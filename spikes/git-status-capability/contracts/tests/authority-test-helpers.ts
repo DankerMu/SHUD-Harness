@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { runCheck } from "../lib/checker";
 
@@ -39,7 +40,7 @@ export function expectSchemaFailure(result: { exit: number; stdout: string; stde
 }
 
 export async function withJson(value: unknown, run: (path: string) => Promise<void>): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), "shud-authority-test-"));
+  const root = await mkdtemp(join(realpathSync(tmpdir()), "shud-authority-test-"));
   try {
     const path = join(root, "input.json");
     await writeFile(path, JSON.stringify(value));

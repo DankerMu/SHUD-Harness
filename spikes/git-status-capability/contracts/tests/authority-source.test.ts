@@ -3,20 +3,18 @@ import {
   expectMutationRejected, expectSchemaFailure, expectSuccess, invoke, invokeAuthority, loadAuthority, withJson
 } from "./authority-test-helpers";
 
-const sourceCommand = [
-  "spikes/git-status-capability/verify.sh", "source-input-digest", "--version", "1", "--source-sha", "<SOURCE_SHA>",
-  "--manifest", "spikes/git-status-capability/contracts/source-input-v1.paths", "--primary", "source-input-primary-v1",
-  "--witness", "source-input-witness-v1", "--record", "<EXTERNAL_EVIDENCE_ROOT>/source-input-record.json", "--create"
-];
-
 function strictSourceRecord(record: any): any {
   record.admitted_modes = record.admitted_paths.map(() => "100644");
   record.primary_result = {
-    status: "ok", source_input_digest_matches: true, manifest_digest_matches: true,
-    entry_count_matches: true, admitted_set_matches: true
+    status: "ok", source_input_digest: record.source_input_digest, manifest_digest: record.manifest_digest,
+    entry_count: record.entry_count, admitted_paths: structuredClone(record.admitted_paths), admitted_modes: structuredClone(record.admitted_modes)
   };
   record.witness_result = structuredClone(record.primary_result);
-  record.command_receipt = { argv: sourceCommand, version: "1", exit_code: 0 };
+  record.command_receipt = { argv: [
+    "spikes/git-status-capability/verify.sh", "source-input-digest", "--version", "1", "--source-sha", record.source_sha,
+    "--manifest", "spikes/git-status-capability/contracts/source-input-v1.paths", "--primary", "source-input-primary-v1",
+    "--witness", "source-input-witness-v1", "--record", "/external-evidence/source-input-record.json", "--create"
+  ], version: "1", exit_code: 0 };
   return record;
 }
 
@@ -65,10 +63,10 @@ describe("cross-record source authority", () => {
       (record) => { record.primary_encoder = "forged-primary"; },
       (record) => { record.witness_encoder = "forged-witness"; },
       (record) => { record.primary_result.status = "failed"; },
-      (record) => { record.witness_result.source_input_digest_matches = false; },
-      (record) => { record.primary_result.manifest_digest_matches = false; },
-      (record) => { record.witness_result.entry_count_matches = false; },
-      (record) => { record.primary_result.admitted_set_matches = false; },
+      (record) => { record.witness_result.source_input_digest = "f".repeat(64); },
+      (record) => { record.primary_result.manifest_digest = "f".repeat(64); },
+      (record) => { record.witness_result.entry_count += 1; },
+      (record) => { record.primary_result.admitted_modes[0] = "100755"; },
       (record) => { record.source_input_digest = "not-a-digest"; },
       (record) => { record.manifest_digest = "not-a-digest"; },
       (record) => { record.entry_count += 1; },
@@ -77,6 +75,9 @@ describe("cross-record source authority", () => {
       (record) => { record.admitted_modes.pop(); },
       (record) => { record.admitted_paths.reverse(); record.admitted_modes.reverse(); },
       (record) => { record.command_receipt.argv[1] = "forged-command"; },
+      (record) => { record.command_receipt.argv[5] = "f".repeat(40); },
+      (record) => { record.command_receipt.argv[13] = "<EXTERNAL_EVIDENCE_ROOT>/source-input-record.json"; },
+      (record) => { record.command_receipt.argv[13] = "/external-evidence/../source-input-record.json"; },
       (record) => { record.command_receipt.version = "2"; },
       (record) => { record.command_receipt.exit_code = 1; },
       (record) => { record.command_receipt.extra = true; },
@@ -93,12 +94,32 @@ describe("cross-record source authority", () => {
     }
   });
 
+  test("requires concrete three-way equality while leaving live source grounding to task 5.1", async () => {
+    const authority = await loadAuthority();
+    strictSourceRecord(authority.source_record);
+    const changedDigest = "f".repeat(64);
+    authority.source_record.source_input_digest = changedDigest;
+    authority.source_record.primary_result.source_input_digest = changedDigest;
+    authority.source_record.witness_result.source_input_digest = changedDigest;
+    authority.source_record.manifest_digest = changedDigest;
+    authority.source_record.primary_result.manifest_digest = changedDigest;
+    authority.source_record.witness_result.manifest_digest = changedDigest;
+    authority.source_record.command_receipt.argv[5] = authority.source_record.source_sha;
+    await withJson(authority.source_record, async (path) => {
+      expectSuccess(await invoke(["--input", path, "--kind", "source_input_record"]), "source_input_record");
+    });
+
+    authority.source_record.primary_result.admitted_modes[0] = "100755";
+    await withJson(authority.source_record, async (path) => expectSchemaFailure(await invoke(["--input", path, "--kind", "source_input_record"])));
+  });
+
   test("the admitted path and mode pairs are sorted by raw UTF-8 path bytes", async () => {
     const authority = await loadAuthority();
     strictSourceRecord(authority.source_record);
     authority.source_record.admitted_paths = ["z.txt", "é.txt", "😀.txt"];
     authority.source_record.admitted_modes = ["100644", "100755", "100644"];
     authority.source_record.entry_count = 3;
+    strictSourceRecord(authority.source_record);
     const expected = [...authority.source_record.admitted_paths].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
     expect(expected).toEqual(["z.txt", "é.txt", "😀.txt"]);
     await withJson(authority.source_record, async (path) => {

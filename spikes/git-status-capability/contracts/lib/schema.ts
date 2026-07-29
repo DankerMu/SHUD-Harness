@@ -20,6 +20,7 @@ import {
 import { ContractError, readJsonFileBounded, type InputKind } from "./ingestion";
 import { validateCargoManifest } from "./cargo-manifest";
 import { validateSourceInputRecord } from "./source-record";
+import { captureNoSymlinkPath, verifyNoSymlinkPath } from "./path-safety";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -38,6 +39,7 @@ const SYNTHETIC_LITERAL_PATH = "spikes/git-status-capability/contracts/goldens/s
 const SOURCE_MANIFEST_MAX_BYTES = 256 * 1024;
 const SYNTHETIC_FRAME_MAX_BYTES = 152;
 const SYNTHETIC_DIGEST_MAX_BYTES = 65;
+export const SOURCE_MANIFEST_RELATIVE = "spikes/git-status-capability/contracts/source-input-v1.paths";
 
 function record(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -85,7 +87,10 @@ export function validateContract(value: unknown): boolean {
   })) return false;
   if (!record(value.source_input_digest_v1) || !exactKeys(value.source_input_digest_v1, ["domain_prefix", "entry_order", "integer_encoding", "allowed_git_modes", "frame_fields", "source_sha_hashed", "live_literal_allowed", "synthetic_literal_path"])) return false;
   if (value.source_input_digest_v1.domain_prefix !== "SHUD-HARNESS\0GIT-STATUS-CAPABILITY\0SOURCE-INPUT-DIGEST\0V1\0" || value.source_input_digest_v1.entry_order !== "raw_repository_relative_utf8_bytes" || value.source_input_digest_v1.integer_encoding !== "unsigned_big_endian" || !exactJson(value.source_input_digest_v1.allowed_git_modes, ["100644", "100755"]) || !exactJson(value.source_input_digest_v1.frame_fields, SOURCE_FRAME_FIELDS) || value.source_input_digest_v1.source_sha_hashed !== false || value.source_input_digest_v1.live_literal_allowed !== false || value.source_input_digest_v1.synthetic_literal_path !== SYNTHETIC_LITERAL_PATH) return false;
-  if (!record(value.schemas) || !exactKeys(value.schemas, ["authority_set", "frame", "row_evidence", "platform_bundle", "final_bundle", "decision", "source_input_record"])) return false;
+  if (!record(value.schemas) || !exactKeys(value.schemas, [
+    "authority_set", "frame", "row_evidence", "platform_bundle", "final_bundle", "decision", "source_input_record",
+    "source_input_encoder_result", "source_input_command_receipt"
+  ])) return false;
   return Object.values(value.schemas).every(strictSchemaDescriptor) && exactJson(value.schemas, SCHEMA_DESCRIPTORS);
 }
 
@@ -220,6 +225,7 @@ export function isSourceCandidate(path: string): boolean {
 
 async function walkCandidateFiles(root: string, prefix: string, output: string[]): Promise<void> {
   const directory = join(root, ...prefix.split("/").filter(Boolean));
+  const directorySnapshot = await captureNoSymlinkPath(directory, "directory");
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (path === `${CHANGE_ROOT}/evidence` || path.startsWith(`${CHANGE_ROOT}/evidence/`)) continue;
@@ -228,9 +234,12 @@ async function walkCandidateFiles(root: string, prefix: string, output: string[]
     if (stat.isDirectory() && !stat.isSymbolicLink()) await walkCandidateFiles(root, path, output);
     else if (isSourceCandidate(path)) {
       if (stat.isSymbolicLink() || !stat.isFile()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+      const fileSnapshot = await captureNoSymlinkPath(absolute, "file");
+      await verifyNoSymlinkPath(fileSnapshot);
       output.push(path);
     }
   }
+  await verifyNoSymlinkPath(directorySnapshot);
 }
 
 async function classifyRegularFile(root: string, path: string, output: string[], required: boolean): Promise<void> {
@@ -238,6 +247,8 @@ async function classifyRegularFile(root: string, path: string, output: string[],
   try {
     const stat = await lstat(join(root, ...path.split("/")));
     if (stat.isSymbolicLink() || !stat.isFile()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    const snapshot = await captureNoSymlinkPath(join(root, ...path.split("/")), "file");
+    await verifyNoSymlinkPath(snapshot);
     output.push(path);
   } catch (error) {
     if (error instanceof ContractError) throw error;
@@ -246,11 +257,13 @@ async function classifyRegularFile(root: string, path: string, output: string[],
 }
 
 export async function enumerateSourceCandidates(repositoryRoot: string): Promise<string[]> {
+  const rootSnapshot = await captureNoSymlinkPath(repositoryRoot, "directory");
   const candidates: string[] = [];
   await walkCandidateFiles(repositoryRoot, "spikes/git-status-capability", candidates);
   for (const file of CHANGE_ROOT_FILES) await classifyRegularFile(repositoryRoot, `${CHANGE_ROOT}/${file}`, candidates, true);
   await walkCandidateFiles(repositoryRoot, `${CHANGE_ROOT}/specs`, candidates);
   await classifyRegularFile(repositoryRoot, WORKFLOW_PATH, candidates, false);
+  await verifyNoSymlinkPath(rootSnapshot);
   return candidates.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
 }
 
@@ -258,7 +271,7 @@ export async function validateManifest(repositoryRoot: string, manifestPath: str
   const absoluteRoot = resolve(repositoryRoot);
   const absoluteManifest = resolve(manifestPath);
   const manifestRelative = relative(absoluteRoot, absoluteManifest).split(sep).join("/");
-  if (!canonicalRelativePath(manifestRelative)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  if (manifestRelative !== SOURCE_MANIFEST_RELATIVE || !canonicalRelativePath(manifestRelative)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const bytes = await readRegularFileBounded(absoluteManifest, SOURCE_MANIFEST_MAX_BYTES);
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { throw new ContractError("CONTRACT_UTF8_INVALID"); }
@@ -273,9 +286,16 @@ export async function validateManifest(repositoryRoot: string, manifestPath: str
 }
 
 export function validateGitCandidateSet(repositoryRoot: string, candidates: readonly string[]): void {
-  const result = spawnSync("git", ["ls-files", "--stage", "-z", "--", "spikes/git-status-capability", CHANGE_ROOT, WORKFLOW_PATH], {
-    cwd: repositoryRoot,
+  const controlledEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
+  Object.assign(controlledEnvironment, {
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_OPTIONAL_LOCKS: "0",
+    LC_ALL: "C"
+  });
+  const result = spawnSync("git", ["-C", resolve(repositoryRoot), "ls-files", "--stage", "-z", "--", "spikes/git-status-capability", CHANGE_ROOT, WORKFLOW_PATH], {
     encoding: "buffer",
+    env: controlledEnvironment,
     stdio: ["ignore", "pipe", "ignore"]
   });
   if (result.status !== 0 || !Buffer.isBuffer(result.stdout)) throw new ContractError("CONTRACT_SCHEMA_INVALID");

@@ -123,6 +123,19 @@ describe("frozen catalog v1 contract", () => {
     expect(validateContract(wrongPath)).toBe(false);
   });
 
+  test("describes concrete source encoder results and runtime command receipts", async () => {
+    const value = await contract();
+    expect(value.schemas.source_input_encoder_result).toEqual({
+      schema_version: "shud.git-status-capability.source-input-encoder-result.v1",
+      required_fields: ["status", "source_input_digest", "manifest_digest", "entry_count", "admitted_paths", "admitted_modes"],
+      optional_fields: [], additional_properties: false
+    });
+    expect(value.schemas.source_input_command_receipt).toEqual({
+      schema_version: "shud.git-status-capability.source-input-command-receipt.v1",
+      required_fields: ["argv", "version", "exit_code"], optional_fields: [], additional_properties: false
+    });
+  });
+
   test("fails closed for missing, extra, duplicate, future, skipped, or platform-conditional catalog rows", async () => {
     const valid = await contract();
     const mutations = [

@@ -1,4 +1,5 @@
 import { describe, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +10,7 @@ import { spawnSync } from "node:child_process";
 const manifestRelative = "spikes/git-status-capability/contracts/source-input-v1.paths";
 
 async function temporaryCurrentRepository(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "shud-cargo-contract-"));
+  const root = await mkdtemp(join(realpathSync(tmpdir()), "shud-cargo-contract-"));
   const spikeRoot = join(root, "spikes", "git-status-capability");
   await mkdir(join(root, "spikes"), { recursive: true });
   await cp(join(repositoryRoot, "spikes", "git-status-capability"), spikeRoot, { recursive: true });
@@ -115,7 +116,7 @@ describe("actual and recorded supply authority", () => {
   });
 
   test("computes both checked-in supply digests at the public authority seam", async () => {
-    const root = await mkdtemp(join(tmpdir(), "shud-supply-digest-"));
+    const root = await mkdtemp(join(realpathSync(tmpdir()), "shud-supply-digest-"));
     try {
       const spikeRoot = join(root, "spikes", "git-status-capability");
       await mkdir(join(root, "spikes"), { recursive: true });
@@ -154,13 +155,13 @@ describe("actual and recorded supply authority", () => {
     }
   });
 
-  test("structurally rejects comments and exact package-field drift in Cargo.toml", async () => {
+  test("rejects Cargo comments independently from exact package-field drift", async () => {
     const mutations = [
       (cargo: string) => `${cargo}# comments are not part of the frozen manifest\n`,
       (cargo: string) => cargo.replace('name = "shud-git-status-capability-spike"', 'name = "forged"'),
       (cargo: string) => cargo.replace('version = "0.0.0"', 'version = "0.0.1"'),
       (cargo: string) => cargo.replace('edition = "2024"', 'edition = "2021"'),
-      (cargo: string) => cargo.replace('rust-version = "1.88.0"', 'rust-version = "1.89.0"\n# rust-version = "1.88.0"'),
+      (cargo: string) => cargo.replace('rust-version = "1.88.0"', 'rust-version = "1.89.0"'),
       (cargo: string) => cargo.replace("publish = false", "publish = true")
     ];
     for (const mutate of mutations) {
@@ -183,14 +184,14 @@ describe("actual and recorded supply authority", () => {
     };
     const mutations = [
       (cargo: string) => `${cargo}serde = { version = "=1.0.0", default-features = false }\n`,
-      (cargo: string) => cargo.replace(exactLines.cap, `# ${exactLines.cap}`),
-      (cargo: string) => cargo.replace(exactLines.cap, `cap-std = { version = "=4.0.2", default-features = true }\n# ${exactLines.cap}`),
-      (cargo: string) => cargo.replace(exactLines.cap, `cap-std = { version = "=4.0.3", default-features = false }\n# ${exactLines.cap}`),
-      (cargo: string) => cargo.replace(exactLines.index, `gix-index = { version = "=0.54.0", default-features = false, features = [] }\n# ${exactLines.index}`),
-      (cargo: string) => cargo.replace(exactLines.index, `gix-index = { version = "=0.54.0", default-features = false, features = ["sha1", "serde"] }\n# ${exactLines.index}`),
-      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["worktree-rewrites", "sha1"] }\n# ${exactLines.status}`),
-      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["sha1", "worktree-rewrites"], registry = "private" }\n# ${exactLines.status}`),
-      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["sha1", "worktree-rewrites"], git = "https://example.invalid/repo" }\n# ${exactLines.status}`)
+      (cargo: string) => cargo.replace(`${exactLines.cap}\n`, ""),
+      (cargo: string) => cargo.replace(exactLines.cap, `cap-std = { version = "=4.0.2", default-features = true }`),
+      (cargo: string) => cargo.replace(exactLines.cap, `cap-std = { version = "=4.0.3", default-features = false }`),
+      (cargo: string) => cargo.replace(exactLines.index, `gix-index = { version = "=0.54.0", default-features = false, features = [] }`),
+      (cargo: string) => cargo.replace(exactLines.index, `gix-index = { version = "=0.54.0", default-features = false, features = ["sha1", "serde"] }`),
+      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["worktree-rewrites", "sha1"] }`),
+      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["sha1", "worktree-rewrites"], registry = "private" }`),
+      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["sha1", "worktree-rewrites"], git = "https://example.invalid/repo" }`)
     ];
     for (const mutate of mutations) {
       const root = await temporaryCurrentRepository();

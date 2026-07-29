@@ -237,6 +237,18 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     ],
     optional_fields: [],
     additional_properties: false
+  },
+  source_input_encoder_result: {
+    schema_version: "shud.git-status-capability.source-input-encoder-result.v1",
+    required_fields: ["status", "source_input_digest", "manifest_digest", "entry_count", "admitted_paths", "admitted_modes"],
+    optional_fields: [],
+    additional_properties: false
+  },
+  source_input_command_receipt: {
+    schema_version: "shud.git-status-capability.source-input-command-receipt.v1",
+    required_fields: ["argv", "version", "exit_code"],
+    optional_fields: [],
+    additional_properties: false
   }
 } as const);
 

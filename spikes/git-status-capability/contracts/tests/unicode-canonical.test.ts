@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { errorReceipt, invoke, successReceipt } from "./authority-test-helpers";
 
 async function withBytes(bytes: Uint8Array, run: (path: string) => Promise<void>): Promise<void> {
-  const root = await mkdtemp(join(tmpdir(), "shud-unicode-"));
+  const root = await mkdtemp(join(realpathSync(tmpdir()), "shud-unicode-"));
   try {
     const path = join(root, "input.json");
     await writeFile(path, bytes);

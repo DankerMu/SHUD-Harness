@@ -8,7 +8,8 @@ import {
   validateGitCandidateSet,
   validateSupplyFiles,
   validateSyntheticGolden,
-  validatorForInputKind
+  validatorForInputKind,
+  SOURCE_MANIFEST_RELATIVE
 } from "./schema";
 
 export type CheckIo = {
@@ -54,6 +55,7 @@ function parseArgs(args: string[]): Options {
 }
 
 export async function checkCurrent(repositoryRoot: string, manifest: string): Promise<Record<string, unknown>> {
+  if (manifest !== SOURCE_MANIFEST_RELATIVE) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const root = resolve(repositoryRoot);
   const spikeRoot = resolve(root, "spikes/git-status-capability");
   await loadAndValidateContract(resolve(spikeRoot, "contracts/contract-v1.json"));

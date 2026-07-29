@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -131,7 +132,7 @@ describe("bounded fail-closed JSON ingestion", () => {
   });
 
   test("each frozen input kind accepts its valid fixture and emits one bounded success receipt", async () => {
-    const temporary = await mkdtemp(join(tmpdir(), "shud-contract-valid-kinds-"));
+    const temporary = await mkdtemp(join(realpathSync(tmpdir()), "shud-contract-valid-kinds-"));
     try {
       for (const kind of kinds) {
         const path = canonicalInputPaths[kind] ?? join(temporary, `${kind}.json`);
@@ -152,7 +153,7 @@ describe("bounded fail-closed JSON ingestion", () => {
   });
 
   test("each frozen input kind rejects missing, unknown, wrong-version, type, enum, and illegal state fields with one stable CLI error", async () => {
-    const temporary = await mkdtemp(join(tmpdir(), "shud-contract-kinds-"));
+    const temporary = await mkdtemp(join(realpathSync(tmpdir()), "shud-contract-kinds-"));
     try {
       for (const kind of kinds) {
         const valid = await validInput(kind);

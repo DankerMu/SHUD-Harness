@@ -17,18 +17,32 @@
     "primary_encoder": "source-input-primary-v1",
     "primary_result": {
       "status": "ok",
-      "source_input_digest_matches": true,
-      "manifest_digest_matches": true,
-      "entry_count_matches": true,
-      "admitted_set_matches": true
+      "source_input_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "entry_count": 2,
+      "admitted_paths": [
+        "spikes/git-status-capability/fixtures/😀.json",
+        "spikes/git-status-capability/native/Cargo.toml"
+      ],
+      "admitted_modes": [
+        "100644",
+        "100644"
+      ]
     },
     "witness_encoder": "source-input-witness-v1",
     "witness_result": {
       "status": "ok",
-      "source_input_digest_matches": true,
-      "manifest_digest_matches": true,
-      "entry_count_matches": true,
-      "admitted_set_matches": true
+      "source_input_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+      "manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+      "entry_count": 2,
+      "admitted_paths": [
+        "spikes/git-status-capability/fixtures/😀.json",
+        "spikes/git-status-capability/native/Cargo.toml"
+      ],
+      "admitted_modes": [
+        "100644",
+        "100644"
+      ]
     },
     "command_receipt": {
       "argv": [
@@ -37,7 +51,7 @@
         "--version",
         "1",
         "--source-sha",
-        "<SOURCE_SHA>",
+        "a24b106d2766eadcff73da4c238639f520e5a80b",
         "--manifest",
         "spikes/git-status-capability/contracts/source-input-v1.paths",
         "--primary",
@@ -45,7 +59,7 @@
         "--witness",
         "source-input-witness-v1",
         "--record",
-        "<EXTERNAL_EVIDENCE_ROOT>/source-input-record.json",
+        "/external-evidence/source-input-record.json",
         "--create"
       ],
       "version": "1",

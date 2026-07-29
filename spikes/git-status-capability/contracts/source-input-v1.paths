@@ -23,6 +23,7 @@ spikes/git-status-capability/contracts/lib/checker.ts
 spikes/git-status-capability/contracts/lib/command-profile.ts
 spikes/git-status-capability/contracts/lib/frozen.ts
 spikes/git-status-capability/contracts/lib/ingestion.ts
+spikes/git-status-capability/contracts/lib/path-safety.ts
 spikes/git-status-capability/contracts/lib/schema.ts
 spikes/git-status-capability/contracts/lib/source-frame.ts
 spikes/git-status-capability/contracts/lib/source-record.ts
@@ -37,6 +38,7 @@ spikes/git-status-capability/contracts/tests/contract.test.ts
 spikes/git-status-capability/contracts/tests/current-file-admission.test.ts
 spikes/git-status-capability/contracts/tests/ingestion.test.ts
 spikes/git-status-capability/contracts/tests/source-manifest.test.ts
+spikes/git-status-capability/contracts/tests/spec-oracle.test.ts
 spikes/git-status-capability/contracts/tests/unicode-canonical.test.ts
 spikes/git-status-capability/dependency-graph-catalog.json
 spikes/git-status-capability/native/Cargo.lock

@@ -2,6 +2,9 @@ import { INGESTION_LIMITS } from "./frozen";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { hasOnlyUnicodeScalars } from "./canonical-json";
+import {
+  captureNoSymlinkPath, runPathSafetyTestInterlock, verifyNoSymlinkPath, verifyOpenedRegularFile, type SafePathSnapshot
+} from "./path-safety";
 
 export type InputKind = keyof typeof INGESTION_LIMITS;
 export type ContractErrorCode =
@@ -183,11 +186,15 @@ export async function readJsonFileBounded(
 ): Promise<unknown> {
   const limit = INGESTION_LIMITS[kind];
   let handle;
+  let snapshot: SafePathSnapshot;
   try {
+    snapshot = await captureNoSymlinkPath(path, "file");
+    await runPathSafetyTestInterlock("after-capture", path);
     handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
-    const stat = await handle.stat();
-    if (!stat.isFile()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-    if (stat.size > limit.bytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
+    const stat = await handle.stat({ bigint: true });
+    await runPathSafetyTestInterlock("after-open", path);
+    verifyOpenedRegularFile(snapshot, stat);
+    if (stat.size > BigInt(limit.bytes)) throw new ContractError("CONTRACT_BYTES_LIMIT");
     const buffer = Buffer.alloc(limit.bytes + 1);
     let offset = 0;
     while (offset < buffer.length) {
@@ -196,6 +203,7 @@ export async function readJsonFileBounded(
       offset += bytesRead;
     }
     if (offset > limit.bytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
+    await verifyNoSymlinkPath(snapshot);
     return ingestJson(buffer.subarray(0, offset), kind, validate);
   } catch (error) {
     if (error instanceof ContractError) throw error;

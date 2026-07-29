@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +14,7 @@ const digestRelative = "spikes/git-status-capability/contracts/goldens/source-in
 const checkPath = join(repositoryRoot, "spikes", "git-status-capability", "contracts", "check.ts");
 
 async function temporaryCurrentRepository(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "shud-current-files-"));
+  const root = await mkdtemp(join(realpathSync(tmpdir()), "shud-current-files-"));
   await mkdir(join(root, "spikes"), { recursive: true });
   await cp(
     join(repositoryRoot, "spikes", "git-status-capability"),
@@ -83,6 +84,74 @@ describe("current checker bounded no-follow authority files", () => {
       expect(result.stdout.endsWith("\n")).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("only the canonical manifest path is accepted even when an alternate manifest is current", async () => {
+    const root = await temporaryCurrentRepository();
+    try {
+      const alternate = "spikes/git-status-capability/contracts/alternate.paths";
+      await writeFile(join(root, alternate), "placeholder\n");
+      const current = `${(await enumerateSourceCandidates(root)).join("\n")}\n`;
+      await writeFile(join(root, alternate), current);
+      await writeFile(join(root, manifestRelative), current);
+      expect(spawnSync("git", ["add", alternate, manifestRelative], { cwd: root }).status).toBe(0);
+      expect(await invoke(["--repository-root", root, "--manifest", alternate, "--check-current"]))
+        .toEqual({ exit: 2, stdout: "", stderr: errorReceipt("CONTRACT_SCHEMA_INVALID") });
+      await writeFile(join(root, manifestRelative), "stale\n");
+      expect(await invoke(["--repository-root", root, "--manifest", alternate, "--check-current"]))
+        .toEqual({ exit: 2, stdout: "", stderr: errorReceipt("CONTRACT_SCHEMA_INVALID") });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("symlinked spike and nested specification traversal roots fail closed", async () => {
+    for (const relativePath of [
+      "spikes/git-status-capability",
+      "openspec/changes/m2-capability-observer-spike/specs"
+    ]) {
+      const root = await temporaryCurrentRepository();
+      try {
+        const path = join(root, relativePath);
+        const moved = `${path}.moved`;
+        await rename(path, moved);
+        await symlink(moved, path);
+        expect(await invokeCurrent(root)).toEqual({ exit: 2, stdout: "", stderr: errorReceipt("CONTRACT_SCHEMA_INVALID") });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("the public checker remains rooted when every ambient Git selector names a foreign repository", async () => {
+    const root = await temporaryCurrentRepository();
+    const foreign = await temporaryCurrentRepository();
+    try {
+      const foreignOnly = "spikes/git-status-capability/foreign-only.ts";
+      await writeFile(join(foreign, foreignOnly), "export {};\n");
+      expect(spawnSync("git", ["add", foreignOnly], { cwd: foreign }).status).toBe(0);
+      const result = spawnSync(process.execPath, [
+        checkPath, "--repository-root", root, "--manifest", manifestRelative, "--check-current"
+      ], {
+        cwd: foreign,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_DIR: join(foreign, ".git"),
+          GIT_WORK_TREE: foreign,
+          GIT_INDEX_FILE: join(foreign, ".git", "index"),
+          GIT_OBJECT_DIRECTORY: join(foreign, ".git", "objects"),
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: join(foreign, ".git", "objects"),
+          GIT_CONFIG_SYSTEM: join(foreign, "foreign-system-config"),
+          GIT_CONFIG_COUNT: "0"
+        }
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(foreign, { recursive: true, force: true });
     }
   });
 

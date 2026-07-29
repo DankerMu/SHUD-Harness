@@ -6,6 +6,9 @@ import { canonicalJson } from "./canonical-json";
 import { validateCommandProfile } from "./command-profile";
 import { SUPPLY_IDENTITY } from "./frozen";
 import { ContractError } from "./ingestion";
+import {
+  captureNoSymlinkPath, runPathSafetyTestInterlock, verifyNoSymlinkPath, verifyOpenedRegularFile, type SafePathSnapshot
+} from "./path-safety";
 import { validateSourceInputRecord } from "./source-record";
 
 type JsonRecord = Record<string, unknown>;
@@ -83,11 +86,15 @@ function validateDecision(value: unknown): value is JsonRecord {
 
 export async function readRegularFileBounded(path: string, maximumBytes: number): Promise<Buffer> {
   let handle;
+  let snapshot: SafePathSnapshot;
   try {
+    snapshot = await captureNoSymlinkPath(path, "file");
+    await runPathSafetyTestInterlock("after-capture", path);
     handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
-    const stat = await handle.stat();
-    if (!stat.isFile()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-    if (stat.size > maximumBytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
+    const stat = await handle.stat({ bigint: true });
+    await runPathSafetyTestInterlock("after-open", path);
+    verifyOpenedRegularFile(snapshot, stat);
+    if (stat.size > BigInt(maximumBytes)) throw new ContractError("CONTRACT_BYTES_LIMIT");
     const buffer = Buffer.alloc(maximumBytes + 1);
     let offset = 0;
     while (offset < buffer.length) {
@@ -96,6 +103,7 @@ export async function readRegularFileBounded(path: string, maximumBytes: number)
       offset += bytesRead;
     }
     if (offset > maximumBytes) throw new ContractError("CONTRACT_BYTES_LIMIT");
+    await verifyNoSymlinkPath(snapshot);
     return buffer.subarray(0, offset);
   } catch (error) {
     if (error instanceof ContractError) throw error;

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,7 +14,7 @@ const manifestRelative = "spikes/git-status-capability/contracts/source-input-v1
 const temporaryRoots: string[] = [];
 
 async function temporaryRepository(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "shud-contract-manifest-"));
+  const root = await mkdtemp(join(realpathSync(tmpdir()), "shud-contract-manifest-"));
   temporaryRoots.push(root);
   await cp(join(repositoryRoot, "spikes"), join(root, "spikes"), { recursive: true });
   await cp(
@@ -146,6 +147,33 @@ describe("source-input-v1 current-set authority", () => {
     expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
     const candidates = await enumerateSourceCandidates(root);
     expect(() => validateGitCandidateSet(root, candidates)).toThrow(ContractError);
+  });
+
+  test("tracked-set inspection ignores ambient repository, worktree, index, object, and config selectors", async () => {
+    const root = await temporaryRepository();
+    const foreign = await temporaryRepository();
+    expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status).toBe(0);
+    expect(spawnSync("git", ["init", "-q"], { cwd: foreign }).status).toBe(0);
+    const saved = Object.fromEntries([
+      "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT"
+    ].map((name) => [name, process.env[name]]));
+    try {
+      process.env.GIT_DIR = join(foreign, ".git");
+      process.env.GIT_WORK_TREE = foreign;
+      process.env.GIT_INDEX_FILE = join(foreign, ".git", "index");
+      process.env.GIT_OBJECT_DIRECTORY = join(foreign, ".git", "objects");
+      process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES = join(foreign, ".git", "objects");
+      process.env.GIT_CONFIG_SYSTEM = join(foreign, "foreign-system-config");
+      process.env.GIT_CONFIG_COUNT = "0";
+      const candidates = await enumerateSourceCandidates(root);
+      expect(() => validateGitCandidateSet(root, candidates)).not.toThrow();
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 
   test("the exact current checker returns one complete receipt and writes zero files", async () => {
