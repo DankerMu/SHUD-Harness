@@ -2,10 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { CONTRACT_METADATA, SOURCE_MANIFEST, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR } from "../lib/constants";
 import { checkCurrentSourceOracleForTest } from "../lib/current-source";
-import { capture, contractsRoot, failure, success } from "./helpers";
+import { capture, captureAfterAdmission, contractsRoot, failure, success } from "./helpers";
 
 const roots: string[] = [];
 const mandatory = [CONTRACT_METADATA, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR] as const;
@@ -146,6 +146,40 @@ describe("committed source oracle current check", () => {
     }
   });
 
+  test("rejects a repository-root upper symlink alias without writes", async () => {
+    const root = await fixture();
+    const before = await treeIdentity(root);
+    const aliasContainer = await mkdtemp(join(tmpdir(), "shud-current-oracle-alias-"));
+    roots.push(aliasContainer);
+    const alias = join(aliasContainer, "upper");
+    await symlink(dirname(root), alias);
+    expect(await current(join(alias, basename(root)))).toEqual({
+      exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID")
+    });
+    expect(await treeIdentity(root)).toEqual(before);
+  });
+
+  test("rejects repository-root ancestor replacement after admission for every retained file", async () => {
+    for (const relativePath of [SOURCE_MANIFEST, ...mandatory]) {
+      const root = await fixture();
+      const admittedRoot = `${root}.admitted`;
+      let replaced = false;
+      const result = await captureAfterAdmission(
+        ["--repository-root", root, "--manifest", SOURCE_MANIFEST, "--check-current"],
+        async (absolutePath) => {
+          if (absolutePath !== join(root, relativePath) || replaced) return;
+          replaced = true;
+          await rename(root, admittedRoot);
+          await symlink(admittedRoot, root);
+        }
+      );
+      roots.push(admittedRoot);
+      expect(replaced).toBe(true);
+      expect(result).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+      expect(await readFile(join(admittedRoot, relativePath))).toEqual(await readFile(join(root, relativePath)));
+    }
+  });
+
   test("rejects frozen metadata, frame, and sidecar mutations", async () => {
     for (const path of mandatory) {
       const root = await fixture();
@@ -163,7 +197,7 @@ describe("committed source oracle current check", () => {
     }
   });
 
-  test("descriptor admission rejects symlink and foreign-file replacement before open", async () => {
+  test("descriptor admission rejects symlink and foreign-file replacement before read", async () => {
     for (const replacement of ["symlink", "regular"] as const) {
       const root = await fixture();
       const target = join(root, CONTRACT_METADATA);

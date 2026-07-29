@@ -1,10 +1,8 @@
-import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import {
   CONTRACT_METADATA, SOURCE_MANIFEST, SOURCE_METADATA_PROFILE, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR
 } from "./constants";
-import { ContractError } from "./ingress";
+import { ContractError, readBoundedFile, type DescriptorAdmissionHook } from "./ingress";
 import { validateContractMetadata } from "./schemas";
 import { validateSyntheticOracle } from "./source-frame";
 
@@ -29,8 +27,6 @@ function inside(root: string, path: string): boolean {
   return candidate === root || candidate.startsWith(`${root}${sep}`);
 }
 
-type DescriptorAdmissionHook = (absolutePath: string) => void | Promise<void>;
-
 async function readDeclaredFile(
   root: string,
   relativePath: string,
@@ -38,39 +34,7 @@ async function readDeclaredFile(
   afterAdmission?: DescriptorAdmissionHook
 ): Promise<Uint8Array> {
   if (!canonicalRelativePath(relativePath) || !inside(root, relativePath)) fail();
-  const absolutePath = join(root, relativePath);
-  let descriptor: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    let admitted = await lstat(root);
-    let current = root;
-    const parts = relativePath.split("/");
-    for (let index = 0; index < parts.length; index += 1) {
-      current = join(current, parts[index]!);
-      admitted = await lstat(current);
-      if (admitted.isSymbolicLink()) fail();
-      if (index < parts.length - 1 && !admitted.isDirectory()) fail();
-    }
-    if (!admitted.isFile() || admitted.isSymbolicLink()) fail();
-    await afterAdmission?.(absolutePath);
-    descriptor = await open(absolutePath, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
-    const opened = await descriptor.stat();
-    if (!opened.isFile() || opened.dev !== admitted.dev || opened.ino !== admitted.ino) fail();
-    if (opened.size > maximum) throw new ContractError("CONTRACT_BYTES_LIMIT");
-    const bytes = Buffer.alloc(maximum + 1);
-    let length = 0;
-    while (length < bytes.length) {
-      const { bytesRead } = await descriptor.read(bytes, length, bytes.length - length, length);
-      if (bytesRead === 0) break;
-      length += bytesRead;
-    }
-    if (length > maximum) throw new ContractError("CONTRACT_BYTES_LIMIT");
-    return bytes.subarray(0, length);
-  } catch (error) {
-    if (error instanceof ContractError) throw error;
-    fail();
-  } finally {
-    await descriptor?.close().catch(() => undefined);
-  }
+  return await readBoundedFile(join(root, relativePath), maximum, afterAdmission);
 }
 
 function parseManifest(bytes: Uint8Array): string[] {
@@ -98,8 +62,6 @@ async function checkCurrentSourceOracleWithHook(
   afterAdmission?: DescriptorAdmissionHook
 ): Promise<void> {
   const root = resolve(repositoryRoot);
-  const rootStat = await lstat(root).catch(() => undefined);
-  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) fail();
   if (manifest !== SOURCE_MANIFEST || isAbsolute(manifest) || !inside(root, manifest)) fail();
 
   const manifestBytes = await readDeclaredFile(root, manifest, SOURCE_METADATA_PROFILE.bytes, afterAdmission);

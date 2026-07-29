@@ -1,10 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { canonicalJson } from "../lib/canonical-json";
 import { SOURCE_METADATA_PROFILE, SOURCE_PROFILE } from "../lib/constants";
 import { ContractError, parseBoundedJson } from "../lib/ingress";
 import { admitSourceInput, validateContractMetadata } from "../lib/schemas";
-import { capture, failure, sourceText, success, validSourcePath, withTemporaryFile } from "./helpers";
+import {
+  capture, captureAfterAdmission, failure, sourceText, success, validIdentityPath, validSourcePath, withTemporaryFile
+} from "./helpers";
 
 function expectCode(action: () => unknown, code: string): void {
   try {
@@ -171,6 +175,59 @@ describe("strict source ingress", () => {
           exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID")
         });
       });
+    }
+  });
+
+  test("both retained input kinds reject a symlinked input parent without writes", async () => {
+    for (const [kind, fixturePath] of [
+      ["source_input_record", validSourcePath],
+      ["source_identity_projection", validIdentityPath]
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), "shud-source-parent-link-"));
+      try {
+        const realParent = join(root, "real");
+        const linkedParent = join(root, "linked");
+        await mkdir(realParent);
+        const target = join(realParent, basename(fixturePath));
+        await writeFile(target, await readFile(fixturePath));
+        await symlink(realParent, linkedParent);
+        const before = await readFile(target);
+        expect(await capture(["--input", join(linkedParent, basename(target)), "--kind", kind])).toEqual({
+          exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID")
+        });
+        expect(await readFile(target)).toEqual(before);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("both retained input kinds reject parent replacement after admission without writes", async () => {
+    for (const [kind, fixturePath] of [
+      ["source_input_record", validSourcePath],
+      ["source_identity_projection", validIdentityPath]
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), "shud-source-parent-swap-"));
+      try {
+        const parent = join(root, "parent");
+        const admittedParent = join(root, "parent.admitted");
+        await mkdir(parent);
+        const target = join(parent, basename(fixturePath));
+        await writeFile(target, await readFile(fixturePath));
+        const before = await readFile(target);
+        let replaced = false;
+        const result = await captureAfterAdmission(["--input", target, "--kind", kind], async (absolutePath) => {
+          if (absolutePath !== target || replaced) return;
+          replaced = true;
+          await rename(parent, admittedParent);
+          await symlink(admittedParent, parent);
+        });
+        expect(replaced).toBe(true);
+        expect(result).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+        expect(await readFile(join(admittedParent, basename(target)))).toEqual(before);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     }
   });
 });

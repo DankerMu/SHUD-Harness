@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { ERROR_SCHEMA, SOURCE_PROFILE, SUCCESS_SCHEMA } from "./constants";
-import { checkCurrentSourceOracle } from "./current-source";
-import { ContractError, readBoundedFile } from "./ingress";
+import { checkCurrentSourceOracle, checkCurrentSourceOracleForTest } from "./current-source";
+import { ContractError, readBoundedFile, type DescriptorAdmissionHook } from "./ingress";
 import { admitSourceInput, type SourceInputKind } from "./schemas";
 
 export type CheckIo = Readonly<{ stdout: (text: string) => void; stderr: (text: string) => void }>;
@@ -42,19 +42,27 @@ function line(value: Record<string, string>): string {
   return `${JSON.stringify(value)}\n`;
 }
 
-async function execute(options: Options): Promise<string> {
+async function execute(options: Options, afterAdmission?: DescriptorAdmissionHook): Promise<string> {
   if (options.mode === "input") {
-    const bytes = await readBoundedFile(resolve(options.input), SOURCE_PROFILE.bytes);
+    const bytes = await readBoundedFile(resolve(options.input), SOURCE_PROFILE.bytes, afterAdmission);
     admitSourceInput(options.kind, bytes);
     return options.kind;
   }
-  await checkCurrentSourceOracle(options.repositoryRoot, options.manifest);
+  if (afterAdmission) {
+    await checkCurrentSourceOracleForTest(options.repositoryRoot, options.manifest, afterAdmission);
+  } else {
+    await checkCurrentSourceOracle(options.repositoryRoot, options.manifest);
+  }
   return "current_source_authority";
 }
 
-export async function runCheck(args: readonly string[], io: CheckIo): Promise<number> {
+async function runCheckWithHook(
+  args: readonly string[],
+  io: CheckIo,
+  afterAdmission?: DescriptorAdmissionHook
+): Promise<number> {
   try {
-    const inputKind = await execute(parseArgs(args));
+    const inputKind = await execute(parseArgs(args), afterAdmission);
     io.stdout(line({ schema_version: SUCCESS_SCHEMA, status: "ok", input_kind: inputKind }));
     return 0;
   } catch (error) {
@@ -62,4 +70,17 @@ export async function runCheck(args: readonly string[], io: CheckIo): Promise<nu
     io.stderr(line({ schema_version: ERROR_SCHEMA, status: "error", code }));
     return 2;
   }
+}
+
+export async function runCheck(args: readonly string[], io: CheckIo): Promise<number> {
+  return await runCheckWithHook(args, io);
+}
+
+/** Deterministic path-replacement seam for contract tests. */
+export async function runCheckForTest(
+  args: readonly string[],
+  io: CheckIo,
+  afterAdmission: DescriptorAdmissionHook
+): Promise<number> {
+  return await runCheckWithHook(args, io, afterAdmission);
 }
