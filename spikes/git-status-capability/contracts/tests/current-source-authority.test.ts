@@ -18,7 +18,7 @@ function git(root: string, args: string[], environment?: Record<string, string>)
   return result.stdout.toString();
 }
 
-async function repository(): Promise<string> {
+async function repository(objectFormat: "sha1" | "sha256" = "sha1"): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "shud-current-source-"));
   roots.push(root);
   await mkdir(join(root, "spikes", "git-status-capability"), { recursive: true });
@@ -28,13 +28,13 @@ async function repository(): Promise<string> {
     join(root, "openspec", "changes", "m2-capability-observer-spike"),
     { recursive: true }
   );
-  git(root, ["init", "-q"]);
+  git(root, ["init", "-q", `--object-format=${objectFormat}`]);
   git(root, ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"]);
   return root;
 }
 
-async function linkedRepository(): Promise<{ main: string; linked: string; gitDir: string }> {
-  const main = await repository();
+async function linkedRepository(objectFormat: "sha1" | "sha256" = "sha1"): Promise<{ main: string; linked: string; gitDir: string }> {
+  const main = await repository(objectFormat);
   git(main, ["-c", "user.name=SHUD Contract Test", "-c", "user.email=contract@example.invalid", "commit", "-qm", "initial"]);
   const container = await mkdtemp(join(tmpdir(), "shud-linked-container-"));
   roots.push(container);
@@ -303,6 +303,25 @@ async function expectStableCurrentFailure(root: string): Promise<void> {
   expect(git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(beforeStatus);
 }
 
+async function expectStableConfigFailure(root: string): Promise<void> {
+  const beforeInventory = await inventory(root);
+  const originalSpawn = Bun.spawn;
+  const originalSpawnSync = Bun.spawnSync;
+  let launches = 0;
+  try {
+    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
+    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
+    const expected = { exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") };
+    expect(await current(root)).toEqual(expected);
+    expect(await current(root)).toEqual(expected);
+  } finally {
+    (Bun as any).spawn = originalSpawn;
+    (Bun as any).spawnSync = originalSpawnSync;
+  }
+  expect(launches).toBe(0);
+  expect(await inventory(root)).toEqual(beforeInventory);
+}
+
 async function expectStableCurrentCorruptIndexFailure(root: string, status: StatusSnapshot): Promise<void> {
   const beforeIndex = await readFile(await indexPath(root));
   const beforeInventory = await inventory(root);
@@ -355,6 +374,63 @@ describe("current source authority", () => {
   test("a valid temporary tracked repository succeeds twice with exact receipts, no writes, and no child launch", async () => {
     const root = await repository();
     await expectStableCurrentSuccess(root);
+  });
+
+  test("real SHA-1 and SHA-256 normal and linked repositories succeed repeatedly without writes or child launch", async () => {
+    for (const objectFormat of ["sha1", "sha256"] as const) {
+      await expectStableCurrentSuccess(await repository(objectFormat));
+      const { linked } = await linkedRepository(objectFormat);
+      await expectStableCurrentSuccess(linked);
+    }
+  });
+
+  test("object-format authority is section-aware and Git section and key names are case-insensitive", async () => {
+    const sha256 = await repository("sha256");
+    const sha256Config = join(sha256, ".git", "config");
+    await writeFile(
+      sha256Config,
+      (await readFile(sha256Config, "utf8")).replace("[extensions]", "[ExTeNsIoNs]").replace("objectformat", "ObJeCtFoRmAt")
+    );
+    await expectStableCurrentSuccess(sha256);
+
+    const unrelated = await repository("sha1");
+    const unrelatedConfig = join(unrelated, ".git", "config");
+    await writeFile(unrelatedConfig, `${await readFile(unrelatedConfig, "utf8")}\n[custom]\n\tobjectFormat = sha256\n`);
+    await expectStableCurrentSuccess(unrelated);
+  });
+
+  test("explicit supported object formats require compatible repository-format semantics", async () => {
+    const explicitSha1 = await repository("sha1");
+    const explicitSha1Config = join(explicitSha1, ".git", "config");
+    await writeFile(
+      explicitSha1Config,
+      `${(await readFile(explicitSha1Config, "utf8")).replace("repositoryformatversion = 0", "repositoryformatversion = 1")}\n` +
+        "[extensions]\n\tobjectFormat = sha1\n"
+    );
+    await expectStableCurrentSuccess(explicitSha1);
+
+    const invalidConfigs = [
+      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = sha512\n",
+      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat sha256\n",
+      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = sha1\n\tobjectformat = sha1\n",
+      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = sha1\n[extensions]\n\tobjectFormat = sha256\n",
+      "[core]\n\trepositoryFormatVersion = 0\n[extensions]\n\tobjectFormat = sha1\n",
+      "[core]\n\trepositoryFormatVersion = 2\n",
+      "[core]\n\trepositoryFormatVersion = 0\n\trepositoryformatversion = 1\n",
+      "[core]\n\trepositoryFormatVersion = 0\n[include]\n\tpath = ../object-format.config\n"
+    ];
+    for (const config of invalidConfigs) {
+      const root = await repository("sha1");
+      await writeFile(join(root, ".git", "config"), config);
+      await expectStableConfigFailure(root);
+    }
+
+    const linked = await linkedRepository("sha1");
+    await writeFile(
+      join(linked.main, ".git", "config"),
+      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = sha1\n\tobjectFormat = sha256\n"
+    );
+    await expectStableConfigFailure(linked.linked);
   });
 
   test("valid Git index v2 and v3 remain accepted", async () => {

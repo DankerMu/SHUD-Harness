@@ -124,7 +124,70 @@ async function gitDirectories(root: string): Promise<GitDirectories> {
 
 async function objectFormat(gitDir: string): Promise<"sha1" | "sha256"> {
   const config = strictUtf8(await readBoundedFile(join(gitDir, "config"), GIT_CONFIG_BYTES));
-  return /^\s*objectFormat\s*=\s*sha256\s*$/im.test(config) ? "sha256" : "sha1";
+  let section: string | undefined;
+  let subsection = false;
+  let repositoryFormatVersion: string | undefined;
+  let declaredObjectFormat: string | undefined;
+
+  for (const line of config.split("\n")) {
+    if (line.endsWith("\r") || /\\\s*$/.test(line)) fail();
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(";")) continue;
+
+    if (trimmed.startsWith("[")) {
+      const match = /^\[([A-Za-z][A-Za-z0-9.-]*)(?:\s+"(?:[^"\\]|\\.)*")?\]\s*(?:[#;].*)?$/.exec(trimmed);
+      if (!match) fail();
+      section = match[1]!.toLowerCase();
+      subsection = /^\[[^\]]+\s+"/.test(trimmed) || section.includes(".");
+      if (section === "include" || section === "includeif") fail();
+      continue;
+    }
+
+    const variable = /^([A-Za-z][A-Za-z0-9-]*)(?:\s*=\s*(.*))?$/.exec(trimmed);
+    if (!variable || !section) fail();
+    const key = variable[1]!.toLowerCase();
+    const value = variable[2] === undefined ? "true" : gitConfigValue(variable[2]);
+    if (!subsection && section === "core" && key === "repositoryformatversion") {
+      if (repositoryFormatVersion !== undefined) fail();
+      repositoryFormatVersion = value;
+    }
+    if (!subsection && section === "extensions" && key === "objectformat") {
+      if (declaredObjectFormat !== undefined) fail();
+      declaredObjectFormat = value;
+    }
+  }
+
+  const version = repositoryFormatVersion ?? "0";
+  if (version !== "0" && version !== "1") fail();
+  if (declaredObjectFormat === undefined) return "sha1";
+  if (version !== "1" || (declaredObjectFormat !== "sha1" && declaredObjectFormat !== "sha256")) fail();
+  return declaredObjectFormat;
+}
+
+function gitConfigValue(raw: string): string {
+  let value = "";
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index]!;
+    if (escaped) {
+      const replacements: Readonly<Record<string, string>> = { n: "\n", t: "\t", b: "\b", "\\": "\\", '"': '"' };
+      const replacement = replacements[character];
+      if (replacement === undefined) fail();
+      value += replacement;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === '"') {
+      quoted = !quoted;
+    } else if (!quoted && (character === "#" || character === ";")) {
+      break;
+    } else {
+      value += character;
+    }
+  }
+  if (quoted || escaped) fail();
+  return value.trimEnd();
 }
 
 async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<IndexEntry[]> {
