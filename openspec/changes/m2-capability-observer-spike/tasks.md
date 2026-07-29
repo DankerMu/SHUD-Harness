@@ -14,26 +14,57 @@ The row partitions in design are exhaustive: every catalog ID has exactly one
 task-2 fixture owner and one task-4 native owner, and no checkbox may absorb a row
 owned by another checkbox.
 The sole shared generated-file exception is `contracts/source-input-v1.paths`:
-task 1.1 owns its sync/check algorithm and initial current-HEAD content; every task
-1.2–5.1 that adds/removes/renames a covered candidate has implicit In permission
+task 1.1a owns its sync/check algorithm and initial current-HEAD content; tasks
+1.1b–1.1e and every task 1.2–5.1 that adds/removes/renames a covered candidate have implicit In permission
 to regenerate only this file, MUST list no future path, and MUST run the exact-set
 check. This mechanical update grants no semantic contract ownership. Tasks 5.2–5.4
 add only bounded output under excluded `evidence/**` lanes and never update it.
 
 ## 1. Frozen contract and validator
 
-- [ ] 1.1 Freeze catalog v1, schemas, rejection taxonomy, limits, and dependency contract.
-  - PR boundary: contract only; minimal mergeable slice is a Bun-only strict schema/catalog checker plus golden valid/invalid fixtures, with no launcher, observer, validator decision, or stable task-1.3 CLI.
-  - In: `spikes/git-status-capability/contracts/**`, specifically `contracts/{check.ts,lib,tests,fixtures}/**`, `source-input-v1.paths`, the synthetic-only `goldens/source-input-v1.synthetic.{frame,sha256}`, `native/Cargo.toml`, `native/Cargo.lock`, `native/rust-toolchain.toml`, and `dependency-graph-catalog.json`; exact 174 IDs/outcomes, exact 25-floor-ID bijection, exhaustive fixture/native ownership maps, four-layer state schema, exact `source_input_digest_v1` frame/record, frame/evidence/bundle/decision schemas, Rust `1.88.0`, Git `2.49.0`, direct crates/features, target graph predicates, and all finite ingestion/observer limits. Phase 0.5 may also update `openspec/project-profile.md` only to register this new isolated surface. The checker uses Bun standard APIs only and writes no files.
-  - Out: validator decisions, fixture recipes, process launch, native source, CI, raw evidence, production paths.
+- [x] 1.1a Freeze canonical source ingress, source identity, and the exact synthetic oracle (#164).
+  - PR boundary: Bun-only strict bounded source ingress, RFC-8785-compatible canonical JSON, exact `source_input_digest_v1` framing/oracle, and source/platform/decision commit binding; no supply graph, Git authority/profile, row/platform state derivation, evidence collector, launcher, observer, validator decision, or stable task-1.3 CLI.
+  - In: `spikes/git-status-capability/contracts/{check.ts,contract-v1.json,lib,tests,fixtures,goldens,source-input-v1.paths}` and this task's OpenSpec fixture/evidence. The checker uses Bun standard APIs only, launches no process, writes no file, and may update `openspec/project-profile.md` only for a real profile gap.
+  - Out: supply/Cargo/toolchain authority (1.1b); Git executable/repository/profile authority (1.1c); row/platform/harness state semantics (1.1d); evidence collection and final/reference/publication vocabulary (1.1e); tasks 1.2/1.3, launcher/observer/native execution, CI, live evidence, production paths, network security, promotion, and #132 closure.
   - Depends on: none.
-  - Verification: first run `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests` with only `contracts/{check.ts,lib}/**` source stashed; every new-behavior test must be red, then restore source and require green. The same command covers valid/exact/bound+1, invalid UTF-8, malformed/trailing/duplicate/deep/wide JSON, unknown/missing fields, stable codes, exit/stdout/stderr, no partial output, manifest missing/extra/future/duplicate/skip/platform-conditional rows, floor merge/gap, ownership overlap/gap, synthetic-only literal, unsafe paths, floating dependencies, and inclusive observer limits. Then `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current` must emit one success receipt without writes; no launcher/observer/`verify.sh` command runs.
+  - Verification: one batched source-only red proof, then `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests` green. Public-seam cases cover ill-formed UTF-8; escaped lone/reversed/mismatched surrogates; a valid paired surrogate; every byte/depth/node/item exact and +1 source-record boundary; exact error/success receipts; independently and synchronously forged `source_sha`/platform `source_commit`/decision `base_sha`; the exact 152-byte three-entry synthetic vector; synchronized 58-byte truncation and same-length mutation with recomputed sidecars; entry count/order/path/mode/content/framing/digest mutations; and byte-identical repeat. The current-set checker emits one deterministic success receipt without writes; no Git helper, launcher, observer, or `verify.sh` command runs.
+  - Public commands: `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --input spikes/git-status-capability/contracts/fixtures/valid/source-input-record-paired-surrogate.json --kind source_input_record`; `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --input spikes/git-status-capability/contracts/fixtures/valid/source-identity-projection-v1.json --kind source_identity_projection`; and `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current`. Exact success `input_kind` values are `source_input_record`, `source_identity_projection`, and `current_source_authority`; every failure is exit `2`, empty stdout, and one exact LF-terminated `contract-error.v1` receipt.
+  - Named evidence: `source-ingress.test.ts` covers UTF-8/surrogates/canonical bytes and every source exact/+1 counter; `source-identity.test.ts` covers the valid four-peer SHA fixture plus every independent/synchronized strict-subset forgery; `synthetic-oracle.test.ts` independently constructs the three-entry vector and rejects synchronized truncated/same-length frame+sidecar pairs; `current-source-authority.test.ts` proves exact manifest equality, exact receipts twice, byte-identical tracked/untracked status before/after, no created path, and no process launch. Compatibility fixtures expose only source identity fields from future platform/decision vocabulary and derive no state or decision.
+  - Full evidence floor: focused tests and all three public commands above; `npx --yes bun@1.2.19 run check`; `npx --yes @fission-ai/openspec@1.3.1 validate m2-capability-observer-spike --strict --no-interactive`; `test "$(git merge-base f8b74e724dc978acb889f715a936feabfd69680d HEAD)" = f8b74e724dc978acb889f715a936feabfd69680d`; `git merge-base --is-ancestor f8b74e724dc978acb889f715a936feabfd69680d HEAD`; `git diff --check f8b74e724dc978acb889f715a936feabfd69680d...HEAD`; `git diff --name-only f8b74e724dc978acb889f715a936feabfd69680d...HEAD -- . ':(exclude)spikes/git-status-capability/contracts/**' ':(exclude)openspec/changes/m2-capability-observer-spike/**'` with empty output; `git diff --submodule=short --exit-code f8b74e724dc978acb889f715a936feabfd69680d...HEAD -- SHUD rSHUD AutoSHUD zero`; before/after `git status --porcelain=v1 --untracked-files=all` byte equality; and `test -z "$(git stash list --format='%gd %s' | rg 'red-proof')"`. The checker launches no child/helper process.
+
+- [ ] 1.1b Freeze complete supply and dependency-graph authority (#165).
+  - PR boundary: supply schemas/catalogs, frozen Cargo/toolchain declarations, complete resolved package/activated-feature/source graph, actual-resource validators, and exact fixtures/tests only.
+  - In: contract supply vocabulary, `native/{Cargo.toml,Cargo.lock,rust-toolchain.toml}`, dependency graph catalog, and mechanical manifest regeneration when needed.
+  - Out: 1.1a source authority; 1.1c Git authority/profile; state/evidence/runtime/production behavior.
+  - Depends on: 1.1a.
+  - Verification: feature-only/package/source/edge/predicate/target drift and valid-repository actual lock/toolchain baseline→mutation→restoration evidence fail or pass at the public seam as specified by #165.
+
+- [ ] 1.1c Bound Git authority and freeze the 17-gate execution profile (#166).
+  - PR boundary: stable-workspace Git executable/exec-path/repository/tracked-set authority, bounded process lifetime, exact 17-gate order, and `GATE-UNTRACKED` profile with public-seam fixtures/tests only.
+  - In: contract Git authority/profile vocabulary and mechanical manifest regeneration when needed.
+  - Out: 1.1a/1.1b redefinition; hostile concurrent replacement and binary provenance; state/evidence/runtime/production behavior.
+  - Depends on: 1.1b.
+  - Verification: transparent and wrong/unusable/blocking wrappers, exact/foreign/linked repository roots, tracked-set drift, process cleanup, and every 17-gate/profile mutation match #166's public receipt contract.
+
+- [ ] 1.1d Close row, platform, harness-validity, and decision-eligibility state semantics (#161).
+  - PR boundary: Bun schema-level state consistency checks and exact state fixtures only; no normalized decision derivation or emission.
+  - In: exact 174-row/25-floor catalog and ownership partition, compound technical failure, row verdict, caller-declared platform state, harness validity, decision eligibility, and mechanical manifest regeneration when needed.
+  - Out: 1.1a–1.1c redefinition; evidence collection; task 1.2/1.3; launcher/observer/native execution and production paths.
+  - Depends on: 1.1c.
+  - Verification: exact catalog/floor/ownership overlap-gap checks, simultaneous outcome/control failure, all legal/illegal four-layer state combinations, caller-declared contradictions, invalid evidence with no decision, and unchanged upstream fixtures.
+
+- [ ] 1.1e Enforce bounded evidence admission and final/reference/publication schema vocabulary (#162).
+  - PR boundary: bounded contract-fixture worktree/staged-blob admission and schema-level final/reference/publication vocabulary checks only; no validator engine, retrieval, finalizer, persistence, or live publication.
+  - In: evidence traversal/read budgets, incremental aggregate accounting, current checker, frozen vocabulary, and mechanical manifest regeneration when needed.
+  - Out: 1.1a–1.1d redefinition; task 1.2/1.3; launcher/observer/native execution and production paths.
+  - Depends on: 1.1d.
+  - Verification: exact/+1 worktree and staged resource bounds, unsafe/malformed/partial/cleanup failures, schema bindings, no-decision-on-invalid, unchanged upstream fixtures, and the full Task 1.1 contract command.
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.
   - In: `spikes/git-status-capability/validator/**`, including the independently implemented `source-input-witness-v1`, and validator tests/fixtures only.
   - Out: command dispatcher, oracle generation, launcher/tripwires, observer, CI, final evidence.
-  - Depends on: 1.1.
+  - Depends on: 1.1e.
   - Verification: goldens cover all-pass accepted; unexpected semantic rejection rejected; exact expected negative and exact-bound pass; bound+1 right/wrong code; platform unsupported rejected; missing/duplicate/corrupt/oversized/stale/source-drift/repository/governance-gate failure invalid with no decision; the witness independently enumerates/frames live inputs and matches only the synthetic literal; raw versus RFC-8785 projection digests vary exactly as design D8 specifies.
 
 - [ ] 1.3 Expose stable spike-only commands, repository gates, and the reusable atomic finalizer.
@@ -49,35 +80,35 @@ add only bounded output under excluded `evidence/**` lanes and never update it.
   - PR boundary: oracle fixtures `BAS-001..006`, `STG-001..012`, and only `UNT-001`, `UNT-002`, `UNT-009`; minimal mergeable slice freezes these 21 literal expected outcomes and frames but cannot mark observer rows pass.
   - In: `spikes/git-status-capability/fixtures/{baseline,staging,true-untracked}/**` and their oracle modules used only before observation.
   - Out: ignore/exclude/global-control rows `UNT-003..008`, attributes/config, index/layout, attacks, launcher/tripwire, native semantics.
-  - Depends on: 1.1.
+  - Depends on: 1.1e.
   - Verification: Git `2.49.0` recipes reproduce all 21 exact outcomes twice across setup-order/root changes, freeze expected/frame/generation before attack, and never create an oracle for `UNT-003..008`.
 
 - [ ] 2.2 Add pinned-Git oracle recipes for ignore, attributes, and effective config.
   - PR boundary: oracle fixtures `UNT-003..008`, `ATR-001..005`, `CFG-001..021`; minimal mergeable slice owns only these 32 rows and their literal expected outcomes.
   - In: `spikes/git-status-capability/fixtures/{ignore,attributes,config}/**` plus their oracle recipe modules.
   - Out: baseline/staging and true-untracked `UNT-001`, `UNT-002`, `UNT-009`; index/layout/nested, helpers, launcher, native comparison.
-  - Depends on: 1.1.
+  - Depends on: 1.1e.
   - Verification: all 32 rows cover ignored-only, root/nested ignore, `.git/info/exclude`, controlled/disabled global excludes, root/nested/`.git/info/attributes`, `core.attributesFile`, local/worktree/include config, autocrlf/eol, fileMode/ignoreCase/trustctime/checkStat/ignoreStat, boolean aliases and invalid token with no ambient user config; no `UNT-001`, `UNT-002`, or `UNT-009` recipe is owned here.
 
 - [ ] 2.3 Add pinned-Git oracle recipes for index, layout, nested state, and #132 floor rows.
   - PR boundary: oracle fixtures `IDX-001..020`, `LAY-001..004`, `NES-001..013`; minimal mergeable slice owns these 37 exact frozen bytes/results, not observer support.
   - In: `spikes/git-status-capability/fixtures/{index,layout,nested}/**` and their oracle recipe modules.
   - Out: other fixture groups, launcher/tripwire, native parser/status code.
-  - Depends on: 1.1.
+  - Depends on: 1.1e.
   - Verification: all 37 rows cover v2/v4/split plus linked/nested split clean+dirty, separate stage-1/2/3 gitlink conflicts, unknown/malformed records, normal/gitfile/linked layouts, initialized/deinitialized/absent nested states, three post-audit drifts, and LF/U+2028/U+2029 recursion; each `F132-01..15` maps one-to-one to its row and exact Git/code oracle.
 
 - [ ] 2.4 Add attack, helper, replay, and collection-protection fixture controls.
   - PR boundary: recipes/controls `CAP-001..017`, `HLP-001..017`, `PRT-001..012`; minimal mergeable slice owns these 46 rows and proves each external sentinel can fire but does not implement launcher policy or native handling.
   - In: `spikes/git-status-capability/fixtures/{capability,helpers,protection}/**` and isolated canary/control binaries or scripts.
   - Out: production roots, semantic fixtures, live launcher enforcement, observer code.
-  - Depends on: 1.1.
+  - Depends on: 1.1e.
   - Verification: foreign/stale/cross-row controls, replacement/deleted-open descriptor, main/linked/nested worktree-config clean and included-process filters, separate post-audit injection controls, separate main/nested fsmonitor, network sentinels, protected TMPDIR aliases, pre-creation, and mutation controls demonstrate exact oracles; each `F132-16..25` maps one-to-one to its row.
 
 - [ ] 2.5 Add exact-limit, lifecycle, cleanup, and determinism fixture controls.
   - PR boundary: recipes/controls `LIM-001..026`, `LIF-001..008`, `DET-001..004`; minimal mergeable slice owns deterministic boundary inputs and expected codes only.
   - In: `spikes/git-status-capability/fixtures/{limits,lifecycle,determinism}/**` and their external limiter/fault controls.
   - Out: native enforcement, launcher settlement, CI, terminal evidence.
-  - Depends on: 1.1.
+  - Depends on: 1.1e.
   - Verification: each exact input is constructible on macOS/Linux, each +1 differs by the smallest declared unit, timeout/signal/cleanup/parallel controls fire, byte-identical repeat is legal, and volatile counter/order/root changes retain expected normalized results.
 
 ## 3. Launcher and active tripwire slices
@@ -86,7 +117,7 @@ add only bounded output under excluded `evidence/**` lanes and never update it.
   - PR boundary: launcher transport and generic raw-evidence emitter only; minimal mergeable slice opens/validates one checkout, freezes schedule, supplies one frame, launches a stub observer, bounds/reaps it, and emits schema-valid launcher evidence without claiming semantics.
   - In: `spikes/git-status-capability/{launcher,evidence-emitter}/**` and launcher/emitter public-seam tests.
   - Out: protection-set tripwire implementation, native Rust transport, semantic status, CI.
-  - Depends on: 1.1, 2.4, 2.5.
+  - Depends on: 1.1e, 2.4, 2.5.
   - Verification: no-follow descriptor allowlist, minimal credential-free environment, no network, replacement/deleted-open attacks, stale/cross-row rejection, timeout/signal/reap, and no partial outcome all match catalog; observer receives only descriptor plus frame. The generic emitter rejects missing/duplicate/oversized/unbound receipts and can assemble a synthetic bounded platform bundle without Git semantics or a terminal decision.
 
 - [ ] 3.2 Implement active transitive tripwires and collection-wide zero-write protection.

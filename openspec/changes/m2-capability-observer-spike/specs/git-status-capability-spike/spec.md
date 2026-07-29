@@ -158,22 +158,33 @@ The manifest SHALL also contain the exact `F132-01..25` evidence-floor crosswalk
 - **THEN** the evidence is harness-invalid and cannot record a decision-bearing pass
 
 ### Requirement: Contract ingestion is bounded and fail-closed
-Task 1.1 SHALL provide a Bun-only contract checker under
+Task 1.1a SHALL provide a Bun-only contract checker under
 `spikes/git-status-capability/contracts/{check.ts,lib,tests,fixtures}/**`. It SHALL
 use only the pinned Bun runtime and standard library, SHALL NOT depend on task
 1.3's `verify.sh`, launcher, observer, or production package, and SHALL write no
 files. Before JSON parsing it SHALL enforce these inclusive limits:
 
-| Input kind | Bytes | Depth | Nodes | Object members + array items |
-|---|---:|---:|---:|---:|
-| catalog/crosswalk/ownership contract | 512 KiB | 16 | 32,768 | 4,096 |
-| dependency graph catalog | 256 KiB | 16 | 16,384 | 4,096 |
-| schema or synthetic-frame metadata | 256 KiB | 32 | 32,768 | 8,192 |
-| source-input record | 64 KiB | 12 | 2,048 | 512 |
-| row evidence | 512 KiB | 32 | 65,536 | 16,384 |
-| macOS/Linux platform bundle | 8 MiB | 32 | 1,048,576 | 262,144 |
-| final bundle | 20 MiB | 32 | 2,097,152 | 524,288 |
-| candidate/terminal decision | 128 KiB | 16 | 8,192 | 2,048 |
+Task 1.1a exposes exactly `source_input_record`,
+`source_identity_projection`, and `--check-current`; it applies the source-record
+profile to both direct source kinds and the metadata profile to the committed
+synthetic oracle. It establishes reusable parser primitives but SHALL reject
+future-owned kinds until their owning task lands. Ownership of the shared limit
+table is:
+
+| Input kind | Bytes | Depth | Nodes | Object members + array items | Semantic owner |
+|---|---:|---:|---:|---:|---|
+| catalog/crosswalk/ownership contract | 512 KiB | 16 | 32,768 | 4,096 | 1.1d (#161) |
+| dependency graph catalog | 256 KiB | 16 | 16,384 | 4,096 | 1.1b (#165) |
+| `source_schema_metadata` / synthetic-frame metadata-oracle | 256 KiB | 32 | 32,768 | 8,192 | 1.1a (#164) |
+| `supply_schema_metadata` | 256 KiB | 32 | 32,768 | 8,192 | 1.1b (#165) |
+| `git_profile_schema_metadata` | 256 KiB | 32 | 32,768 | 8,192 | 1.1c (#166) |
+| `state_schema_metadata` | 256 KiB | 32 | 32,768 | 8,192 | 1.1d (#161) |
+| `evidence_schema_metadata` | 256 KiB | 32 | 32,768 | 8,192 | 1.1e (#162) |
+| source-input record / source-identity projection | 64 KiB | 12 | 2,048 | 512 | 1.1a (#164) |
+| row evidence | 512 KiB | 32 | 65,536 | 16,384 | 1.1d (#161) |
+| macOS/Linux platform bundle | 8 MiB | 32 | 1,048,576 | 262,144 | 1.1d (#161) |
+| final bundle | 20 MiB | 32 | 2,097,152 | 524,288 | 1.1e (#162) |
+| candidate/terminal decision | 128 KiB | 16 | 8,192 | 2,048 | 1.1d (#161) |
 
 Depth counts the root as one; each scalar, object, or array value is one node;
 the item counter counts every object member and array element. Strict UTF-8,
@@ -184,13 +195,41 @@ The checker exits `2`, keeps stdout empty, emits one bounded machine-readable er
 receipt on stderr, and produces no partial file or success receipt. Success exits
 `0` and emits one canonical receipt only after all checks pass.
 
+Task 1.1a's two direct commands SHALL be:
+
+- `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --input spikes/git-status-capability/contracts/fixtures/valid/source-input-record-paired-surrogate.json --kind source_input_record`
+- `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --input spikes/git-status-capability/contracts/fixtures/valid/source-identity-projection-v1.json --kind source_identity_projection`
+
+Its exact success receipt is compact UTF-8 with field order
+`schema_version,status,input_kind`, no BOM/extra whitespace, and one LF:
+`{"schema_version":"shud.git-status-capability.contract-check-receipt.v1","status":"ok","input_kind":"<kind>"}\n`.
+The current command SHALL be
+`npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current`
+and emits the same exact receipt with `input_kind=current_source_authority`.
+Every error receipt has exact field order `schema_version,status,code`:
+`{"schema_version":"shud.git-status-capability.contract-error.v1","status":"error","code":"<CODE>"}\n`.
+Both commands SHALL leave tracked and untracked status bytes identical before and
+after, create no path, write no file, and launch no child/helper process.
+
 #### Scenario: Contract input reaches an exact bound
-- **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
+- **WHEN** an input kind reaches exactly one declared byte, depth, node, or item bound after its owning task has landed, with otherwise valid content
 - **THEN** ingestion continues to strict schema validation and may succeed
 
+#### Scenario: Task 1.1a source input reaches an exact bound
+- **WHEN** a source-input record or source-identity projection reaches exactly 64 KiB, depth 12, 2,048 nodes, or 512 items independently with otherwise valid authority fields
+- **THEN** Task 1.1a continues to source schema/identity validation and may emit its exact success receipt
+
 #### Scenario: Contract input exceeds a bound or is malformed
-- **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
+- **WHEN** an input accepted by its owning task is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
 - **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
+
+#### Scenario: Unicode input is invalid or canonical
+- **WHEN** raw input contains ill-formed UTF-8 bytes that attempt to encode a surrogate scalar
+- **THEN** the checker returns only `CONTRACT_UTF8_INVALID`, exit `2`, empty stdout, one bounded error receipt on stderr, and no partial success receipt
+- **WHEN** valid UTF-8 JSON contains an escaped lone high surrogate, lone low surrogate, reversed pair, or mismatched pair in any key or value
+- **THEN** the checker returns the same public failure shape with only `CONTRACT_JSON_MALFORMED`
+- **WHEN** a valid source-input-record contains escaped `\uD83D\uDE00` in an admitted path and all authority fields are exact
+- **THEN** it decodes as one Unicode scalar and the checker emits the exact source-record success receipt byte-identically across repeats using RFC-8785-compatible canonical bytes
 
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:
@@ -297,9 +336,9 @@ excluded and admits only bounded non-executable `source|platform|gates|final/<di
 JSON/Markdown or immutable content-addressed references. The source
 commit SHALL be recorded beside the digest but MUST NOT be hashed into it.
 
-Task 1.1 SHALL generate the initial manifest from only the covered files present
+Task 1.1a SHALL generate the initial manifest from only the covered files present
 at its HEAD and SHALL freeze the sync/check algorithm; absent future paths are
-forbidden. Every task 1.2–5.1 that adds or removes a covered candidate SHALL use
+forbidden. Every task 1.1b–1.1e and task 1.2–5.1 that adds or removes a covered candidate SHALL use
 that algorithm to update the shared derived manifest and prove exact equality at
 its own HEAD. Such an update is mandatory mechanical bookkeeping, not ownership
 of the catalog or digest contract. Task 5.1 SHALL freeze the final `SOURCE_SHA`
@@ -307,7 +346,7 @@ only after its covered workflow/supply source is final. Tasks 5.2–5.4 SHALL mo
 only excluded evidence lanes and MUST NOT update the manifest.
 
 #### Scenario: A DAG slice changes the covered source set
-- **WHEN** a task from 1.2 through 5.1 adds, removes, or renames a covered source file
+- **WHEN** task 1.1b, 1.1c, 1.1d, 1.1e, or a task from 1.2 through 5.1 adds, removes, or renames a covered source file
 - **THEN** the same PR regenerates the manifest from current tracked files, rejects predeclared future paths, proves exact-set equality, and invalidates older source-bound evidence
 
 #### Scenario: A post-freeze slice persists evidence
@@ -323,6 +362,16 @@ of the live manifest may be committed or used as an oracle. The only committed
 literal SHALL be `contracts/goldens/source-input-v1.synthetic.sha256` for the
 fixed synthetic frame vector.
 
+The fixed synthetic vector SHALL be exactly three entries sorted by raw UTF-8
+path bytes: `a.txt` mode `100644` content `alpha\n`; `bin/run` mode `100755`
+content bytes `00 01 02 ff`; and `unicode/β.txt` mode `100644` content
+`water\n`. With the D8 domain prefix and framing this vector is exactly 152 bytes
+and has SHA-256
+`069f34220c6059b162d9bf16cada6a345eb5d9b3235bd813dde4d72402a2e4dd`.
+Task 1.1a SHALL bind the committed frame and sidecar independently to those
+literal entries, bytes, length, and digest; mutual consistency between a changed
+frame and a recomputed sidecar is not authority.
+
 Task 5.1 SHALL be the sole producer of
 `<external-evidence-root>/source-input-record.json` before either platform run and,
 after observation closes, SHALL persist those unchanged bytes at
@@ -334,6 +383,19 @@ receipt, but SHALL contain no self-hash.
 All other evidence SHALL bind only the source-record SHA-256, not repeat the live
 digest field. D9's `GATE-SOURCE-INPUT` SHALL rerun both encoders with `--no-write`
 and verify the immutable record.
+
+The source record's `source_sha`, each platform bundle's `source_commit`, and the
+decision's `base_sha` SHALL be one equal Git object identity. No combination of
+synchronously changed peers may substitute for equality with the remaining
+admitted record.
+
+#### Scenario: The committed synthetic frame or sidecar is synchronized but wrong
+- **WHEN** the frame is truncated to the 58-byte domain prefix or mutated at the same 152-byte length and its sidecar is recomputed to match
+- **THEN** Task 1.1a returns `CONTRACT_SCHEMA_INVALID`, exit `2`, empty stdout, one bounded error receipt, and no partial success receipt
+
+#### Scenario: Source commit peers diverge or a strict subset is forged
+- **WHEN** source-record `source_sha`, either platform `source_commit`, or decision `base_sha` differs, including synchronized mutation of any strict subset while one peer remains unchanged
+- **THEN** Task 1.1a returns `CONTRACT_SCHEMA_INVALID`, exit `2`, empty stdout, one bounded error receipt, and no partial success receipt before downstream use
 
 #### Scenario: Source digest is reproduced independently
 - **WHEN** the primary and witness runtime encoders consume the same live manifest and `SOURCE_SHA`

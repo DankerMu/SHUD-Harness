@@ -452,8 +452,8 @@ hashing. Repository-relative paths use `/`, are nonempty canonical UTF-8 without
 NUL, absolute prefix, `.` or `..` components, and are sorted lexicographically by
 their raw UTF-8 bytes.
 
-Task 1.1 initializes this manifest from files at its own HEAD; future paths MUST
-NOT be predeclared. It owns the frozen sync/check algorithm. Every task 1.2–5.1
+Task 1.1a initializes this manifest from files at its own HEAD; future paths MUST
+NOT be predeclared. It owns the frozen sync/check algorithm. Every task 1.1b–1.1e and task 1.2–5.1
 that changes a covered file mechanically regenerates the derived manifest and
 proves exact-set equality at that HEAD. This shared permission grants no semantic
 ownership. Task 5.1 freezes `SOURCE_SHA` only after its workflow/supply source is
@@ -485,7 +485,21 @@ Only the fixed synthetic vector `contracts/goldens/source-input-v1.synthetic.fra
 
 Encoder failure/disagreement, an existing/malformed record, record drift before publication, or any committed live literal is harness-invalid, CI red, and yields no candidate or terminal publication. Synthetic goldens prove framing and manifest-order invariance; live mutation tests prove a content/path/mode/input change alters the digest, unsafe enumeration rejects, and only admitted `evidence/**` output or an evidence-only descendant commit leaves it unchanged. Any covered change invalidates every older bundle and requires both platform matrices, supply capture, and all D9 gates to rerun; an old bundle cannot be relabeled.
 
-Task 1.1's Bun-only contract harness lives under `contracts/{check.ts,lib,tests,fixtures}/**`, writes no files, and is independent of task 1.3's stable CLI. It enforces the per-kind byte/depth/node/item table and stable ingestion codes frozen in the spec before semantic schema validation.
+Task 1.1a's Bun-only contract harness lives under `contracts/{check.ts,lib,tests,fixtures}/**`, writes no files or launches no process, and is independent of task 1.3's stable CLI. It owns strict source-record ingestion, RFC-8785-compatible canonical bytes, source/platform/decision commit identity, and the exact synthetic frame oracle. Tasks 1.1b–1.1e add their own supply, Git-profile, state, and evidence vocabulary without redefining those source authorities.
+
+Input-kind ownership is exclusive even though all slices reuse one bounded parser:
+
+| Input kind / semantic projection | Owning task |
+|---|---|
+| `source_input_record`, `source_identity_projection`, `source_schema_metadata`, synthetic-frame metadata/oracle | 1.1a (#164) |
+| `dependency_graph`, `supply_schema_metadata`, actual supply resources | 1.1b (#165) |
+| `git_authority_profile`, `git_profile_schema_metadata` | 1.1c (#166) |
+| `catalog`, `row_evidence`, `platform_bundle`, `decision`, `state_schema_metadata` | 1.1d (#161) |
+| `evidence_subtree`, `final_bundle`, `immutable_reference`, `publication_receipt`, `evidence_schema_metadata` | 1.1e (#162) |
+
+Task 1.1a establishes reusable parser primitives but accepts and normatively tests
+only its row above. A future-owned input kind is not accepted merely because its
+numerical ceiling appears in the shared table.
 
 Tasks 5.1 and 5.2 own the fixed source/platform commands before D9:
 
@@ -862,6 +876,94 @@ cleanup code to appear only in the ordered secondary-error array. `DET-*` compar
 normalized row output and decision projection, while their differing raw counters
 remain content-addressed by the raw digest.
 
+## Task 1.1a (#164) issue fixture
+
+Fixture level is **expanded** (agrees with the upstream suggestion) and repair
+intensity is **high**. This slice changes a public checker, bounded raw JSON
+ingress, canonical bytes, binary framing, identity binding, and fail-closed
+receipts. It remains source-contract-only and does not inherit the later supply,
+Git authority, state, collector, native runtime, network, or production surfaces.
+
+### Seams under test
+
+- Direct source-record admission:
+  `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --input spikes/git-status-capability/contracts/fixtures/valid/source-input-record-paired-surrogate.json --kind source_input_record`.
+  Success stdout is exactly `{"schema_version":"shud.git-status-capability.contract-check-receipt.v1","status":"ok","input_kind":"source_input_record"}\n`; stderr is empty and exit is `0`.
+- Direct source-identity projection:
+  `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --input spikes/git-status-capability/contracts/fixtures/valid/source-identity-projection-v1.json --kind source_identity_projection`.
+  It checks only `source_sha`/two `source_commit`/`base_sha` equality and emits the same exact success schema with `input_kind=source_identity_projection`; it derives no row/platform state or decision.
+- Current source authority:
+  `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current`.
+  Success stdout is exactly `{"schema_version":"shud.git-status-capability.contract-check-receipt.v1","status":"ok","input_kind":"current_source_authority"}\n`; stderr is empty and exit is `0`.
+- Every failure exits `2`, keeps stdout empty, and emits exactly one LF-terminated bounded stderr receipt with field order `schema_version,status,code`: `{"schema_version":"shud.git-status-capability.contract-error.v1","status":"error","code":"<CODE>"}\n`.
+- `source-ingress.test.ts`, `source-identity.test.ts`, `synthetic-oracle.test.ts`, and `current-source-authority.test.ts` exercise those public functions/CLI routes. The current-authority test snapshots tracked and untracked status bytes before/after and requires byte identity, no created path, and no process launch.
+
+### Task 1.1a risk-pack selection
+
+| Risk pack | Selection | Evidence obligation |
+|---|---|---|
+| Public API / CLI / script entry | Selected | Direct and current-check argv, exit, stdout, stderr, repeatability |
+| Config / project setup | Not selected | No config discovery or project setup changes |
+| File IO / path safety / overwrite | Selected | Bounded regular-file reads, canonical manifest/golden paths, no writes or ambient reopen |
+| Schema / columns / units / field names | Selected | Strict source schema, Unicode scalar rules, exact SHA peer names and framing fields |
+| Auth / permissions / secrets | Not selected | No credential or product authorization surface |
+| Concurrency / shared state / ordering | Not selected | Stable build/source workspace; only deterministic repeat is asserted |
+| Resource limits / large input / discovery | Selected | Source bytes/depth/nodes/items exact and +1; bounded error receipt |
+| Legacy compatibility / examples | Selected | Existing structural platform/decision vocabulary remains consumable without semantic derivation |
+| Error handling / rollback / partial outputs | Selected | Stable codes, empty stdout on failure, one stderr receipt, no partial success |
+| Release / packaging / dependency compatibility | Not selected | Owned by Task 1.1b; no root/package/toolchain changes |
+| Documentation / migration notes | Not selected | Spike contract only; no user-facing migration |
+| Scientific governance / PI gate / evidence lineage | Not selected | No hydrological or scientific decision changes |
+| Hydrology runtime compatibility | Not selected | SHUD/rSHUD/AutoSHUD submodules remain untouched |
+| Zero adapter / tool registry governance | Not selected | Zero/runtime adapter remains untouched |
+
+### Task 1.1a Invariant Matrix
+
+Governing invariant: a public success receipt exists only after the exact bounded
+source bytes, canonical Unicode/JSON form, fixed synthetic vector, and all source
+commit peers agree; every mismatch fails deterministically with no partial output.
+
+Source-of-truth identity/contract: raw admitted source-record bytes; the D8 frame
+contract and three-entry 152-byte synthetic literal; `source_sha`, both platform
+`source_commit` values, and decision `base_sha`.
+
+| Surface | Enforcement / evidence |
+|---|---|
+| Producers | Independent literal source fixtures and synthetic entries/frame/digest; no expected value computed by the validator under test |
+| Validators/preflight | Bounded UTF-8/JSON ingress, RFC-8785-compatible canonicalization, exact frame/oracle validation, SHA peer equality |
+| Storage/cache/query | None: the checker writes no file and owns no cache or persistent record |
+| Public routes/entrypoints | Direct source-record check and `--check-current`, both with exact byte receipts |
+| Frontend/downstream consumers | Tasks 1.1b–1.1e consume the frozen source identity without redefining it; no production consumer exists |
+| Failure/rollback/stale state | Malformed/over-limit/oracle/identity failures emit one bounded error, empty stdout, no partial success or write |
+| Evidence/audit/readiness | Batched red proof, focused contract suite, current-set no-write check, strict OpenSpec and scope/diff checks |
+
+Regression rows:
+
+- `source-input-record-paired-surrogate.json` at every exact source bound -> deterministic source-record success receipt twice.
+- `source-identity-projection-v1.json` with all four SHA peers equal -> deterministic identity success; each independent or synchronized strict-subset forgery -> `CONTRACT_SCHEMA_INVALID` and no success output.
+- Exact three-entry/152-byte synthetic frame + literal digest -> current-source success; 58-byte truncation or same-length mutation with recomputed sidecar -> `CONTRACT_SCHEMA_INVALID`.
+- Invalid UTF-8 -> `CONTRACT_UTF8_INVALID`; lone/reversed/mismatched escaped surrogate -> `CONTRACT_JSON_MALFORMED`; every source bound+1 -> its named limit code, all with exact failure I/O.
+- Unchanged future-owned input kind -> rejected as unsupported in 1.1a or consumed only through its named source-identity projection; no semantic state, process, or publication behavior appears.
+
+Exact verification commands:
+
+- `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests`
+- `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current`
+- `npx --yes bun@1.2.19 run check`
+- `npx --yes @fission-ai/openspec@1.3.1 validate m2-capability-observer-spike --strict --no-interactive`
+- `test "$(git merge-base f8b74e724dc978acb889f715a936feabfd69680d HEAD)" = f8b74e724dc978acb889f715a936feabfd69680d` and `git merge-base --is-ancestor f8b74e724dc978acb889f715a936feabfd69680d HEAD`
+- `git diff --check f8b74e724dc978acb889f715a936feabfd69680d...HEAD`
+- `git diff --name-only f8b74e724dc978acb889f715a936feabfd69680d...HEAD -- . ':(exclude)spikes/git-status-capability/contracts/**' ':(exclude)openspec/changes/m2-capability-observer-spike/**'` emits nothing.
+- `git diff --submodule=short --exit-code f8b74e724dc978acb889f715a936feabfd69680d...HEAD -- SHUD rSHUD AutoSHUD zero`
+- Capture `git status --porcelain=v1 --untracked-files=all` bytes immediately before and after each public command and require byte identity; `current-source-authority.test.ts` additionally instruments child-process APIs and requires zero child/helper invocation.
+- `test -z "$(git stash list --format='%gd %s' | rg 'red-proof')"`
+
+Boundary-surface checklist: public entrypoints, bounded read surfaces, canonical
+producer/consumer evidence boundary, stale/mismatched identity, no-write failure
+paths, and unchanged downstream contract consumers are in scope. Write/delete,
+staging/publish/rollback, shared runtime helpers, network, and production consumers
+are explicitly out of scope.
+
 ## Risk-pack selection
 
 Fixture level is **expanded** and repair intensity is **high** because the change
@@ -908,14 +1010,18 @@ none is a change-sized umbrella. Every slice uses `fixture=expanded`,
 remaining non-production. The dependency DAG is:
 
 ```text
-1.1 frozen catalog/schemas
- ├─> 1.2 validator/state goldens ─> 1.3 CLI/finalizer/repository-gate source
- ├─> 2.1 baseline/staging/true-untracked oracle ┐
- ├─> 2.2 ignore/exclude/attribute/config oracle │
- ├─> 2.3 index/layout/nested floor oracle ├─ semantic prerequisite set
- ├─> 2.4 attack/helper/protection oracle  │
- └─> 2.5 limits/lifecycle oracle  ┘
-1.1 + 2.4 + 2.5 ─> 3.1 launcher/evidence-emitter source ─> 3.2 active tripwires/protection
+1.1a source ingress/oracle (#164)
+ └─> 1.1b supply graph (#165)
+      └─> 1.1c Git authority/profile (#166)
+           └─> 1.1d row/platform state (#161)
+                └─> 1.1e bounded evidence vocabulary (#162)
+                     ├─> 1.2 validator/state goldens ─> 1.3 CLI/finalizer/repository-gate source
+                     ├─> 2.1 baseline/staging/true-untracked oracle ┐
+                     ├─> 2.2 ignore/exclude/attribute/config oracle │
+                     ├─> 2.3 index/layout/nested floor oracle ├─ semantic prerequisite set
+                     ├─> 2.4 attack/helper/protection oracle  │
+                     └─> 2.5 limits/lifecycle oracle  ┘
+1.1e + 2.4 + 2.5 ─> 3.1 launcher/evidence-emitter source ─> 3.2 active tripwires/protection
 1.3 + 3.2 ─> 4.1 native transport (no semantic pass claim)
 1.2 + 2.1 + 3.2 + 4.1 ─> 4.2 baseline/staging/true-untracked
 1.2 + 2.2 + 3.2 + 4.1 ─> 4.3 ignore/exclude/attribute/config
@@ -941,12 +1047,12 @@ The catalog ownership partition is frozen and exhaustive:
 | `LIM-001..026`, `LIF-001..008`, `DET-001..004` | 2.5 | 4.7 | 38 |
 | **Exact total** | **one owner per row** | **one owner per row** | **174** |
 
-Task 1.1 validates both ownership columns as exact partitions of the catalog; an
+Task 1.1d validates both ownership columns as exact partitions of the catalog; an
 overlap, gap, or row claimed by another checkbox is a contract failure.
 Task 4.6 depends on 4.5 specifically so nested helper/fsmonitor and audit→inject controls exercise the completed descriptor-bound nested observer rather than a stub or parent-only path.
 
 The hard semantic gate is mechanical: no `BAS/STG/UNT/ATR/CFG/IDX/LAY/NES` row
-may be recorded as pass until task 1.1's exact catalog, task 1.2's validator, the
+may be recorded as pass until task 1.1d's exact catalog, task 1.2's validator, the
 row's task-2 oracle, and task 3.2's live path/process/network/write tripwires all
 exist and are identity-bound to the same `source_input_digest_v1`. Task 4.1 may prove only
 transport and negative contract rows. Focused semantic test output created earlier
@@ -989,7 +1095,7 @@ Either terminal result remains local evidence and carries the same immutable gov
 
 ## Open Questions
 
-None for spike execution. Task 1.1 commits the exact direct crate versions/features,
+None for spike execution. Task 1.1b commits the exact direct crate versions/features,
 lockfile, and target graph catalog before launcher/native work; no semantic task
 may select or update them. Rust is fixed at `1.88.0`, Git oracle at `2.49.0`, Bun
 at `1.2.19`, OpenSpec at `1.3.1`, and the frozen implementation base is
