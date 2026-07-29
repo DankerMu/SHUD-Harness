@@ -169,6 +169,7 @@ files. Before JSON parsing it SHALL enforce these inclusive limits:
 | catalog/crosswalk/ownership contract | 512 KiB | 16 | 32,768 | 4,096 |
 | dependency graph catalog | 256 KiB | 16 | 16,384 | 4,096 |
 | schema or synthetic-frame metadata | 256 KiB | 32 | 32,768 | 8,192 |
+| authority set | 256 KiB | 32 | 32,768 | 8,192 |
 | source-input record | 64 KiB | 12 | 2,048 | 512 |
 | row evidence | 512 KiB | 32 | 65,536 | 16,384 |
 | macOS/Linux platform bundle | 8 MiB | 32 | 1,048,576 | 262,144 |
@@ -188,28 +189,61 @@ extra whitespace and with one LF:
 Success exits `0` and emits one canonical receipt only after all checks pass;
 identical invocations produce byte-identical receipts.
 
-Task 1.1a SHALL enforce one explicit authority-boundary matrix covering actual
-opened resources, the resolved Git executable, the supplied repository root, the
-raw nested `authority_set.source_record` subtree, no-symlink filesystem paths,
-and the canonical source manifest. Each row SHALL bind an actual boundary to an
-identity/profile proof and a foreign/mismatch negative. In particular the same
-resolved executable MUST prove exact Git `2.49.0` and a usable exec-path before
-running `ls-files`; Git's exact top-level MUST equal the supplied root while a
-linked worktree remains valid; and the raw nested source record MUST independently
-receive its full 64 KiB/depth-12/2,048-node/512-item profile before semantic
-validation. Caller-declared versions, ancestor repository discovery, JSON
-reserialization, and test-local candidate approximations MUST NOT ground success.
+Every node ceiling is an independent parser fail-safe and retains isolated exact
+and bound-plus-one parser coverage. For a frozen profile where the item ceiling
+is smaller than `nodes - 1`, ordinary object/array JSON cannot reach the node
+ceiling first: the public checker SHALL deterministically report
+`CONTRACT_JSON_ITEM_LIMIT`. The larger node value remains frozen defense in depth,
+not a false claim that every ceiling is independently reachable through the same
+public document.
+
+Task 1.1a SHALL enforce one explicit two-owner authority-boundary matrix. Its
+trust assumption is a stable build/source workspace without hostile concurrent
+executable or repository rename-replace while the Bun checker runs. Its rows
+cover actual opened resources, a persistent resolved Git path, the supplied
+repository root, the raw nested `authority_set.source_record` subtree,
+no-symlink filesystem paths, and the canonical source manifest. Each Task-1.1a
+row SHALL bind an actual boundary to an identity/profile proof and a
+foreign/mismatch negative. In particular the resolved path MUST report exact Git
+`2.49.0` and a usable exec-path before that path runs `ls-files`; Git's exact
+top-level MUST equal the supplied root while a linked worktree remains valid;
+`authority_set` MUST establish that same exact repository authority before
+reading supply and MUST read supply only below its returned canonical root; and
+the raw nested source record MUST independently receive its full 64
+KiB/depth-12/2,048-node/512-item profile before semantic validation.
+Caller-declared versions, non-repositories, ancestor or foreign repository
+discovery, JSON reserialization, and test-local candidate approximations MUST NOT
+ground success.
+
+The Git-path negative SHALL be only an exact version mismatch, a non-executable,
+non-file, or otherwise persistently unusable resolved path, or an unusable
+exec-path. A transparent behavior-compatible wrapper that reports exact
+`2.49.0`, supplies the usable exec-path, and delegates the required Git commands
+MAY satisfy Task 1.1a in the stable workspace; that success SHALL NOT be described
+as binary provenance.
+
+Separate rows SHALL assign hostile concurrent executable replacement to the
+later native launcher tripwire and hostile repository replacement to the later
+descriptor-bound Rust observer. Their rename-replace and descriptor-relative
+evidence remain mandatory before an accepted runtime decision. Task 1.1a SHALL
+NOT claim cryptographic binary provenance, atomic pathname execution, or an
+atomic repository-root capability; this trust allocation SHALL NOT weaken any
+later no-ambient-path, path-replacement, or descriptor-authority requirement.
 The task-local Cargo manifest lexer SHALL treat only TOML ASCII space, tab, and
 LF as whitespace outside strings; Unicode whitespace and every other control
 character SHALL fail at the public current-checker seam.
 
 #### Scenario: Contract input reaches an exact bound
-- **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
-- **THEN** ingestion continues to strict schema validation and may succeed
+- **WHEN** an input reaches a declared byte, depth, node, or item bound at the isolated parser seam, or reaches a publicly reachable bound under its frozen full profile
+- **THEN** ingestion continues to strict schema validation and may succeed; when the frozen item ceiling makes the node ceiling unreachable first, the node check remains an isolated fail-safe proof
 
 #### Scenario: Contract input exceeds a bound or is malformed
 - **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
 - **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
+
+#### Scenario: Public limit precedence is deterministic
+- **WHEN** a frozen full-profile input exceeds both a smaller item ceiling and a redundant larger node ceiling through ordinary object/array structure
+- **THEN** the checker returns only `CONTRACT_JSON_ITEM_LIMIT`; isolated parser tests still prove the node ceiling at exact and bound+1 with the other counters relaxed
 
 #### Scenario: Unicode input is invalid or canonical
 - **WHEN** raw input contains ill-formed UTF-8 bytes that attempt to encode a surrogate scalar

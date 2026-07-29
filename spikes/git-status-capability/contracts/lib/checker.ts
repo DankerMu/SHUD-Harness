@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { validateAuthoritySet, readActualSupply } from "./authority";
+import { establishGitAuthority } from "./authority-boundary";
 import { ContractError, canonicalReceipt, readJsonFileBounded, type InputKind } from "./ingestion";
 import {
   enumerateSourceCandidates,
@@ -80,7 +81,8 @@ export async function checkCurrent(repositoryRoot: string, manifest: string): Pr
 async function execute(options: Options): Promise<Record<string, unknown>> {
   if (options.mode === "input") {
     if (options.kind === "authority_set") {
-      const spikeRoot = resolve(options.repositoryRoot!, "spikes/git-status-capability");
+      const repositoryAuthority = establishGitAuthority(options.repositoryRoot!);
+      const spikeRoot = resolve(repositoryAuthority.repositoryRoot, "spikes/git-status-capability");
       const actualSupply = await readActualSupply(spikeRoot);
       await readJsonFileBounded(
         options.input,

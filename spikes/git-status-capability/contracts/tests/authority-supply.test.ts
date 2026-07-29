@@ -1,4 +1,4 @@
-import { describe, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { realpathSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -201,6 +201,34 @@ describe("actual and recorded supply authority", () => {
         expectSchemaFailure(await invokeCurrent(root));
       } finally {
         await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("the public current checker accepts ASCII Cargo spacing and rejects Unicode whitespace or controls with exact receipts", async () => {
+    const accepted = await temporaryCurrentRepository();
+    try {
+      const path = join(accepted, "spikes", "git-status-capability", "native", "Cargo.toml");
+      await writeFile(path, (await readFile(path, "utf8")).replace("name =", "name\t=\t"));
+      const sourceEntries = (await enumerateSourceCandidates(accepted)).length;
+      const result = await invokeCurrent(accepted);
+      expect(result).toEqual({
+        exit: 0,
+        stderr: "",
+        stdout: `{"schema_version":"shud.git-status-capability.contract-check-receipt.v1","status":"ok","catalog_rows":174,"floor_mappings":25,"fixture_owners":174,"native_owners":174,"source_entries":${sourceEntries},"rust_version":"1.88.0","git_oracle_version":"2.49.0"}\n`
+      });
+    } finally {
+      await rm(accepted, { recursive: true, force: true });
+    }
+
+    for (const separator of ["\u00a0", "\u2003", "\u2028", "\u000b", "\u000c"]) {
+      const rejected = await temporaryCurrentRepository();
+      try {
+        const path = join(rejected, "spikes", "git-status-capability", "native", "Cargo.toml");
+        await writeFile(path, (await readFile(path, "utf8")).replace("name =", `name${separator}=${separator}`));
+        expectSchemaFailure(await invokeCurrent(rejected));
+      } finally {
+        await rm(rejected, { recursive: true, force: true });
       }
     }
   });

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { realpathSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -8,7 +8,7 @@ import { INGESTION_LIMITS } from "../lib/frozen";
 import { ContractError, canonicalReceipt } from "../lib/ingestion";
 import { validateCargoManifest } from "../lib/cargo-manifest";
 import { runCheck } from "../lib/checker";
-import { loadAuthority, repositoryRoot } from "./authority-test-helpers";
+import { invokeAuthority, loadAuthority, repositoryRoot } from "./authority-test-helpers";
 
 const temporaryRoots: string[] = [];
 const encoder = new TextEncoder();
@@ -70,16 +70,28 @@ function sourceWithProbe(source: Record<string, any>, probe: string): string {
   return `${canonical.slice(0, -1)},"round3_probe":${probe}}`;
 }
 
+function authorityWithProbe(authority: Record<string, any>, probe: string): Uint8Array {
+  const canonical = JSON.stringify(authority);
+  return encoder.encode(`${canonical.slice(0, -1)},"round4_probe":${probe}}`);
+}
+
 describe("round-3 authority boundary matrix", () => {
   test("declares every actual authority resource and its mismatch proof", async () => {
     const module = await import("../lib/authority-boundary") as any;
+    expect(module.AUTHORITY_TRUST_MODEL).toEqual({
+      task_1_1a_assumption: "stable_build_source_workspace_without_hostile_concurrent_rename_replace",
+      task_1_1a_non_goal: "cryptographic_binary_provenance_or_atomic_executable_repository_capability",
+      runtime_acceptance_precondition: "later_descriptor_bound_launcher_observer_tripwire_evidence"
+    });
     expect(module.AUTHORITY_BOUNDARY_MATRIX).toEqual([
-      { resource: "resource", actual_boundary: "opened_regular_file_handle", identity_profile: "captured_path_and_file_identity", foreign_negative: "symlink_replacement_or_non_regular" },
-      { resource: "tool", actual_boundary: "resolved_git_executable", identity_profile: "same_executable_exact_2.49.0_and_exec_path", foreign_negative: "path_impostor_or_version_mismatch" },
-      { resource: "repository", actual_boundary: "supplied_repository_root", identity_profile: "exact_git_top_level_and_common_directory", foreign_negative: "parent_or_foreign_repository_discovery" },
-      { resource: "raw_nested_input", actual_boundary: "raw_authority_set_source_record_subtree", identity_profile: "64kib_depth_12_nodes_2048_items_512", foreign_negative: "nested_profile_bound_plus_one" },
-      { resource: "path", actual_boundary: "captured_no_symlink_path", identity_profile: "ancestor_and_opened_file_identity", foreign_negative: "alias_or_path_replacement" },
-      { resource: "canonical_manifest", actual_boundary: "source_input_v1_paths", identity_profile: "shared_candidate_predicate_and_exact_tracked_set", foreign_negative: "alternate_stale_or_evidence_path" }
+      { owner: "task_1_1a_stable_workspace", resource: "resource", actual_boundary: "opened_regular_file_handle", identity_profile: "captured_path_and_file_identity", foreign_negative: "symlink_replacement_or_non_regular" },
+      { owner: "task_1_1a_stable_workspace", resource: "tool", actual_boundary: "resolved_git_path", identity_profile: "persistent_path_reports_exact_2.49.0_and_usable_exec_path", foreign_negative: "version_mismatch_or_unusable_persistent_path_or_exec_path" },
+      { owner: "task_1_1a_stable_workspace", resource: "repository", actual_boundary: "supplied_repository_root", identity_profile: "exact_git_top_level_and_common_directory", foreign_negative: "nonrepository_parent_or_foreign_root" },
+      { owner: "task_1_1a_stable_workspace", resource: "raw_nested_input", actual_boundary: "raw_authority_set_source_record_subtree", identity_profile: "64kib_depth_12_nodes_2048_items_512_item_precedes_redundant_node", foreign_negative: "nested_profile_bound_plus_one" },
+      { owner: "task_1_1a_stable_workspace", resource: "path", actual_boundary: "captured_no_symlink_path", identity_profile: "ancestor_and_opened_file_identity", foreign_negative: "alias_or_persistent_path_mismatch" },
+      { owner: "task_1_1a_stable_workspace", resource: "canonical_manifest", actual_boundary: "source_input_v1_paths", identity_profile: "shared_candidate_predicate_and_exact_tracked_set", foreign_negative: "alternate_stale_or_evidence_path" },
+      { owner: "later_rust_launcher", resource: "hostile_executable_replacement", actual_boundary: "native_launch_tripwire", identity_profile: "mandatory_concurrent_rename_replace_evidence", foreign_negative: "no_runtime_decision_without_tripwire" },
+      { owner: "later_rust_observer", resource: "hostile_repository_replacement", actual_boundary: "descriptor_bound_checkout_capability", identity_profile: "mandatory_descriptor_relative_rename_replace_evidence", foreign_negative: "no_runtime_decision_without_tripwire" }
     ]);
   });
 
@@ -91,9 +103,22 @@ describe("round-3 authority boundary matrix", () => {
     expect(authority.gitCommonDirectory).toBeTruthy();
   });
 
-  test("Git 2.50 and a PATH impostor claiming 2.49.0 both fail closed", async () => {
+  test("a Git version mismatch, unusable persistent path, or unusable exec-path fails closed", async () => {
     const { establishGitAuthority } = await import("../lib/authority-boundary") as any;
     const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    for (const kind of ["non_executable", "non_file"] as const) {
+      const root = await temporaryRoot("shud-unusable-git-");
+      const executable = join(root, "git");
+      if (kind === "non_executable") await writeFile(executable, "not executable\n");
+      else await mkdir(executable);
+      const savedPath = process.env.PATH;
+      try {
+        process.env.PATH = root;
+        expect(() => establishGitAuthority(repositoryRoot)).toThrow(ContractError);
+      } finally {
+        if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+      }
+    }
     for (const [version, delegatesExecPath] of [["2.50.0", true], ["2.49.0", false]] as const) {
       const root = await temporaryRoot("shud-fake-git-");
       const executable = join(root, "git");
@@ -109,6 +134,28 @@ describe("round-3 authority boundary matrix", () => {
         if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
         if (savedRealGit === undefined) delete process.env.ROUND3_REAL_GIT; else process.env.ROUND3_REAL_GIT = savedRealGit;
       }
+    }
+  });
+
+  test("a transparent exact-version delegating wrapper is admitted within the stable-workspace contract", async () => {
+    const { establishGitAuthority } = await import("../lib/authority-boundary") as any;
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const root = await temporaryRoot("shud-transparent-git-");
+    const executable = join(root, "git");
+    await writeFile(executable, `#!${process.execPath}\nconst a=Bun.argv.slice(2);if(a[0]==="--version"){console.log("git version 2.49.0");process.exit(0)}const r=Bun.spawnSync([process.env.ROUND3_REAL_GIT,...a],{stdout:"inherit",stderr:"inherit",env:process.env});process.exit(r.exitCode);\n`);
+    await chmod(executable, 0o755);
+    const savedPath = process.env.PATH;
+    const savedRealGit = process.env.ROUND3_REAL_GIT;
+    try {
+      process.env.PATH = `${root}:${savedPath ?? ""}`;
+      process.env.ROUND3_REAL_GIT = realGit;
+      const authority = establishGitAuthority(repositoryRoot);
+      expect(authority.executable).toBe(realpathSync(executable));
+      expect(authority.version).toBe("2.49.0");
+      expect(authority.repositoryRoot).toBe(realpathSync(repositoryRoot));
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+      if (savedRealGit === undefined) delete process.env.ROUND3_REAL_GIT; else process.env.ROUND3_REAL_GIT = savedRealGit;
     }
   });
 
@@ -130,6 +177,37 @@ describe("round-3 authority boundary matrix", () => {
     const admitted = establishGitAuthority(worktree);
     expect(admitted.repositoryRoot).toBe(realpathSync(worktree));
     expect(admitted.gitCommonDirectory).toBe(realpathSync(join(parent, ".git")));
+  });
+
+  test("authority-set supply uses one exact repository authority: nonrepository, parent-discovered, and foreign roots fail while a linked worktree succeeds", async () => {
+    const sourceSpike = join(repositoryRoot, "spikes", "git-status-capability");
+    const parent = await temporaryRoot("shud-authority-set-root-");
+    expect(spawnSync("git", ["init", "-q"], { cwd: parent }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "round4@example.invalid"], { cwd: parent }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Round Four"], { cwd: parent }).status).toBe(0);
+    await mkdir(join(parent, "spikes"), { recursive: true });
+    await cp(sourceSpike, join(parent, "spikes", "git-status-capability"), { recursive: true });
+    expect(spawnSync("git", ["add", "spikes/git-status-capability"], { cwd: parent }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-qm", "authority fixture"], { cwd: parent }).status).toBe(0);
+
+    const nonrepository = await temporaryRoot("shud-authority-set-nonrepo-");
+    await mkdir(join(nonrepository, "spikes"), { recursive: true });
+    await cp(sourceSpike, join(nonrepository, "spikes", "git-status-capability"), { recursive: true });
+    expect((await invokeAuthority(undefined, nonrepository)).exit).toBe(2);
+
+    const child = join(parent, "parent-discovered");
+    await mkdir(join(child, "spikes"), { recursive: true });
+    await cp(sourceSpike, join(child, "spikes", "git-status-capability"), { recursive: true });
+    expect((await invokeAuthority(undefined, child)).exit).toBe(2);
+
+    const foreign = await temporaryRoot("shud-authority-set-foreign-");
+    expect(spawnSync("git", ["init", "-q"], { cwd: foreign }).status).toBe(0);
+    expect((await invokeAuthority(undefined, foreign)).exit).toBe(2);
+
+    const linked = await temporaryRoot("shud-authority-set-linked-");
+    await rm(linked, { recursive: true, force: true });
+    expect(spawnSync("git", ["worktree", "add", "-q", "--detach", linked], { cwd: parent }).status).toBe(0);
+    expect((await invokeAuthority(undefined, linked)).exit).toBe(0);
   });
 });
 
@@ -165,6 +243,18 @@ describe("raw nested source-record accounting", () => {
     const nested = { bytes: 64 * 1024, depth: 12, nodes: 2_048, items: 8_192 };
     expect(ingestJsonWithNestedLimits(nestedAt(2_048), outer, "source_record", nested)).toBeDefined();
     expect(() => ingestJsonWithNestedLimits(nestedAt(2_049), outer, "source_record", nested)).toThrow("CONTRACT_JSON_NODE_LIMIT");
+  });
+
+  test("the frozen authority-set profile publicly applies its reachable item limit before its redundant node fail-safe", async () => {
+    const authority = await loadAuthority();
+    const baseline = structuralCounts(authority).items;
+    const exactProbeItems = INGESTION_LIMITS.authority_set.items - baseline - 1;
+    const exact = authorityWithProbe(authority, `[${Array.from({ length: exactProbeItems }, () => "null").join(",")}]`);
+    const plusOne = authorityWithProbe(authority, `[${Array.from({ length: exactProbeItems + 1 }, () => "null").join(",")}]`);
+    const exceedsBoth = authorityWithProbe(authority, `[${Array.from({ length: INGESTION_LIMITS.authority_set.nodes + 1 }, () => "null").join(",")}]`);
+    expect((await invokeAuthorityBytes(exact)).stderr).toBe(errorReceipt("CONTRACT_SCHEMA_INVALID"));
+    expect((await invokeAuthorityBytes(plusOne)).stderr).toBe(errorReceipt("CONTRACT_JSON_ITEM_LIMIT"));
+    expect((await invokeAuthorityBytes(exceedsBoth)).stderr).toBe(errorReceipt("CONTRACT_JSON_ITEM_LIMIT"));
   });
 });
 

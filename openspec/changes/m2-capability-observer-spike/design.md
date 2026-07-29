@@ -444,18 +444,44 @@ rejection code, or gate verdict changes the projection digest. Exact-bound
 evidence is valid; an evidence bundle of 8 MiB+1, a final bundle of 20 MiB+1, or a
 malformed manifest is harness-invalid with no decision.
 
-Task 1.1a uses one authority-boundary matrix rather than trusting semantic
-self-claims. The matrix binds: opened regular-file resources to captured path and
-file identity; Git to one resolved executable that itself proves exact version
-`2.49.0` and a usable exec-path before that same executable runs `ls-files`; the
-supplied repository root to Git's exact top-level and common-directory identity
-(including linked worktrees, excluding ancestor discovery); nested
+Task 1.1a uses one two-owner authority-boundary matrix rather than trusting
+semantic self-claims. Its explicit trust assumption is a stable build/source
+workspace: hostile concurrent executable or repository rename-replace does not
+occur while this Bun checker runs. Within that boundary it binds opened
+regular-file resources to captured path and file identity; Git to one persistent
+resolved path that reports exact version `2.49.0` and a usable exec-path before
+that path runs `ls-files`; the supplied repository root to Git's exact top-level
+and common-directory identity (including linked worktrees, excluding
+non-repositories, ancestor discovery, and foreign roots); nested
 `authority_set.source_record` to its raw input subtree under the complete 64 KiB,
 depth-12, 2,048-node, 512-item profile; filesystem paths to no-symlink ancestor
 and opened-handle identity; and the canonical manifest to the shared candidate
-predicate plus exact tracked set. Every row has a foreign/mismatched negative;
-no reserialized JSON, caller-declared version, ambient repository discovery, or
-test-local path approximation may ground a success receipt.
+predicate plus exact tracked set. `authority_set` establishes this same exact
+repository authority before it reads supply, and reads supply only below the
+canonical root returned by that authority. Every Task-1.1a row has a
+foreign/mismatched negative; no reserialized JSON, caller-declared version,
+ambient repository discovery, or test-local path approximation may ground a
+success receipt.
+
+The Task-1.1a Git-path negative is limited to an exact version mismatch, a
+non-executable/non-file or otherwise persistently unusable resolved path, or an
+unusable exec-path. A behavior-compatible transparent wrapper that reports exact
+`2.49.0`, provides the usable exec-path, and delegates the required Git commands
+is inside this stable-workspace version-validation contract; it is not evidence
+of binary provenance.
+
+The matrix separately assigns hostile concurrent executable replacement to the
+later native launcher tripwire and hostile repository replacement to the later
+descriptor-bound Rust observer. Those experiments remain mandatory, and an
+accepted runtime decision is impossible without their rename-replace and
+descriptor-relative evidence. Task 1.1a neither supplies nor claims
+cryptographic binary provenance, atomic pathname execution, or an atomic
+repository-root capability. This is a boundary allocation, not a weakening of
+the runtime no-ambient-path, path-replacement, or descriptor-authority contract.
+For JSON profiles, every node ceiling remains an independent parser fail-safe.
+Where `items < nodes - 1`, ordinary object/array inputs mathematically reach the
+item ceiling first; the public checker promises that deterministic precedence
+while isolated parser tests retain exact node-bound coverage.
 The task-local Cargo manifest lexer admits only TOML ASCII space, tab, and LF as
 whitespace outside strings; Unicode whitespace and other control characters fail
 at the public current-checker seam before supply identity can succeed.

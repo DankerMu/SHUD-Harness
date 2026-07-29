@@ -3,22 +3,22 @@ import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { ContractError } from "./ingestion";
 
-export const AUTHORITY_BOUNDARY_MATRIX = Object.freeze([
-  { resource: "resource", actual_boundary: "opened_regular_file_handle", identity_profile: "captured_path_and_file_identity", foreign_negative: "symlink_replacement_or_non_regular" },
-  { resource: "tool", actual_boundary: "resolved_git_executable", identity_profile: "same_executable_exact_2.49.0_and_exec_path", foreign_negative: "path_impostor_or_version_mismatch" },
-  { resource: "repository", actual_boundary: "supplied_repository_root", identity_profile: "exact_git_top_level_and_common_directory", foreign_negative: "parent_or_foreign_repository_discovery" },
-  { resource: "raw_nested_input", actual_boundary: "raw_authority_set_source_record_subtree", identity_profile: "64kib_depth_12_nodes_2048_items_512", foreign_negative: "nested_profile_bound_plus_one" },
-  { resource: "path", actual_boundary: "captured_no_symlink_path", identity_profile: "ancestor_and_opened_file_identity", foreign_negative: "alias_or_path_replacement" },
-  { resource: "canonical_manifest", actual_boundary: "source_input_v1_paths", identity_profile: "shared_candidate_predicate_and_exact_tracked_set", foreign_negative: "alternate_stale_or_evidence_path" }
-] as const);
+export const AUTHORITY_TRUST_MODEL = Object.freeze({
+  task_1_1a_assumption: "stable_build_source_workspace_without_hostile_concurrent_rename_replace",
+  task_1_1a_non_goal: "cryptographic_binary_provenance_or_atomic_executable_repository_capability",
+  runtime_acceptance_precondition: "later_descriptor_bound_launcher_observer_tripwire_evidence"
+} as const);
 
-type FileIdentity = {
-  dev: bigint;
-  ino: bigint;
-  mode: bigint;
-  size: bigint;
-  mtimeNs: bigint;
-};
+export const AUTHORITY_BOUNDARY_MATRIX = Object.freeze([
+  { owner: "task_1_1a_stable_workspace", resource: "resource", actual_boundary: "opened_regular_file_handle", identity_profile: "captured_path_and_file_identity", foreign_negative: "symlink_replacement_or_non_regular" },
+  { owner: "task_1_1a_stable_workspace", resource: "tool", actual_boundary: "resolved_git_path", identity_profile: "persistent_path_reports_exact_2.49.0_and_usable_exec_path", foreign_negative: "version_mismatch_or_unusable_persistent_path_or_exec_path" },
+  { owner: "task_1_1a_stable_workspace", resource: "repository", actual_boundary: "supplied_repository_root", identity_profile: "exact_git_top_level_and_common_directory", foreign_negative: "nonrepository_parent_or_foreign_root" },
+  { owner: "task_1_1a_stable_workspace", resource: "raw_nested_input", actual_boundary: "raw_authority_set_source_record_subtree", identity_profile: "64kib_depth_12_nodes_2048_items_512_item_precedes_redundant_node", foreign_negative: "nested_profile_bound_plus_one" },
+  { owner: "task_1_1a_stable_workspace", resource: "path", actual_boundary: "captured_no_symlink_path", identity_profile: "ancestor_and_opened_file_identity", foreign_negative: "alias_or_persistent_path_mismatch" },
+  { owner: "task_1_1a_stable_workspace", resource: "canonical_manifest", actual_boundary: "source_input_v1_paths", identity_profile: "shared_candidate_predicate_and_exact_tracked_set", foreign_negative: "alternate_stale_or_evidence_path" },
+  { owner: "later_rust_launcher", resource: "hostile_executable_replacement", actual_boundary: "native_launch_tripwire", identity_profile: "mandatory_concurrent_rename_replace_evidence", foreign_negative: "no_runtime_decision_without_tripwire" },
+  { owner: "later_rust_observer", resource: "hostile_repository_replacement", actual_boundary: "descriptor_bound_checkout_capability", identity_profile: "mandatory_descriptor_relative_rename_replace_evidence", foreign_negative: "no_runtime_decision_without_tripwire" }
+] as const);
 
 export type GitAuthority = {
   executable: string;
@@ -27,37 +27,21 @@ export type GitAuthority = {
   repositoryRoot: string;
   gitCommonDirectory: string;
   environment: NodeJS.ProcessEnv;
-  executableIdentity: FileIdentity;
 };
 
 function fail(): never {
   throw new ContractError("CONTRACT_SCHEMA_INVALID");
 }
 
-function fileIdentity(path: string): FileIdentity {
-  let stat;
-  try {
-    stat = statSync(path, { bigint: true });
-  } catch {
-    return fail();
-  }
-  if (!stat.isFile()) return fail();
-  return { dev: stat.dev, ino: stat.ino, mode: stat.mode, size: stat.size, mtimeNs: stat.mtimeNs };
-}
-
-function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
-    left.size === right.size && left.mtimeNs === right.mtimeNs;
-}
-
-function resolveExecutable(name: string): { path: string; identity: FileIdentity } {
+function resolveExecutable(name: string): string {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (!directory) continue;
     const candidate = join(directory, name);
     try {
       accessSync(candidate, constants.X_OK);
       const path = realpathSync(candidate);
-      return { path, identity: fileIdentity(path) };
+      if (!statSync(path).isFile()) return fail();
+      return path;
     } catch {
       // Continue to the next explicit PATH entry; no shell or command lookup is used.
     }
@@ -78,16 +62,17 @@ function controlledGitEnvironment(): NodeJS.ProcessEnv {
 
 function invokeExecutable(
   executable: string,
-  identity: FileIdentity,
   args: readonly string[],
   environment: NodeJS.ProcessEnv
 ): SpawnSyncReturns<Buffer> {
-  if (!sameFileIdentity(identity, fileIdentity(executable))) return fail();
-  const result = spawnSync(executable, [...args], {
+  try {
+    if (realpathSync(executable) !== executable || !statSync(executable).isFile()) return fail();
+  } catch {
+    return fail();
+  }
+  return spawnSync(executable, [...args], {
     encoding: "buffer", env: environment, stdio: ["ignore", "pipe", "ignore"]
   });
-  if (!sameFileIdentity(identity, fileIdentity(executable))) return fail();
-  return result;
 }
 
 function exactLine(result: SpawnSyncReturns<Buffer>): string {
@@ -103,12 +88,12 @@ function exactLine(result: SpawnSyncReturns<Buffer>): string {
 }
 
 export function establishGitAuthority(repositoryRoot: string): GitAuthority {
-  const resolved = resolveExecutable("git");
+  const executable = resolveExecutable("git");
   const environment = controlledGitEnvironment();
-  const versionLine = exactLine(invokeExecutable(resolved.path, resolved.identity, ["--version"], environment));
+  const versionLine = exactLine(invokeExecutable(executable, ["--version"], environment));
   if (versionLine !== "git version 2.49.0") return fail();
 
-  const execPath = exactLine(invokeExecutable(resolved.path, resolved.identity, ["--exec-path"], environment));
+  const execPath = exactLine(invokeExecutable(executable, ["--exec-path"], environment));
   if (!isAbsolute(execPath)) return fail();
   let canonicalExecPath: string;
   let root: string;
@@ -121,7 +106,7 @@ export function establishGitAuthority(repositoryRoot: string): GitAuthority {
     return fail();
   }
 
-  const identityResult = invokeExecutable(resolved.path, resolved.identity, [
+  const identityResult = invokeExecutable(executable, [
     "-C", root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"
   ], environment);
   if (identityResult.status !== 0 || !Buffer.isBuffer(identityResult.stdout)) return fail();
@@ -146,8 +131,7 @@ export function establishGitAuthority(repositoryRoot: string): GitAuthority {
   if (topLevel !== root) return fail();
 
   return {
-    executable: resolved.path,
-    executableIdentity: resolved.identity,
+    executable,
     version: "2.49.0",
     execPath: canonicalExecPath,
     repositoryRoot: root,
@@ -157,5 +141,5 @@ export function establishGitAuthority(repositoryRoot: string): GitAuthority {
 }
 
 export function runBoundGit(authority: GitAuthority, args: readonly string[]): SpawnSyncReturns<Buffer> {
-  return invokeExecutable(authority.executable, authority.executableIdentity, args, authority.environment);
+  return invokeExecutable(authority.executable, args, authority.environment);
 }
