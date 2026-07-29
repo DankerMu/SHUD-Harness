@@ -97,11 +97,70 @@ async function expectStableCurrentSuccess(root: string): Promise<void> {
 }
 
 async function indexVersion(root: string): Promise<number> {
+  return (await readFile(await indexPath(root))).readUInt32BE(4);
+}
+
+async function indexPath(root: string): Promise<string> {
   const gitfile = await lstat(join(root, ".git"));
-  if (gitfile.isDirectory()) return (await readFile(join(root, ".git", "index"))).readUInt32BE(4);
+  if (gitfile.isDirectory()) return join(root, ".git", "index");
   const match = /^gitdir: ([^\r\n]+)\n$/.exec(await readFile(join(root, ".git"), "utf8"));
   if (!match) throw new Error("git did not create an ordinary linked-worktree gitfile");
-  return (await readFile(join(match[1]!, "index"))).readUInt32BE(4);
+  return join(match[1]!, "index");
+}
+
+function sha1Index(body: Buffer): Buffer {
+  return Buffer.concat([body, createHash("sha1").update(body).digest()]);
+}
+
+async function rewriteSha1Index(root: string, mutate: (body: Buffer) => Buffer): Promise<void> {
+  const path = await indexPath(root);
+  const bytes = Buffer.from(await readFile(path));
+  await writeFile(path, sha1Index(mutate(bytes.subarray(0, -20))));
+}
+
+function duplicateFinalV4Noncandidate(body: Buffer, expectedPath: string): Buffer {
+  if (body.toString("ascii", 0, 4) !== "DIRC" || body.readUInt32BE(4) !== 4) throw new Error("expected v4 index");
+  const count = body.readUInt32BE(8);
+  let cursor = 12;
+  let previousPath = Buffer.alloc(0);
+  let finalHeader: Buffer | undefined;
+  for (let index = 0; index < count; index += 1) {
+    const start = cursor;
+    const fixed = 62;
+    if (cursor + fixed > body.length) throw new Error("truncated v4 index");
+    const flags = body.readUInt16BE(cursor + 60);
+    cursor += fixed;
+    if ((flags & 0x4000) !== 0) cursor += 2;
+    const header = Buffer.from(body.subarray(start, cursor));
+    let removed = 0;
+    while (true) {
+      if (cursor >= body.length) throw new Error("truncated v4 prefix");
+      const byte = body[cursor++]!;
+      const value = byte & 0x7f;
+      if (removed > Math.floor((previousPath.length - value) / 128)) throw new Error("invalid v4 prefix");
+      removed = removed * 128 + value;
+      if ((byte & 0x80) === 0) break;
+      if (removed >= previousPath.length) throw new Error("invalid v4 prefix");
+      removed += 1;
+    }
+    const nul = body.indexOf(0, cursor);
+    if (nul < 0) throw new Error("unterminated v4 path");
+    previousPath = Buffer.concat([previousPath.subarray(0, previousPath.length - removed), body.subarray(cursor, nul)]);
+    cursor = nul + 1;
+    if (index === count - 1) finalHeader = header;
+  }
+  if (previousPath.toString("utf8") !== expectedPath || !finalHeader) throw new Error("expected final noncandidate path");
+  if (previousPath.length >= 128) throw new Error("test path exceeds single-byte v4 prefix encoding");
+  const duplicate = Buffer.concat([finalHeader, Buffer.from([previousPath.length]), previousPath, Buffer.from([0])]);
+  const changed = Buffer.concat([body.subarray(0, cursor), duplicate, body.subarray(cursor)]);
+  changed.writeUInt32BE(count + 1, 8);
+  return changed;
+}
+
+async function expectTreeExtension(root: string): Promise<void> {
+  git(root, ["write-tree"]);
+  const bytes = await readFile(await indexPath(root));
+  expect(bytes.includes(Buffer.from("TREE", "ascii"))).toBe(true);
 }
 
 async function expectStableCurrentFailure(root: string): Promise<void> {
@@ -123,6 +182,27 @@ async function expectStableCurrentFailure(root: string): Promise<void> {
   expect(launches).toBe(0);
   expect(await inventory(root)).toEqual(beforeInventory);
   expect(git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(beforeStatus);
+}
+
+async function expectStableCurrentCorruptIndexFailure(root: string): Promise<void> {
+  const beforeIndex = await readFile(await indexPath(root));
+  const beforeInventory = await inventory(root);
+  const originalSpawn = Bun.spawn;
+  const originalSpawnSync = Bun.spawnSync;
+  let launches = 0;
+  try {
+    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
+    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
+    const expected = { exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") };
+    expect(await current(root)).toEqual(expected);
+    expect(await current(root)).toEqual(expected);
+  } finally {
+    (Bun as any).spawn = originalSpawn;
+    (Bun as any).spawnSync = originalSpawnSync;
+  }
+  expect(launches).toBe(0);
+  expect(await readFile(await indexPath(root))).toEqual(beforeIndex);
+  expect(await inventory(root)).toEqual(beforeInventory);
 }
 
 afterEach(async () => {
@@ -153,6 +233,53 @@ describe("current source authority", () => {
     git(linked, ["update-index", "--index-version", "4"]);
     expect(await indexVersion(linked)).toBe(4);
     await expectStableCurrentSuccess(linked);
+  });
+
+  test("legal bounded TREE extensions remain admitted for normal and linked Git index v4", async () => {
+    const root = await repository();
+    git(root, ["update-index", "--index-version", "4"]);
+    await expectTreeExtension(root);
+    await expectStableCurrentSuccess(root);
+
+    const { linked } = await linkedRepository();
+    git(linked, ["update-index", "--index-version", "4"]);
+    await expectTreeExtension(linked);
+    await expectStableCurrentSuccess(linked);
+  });
+
+  test("checksum-rehashed malformed extension envelopes fail closed for normal and linked Git index v4", async () => {
+    const root = await repository();
+    git(root, ["update-index", "--index-version", "4"]);
+    await expectStableCurrentSuccess(root);
+    await rewriteSha1Index(root, (body) => Buffer.concat([body, Buffer.from([0])]));
+    await expectStableCurrentCorruptIndexFailure(root);
+
+    const { linked } = await linkedRepository();
+    git(linked, ["update-index", "--index-version", "4"]);
+    await rewriteSha1Index(linked, (body) => Buffer.concat([
+      body, Buffer.from("TREE", "ascii"), Buffer.from([0, 0, 0, 1])
+    ]));
+    await expectStableCurrentCorruptIndexFailure(linked);
+  });
+
+  test("duplicate noncandidate stage-0 entries fail closed for normal and linked Git index v4", async () => {
+    const noncandidate = "unrelated/noncandidate.txt";
+    const root = await repository();
+    await mkdir(join(root, "unrelated"));
+    await writeFile(join(root, noncandidate), "noncandidate\n");
+    git(root, ["add", noncandidate]);
+    git(root, ["update-index", "--index-version", "4"]);
+    await expectStableCurrentSuccess(root);
+    await rewriteSha1Index(root, (body) => duplicateFinalV4Noncandidate(body, noncandidate));
+    await expectStableCurrentCorruptIndexFailure(root);
+
+    const { linked } = await linkedRepository();
+    await mkdir(join(linked, "unrelated"));
+    await writeFile(join(linked, noncandidate), "noncandidate\n");
+    git(linked, ["add", noncandidate]);
+    git(linked, ["update-index", "--index-version", "4"]);
+    await rewriteSha1Index(linked, (body) => duplicateFinalV4Noncandidate(body, noncandidate));
+    await expectStableCurrentCorruptIndexFailure(linked);
   });
 
   test("checker implementation has no process, Git command, network, production import, or write seam", async () => {

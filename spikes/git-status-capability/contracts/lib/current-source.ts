@@ -18,6 +18,7 @@ const GIT_CONFIG_BYTES = 1_048_576;
 const SPIKE_PREFIX = "spikes/git-status-capability/";
 const WORKFLOW_PATH = ".github/workflows/git-status-capability-spike.yml";
 const CHANGE_PREFIX = "openspec/changes/m2-capability-observer-spike/";
+const INDEX_EXTENSION_SIGNATURES = new Set(["TREE", "REUC", "link", "UNTR", "FSMN", "EOIE", "IEOT", "sdir"]);
 const MANDATORY_CHANGE_PATHS = Object.freeze([
   `${CHANGE_PREFIX}.openspec.yaml`,
   `${CHANGE_PREFIX}proposal.md`,
@@ -135,19 +136,21 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
   if (!actualChecksum.equals(expectedChecksum)) fail();
   const count = bytes.readUInt32BE(8);
   const entries: IndexEntry[] = [];
+  const stageZeroPaths = new Set<string>();
+  const checksumStart = bytes.length - oidLength;
   let cursor = 12;
   let previousPath = Buffer.alloc(0);
   for (let index = 0; index < count; index += 1) {
     const start = cursor;
     const fixed = 40 + oidLength + 2;
-    if (cursor + fixed > bytes.length - oidLength) fail();
+    if (cursor + fixed > checksumStart) fail();
     const rawMode = bytes.readUInt32BE(cursor + 24);
     const objectId = bytes.subarray(cursor + 40, cursor + 40 + oidLength).toString("hex");
     const flags = bytes.readUInt16BE(cursor + 40 + oidLength);
     if (((flags >>> 12) & 3) !== 0) fail();
     cursor += fixed;
     if (version >= 3 && (flags & 0x4000) !== 0) {
-      if (cursor + 2 > bytes.length - oidLength) fail();
+      if (cursor + 2 > checksumStart) fail();
       cursor += 2;
     }
     let pathBytes: Buffer;
@@ -155,7 +158,7 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
       let removed = 0;
       let prefixCursor = cursor;
       while (true) {
-        if (prefixCursor >= bytes.length - oidLength) fail();
+        if (prefixCursor >= checksumStart) fail();
         const byte = bytes[prefixCursor++]!;
         const value = byte & 0x7f;
         if (removed > Math.floor((previousPath.length - value) / 128)) fail();
@@ -166,13 +169,13 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
       }
       if (removed > previousPath.length) fail();
       const nul = bytes.indexOf(0, prefixCursor);
-      if (nul < 0 || nul >= bytes.length - oidLength) fail();
+      if (nul < 0 || nul >= checksumStart) fail();
       pathBytes = Buffer.concat([previousPath.subarray(0, previousPath.length - removed), bytes.subarray(prefixCursor, nul)]);
       if (pathBytes.length > bytes.length) fail();
       cursor = nul + 1;
     } else {
       const nul = bytes.indexOf(0, cursor);
-      if (nul < 0 || nul >= bytes.length - oidLength) fail();
+      if (nul < 0 || nul >= checksumStart) fail();
       pathBytes = bytes.subarray(cursor, nul);
       cursor = start + Math.ceil((nul + 1 - start) / 8) * 8;
     }
@@ -183,13 +186,24 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
       fail();
     }
     if (!canonicalRelativePath(path)) fail();
+    if (stageZeroPaths.has(path)) fail();
+    stageZeroPaths.add(path);
     previousPath = pathBytes;
     const mode = rawMode === 0o100644 ? "100644" : rawMode === 0o100755 ? "100755" : undefined;
     if (isCandidate(path) && !mode) fail();
     if (isCandidate(path)) entries.push({ path, mode: mode!, objectId });
   }
+  while (cursor < checksumStart) {
+    if (checksumStart - cursor < 8) fail();
+    const signature = bytes.toString("ascii", cursor, cursor + 4);
+    if (!INDEX_EXTENSION_SIGNATURES.has(signature)) fail();
+    const length = bytes.readUInt32BE(cursor + 4);
+    cursor += 8;
+    if (length > checksumStart - cursor) fail();
+    cursor += length;
+  }
+  if (cursor !== checksumStart) fail();
   entries.sort((left, right) => bytesCompare(left.path, right.path));
-  for (let index = 1; index < entries.length; index += 1) if (entries[index - 1]!.path === entries[index]!.path) fail();
   return entries;
 }
 
