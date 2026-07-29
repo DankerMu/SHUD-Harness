@@ -578,6 +578,10 @@ function validateEvidenceCollection(blobs: Array<{ path: string; bytes: Buffer; 
     }
     const decisionPath = `${EVIDENCE_ROOT}/final/${digest}/decision.json`;
     const decision = values.get(decisionPath);
+    if ((directRecord(finalBundle, "shud.git-status-capability.final-bundle.v1") &&
+        finalBundle.run_status !== "valid_complete") ||
+      (directRecord(decision, "shud.git-status-capability.decision.v1") &&
+        decision.run_status !== "valid_complete")) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     if (directRecord(finalBundle, "shud.git-status-capability.final-bundle.v1") &&
       directRecord(decision, "shud.git-status-capability.decision.v1")) {
       if (!terminalStateMatches(finalBundle, decision)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
@@ -596,19 +600,20 @@ function validateEvidenceCollection(blobs: Array<{ path: string; bytes: Buffer; 
     const assertionPath = `${EVIDENCE_ROOT}/final/${digest}/publication-assertion.json`;
     const assertion = values.get(assertionPath);
     const decisionDigest = artifactDigests.get(decisionPath);
-    if (directRecord(assertion, "shud.git-status-capability.publication-assertion.v1") &&
-      (!directRecord(decision, "shud.git-status-capability.decision.v1") ||
-        !directRecord(finalBundle, "shud.git-status-capability.final-bundle.v1") ||
-        decision.run_status !== "valid_complete" || finalBundle.run_status !== "valid_complete" ||
-        !decisionDigest || assertion.decision_sha256 !== decisionDigest ||
-        assertion.expected_decision !== decision.terminal_decision ||
-        assertion.expected_decision !== finalBundle.terminal_decision)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    if (directRecord(assertion, "shud.git-status-capability.publication-assertion.v1")) {
+      if (!decisionDigest || assertion.decision_sha256 !== decisionDigest ||
+        (directRecord(decision, "shud.git-status-capability.decision.v1") &&
+          assertion.expected_decision !== decision.terminal_decision) ||
+        (directRecord(finalBundle, "shud.git-status-capability.final-bundle.v1") &&
+          assertion.expected_decision !== finalBundle.terminal_decision))
+        throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    }
     const governancePath = `${EVIDENCE_ROOT}/final/${digest}/publication-governance-recheck.json`;
     const governance = values.get(governancePath);
     const gate = values.get(`${EVIDENCE_ROOT}/gates/${digest}/repository-gate.json`);
-    if (directRecord(governance, "shud.git-status-capability.publication-governance-recheck.v1")) {
-      if (!directRecord(gate, "shud.git-status-capability.repository-gate.v1") || !Array.isArray(gate.gates))
-        throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    if (directRecord(governance, "shud.git-status-capability.publication-governance-recheck.v1") &&
+      directRecord(gate, "shud.git-status-capability.repository-gate.v1")) {
+      if (!Array.isArray(gate.gates)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
       const receipt = gate.gates[D9_COMMAND_PROFILE.findIndex((profile) => profile.id === "GATE-GOVERNANCE")];
       if (!record(receipt) || governance.d9_governance_receipt_sha256 !== canonicalDigest(receipt))
         throw new ContractError("CONTRACT_SCHEMA_INVALID");
