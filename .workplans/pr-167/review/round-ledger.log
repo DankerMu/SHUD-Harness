@@ -4,3 +4,4 @@ Round 3 | a04f5c379a290ade2fe43a408e613bd95fc88088 | not-clean | verified findin
 Retro | shape: depth | at round 3 | .workplans/pr-167/review/review-failure-retro-round-3.md | budget: 1 round(s)
 Round 4 | 64f548385c9cf3bd6cd7fff3bf244641827a4d61 | not-clean | verified findings: 6 | highest severity: major | failure classes: contract, data-integrity, test-evidence | repeats prior class: yes (contract (also round 1); data-integrity (also round 1); test-evidence (also round 1)) | gate: post-gate-budget
 Retro | shape: breadth | at round 4 | .workplans/pr-167/review/review-failure-retro-round-4.md | budget: 1 round(s)
+Round 5 | 0b832a825af9b352ccbb659c459f1acccf4c8618 | not-clean | verified findings: 4 | highest severity: major | failure classes: design-consistency, path-safety, test-evidence, compatibility | repeats prior class: yes (test-evidence (also round 1); compatibility (also round 2)) | gate: round-ceiling

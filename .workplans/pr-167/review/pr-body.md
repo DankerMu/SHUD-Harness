@@ -48,6 +48,8 @@ binds the complete contracts/test/helper/fixture/golden tree.
 
 ## Review state
 
-Final retained-slice Phase 6.2 audit is clean at `abe777f`. Draft pending the
-one remaining comprehensive Round 5 cross-review and finding verification, CI,
-and the human merge gate.
+Final retained-slice Phase 6.2 audit was clean at `abe777f`, but comprehensive
+Round 5 at `0b832a8` was not clean: three confirmed P1 findings and one blocking
+plausible P1 remain. The five-round ceiling is terminally locked. CI progression
+and merge are blocked pending an explicit user decision to split, descope, or
+stop this PR.

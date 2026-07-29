@@ -6,7 +6,7 @@ Evidence carrier: the pushed HEAD containing this manifest; it changes no contra
 Base SHA: `f8b74e724dc978acb889f715a936feabfd69680d`
 Issue: #164
 Fixture: expanded; repair intensity high
-Review state: final Phase 6.2 at `abe777f` clean; comprehensive Round 5 pending
+Review state: Round 5 at `0b832a8` not clean; terminal round ceiling locked; awaiting user split/descope/stop decision
 
 ## Current retained scope
 
@@ -61,6 +61,13 @@ history but explicitly superseded; they do not support current PR claims.
 - Final Phase 6.2 re-audit at `abe777f`: clean after online PR body was updated
   and independently proven byte-exact with committed `pr-body.md`. See
   `phase-6-2-final-clean-abe777f.md`. Round 5 is the final review budget.
+- Round 5 at `0b832a8`: not clean. Three P1 candidates are CONFIRMED/FIX_NOW
+  (`design-consistency`, `path-safety`, `test-evidence`); one gap-sweep P1 is
+  PLAUSIBLE/FIX_NOW (`compatibility`). The gate CLI recorded verified=4,
+  highest=major and locked at `round-ceiling`. See
+  `round-5-candidate-synthesis-0b832a8.md` and `verify-round-5.md`.
+- CI and human merge gate are blocked by the terminal review gate. No terminal
+  split/descope/stop outcome has been selected or recorded.
 
 Reviewer lens mix: correctness, integration, resource/path/performance,
 test/evidence, spec compliance, invariant/state/compatibility.
