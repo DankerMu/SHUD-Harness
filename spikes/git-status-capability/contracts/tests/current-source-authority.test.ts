@@ -115,6 +115,65 @@ function sha1Index(body: Buffer): Buffer {
   return Buffer.concat([body, createHash("sha1").update(body).digest()]);
 }
 
+type RawIndexEntry = Readonly<{
+  flagsOffset: number;
+  extendedFlagsOffset?: number;
+  path: Buffer;
+  paddingStart?: number;
+  end: number;
+}>;
+
+function rawIndexEntries(body: Buffer): RawIndexEntry[] {
+  if (body.toString("ascii", 0, 4) !== "DIRC") throw new Error("expected Git index");
+  const version = body.readUInt32BE(4);
+  if (version !== 2 && version !== 3 && version !== 4) throw new Error("expected supported Git index");
+  const count = body.readUInt32BE(8);
+  const entries: RawIndexEntry[] = [];
+  let cursor = 12;
+  let previousPath = Buffer.alloc(0);
+  for (let index = 0; index < count; index += 1) {
+    const start = cursor;
+    const flagsOffset = cursor + 60;
+    if (flagsOffset + 2 > body.length) throw new Error("truncated index entry");
+    const flags = body.readUInt16BE(flagsOffset);
+    cursor = flagsOffset + 2;
+    const extendedFlagsOffset = (flags & 0x4000) !== 0 ? cursor : undefined;
+    if (extendedFlagsOffset !== undefined) cursor += 2;
+    if (version === 4) {
+      let removed = 0;
+      while (true) {
+        if (cursor >= body.length) throw new Error("truncated v4 prefix");
+        const byte = body[cursor++]!;
+        removed = removed * 128 + (byte & 0x7f);
+        if ((byte & 0x80) === 0) break;
+        removed += 1;
+      }
+      const nul = body.indexOf(0, cursor);
+      if (nul < 0) throw new Error("unterminated v4 path");
+      const path = Buffer.concat([previousPath.subarray(0, previousPath.length - removed), body.subarray(cursor, nul)]);
+      cursor = nul + 1;
+      entries.push({ flagsOffset, extendedFlagsOffset, path, end: cursor });
+      previousPath = path;
+    } else {
+      const nul = body.indexOf(0, cursor);
+      if (nul < 0) throw new Error("unterminated index path");
+      const path = Buffer.from(body.subarray(cursor, nul));
+      const end = start + Math.ceil((nul + 1 - start) / 8) * 8;
+      entries.push({ flagsOffset, extendedFlagsOffset, path, paddingStart: nul + 1, end });
+      cursor = end;
+      previousPath = path;
+    }
+  }
+  return entries;
+}
+
+function appendIndexExtension(body: Buffer, signature: string, payload = Buffer.alloc(0)): Buffer {
+  const header = Buffer.alloc(8);
+  header.write(signature, 0, 4, "ascii");
+  header.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([body, header, payload]);
+}
+
 async function rewriteSha1Index(root: string, mutate: (body: Buffer) => Buffer): Promise<void> {
   const path = await indexPath(root);
   const bytes = Buffer.from(await readFile(path));
@@ -266,6 +325,28 @@ async function expectStableCurrentCorruptIndexFailure(root: string, status: Stat
   expect(await statusFromSnapshot(root, status)).toBe(status.status);
 }
 
+async function expectStableCurrentMutatedIndexSuccess(root: string, status: StatusSnapshot): Promise<void> {
+  const beforeIndex = await readFile(await indexPath(root));
+  const beforeInventory = await inventory(root);
+  const originalSpawn = Bun.spawn;
+  const originalSpawnSync = Bun.spawnSync;
+  let launches = 0;
+  try {
+    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
+    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
+    const expected = { exit: 0, stdout: success("current_source_authority"), stderr: "" };
+    expect(await current(root)).toEqual(expected);
+    expect(await current(root)).toEqual(expected);
+  } finally {
+    (Bun as any).spawn = originalSpawn;
+    (Bun as any).spawnSync = originalSpawnSync;
+  }
+  expect(launches).toBe(0);
+  expect(await readFile(await indexPath(root))).toEqual(beforeIndex);
+  expect(await inventory(root)).toEqual(beforeInventory);
+  expect(await statusFromSnapshot(root, status)).toBe(status.status);
+}
+
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -287,6 +368,80 @@ describe("current source authority", () => {
     git(v3, ["update-index", "--index-version", "3"]);
     expect(await indexVersion(v3)).toBe(3);
     await expectStableCurrentSuccess(v3);
+  });
+
+  test("legal ordinary and extended Git index v2, v3, and v4 entries remain accepted", async () => {
+    const v2 = await repository();
+    git(v2, ["update-index", "--index-version", "2"]);
+    await expectStableCurrentSuccess(v2);
+
+    for (const version of [3, 4]) {
+      const root = await repository();
+      git(root, ["update-index", "--skip-worktree", "spikes/git-status-capability/contracts/contract-v1.json"]);
+      git(root, ["update-index", "--index-version", String(version)]);
+      expect(await indexVersion(root)).toBe(version);
+      await expectStableCurrentSuccess(root);
+    }
+  });
+
+  test("checksum-rehashed wrong pathname lengths fail closed for Git index v2, v3, and v4", async () => {
+    for (const version of [2, 3, 4]) {
+      const root = await repository();
+      git(root, ["update-index", "--index-version", String(version)]);
+      const status = await snapshotStatus(root);
+      await rewriteSha1Index(root, (body) => {
+        const changed = Buffer.from(body);
+        const entry = rawIndexEntries(body)[0]!;
+        const declared = changed.readUInt16BE(entry.flagsOffset) & 0x0fff;
+        changed.writeUInt16BE((changed.readUInt16BE(entry.flagsOffset) & 0xf000) | ((declared + 1) & 0x0fff), entry.flagsOffset);
+        return changed;
+      });
+      await expectStableCurrentCorruptIndexFailure(root, status);
+    }
+  });
+
+  test("illegal base and extended entry flags fail closed across Git index versions", async () => {
+    const v2 = await repository();
+    git(v2, ["update-index", "--index-version", "2"]);
+    const v2Status = await snapshotStatus(v2);
+    await rewriteSha1Index(v2, (body) => {
+      const changed = Buffer.from(body);
+      const entry = rawIndexEntries(body)[0]!;
+      changed.writeUInt16BE(changed.readUInt16BE(entry.flagsOffset) | 0x4000, entry.flagsOffset);
+      return changed;
+    });
+    await expectStableCurrentCorruptIndexFailure(v2, v2Status);
+
+    for (const version of [3, 4]) {
+      const root = await repository();
+      git(root, ["update-index", "--skip-worktree", "spikes/git-status-capability/contracts/contract-v1.json"]);
+      git(root, ["update-index", "--index-version", String(version)]);
+      const status = await snapshotStatus(root);
+      await rewriteSha1Index(root, (body) => {
+        const changed = Buffer.from(body);
+        const entry = rawIndexEntries(body).find((candidate) => candidate.extendedFlagsOffset !== undefined);
+        if (entry?.extendedFlagsOffset === undefined) throw new Error("expected extended index entry");
+        changed.writeUInt16BE(version === 3 ? 0 : 0x0001, entry.extendedFlagsOffset);
+        return changed;
+      });
+      await expectStableCurrentCorruptIndexFailure(root, status);
+    }
+  });
+
+  test("nonzero Git index v2 and v3 alignment padding fails closed", async () => {
+    for (const version of [2, 3]) {
+      const root = await repository();
+      git(root, ["update-index", "--index-version", String(version)]);
+      const status = await snapshotStatus(root);
+      await rewriteSha1Index(root, (body) => {
+        const changed = Buffer.from(body);
+        const entry = rawIndexEntries(body).find((candidate) => candidate.paddingStart !== undefined && candidate.paddingStart < candidate.end);
+        if (entry?.paddingStart === undefined) throw new Error("expected padded index entry");
+        changed[entry.paddingStart] = 1;
+        return changed;
+      });
+      await expectStableCurrentCorruptIndexFailure(root, status);
+    }
   });
 
   test("a valid normal Git index v4 succeeds twice with exact receipts, no writes, and no child launch", async () => {
@@ -319,6 +474,33 @@ describe("current source authority", () => {
     git(linked, ["update-index", "--index-version", "4"]);
     await expectTreeExtension(linked);
     await expectStableCurrentSuccess(linked);
+  });
+
+  test("arbitrary bounded uppercase optional extensions remain admitted without writes or child launch", async () => {
+    const root = await repository();
+    const rootStatus = await snapshotStatus(root);
+    await rewriteSha1Index(root, (body) => appendIndexExtension(body, "Z123", Buffer.from([0, 1, 2, 3])));
+    await expectStableCurrentMutatedIndexSuccess(root, rootStatus);
+
+    const { linked } = await linkedRepository();
+    const linkedStatus = await snapshotStatus(linked);
+    await rewriteSha1Index(linked, (body) => appendIndexExtension(body, "ABcd"));
+    await expectStableCurrentMutatedIndexSuccess(linked, linkedStatus);
+  });
+
+  test("empty, truncated, and lowercase mandatory extension envelopes fail closed", async () => {
+    const mutations = [
+      (body: Buffer) => Buffer.concat([body, Buffer.from([0, 0, 0, 0, 0, 0, 0, 0])]),
+      (body: Buffer) => Buffer.concat([body, Buffer.from("ABCD", "ascii")]),
+      (body: Buffer) => appendIndexExtension(body, "link"),
+      (body: Buffer) => appendIndexExtension(body, "sdir", Buffer.from([0]))
+    ];
+    for (let index = 0; index < mutations.length; index += 1) {
+      const target = index === mutations.length - 1 ? (await linkedRepository()).linked : await repository();
+      const status = await snapshotStatus(target);
+      await rewriteSha1Index(target, mutations[index]!);
+      await expectStableCurrentCorruptIndexFailure(target, status);
+    }
   });
 
   test("checksum-rehashed malformed extension envelopes fail closed for normal and linked Git index v4", async () => {

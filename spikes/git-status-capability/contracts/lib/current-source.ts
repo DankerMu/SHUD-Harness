@@ -18,7 +18,9 @@ const GIT_CONFIG_BYTES = 1_048_576;
 const SPIKE_PREFIX = "spikes/git-status-capability/";
 const WORKFLOW_PATH = ".github/workflows/git-status-capability-spike.yml";
 const CHANGE_PREFIX = "openspec/changes/m2-capability-observer-spike/";
-const INDEX_EXTENSION_SIGNATURES = new Set(["TREE", "REUC", "link", "UNTR", "FSMN", "EOIE", "IEOT", "sdir"]);
+const INDEX_ENTRY_PATH_LENGTH_MASK = 0x0fff;
+const INDEX_ENTRY_EXTENDED = 0x4000;
+const INDEX_ENTRY_EXTENDED_FLAGS = 0x6000;
 const MANDATORY_CHANGE_PATHS = Object.freeze([
   `${CHANGE_PREFIX}.openspec.yaml`,
   `${CHANGE_PREFIX}proposal.md`,
@@ -149,8 +151,11 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
     const flags = bytes.readUInt16BE(cursor + 40 + oidLength);
     if (((flags >>> 12) & 3) !== 0) fail();
     cursor += fixed;
-    if (version >= 3 && (flags & 0x4000) !== 0) {
+    if (version === 2 && (flags & INDEX_ENTRY_EXTENDED) !== 0) fail();
+    if (version >= 3 && (flags & INDEX_ENTRY_EXTENDED) !== 0) {
       if (cursor + 2 > checksumStart) fail();
+      const extendedFlags = bytes.readUInt16BE(cursor);
+      if (extendedFlags === 0 || (extendedFlags & ~INDEX_ENTRY_EXTENDED_FLAGS) !== 0) fail();
       cursor += 2;
     }
     let pathBytes: Buffer;
@@ -177,7 +182,10 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
       const nul = bytes.indexOf(0, cursor);
       if (nul < 0 || nul >= checksumStart) fail();
       pathBytes = bytes.subarray(cursor, nul);
-      cursor = start + Math.ceil((nul + 1 - start) / 8) * 8;
+      const alignedCursor = start + Math.ceil((nul + 1 - start) / 8) * 8;
+      if (alignedCursor > checksumStart) fail();
+      for (let padding = nul + 1; padding < alignedCursor; padding += 1) if (bytes[padding] !== 0) fail();
+      cursor = alignedCursor;
     }
     let path: string;
     try {
@@ -185,6 +193,7 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
     } catch {
       fail();
     }
+    if ((flags & INDEX_ENTRY_PATH_LENGTH_MASK) !== Math.min(pathBytes.length, INDEX_ENTRY_PATH_LENGTH_MASK)) fail();
     if (!canonicalRelativePath(path)) fail();
     if (stageZeroPaths.has(path)) fail();
     if (Buffer.compare(previousPath, pathBytes) >= 0) fail();
@@ -196,8 +205,8 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
   }
   while (cursor < checksumStart) {
     if (checksumStart - cursor < 8) fail();
-    const signature = bytes.toString("ascii", cursor, cursor + 4);
-    if (!INDEX_EXTENSION_SIGNATURES.has(signature)) fail();
+    const signatureFirstByte = bytes[cursor]!;
+    if (signatureFirstByte < 0x41 || signatureFirstByte > 0x5a) fail();
     const length = bytes.readUInt32BE(cursor + 4);
     cursor += 8;
     if (length > checksumStart - cursor) fail();
