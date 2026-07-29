@@ -129,13 +129,14 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
   const bytes = Buffer.from(await readBoundedFile(join(gitDir, "index"), 20 * 1024 * 1024));
   if (bytes.length < 12 + oidLength || bytes.toString("ascii", 0, 4) !== "DIRC") fail();
   const version = bytes.readUInt32BE(4);
-  if (version !== 2 && version !== 3) fail();
+  if (version !== 2 && version !== 3 && version !== 4) fail();
   const expectedChecksum = bytes.subarray(bytes.length - oidLength);
   const actualChecksum = createHash(algorithm).update(bytes.subarray(0, -oidLength)).digest();
   if (!actualChecksum.equals(expectedChecksum)) fail();
   const count = bytes.readUInt32BE(8);
   const entries: IndexEntry[] = [];
   let cursor = 12;
+  let previousPath = Buffer.alloc(0);
   for (let index = 0; index < count; index += 1) {
     const start = cursor;
     const fixed = 40 + oidLength + 2;
@@ -145,20 +146,44 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
     const flags = bytes.readUInt16BE(cursor + 40 + oidLength);
     if (((flags >>> 12) & 3) !== 0) fail();
     cursor += fixed;
-    if (version === 3 && (flags & 0x4000) !== 0) {
+    if (version >= 3 && (flags & 0x4000) !== 0) {
       if (cursor + 2 > bytes.length - oidLength) fail();
       cursor += 2;
     }
-    const nul = bytes.indexOf(0, cursor);
-    if (nul < 0 || nul >= bytes.length - oidLength) fail();
+    let pathBytes: Buffer;
+    if (version === 4) {
+      let removed = 0;
+      let prefixCursor = cursor;
+      while (true) {
+        if (prefixCursor >= bytes.length - oidLength) fail();
+        const byte = bytes[prefixCursor++]!;
+        const value = byte & 0x7f;
+        if (removed > Math.floor((previousPath.length - value) / 128)) fail();
+        removed = removed * 128 + value;
+        if ((byte & 0x80) === 0) break;
+        if (removed >= previousPath.length) fail();
+        removed += 1;
+      }
+      if (removed > previousPath.length) fail();
+      const nul = bytes.indexOf(0, prefixCursor);
+      if (nul < 0 || nul >= bytes.length - oidLength) fail();
+      pathBytes = Buffer.concat([previousPath.subarray(0, previousPath.length - removed), bytes.subarray(prefixCursor, nul)]);
+      if (pathBytes.length > bytes.length) fail();
+      cursor = nul + 1;
+    } else {
+      const nul = bytes.indexOf(0, cursor);
+      if (nul < 0 || nul >= bytes.length - oidLength) fail();
+      pathBytes = bytes.subarray(cursor, nul);
+      cursor = start + Math.ceil((nul + 1 - start) / 8) * 8;
+    }
     let path: string;
     try {
-      path = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(cursor, nul));
+      path = new TextDecoder("utf-8", { fatal: true }).decode(pathBytes);
     } catch {
       fail();
     }
     if (!canonicalRelativePath(path)) fail();
-    cursor = start + Math.ceil((nul + 1 - start) / 8) * 8;
+    previousPath = pathBytes;
     const mode = rawMode === 0o100644 ? "100644" : rawMode === 0o100755 ? "100755" : undefined;
     if (isCandidate(path) && !mode) fail();
     if (isCandidate(path)) entries.push({ path, mode: mode!, objectId });

@@ -75,6 +75,35 @@ async function current(root: string) {
   return await capture(["--repository-root", root, "--manifest", SOURCE_MANIFEST, "--check-current"]);
 }
 
+async function expectStableCurrentSuccess(root: string): Promise<void> {
+  const beforeStatus = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  const beforeInventory = await inventory(root);
+  const originalSpawn = Bun.spawn;
+  const originalSpawnSync = Bun.spawnSync;
+  let launches = 0;
+  try {
+    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
+    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
+    const expected = { exit: 0, stdout: success("current_source_authority"), stderr: "" };
+    expect(await current(root)).toEqual(expected);
+    expect(await current(root)).toEqual(expected);
+  } finally {
+    (Bun as any).spawn = originalSpawn;
+    (Bun as any).spawnSync = originalSpawnSync;
+  }
+  expect(launches).toBe(0);
+  expect(await inventory(root)).toEqual(beforeInventory);
+  expect(git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(beforeStatus);
+}
+
+async function indexVersion(root: string): Promise<number> {
+  const gitfile = await lstat(join(root, ".git"));
+  if (gitfile.isDirectory()) return (await readFile(join(root, ".git", "index"))).readUInt32BE(4);
+  const match = /^gitdir: ([^\r\n]+)\n$/.exec(await readFile(join(root, ".git"), "utf8"));
+  if (!match) throw new Error("git did not create an ordinary linked-worktree gitfile");
+  return (await readFile(join(match[1]!, "index"))).readUInt32BE(4);
+}
+
 async function expectStableCurrentFailure(root: string): Promise<void> {
   const beforeStatus = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]);
   const beforeInventory = await inventory(root);
@@ -103,24 +132,27 @@ afterEach(async () => {
 describe("current source authority", () => {
   test("a valid temporary tracked repository succeeds twice with exact receipts, no writes, and no child launch", async () => {
     const root = await repository();
-    const beforeStatus = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]);
-    const beforeInventory = await inventory(root);
-    const originalSpawn = Bun.spawn;
-    const originalSpawnSync = Bun.spawnSync;
-    let launches = 0;
-    try {
-      (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
-      (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
-      const expected = { exit: 0, stdout: success("current_source_authority"), stderr: "" };
-      expect(await current(root)).toEqual(expected);
-      expect(await current(root)).toEqual(expected);
-    } finally {
-      (Bun as any).spawn = originalSpawn;
-      (Bun as any).spawnSync = originalSpawnSync;
-    }
-    expect(launches).toBe(0);
-    expect(await inventory(root)).toEqual(beforeInventory);
-    expect(git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(beforeStatus);
+    await expectStableCurrentSuccess(root);
+  });
+
+  test("a valid normal Git index v4 succeeds twice with exact receipts, no writes, and no child launch", async () => {
+    const root = await repository();
+    const longPath = `spikes/git-status-capability/v4-${"a".repeat(180)}.ts`;
+    const followingPath = "spikes/git-status-capability/v5.ts";
+    await writeFile(join(root, longPath), "export {};\n");
+    await writeFile(join(root, followingPath), "export {};\n");
+    await rewriteManifest(root, (paths) => [...paths, longPath, followingPath].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))));
+    git(root, ["add", longPath, followingPath]);
+    git(root, ["update-index", "--index-version", "4"]);
+    expect(await indexVersion(root)).toBe(4);
+    await expectStableCurrentSuccess(root);
+  });
+
+  test("a valid linked-worktree Git index v4 succeeds twice with exact receipts, no writes, and no child launch", async () => {
+    const { linked } = await linkedRepository();
+    git(linked, ["update-index", "--index-version", "4"]);
+    expect(await indexVersion(linked)).toBe(4);
+    await expectStableCurrentSuccess(linked);
   });
 
   test("checker implementation has no process, Git command, network, production import, or write seam", async () => {
