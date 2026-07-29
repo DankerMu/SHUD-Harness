@@ -233,7 +233,7 @@ export const SCHEMA_DESCRIPTORS = Object.freeze({
     schema_version: "shud.git-status-capability.source-input-record.v1",
     required_fields: [
       "schema_version", "source_sha", "source_input_digest", "manifest_digest", "entry_count", "admitted_paths",
-      "primary_encoder", "witness_encoder", "command_receipt"
+      "admitted_modes", "primary_encoder", "primary_result", "witness_encoder", "witness_result", "command_receipt"
     ],
     optional_fields: [],
     additional_properties: false

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { cp, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { checkCurrent } from "../lib/checker";
@@ -103,6 +103,42 @@ describe("source-input-v1 current-set authority", () => {
     await writeFile(join(root, "spikes", "git-status-capability", "untracked.ts"), "export {};\n");
     const drifted = await enumerateSourceCandidates(root);
     expect(() => validateGitCandidateSet(root, drifted)).toThrow(ContractError);
+  });
+
+  test("one candidate predicate covers the optional workflow, nested specs, and only excludes canonical change evidence", async () => {
+    const root = await temporaryRepository();
+    const workflow = ".github/workflows/git-status-capability-spike.yml";
+    const nestedSpec = "openspec/changes/m2-capability-observer-spike/specs/nested/capability/spec.md";
+    const spikeEvidence = "spikes/git-status-capability/evidence/source.ts";
+    const canonicalEvidence = "openspec/changes/m2-capability-observer-spike/evidence/source/deadbeef/record.json";
+    const nonCandidate = "openspec/changes/m2-capability-observer-spike/specs/nested/capability/notes.md";
+    await mkdir(join(root, ".github", "workflows"), { recursive: true });
+    await mkdir(join(root, "openspec", "changes", "m2-capability-observer-spike", "specs", "nested", "capability"), { recursive: true });
+    await mkdir(join(root, "openspec", "changes", "m2-capability-observer-spike", "evidence", "source", "deadbeef"), { recursive: true });
+    await mkdir(join(root, "spikes", "git-status-capability", "evidence"), { recursive: true });
+    await writeFile(join(root, workflow), "name: spike\n");
+    await writeFile(join(root, nestedSpec), "## ADDED Requirements\n");
+    await writeFile(join(root, spikeEvidence), "export {};\n");
+    await writeFile(join(root, canonicalEvidence), "{}\n");
+    await writeFile(join(root, nonCandidate), "not a spec\n");
+
+    const candidates = await enumerateSourceCandidates(root);
+    expect(candidates).toContain(workflow);
+    expect(candidates).toContain(nestedSpec);
+    expect(candidates).toContain(spikeEvidence);
+    expect(candidates).not.toContain(canonicalEvidence);
+    expect(candidates).not.toContain(nonCandidate);
+
+    expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+    expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike", workflow], { cwd: root }).status).toBe(0);
+    expect(() => validateGitCandidateSet(root, candidates)).not.toThrow();
+  });
+
+  test("an absent workflow and absent future spec are not predeclared", async () => {
+    const root = await temporaryRepository();
+    const candidates = await enumerateSourceCandidates(root);
+    expect(candidates).not.toContain(".github/workflows/git-status-capability-spike.yml");
+    expect(candidates).not.toContain("openspec/changes/m2-capability-observer-spike/specs/future/spec.md");
   });
 
   test("an entirely untracked spike cannot masquerade as the tracked candidate set", async () => {

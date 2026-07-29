@@ -18,12 +18,14 @@ spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.frame
 spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.sha256
 spikes/git-status-capability/contracts/lib/authority.ts
 spikes/git-status-capability/contracts/lib/canonical-json.ts
+spikes/git-status-capability/contracts/lib/cargo-manifest.ts
 spikes/git-status-capability/contracts/lib/checker.ts
 spikes/git-status-capability/contracts/lib/command-profile.ts
 spikes/git-status-capability/contracts/lib/frozen.ts
 spikes/git-status-capability/contracts/lib/ingestion.ts
 spikes/git-status-capability/contracts/lib/schema.ts
 spikes/git-status-capability/contracts/lib/source-frame.ts
+spikes/git-status-capability/contracts/lib/source-record.ts
 spikes/git-status-capability/contracts/source-input-v1.paths
 spikes/git-status-capability/contracts/tests/authority-source.test.ts
 spikes/git-status-capability/contracts/tests/authority-supply.test.ts
@@ -32,6 +34,7 @@ spikes/git-status-capability/contracts/tests/bounded-file.test.ts
 spikes/git-status-capability/contracts/tests/command-profile.test.ts
 spikes/git-status-capability/contracts/tests/compatibility-authority.test.ts
 spikes/git-status-capability/contracts/tests/contract.test.ts
+spikes/git-status-capability/contracts/tests/current-file-admission.test.ts
 spikes/git-status-capability/contracts/tests/ingestion.test.ts
 spikes/git-status-capability/contracts/tests/source-manifest.test.ts
 spikes/git-status-capability/contracts/tests/unicode-canonical.test.ts

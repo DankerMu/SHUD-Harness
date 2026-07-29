@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { join } from "node:path";
 import { canonicalJson } from "./canonical-json";
 import { validateCommandProfile } from "./command-profile";
 import { SUPPLY_IDENTITY } from "./frozen";
 import { ContractError } from "./ingestion";
+import { validateSourceInputRecord } from "./source-record";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -35,27 +36,6 @@ function sha256(value: unknown): value is string {
 
 function gitObjectId(value: unknown): value is string {
   return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value);
-}
-
-function canonicalRelativePath(path: unknown): path is string {
-  if (typeof path !== "string" || !path || path.includes("\0") || path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:/.test(path)) return false;
-  const parts = path.split("/");
-  return parts.every((part) => part !== "" && part !== "." && part !== "..") && posix.normalize(path) === path;
-}
-
-function validateSourceRecord(value: unknown): value is JsonRecord {
-  const keys = [
-    "schema_version", "source_sha", "source_input_digest", "manifest_digest", "entry_count", "admitted_paths",
-    "primary_encoder", "witness_encoder", "command_receipt"
-  ];
-  if (!record(value) || !exactKeys(value, keys) || value.schema_version !== "shud.git-status-capability.source-input-record.v1") return false;
-  if (!gitObjectId(value.source_sha) || !sha256(value.source_input_digest) || !sha256(value.manifest_digest)) return false;
-  if (!Number.isSafeInteger(value.entry_count) || (value.entry_count as number) < 0 || !Array.isArray(value.admitted_paths) || value.admitted_paths.length !== value.entry_count) return false;
-  const admittedPaths = value.admitted_paths;
-  if (!admittedPaths.every(canonicalRelativePath) || new Set(admittedPaths).size !== admittedPaths.length) return false;
-  const sorted = [...admittedPaths].sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
-  if (sorted.some((path, index) => path !== admittedPaths[index])) return false;
-  return value.primary_encoder === "source-input-primary-v1" && value.witness_encoder === "source-input-witness-v1" && record(value.command_receipt);
 }
 
 export function validatePlatformToolchain(value: unknown, platform: "macos" | "linux"): value is JsonRecord {
@@ -145,7 +125,7 @@ export async function readActualSupply(spikeRoot: string): Promise<ActualSupply>
 
 export function validateAuthoritySet(value: unknown, actual: ActualSupply): boolean {
   if (!record(value) || !exactKeys(value, ["schema_version", "source_record", "platforms", "decision", "command_profile"])) return false;
-  if (value.schema_version !== "shud.git-status-capability.authority-set.v1" || !validateSourceRecord(value.source_record)) return false;
+  if (value.schema_version !== "shud.git-status-capability.authority-set.v1" || !validateSourceInputRecord(value.source_record)) return false;
   if (!record(value.platforms) || !exactKeys(value.platforms, ["macos", "linux"]) || !validatePlatform(value.platforms.macos, "macos") || !validatePlatform(value.platforms.linux, "linux") || !validateDecision(value.decision)) return false;
   const sourceRecord = value.source_record;
   const macos = value.platforms.macos;

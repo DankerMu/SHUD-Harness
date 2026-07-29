@@ -3,6 +3,32 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expectMutationRejected, expectSchemaFailure, expectSuccess, invoke, invokeAuthority, repositoryRoot, withJson } from "./authority-test-helpers";
+import { enumerateSourceCandidates } from "../lib/schema";
+import { spawnSync } from "node:child_process";
+
+const manifestRelative = "spikes/git-status-capability/contracts/source-input-v1.paths";
+
+async function temporaryCurrentRepository(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "shud-cargo-contract-"));
+  const spikeRoot = join(root, "spikes", "git-status-capability");
+  await mkdir(join(root, "spikes"), { recursive: true });
+  await cp(join(repositoryRoot, "spikes", "git-status-capability"), spikeRoot, { recursive: true });
+  await cp(
+    join(repositoryRoot, "openspec", "changes", "m2-capability-observer-spike"),
+    join(root, "openspec", "changes", "m2-capability-observer-spike"),
+    { recursive: true }
+  );
+  await writeFile(join(root, manifestRelative), `${(await enumerateSourceCandidates(root)).join("\n")}\n`);
+  if (spawnSync("git", ["init", "-q"], { cwd: root }).status !== 0 ||
+      spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: root }).status !== 0) {
+    throw new Error("temporary Git repository setup failed");
+  }
+  return root;
+}
+
+async function invokeCurrent(root: string) {
+  return invoke(["--repository-root", root, "--manifest", manifestRelative, "--check-current"]);
+}
 
 type Setter = (value: any, changed: string) => void;
 
@@ -125,6 +151,56 @@ describe("actual and recorded supply authority", () => {
       const changed = structuredClone(original);
       mutate(changed);
       await withJson(changed, async (path) => expectSchemaFailure(await invoke(["--input", path, "--kind", kind])));
+    }
+  });
+
+  test("structurally rejects comments and exact package-field drift in Cargo.toml", async () => {
+    const mutations = [
+      (cargo: string) => `${cargo}# comments are not part of the frozen manifest\n`,
+      (cargo: string) => cargo.replace('name = "shud-git-status-capability-spike"', 'name = "forged"'),
+      (cargo: string) => cargo.replace('version = "0.0.0"', 'version = "0.0.1"'),
+      (cargo: string) => cargo.replace('edition = "2024"', 'edition = "2021"'),
+      (cargo: string) => cargo.replace('rust-version = "1.88.0"', 'rust-version = "1.89.0"\n# rust-version = "1.88.0"'),
+      (cargo: string) => cargo.replace("publish = false", "publish = true")
+    ];
+    for (const mutate of mutations) {
+      const root = await temporaryCurrentRepository();
+      try {
+        const path = join(root, "spikes", "git-status-capability", "native", "Cargo.toml");
+        await writeFile(path, mutate(await readFile(path, "utf8")));
+        expectSchemaFailure(await invokeCurrent(root));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test("structurally rejects extra, missing, feature, default-feature, version, and source drift", async () => {
+    const exactLines = {
+      cap: 'cap-std = { version = "=4.0.2", default-features = false }',
+      index: 'gix-index = { version = "=0.54.0", default-features = false, features = ["sha1"] }',
+      status: 'gix-status = { version = "=0.33.0", default-features = false, features = ["sha1", "worktree-rewrites"] }'
+    };
+    const mutations = [
+      (cargo: string) => `${cargo}serde = { version = "=1.0.0", default-features = false }\n`,
+      (cargo: string) => cargo.replace(exactLines.cap, `# ${exactLines.cap}`),
+      (cargo: string) => cargo.replace(exactLines.cap, `cap-std = { version = "=4.0.2", default-features = true }\n# ${exactLines.cap}`),
+      (cargo: string) => cargo.replace(exactLines.cap, `cap-std = { version = "=4.0.3", default-features = false }\n# ${exactLines.cap}`),
+      (cargo: string) => cargo.replace(exactLines.index, `gix-index = { version = "=0.54.0", default-features = false, features = [] }\n# ${exactLines.index}`),
+      (cargo: string) => cargo.replace(exactLines.index, `gix-index = { version = "=0.54.0", default-features = false, features = ["sha1", "serde"] }\n# ${exactLines.index}`),
+      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["worktree-rewrites", "sha1"] }\n# ${exactLines.status}`),
+      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["sha1", "worktree-rewrites"], registry = "private" }\n# ${exactLines.status}`),
+      (cargo: string) => cargo.replace(exactLines.status, `gix-status = { version = "=0.33.0", default-features = false, features = ["sha1", "worktree-rewrites"], git = "https://example.invalid/repo" }\n# ${exactLines.status}`)
+    ];
+    for (const mutate of mutations) {
+      const root = await temporaryCurrentRepository();
+      try {
+        const path = join(root, "spikes", "git-status-capability", "native", "Cargo.toml");
+        await writeFile(path, mutate(await readFile(path, "utf8")));
+        expectSchemaFailure(await invokeCurrent(root));
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     }
   });
 });

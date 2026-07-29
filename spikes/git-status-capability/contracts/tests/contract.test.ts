@@ -99,6 +99,30 @@ describe("frozen catalog v1 contract", () => {
     ]);
   });
 
+  test("freezes every source frame field in order and the sole synthetic literal path", async () => {
+    const valid = await contract();
+    const expectedFields = [
+      "u32_entry_count", "u32_path_byte_length", "path_utf8_bytes", "u32_git_mode_octal",
+      "u64_content_byte_length", "raw_git_blob_bytes"
+    ];
+    expect(valid.source_input_digest_v1.frame_fields).toEqual(expectedFields);
+    expect(valid.source_input_digest_v1.synthetic_literal_path).toBe(
+      "spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.sha256"
+    );
+    for (let index = 0; index < expectedFields.length; index += 1) {
+      const changed = clone(valid);
+      changed.source_input_digest_v1.frame_fields[index] = `forged_${index}`;
+      expect(validateContract(changed)).toBe(false);
+    }
+    const reordered = clone(valid);
+    [reordered.source_input_digest_v1.frame_fields[0], reordered.source_input_digest_v1.frame_fields[1]] =
+      [reordered.source_input_digest_v1.frame_fields[1], reordered.source_input_digest_v1.frame_fields[0]];
+    expect(validateContract(reordered)).toBe(false);
+    const wrongPath = clone(valid);
+    wrongPath.source_input_digest_v1.synthetic_literal_path = "spikes/git-status-capability/contracts/goldens/other.sha256";
+    expect(validateContract(wrongPath)).toBe(false);
+  });
+
   test("fails closed for missing, extra, duplicate, future, skipped, or platform-conditional catalog rows", async () => {
     const valid = await contract();
     const mutations = [

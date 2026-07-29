@@ -8,7 +8,45 @@
     "spikes/git-status-capability/fixtures/\uD83D\uDE00.json",
     "spikes/git-status-capability/native/Cargo.toml"
   ],
+  "admitted_modes": [
+    "100644",
+    "100644"
+  ],
   "primary_encoder": "source-input-primary-v1",
+  "primary_result": {
+    "status": "ok",
+    "source_input_digest_matches": true,
+    "manifest_digest_matches": true,
+    "entry_count_matches": true,
+    "admitted_set_matches": true
+  },
   "witness_encoder": "source-input-witness-v1",
-  "command_receipt": {}
+  "witness_result": {
+    "status": "ok",
+    "source_input_digest_matches": true,
+    "manifest_digest_matches": true,
+    "entry_count_matches": true,
+    "admitted_set_matches": true
+  },
+  "command_receipt": {
+    "argv": [
+      "spikes/git-status-capability/verify.sh",
+      "source-input-digest",
+      "--version",
+      "1",
+      "--source-sha",
+      "<SOURCE_SHA>",
+      "--manifest",
+      "spikes/git-status-capability/contracts/source-input-v1.paths",
+      "--primary",
+      "source-input-primary-v1",
+      "--witness",
+      "source-input-witness-v1",
+      "--record",
+      "<EXTERNAL_EVIDENCE_ROOT>/source-input-record.json",
+      "--create"
+    ],
+    "version": "1",
+    "exit_code": 0
+  }
 }
