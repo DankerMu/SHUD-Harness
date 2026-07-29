@@ -36,6 +36,19 @@
           "rounds": 5
         }
       ]
+    },
+    "160": {
+      "ceilingPrs": [
+        163
+      ],
+      "gateEntries": 1,
+      "closed": [
+        {
+          "pr": 163,
+          "outcome": "superseded-by-split",
+          "rounds": 5
+        }
+      ]
     }
   }
 }
