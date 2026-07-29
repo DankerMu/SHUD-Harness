@@ -6,7 +6,7 @@ Evidence carrier: the pushed HEAD containing this manifest; it changes no contra
 Base SHA: `f8b74e724dc978acb889f715a936feabfd69680d`
 Issue: #164
 Fixture: expanded; repair intensity high
-Review state: Phase 6.2 at `5fb069a` not clean; two verified P1 closures implemented; final Phase 6.2 re-audit pending before Round 5
+Review state: final Phase 6.2 at `abe777f` clean; comprehensive Round 5 pending
 
 ## Current retained scope
 
@@ -57,7 +57,10 @@ history but explicitly superseded; they do not support current PR claims.
   repair round may continue.
 - Phase 6.2 at `5fb069a`: two P1 findings verified CONFIRMED/FIX_NOW. Descriptor-
   bound ingress closure is `6b474b4`; stale/tree-binding evidence is refreshed
-  in this carrier. Final retained-slice Phase 6.2 re-audit is pending.
+  in this carrier.
+- Final Phase 6.2 re-audit at `abe777f`: clean after online PR body was updated
+  and independently proven byte-exact with committed `pr-body.md`. See
+  `phase-6-2-final-clean-abe777f.md`. Round 5 is the final review budget.
 
 Reviewer lens mix: correctness, integration, resource/path/performance,
 test/evidence, spec compliance, invariant/state/compatibility.

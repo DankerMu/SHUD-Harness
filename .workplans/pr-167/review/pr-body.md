@@ -48,6 +48,6 @@ binds the complete contracts/test/helper/fixture/golden tree.
 
 ## Review state
 
-Draft pending final retained-slice Phase 6.2 audit, the one remaining
-comprehensive Round 5 cross-review and finding verification, CI, and the human
-merge gate.
+Final retained-slice Phase 6.2 audit is clean at `abe777f`. Draft pending the
+one remaining comprehensive Round 5 cross-review and finding verification, CI,
+and the human merge gate.
