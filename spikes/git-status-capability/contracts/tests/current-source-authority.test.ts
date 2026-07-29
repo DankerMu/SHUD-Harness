@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { SOURCE_MANIFEST } from "../lib/constants";
@@ -73,6 +73,27 @@ async function inventory(root: string): Promise<Record<string, string>> {
 
 async function current(root: string) {
   return await capture(["--repository-root", root, "--manifest", SOURCE_MANIFEST, "--check-current"]);
+}
+
+async function expectStableCurrentFailure(root: string): Promise<void> {
+  const beforeStatus = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  const beforeInventory = await inventory(root);
+  const originalSpawn = Bun.spawn;
+  const originalSpawnSync = Bun.spawnSync;
+  let launches = 0;
+  try {
+    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
+    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
+    expect(await current(root)).toEqual({
+      exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID")
+    });
+  } finally {
+    (Bun as any).spawn = originalSpawn;
+    (Bun as any).spawnSync = originalSpawnSync;
+  }
+  expect(launches).toBe(0);
+  expect(await inventory(root)).toEqual(beforeInventory);
+  expect(git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(beforeStatus);
 }
 
 afterEach(async () => {
@@ -171,6 +192,77 @@ describe("current source authority", () => {
     expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
   });
 
+  test("every governed filesystem lane is inventoried while unrelated and excluded evidence paths stay excluded", async () => {
+    const untrackedSpec = await repository();
+    const futureSpec = join(
+      untrackedSpec, "openspec", "changes", "m2-capability-observer-spike", "specs", "future-capability", "spec.md"
+    );
+    await mkdir(join(futureSpec, ".."), { recursive: true });
+    await writeFile(futureSpec, "# future candidate\n");
+    await expectStableCurrentFailure(untrackedSpec);
+
+    const untrackedWorkflow = await repository();
+    const workflow = join(untrackedWorkflow, ".github", "workflows", "git-status-capability-spike.yml");
+    await mkdir(join(workflow, ".."), { recursive: true });
+    await writeFile(workflow, "name: untracked candidate\n");
+    await expectStableCurrentFailure(untrackedWorkflow);
+
+    const symlinkedSpec = await repository();
+    const symlinkSpecPath = join(
+      symlinkedSpec, "openspec", "changes", "m2-capability-observer-spike", "specs", "linked-capability", "spec.md"
+    );
+    await mkdir(join(symlinkSpecPath, ".."), { recursive: true });
+    await symlink("../git-status-capability-spike/spec.md", symlinkSpecPath);
+    await expectStableCurrentFailure(symlinkedSpec);
+
+    const symlinkedSpecDirectory = await repository();
+    const specAlias = join(
+      symlinkedSpecDirectory, "openspec", "changes", "m2-capability-observer-spike", "specs", "alias"
+    );
+    await symlink("git-status-capability-spike", specAlias);
+    await expectStableCurrentFailure(symlinkedSpecDirectory);
+
+    const symlinkedAncestor = await repository();
+    const openspecRoot = join(symlinkedAncestor, "openspec");
+    const realOpenspecRoot = join(symlinkedAncestor, "real-openspec");
+    await rename(openspecRoot, realOpenspecRoot);
+    await symlink("real-openspec", openspecRoot);
+    await expectStableCurrentFailure(symlinkedAncestor);
+
+    const nonRegularWorkflow = await repository();
+    const workflowDirectory = join(nonRegularWorkflow, ".github", "workflows", "git-status-capability-spike.yml");
+    await mkdir(workflowDirectory, { recursive: true });
+    await expectStableCurrentFailure(nonRegularWorkflow);
+
+    for (const mandatory of [
+      "openspec/changes/m2-capability-observer-spike/.openspec.yaml",
+      "openspec/changes/m2-capability-observer-spike/proposal.md",
+      "openspec/changes/m2-capability-observer-spike/design.md",
+      "openspec/changes/m2-capability-observer-spike/tasks.md",
+      "openspec/changes/m2-capability-observer-spike/specs/git-status-capability-spike/spec.md"
+    ]) {
+      const synchronizedRemoval = await repository();
+      await unlink(join(synchronizedRemoval, mandatory));
+      await rewriteManifest(synchronizedRemoval, (paths) => paths.filter((path) => path !== mandatory));
+      git(synchronizedRemoval, ["add", "-u", mandatory]);
+      await expectStableCurrentFailure(synchronizedRemoval);
+    }
+
+    const excluded = await repository();
+    const evidence = join(
+      excluded, "openspec", "changes", "m2-capability-observer-spike", "evidence", "source", "digest", "receipt.json"
+    );
+    await mkdir(join(evidence, ".."), { recursive: true });
+    await writeFile(evidence, "{}\n");
+    await mkdir(join(excluded, "unrelated"));
+    await writeFile(join(excluded, "unrelated", "note.md"), "not a governed candidate\n");
+    await writeFile(
+      join(excluded, "openspec", "changes", "m2-capability-observer-spike", "specs", "notes.md"),
+      "not a recursive spec candidate\n"
+    );
+    expect(await current(excluded)).toEqual({ exit: 0, stdout: success("current_source_authority"), stderr: "" });
+  });
+
   test("untracked, symlink, non-regular, and mode drift inputs fail closed", async () => {
     const untracked = await repository();
     await writeFile(join(untracked, "spikes", "git-status-capability", "untracked.ts"), "export {};\n");
@@ -206,6 +298,51 @@ describe("current source authority", () => {
       await writeFile(sidecarPath, `${createHash("sha256").update(changed).digest("hex")}\n`);
       git(root, ["add", "spikes/git-status-capability/contracts/goldens"]);
       expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+    }
+  });
+
+  test("every frozen synthetic mutation fails through --check-current without writes or child launch", async () => {
+    type Mutation = (frame: Buffer, sidecar: Buffer) => { frame: Buffer; sidecar: Buffer };
+    const frameOnly = (mutate: (frame: Buffer) => Buffer): Mutation => (frame, sidecar) => ({
+      frame: mutate(frame), sidecar
+    });
+    const synchronized = (mutate: (frame: Buffer) => Buffer): Mutation => (frame) => {
+      const changed = mutate(frame);
+      return { frame: changed, sidecar: Buffer.from(`${createHash("sha256").update(changed).digest("hex")}\n`, "ascii") };
+    };
+    const mutations: Array<[string, Mutation]> = [
+      ["entry count", frameOnly((frame) => { const changed = Buffer.from(frame); changed.writeUInt32BE(2, 58); return changed; })],
+      ["entry order", frameOnly((frame) => Buffer.concat([
+        frame.subarray(0, 62), frame.subarray(89, 116), frame.subarray(62, 89), frame.subarray(116)
+      ]))],
+      ["path", frameOnly((frame) => { const changed = Buffer.from(frame); changed[66] ^= 1; return changed; })],
+      ["mode", frameOnly((frame) => { const changed = Buffer.from(frame); changed[71] ^= 1; return changed; })],
+      ["content", frameOnly((frame) => { const changed = Buffer.from(frame); changed[83] ^= 1; return changed; })],
+      ["framing", frameOnly((frame) => { const changed = Buffer.from(frame); changed[0] ^= 1; return changed; })],
+      ["digest", (frame, sidecar) => {
+        const changed = Buffer.from(sidecar); changed[0] = changed[0] === 0x30 ? 0x31 : 0x30;
+        return { frame, sidecar: changed };
+      }],
+      ["trailing", frameOnly((frame) => Buffer.concat([frame, Buffer.from([0])]))],
+      ["truncation", frameOnly((frame) => frame.subarray(0, frame.length - 1))],
+      ["synchronized 58-byte truncation", synchronized((frame) => frame.subarray(0, 58))],
+      ["synchronized same-length mutation", synchronized((frame) => {
+        const changed = Buffer.from(frame); changed[83] ^= 1; return changed;
+      })]
+    ];
+    for (const [name, mutate] of mutations) {
+      const root = await repository();
+      const framePath = join(root, "spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.frame");
+      const sidecarPath = join(root, "spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.sha256");
+      const changed = mutate(await readFile(framePath), await readFile(sidecarPath));
+      await writeFile(framePath, changed.frame);
+      await writeFile(sidecarPath, changed.sidecar);
+      git(root, ["add", "spikes/git-status-capability/contracts/goldens"]);
+      try {
+        await expectStableCurrentFailure(root);
+      } catch (error) {
+        throw new Error(`public synthetic mutation did not fail closed: ${name}`, { cause: error });
+      }
     }
   });
 

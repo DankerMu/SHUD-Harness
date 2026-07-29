@@ -195,6 +195,16 @@ The checker exits `2`, keeps stdout empty, emits one bounded machine-readable er
 receipt on stderr, and produces no partial file or success receipt. Success exits
 `0` and emits one canonical receipt only after all checks pass.
 
+These counting definitions and every source/metadata profile ceiling remain
+frozen. For every complete JSON document, each non-root value is owned by exactly
+one object member or array element, so `nodes = items + 1`. Consequently the
+source and metadata item ceilings dominate their node ceilings for admitted real-
+profile inputs. The node ceiling is a defense-in-depth parser guard for reuse or
+an incorrectly relaxed sibling limit; it is not a separately reachable public
+real-profile boundary. Public real-profile evidence MUST cover byte, depth, and
+item exact/+1 behavior. An isolated parser test MUST retain node exact/+1 evidence
+using the same node ceiling with only the item ceiling relaxed.
+
 Task 1.1a's two direct commands SHALL be:
 
 - `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --input spikes/git-status-capability/contracts/fixtures/valid/source-input-record-paired-surrogate.json --kind source_input_record`
@@ -212,12 +222,16 @@ Both commands SHALL leave tracked and untracked status bytes identical before an
 after, create no path, write no file, and launch no child/helper process.
 
 #### Scenario: Contract input reaches an exact bound
-- **WHEN** an input kind reaches exactly one declared byte, depth, node, or item bound after its owning task has landed, with otherwise valid content
+- **WHEN** an input kind reaches exactly one declared byte, depth, or item bound after its owning task has landed, with otherwise valid content
 - **THEN** ingestion continues to strict schema validation and may succeed
 
 #### Scenario: Task 1.1a source input reaches an exact bound
-- **WHEN** a source-input record or source-identity projection reaches exactly 64 KiB, depth 12, 2,048 nodes, or 512 items independently with otherwise valid authority fields
+- **WHEN** a source-input record or source-identity projection reaches exactly 64 KiB, depth 12, or 512 items independently with otherwise valid authority fields
 - **THEN** Task 1.1a continues to source schema/identity validation and may emit its exact success receipt
+
+#### Scenario: Parser node guard reaches its isolated boundary
+- **WHEN** the bounded parser is exercised with the source or metadata node ceiling unchanged and only its dominated item ceiling relaxed, using otherwise valid JSON at the exact node ceiling and node ceiling +1
+- **THEN** the exact-node input continues parsing and the +1 input returns only `CONTRACT_JSON_NODE_LIMIT`; no public real-profile claim is inferred from this defense-in-depth test
 
 #### Scenario: Contract input exceeds a bound or is malformed
 - **WHEN** an input accepted by its owning task is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid

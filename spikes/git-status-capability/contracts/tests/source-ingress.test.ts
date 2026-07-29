@@ -105,33 +105,48 @@ describe("strict source ingress", () => {
     }
   });
 
-  test("every source depth, node, and item exact/+1 counter is inclusive independently", () => {
-    const depth = (count: number) => Buffer.from("[".repeat(count - 1) + "0" + "]".repeat(count - 1));
-    expect(() => parseBoundedJson(depth(12), { ...SOURCE_PROFILE, nodes: 10_000, items: 10_000 })).not.toThrow();
-    expectCode(() => parseBoundedJson(depth(13), { ...SOURCE_PROFILE, nodes: 10_000, items: 10_000 }), "CONTRACT_JSON_DEPTH_LIMIT");
+  test("parser node guard is inclusive at exact and rejects +1 when only the item ceiling is relaxed", () => {
     const nodes = (count: number) => Buffer.from(`[${Array.from({ length: count - 1 }, () => "0").join(",")}]`);
-    expect(() => parseBoundedJson(nodes(2_048), { ...SOURCE_PROFILE, bytes: 100_000, items: 10_000 })).not.toThrow();
-    expectCode(() => parseBoundedJson(nodes(2_049), { ...SOURCE_PROFILE, bytes: 100_000, items: 10_000 }), "CONTRACT_JSON_NODE_LIMIT");
-    const items = (count: number) => Buffer.from(`[${Array.from({ length: count }, () => "0").join(",")}]`);
-    expect(() => parseBoundedJson(items(512), { ...SOURCE_PROFILE, nodes: 10_000 })).not.toThrow();
-    expectCode(() => parseBoundedJson(items(513), { ...SOURCE_PROFILE, nodes: 10_000 }), "CONTRACT_JSON_ITEM_LIMIT");
+    for (const profile of [SOURCE_PROFILE, SOURCE_METADATA_PROFILE]) {
+      const nodeProfile = { ...profile, items: profile.nodes };
+      expect(() => parseBoundedJson(nodes(profile.nodes), nodeProfile)).not.toThrow();
+      expectCode(() => parseBoundedJson(nodes(profile.nodes + 1), nodeProfile), "CONTRACT_JSON_NODE_LIMIT");
+    }
   });
 
-  test("source metadata profile has exact/+1 byte, depth, node, and item boundaries", async () => {
+  test("public checker exposes exact and +1 source depth and item behavior", async () => {
+    const cases: Array<[string, string]> = [
+      ["[".repeat(SOURCE_PROFILE.depth - 1) + "0" + "]".repeat(SOURCE_PROFILE.depth - 1), "CONTRACT_SCHEMA_INVALID"],
+      ["[".repeat(SOURCE_PROFILE.depth) + "0" + "]".repeat(SOURCE_PROFILE.depth), "CONTRACT_JSON_DEPTH_LIMIT"],
+      [`[${Array.from({ length: SOURCE_PROFILE.items }, () => "0").join(",")}]`, "CONTRACT_SCHEMA_INVALID"],
+      [`[${Array.from({ length: SOURCE_PROFILE.items + 1 }, () => "0").join(",")}]`, "CONTRACT_JSON_ITEM_LIMIT"]
+    ];
+    for (const [text, code] of cases) {
+      await withTemporaryFile(text, async (path) => {
+        expect(await capture(["--input", path, "--kind", "source_input_record"])).toEqual({
+          exit: 2, stdout: "", stderr: failure(code)
+        });
+      });
+    }
+  });
+
+  test("source metadata profile retains exact/+1 byte, depth, and item boundaries", async () => {
     const metadata = await readFile(new URL("../contract-v1.json", import.meta.url));
     const padded = Buffer.concat([metadata, Buffer.alloc(SOURCE_METADATA_PROFILE.bytes - metadata.length, 0x20)]);
     expect(() => validateContractMetadata(padded)).not.toThrow();
     expectCode(() => validateContractMetadata(Buffer.concat([padded, Buffer.from(" ")])), "CONTRACT_BYTES_LIMIT");
-    const relaxed = { ...SOURCE_METADATA_PROFILE, bytes: 1_000_000, nodes: 100_000, items: 100_000 };
     const depth = (count: number) => Buffer.from("[".repeat(count - 1) + "0" + "]".repeat(count - 1));
-    expect(() => parseBoundedJson(depth(32), relaxed)).not.toThrow();
-    expectCode(() => parseBoundedJson(depth(33), relaxed), "CONTRACT_JSON_DEPTH_LIMIT");
-    const nodes = (count: number) => Buffer.from(`[${Array.from({ length: count - 1 }, () => "0").join(",")}]`);
-    expect(() => parseBoundedJson(nodes(32_768), { ...relaxed, depth: 32, nodes: 32_768 })).not.toThrow();
-    expectCode(() => parseBoundedJson(nodes(32_769), { ...SOURCE_METADATA_PROFILE, bytes: 1_000_000, items: 100_000 }), "CONTRACT_JSON_NODE_LIMIT");
+    expect(() => parseBoundedJson(depth(SOURCE_METADATA_PROFILE.depth), SOURCE_METADATA_PROFILE)).not.toThrow();
+    expectCode(
+      () => parseBoundedJson(depth(SOURCE_METADATA_PROFILE.depth + 1), SOURCE_METADATA_PROFILE),
+      "CONTRACT_JSON_DEPTH_LIMIT"
+    );
     const items = (count: number) => Buffer.from(`[${Array.from({ length: count }, () => "0").join(",")}]`);
-    expect(() => parseBoundedJson(items(8_192), { ...SOURCE_METADATA_PROFILE, bytes: 1_000_000, nodes: 100_000 })).not.toThrow();
-    expectCode(() => parseBoundedJson(items(8_193), { ...SOURCE_METADATA_PROFILE, bytes: 1_000_000, nodes: 100_000 }), "CONTRACT_JSON_ITEM_LIMIT");
+    expect(() => parseBoundedJson(items(SOURCE_METADATA_PROFILE.items), SOURCE_METADATA_PROFILE)).not.toThrow();
+    expectCode(
+      () => parseBoundedJson(items(SOURCE_METADATA_PROFILE.items + 1), SOURCE_METADATA_PROFILE),
+      "CONTRACT_JSON_ITEM_LIMIT"
+    );
   });
 
   test("future-owned input kinds and malformed argv are rejected without partial output", async () => {

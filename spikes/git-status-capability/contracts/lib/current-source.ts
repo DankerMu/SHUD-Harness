@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { lstat, readdir, readFile, stat as followStat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   CONTRACT_METADATA, SOURCE_MANIFEST, SOURCE_METADATA_PROFILE, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR
@@ -14,6 +15,15 @@ type GitDirectories = Readonly<{ worktree: string; common: string }>;
 const GITFILE_BYTES = 4_096;
 const COMMONDIR_BYTES = 1_024;
 const GIT_CONFIG_BYTES = 1_048_576;
+const SPIKE_PREFIX = "spikes/git-status-capability/";
+const WORKFLOW_PATH = ".github/workflows/git-status-capability-spike.yml";
+const CHANGE_PREFIX = "openspec/changes/m2-capability-observer-spike/";
+const MANDATORY_CHANGE_PATHS = Object.freeze([
+  `${CHANGE_PREFIX}.openspec.yaml`,
+  `${CHANGE_PREFIX}proposal.md`,
+  `${CHANGE_PREFIX}design.md`,
+  `${CHANGE_PREFIX}tasks.md`
+]);
 
 function fail(): never {
   throw new ContractError("CONTRACT_SCHEMA_INVALID");
@@ -34,11 +44,10 @@ function inside(root: string, path: string): boolean {
 }
 
 function isCandidate(path: string): boolean {
-  if (path.startsWith("spikes/git-status-capability/")) return true;
-  if (path === ".github/workflows/git-status-capability-spike.yml") return true;
-  const prefix = "openspec/changes/m2-capability-observer-spike/";
-  if (!path.startsWith(prefix)) return false;
-  const local = path.slice(prefix.length);
+  if (path.startsWith(SPIKE_PREFIX)) return true;
+  if (path === WORKFLOW_PATH) return true;
+  if (!path.startsWith(CHANGE_PREFIX)) return false;
+  const local = path.slice(CHANGE_PREFIX.length);
   return local === ".openspec.yaml" || local === "proposal.md" || local === "design.md" || local === "tasks.md" ||
     (local.startsWith("specs/") && local.endsWith("/spec.md"));
 }
@@ -55,6 +64,31 @@ async function admittedDirectory(path: string): Promise<string> {
   const stat = await lstat(path).catch(() => undefined);
   if (!stat?.isDirectory() || stat.isSymbolicLink()) fail();
   return path;
+}
+
+async function repositoryPathStat(root: string, path: string): Promise<Stats | undefined> {
+  if (!canonicalRelativePath(path)) fail();
+  let current = root;
+  const parts = path.split("/");
+  for (let index = 0; index < parts.length; index += 1) {
+    current = join(current, parts[index]!);
+    let candidate: Stats;
+    try {
+      candidate = await lstat(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      fail();
+    }
+    if (candidate.isSymbolicLink() || (index < parts.length - 1 && !candidate.isDirectory())) fail();
+    if (index === parts.length - 1) return candidate;
+  }
+  fail();
+}
+
+async function admittedRepositoryDirectory(root: string, path: string): Promise<string> {
+  const stat = await repositoryPathStat(root, path);
+  if (!stat?.isDirectory()) fail();
+  return join(root, path);
 }
 
 async function gitDirectories(root: string): Promise<GitDirectories> {
@@ -134,21 +168,56 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
   return entries;
 }
 
-async function filesystemSpikePaths(root: string): Promise<string[]> {
-  const spikeRoot = join(root, "spikes", "git-status-capability");
+async function regularCandidate(root: string, path: string, required: boolean): Promise<string | undefined> {
+  const stat = await repositoryPathStat(root, path);
+  if (!stat) {
+    if (required) fail();
+    return undefined;
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) fail();
+  return path;
+}
+
+async function filesystemCandidatePaths(root: string): Promise<string[]> {
+  const spikeRoot = await admittedRepositoryDirectory(root, "spikes/git-status-capability");
   const result: string[] = [];
-  async function walk(directory: string): Promise<void> {
+  async function walkSpike(directory: string): Promise<void> {
     const entries = await readdir(directory, { withFileTypes: true }).catch(() => fail());
     for (const entry of entries) {
       const absolute = join(directory, entry.name);
       const local = relative(root, absolute).split(sep).join("/");
       if (entry.isSymbolicLink()) fail();
-      if (entry.isDirectory()) await walk(absolute);
+      if (entry.isDirectory()) await walkSpike(absolute);
       else if (entry.isFile()) result.push(local);
       else fail();
     }
   }
-  await walk(spikeRoot);
+  await walkSpike(spikeRoot);
+
+  const workflow = await regularCandidate(root, WORKFLOW_PATH, false);
+  if (workflow) result.push(workflow);
+
+  for (const path of MANDATORY_CHANGE_PATHS) result.push((await regularCandidate(root, path, true))!);
+
+  const specsRoot = await admittedRepositoryDirectory(root, `${CHANGE_PREFIX}specs`);
+  let specCount = 0;
+  async function walkSpecs(directory: string): Promise<void> {
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => fail());
+    for (const entry of entries) {
+      const absolute = join(directory, entry.name);
+      const local = relative(root, absolute).split(sep).join("/");
+      if (entry.isSymbolicLink()) {
+        if (isCandidate(local) || (await followStat(absolute).catch(() => undefined))?.isDirectory()) fail();
+      } else if (entry.isDirectory()) await walkSpecs(absolute);
+      else if (isCandidate(local)) {
+        if (!entry.isFile()) fail();
+        result.push(local);
+        specCount += 1;
+      }
+    }
+  }
+  await walkSpecs(specsRoot);
+  if (specCount === 0) fail();
   return result.sort(bytesCompare);
 }
 
@@ -187,12 +256,11 @@ export async function checkCurrentSourceAuthority(repositoryRoot: string, manife
   const gitDirs = await gitDirectories(root);
   const algorithm = await objectFormat(gitDirs.common);
   const tracked = await readIndex(gitDirs.worktree, algorithm);
+  const filesystemCandidates = await filesystemCandidatePaths(root);
   const declared = await manifestPaths(root, manifest);
   const trackedPaths = tracked.map((entry) => entry.path);
   if (!canonicalEqualStrings(declared, trackedPaths)) fail();
-  const worktreeSpike = await filesystemSpikePaths(root);
-  const trackedSpike = trackedPaths.filter((path) => path.startsWith("spikes/git-status-capability/"));
-  if (!canonicalEqualStrings(worktreeSpike, trackedSpike)) fail();
+  if (!canonicalEqualStrings(filesystemCandidates, trackedPaths)) fail();
   for (const entry of tracked) await verifyWorktreeEntry(root, entry, algorithm);
   validateContractMetadata(await readBoundedFile(join(root, CONTRACT_METADATA), SOURCE_METADATA_PROFILE.bytes));
   validateSyntheticOracle(

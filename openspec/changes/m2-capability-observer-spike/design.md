@@ -501,6 +501,16 @@ Task 1.1a establishes reusable parser primitives but accepts and normatively tes
 only its row above. A future-owned input kind is not accepted merely because its
 numerical ceiling appears in the shared table.
 
+The JSON counting rules and source/metadata limits stay unchanged: the root is one
+node, every scalar/object/array value is one node, and every object member or
+array element is one item. Therefore every complete document has
+`nodes = items + 1`. The real source profiles (`2,048/512`) and metadata profiles
+(`32,768/8,192`) necessarily reach the item ceiling before the node ceiling. The
+node ceiling remains a defense-in-depth parser guard, but Task 1.1a does not claim
+that a public real-profile fixture can independently reach it. Public checker
+evidence covers byte/depth/item exact and +1; isolated parser evidence covers node
+exact and +1 with the item ceiling relaxed and every other profile limit intact.
+
 Tasks 5.1 and 5.2 own the fixed source/platform commands before D9:
 
 | ID | Exact reproducible command |
@@ -908,7 +918,7 @@ Git authority, state, collector, native runtime, network, or production surfaces
 | Schema / columns / units / field names | Selected | Strict source schema, Unicode scalar rules, exact SHA peer names and framing fields |
 | Auth / permissions / secrets | Not selected | No credential or product authorization surface |
 | Concurrency / shared state / ordering | Not selected | Stable build/source workspace; only deterministic repeat is asserted |
-| Resource limits / large input / discovery | Selected | Source bytes/depth/nodes/items exact and +1; bounded error receipt |
+| Resource limits / large input / discovery | Selected | Public source bytes/depth/items exact and +1; isolated parser-node exact and +1 with only the dominated item ceiling relaxed; bounded error receipt |
 | Legacy compatibility / examples | Selected | Existing structural platform/decision vocabulary remains consumable without semantic derivation |
 | Error handling / rollback / partial outputs | Selected | Stable codes, empty stdout on failure, one stderr receipt, no partial success |
 | Release / packaging / dependency compatibility | Not selected | Owned by Task 1.1b; no root/package/toolchain changes |
@@ -939,10 +949,11 @@ contract and three-entry 152-byte synthetic literal; `source_sha`, both platform
 
 Regression rows:
 
-- `source-input-record-paired-surrogate.json` at every exact source bound -> deterministic source-record success receipt twice.
+- `source-input-record-paired-surrogate.json` at the exact byte bound -> deterministic source-record success receipt twice; exact depth/item inputs reach schema validation through the public checker.
+- Source and metadata node exact/+1 inputs exercise the isolated parser with the declared node ceiling unchanged and only the dominated item ceiling relaxed; exact continues and +1 returns `CONTRACT_JSON_NODE_LIMIT`.
 - `source-identity-projection-v1.json` with all four SHA peers equal -> deterministic identity success; each independent or synchronized strict-subset forgery -> `CONTRACT_SCHEMA_INVALID` and no success output.
 - Exact three-entry/152-byte synthetic frame + literal digest -> current-source success; 58-byte truncation or same-length mutation with recomputed sidecar -> `CONTRACT_SCHEMA_INVALID`.
-- Invalid UTF-8 -> `CONTRACT_UTF8_INVALID`; lone/reversed/mismatched escaped surrogate -> `CONTRACT_JSON_MALFORMED`; every source bound+1 -> its named limit code, all with exact failure I/O.
+- Invalid UTF-8 -> `CONTRACT_UTF8_INVALID`; lone/reversed/mismatched escaped surrogate -> `CONTRACT_JSON_MALFORMED`; public source byte/depth/item bound+1 -> its named limit code, all with exact failure I/O.
 - Unchanged future-owned input kind -> rejected as unsupported in 1.1a or consumed only through its named source-identity projection; no semantic state, process, or publication behavior appears.
 
 Exact verification commands:
