@@ -187,6 +187,7 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
     }
     if (!canonicalRelativePath(path)) fail();
     if (stageZeroPaths.has(path)) fail();
+    if (Buffer.compare(previousPath, pathBytes) >= 0) fail();
     stageZeroPaths.add(path);
     previousPath = pathBytes;
     const mode = rawMode === 0o100644 ? "100644" : rawMode === 0o100755 ? "100755" : undefined;
