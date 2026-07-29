@@ -1,5 +1,8 @@
 # Phase 6.2 invariant audit
 
+> Superseded. Round 2 later found a Git index v4 compatibility defect at this
+> same reviewed SHA, so this clean conclusion is not current evidence.
+
 PR: #167
 Audited head SHA: `618bc86f1708513d3bf2666537fde0359019c800`
 Failure classes: `data-integrity`, `contract`, `test-evidence`

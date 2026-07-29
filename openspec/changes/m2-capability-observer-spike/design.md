@@ -485,7 +485,7 @@ Only the fixed synthetic vector `contracts/goldens/source-input-v1.synthetic.fra
 
 Encoder failure/disagreement, an existing/malformed record, record drift before publication, or any committed live literal is harness-invalid, CI red, and yields no candidate or terminal publication. Synthetic goldens prove framing and manifest-order invariance; live mutation tests prove a content/path/mode/input change alters the digest, unsafe enumeration rejects, and only admitted `evidence/**` output or an evidence-only descendant commit leaves it unchanged. Any covered change invalidates every older bundle and requires both platform matrices, supply capture, and all D9 gates to rerun; an old bundle cannot be relabeled.
 
-Task 1.1a's Bun-only contract harness lives under `contracts/{check.ts,lib,tests,fixtures}/**`, writes no files or launches no process, and is independent of task 1.3's stable CLI. It owns strict source-record ingestion, RFC-8785-compatible canonical bytes, source/platform/decision commit identity, and the exact synthetic frame oracle. Tasks 1.1b–1.1e add their own supply, Git-profile, state, and evidence vocabulary without redefining those source authorities.
+Task 1.1a's Bun-only contract harness lives under `contracts/{check.ts,lib,tests,fixtures}/**`, writes no files or launches no process, and is independent of task 1.3's stable CLI. It owns strict source-record ingestion, RFC-8785-compatible canonical bytes, source/platform/decision commit identity, and the exact synthetic frame oracle. Its `--check-current` route validates only the strict declared manifest and committed metadata/frame/sidecar oracle through bounded descriptor/no-follow reads; the retained `current_source_authority` receipt name does not establish live Git repository, config, object-format, index, tracked-set, mode, blob, inventory, or filesystem-generation authority. Task 1.1c (#166) owns those authorities and future live-manifest equality. Tasks 1.1b–1.1e add their own vocabulary without redefining Task 1.1a's source identity and oracle contracts.
 
 Input-kind ownership is exclusive even though all slices reuse one bounded parser:
 
@@ -508,8 +508,12 @@ array element is one item. Therefore every complete document has
 (`32,768/8,192`) necessarily reach the item ceiling before the node ceiling. The
 node ceiling remains a defense-in-depth parser guard, but Task 1.1a does not claim
 that a public real-profile fixture can independently reach it. Public checker
-evidence covers byte/depth/item exact and +1; isolated parser evidence covers node
-exact and +1 with the item ceiling relaxed and every other profile limit intact.
+evidence uses a schema-valid byte-exact record, while exact depth/item synthetic
+documents prove only that parsing continues to strict schema validation (and may
+return `CONTRACT_SCHEMA_INVALID`); +1 returns the matching limit code. It does not
+claim a closed-schema otherwise-valid authority record or exact depth/item
+success. Isolated parser evidence covers node exact and +1 with the item ceiling
+relaxed and every other profile limit intact.
 
 Tasks 5.1 and 5.2 own the fixed source/platform commands before D9:
 
@@ -525,7 +529,10 @@ The immutable implementation base and merge-base are
 `9b761459760db16c1088ec81f91387790f8567e2`. The only implementation paths admitted
 relative to that base are `spikes/git-status-capability/**`,
 `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory,
-and the Phase-0.5-only `openspec/project-profile.md` update. Production packages, root/workspace manifests and lockfiles, schema
+and the Phase-0.5-only `openspec/project-profile.md` update. For PR #167 only,
+`.review-gate-issues.json` and `.workplans/pr-167/**` are narrowly admitted as
+review-only evidence; they are never source-input, runtime, package, workflow, or
+production authority. Production packages, root/workspace manifests and lockfiles, schema
 sources/generated outputs, runtime imports, release assembly, existing workflows,
 canonical docs, and all four submodules are prohibited paths.
 
@@ -902,23 +909,23 @@ Git authority, state, collector, native runtime, network, or production surfaces
 - Direct source-identity projection:
   `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --input spikes/git-status-capability/contracts/fixtures/valid/source-identity-projection-v1.json --kind source_identity_projection`.
   It checks only `source_sha`/two `source_commit`/`base_sha` equality and emits the same exact success schema with `input_kind=source_identity_projection`; it derives no row/platform state or decision.
-- Current source authority:
+- Current committed source oracle check (receipt vocabulary remains `current_source_authority`):
   `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current`.
   Success stdout is exactly `{"schema_version":"shud.git-status-capability.contract-check-receipt.v1","status":"ok","input_kind":"current_source_authority"}\n`; stderr is empty and exit is `0`.
 - Every failure exits `2`, keeps stdout empty, and emits exactly one LF-terminated bounded stderr receipt with field order `schema_version,status,code`: `{"schema_version":"shud.git-status-capability.contract-error.v1","status":"error","code":"<CODE>"}\n`.
-- `source-ingress.test.ts`, `source-identity.test.ts`, `synthetic-oracle.test.ts`, and `current-source-authority.test.ts` exercise those public functions/CLI routes. The current-authority test snapshots tracked and untracked status bytes before/after and requires byte identity, no created path, and no process launch.
+- `source-ingress.test.ts`, `source-identity.test.ts`, `synthetic-oracle.test.ts`, and `current-source-authority.test.ts` exercise those public functions/CLI routes. The current-oracle test snapshots status bytes before/after and requires byte identity, no created path, and no process launch; it does not test or claim Git authority.
 
 ### Task 1.1a risk-pack selection
 
 | Risk pack | Selection | Evidence obligation |
 |---|---|---|
 | Public API / CLI / script entry | Selected | Direct and current-check argv, exit, stdout, stderr, repeatability |
-| Config / project setup | Selected | Common Git config is parsed fail-closed for repository format/object format and explicitly supported repository extensions; normal/linked SHA-1/SHA-256 plus hostile config fixtures exercise the public seam |
-| File IO / path safety / overwrite | Selected | Bounded contract-ingress and metadata reads, canonical manifest/golden paths, descriptor-bound no-follow candidate admission, no writes or ambient pathname reopen; aggregate candidate traversal/read budgets remain owned by Task 1.1e / #162 |
+| Config / project setup | Not selected | Git config, repository layout, object format, index, and tracked-set authority are owned by Task 1.1c / #166 |
+| File IO / path safety / overwrite | Selected | Bounded contract-ingress and committed-oracle reads, canonical manifest/golden paths, descriptor-bound no-follow admission and replacement rejection, no writes or ambient discovery; live repository/tracked-set checks are owned by Task 1.1c / #166 and aggregate evidence budgets by Task 1.1e / #162 |
 | Schema / columns / units / field names | Selected | Strict source schema, Unicode scalar rules, exact SHA peer names and framing fields |
 | Auth / permissions / secrets | Not selected | No credential or product authorization surface |
 | Concurrency / shared state / ordering | Not selected | Stable build/source workspace; only deterministic repeat is asserted |
-| Resource limits / large input / discovery | Selected | Public source bytes/depth/items exact and +1; isolated parser-node exact and +1 with only the dominated item ceiling relaxed; bounded error receipt |
+| Resource limits / large input / discovery | Selected | Schema-valid byte-exact success; exact depth/items continuation to schema validation; +1 matching limit codes; isolated parser-node exact and +1 with only the dominated item ceiling relaxed; bounded error receipt |
 | Legacy compatibility / examples | Selected | Existing structural platform/decision vocabulary remains consumable without semantic derivation |
 | Error handling / rollback / partial outputs | Selected | Stable codes, empty stdout on failure, one stderr receipt, no partial success |
 | Release / packaging / dependency compatibility | Not selected | Owned by Task 1.1b; no root/package/toolchain changes |
@@ -945,17 +952,17 @@ contract and three-entry 152-byte synthetic literal; `source_sha`, both platform
 | Public routes/entrypoints | Direct source-record check and `--check-current`, both with exact byte receipts |
 | Frontend/downstream consumers | Tasks 1.1b–1.1e consume the frozen source identity without redefining it; no production consumer exists |
 | Failure/rollback/stale state | Malformed/over-limit/oracle/identity failures emit one bounded error, empty stdout, no partial success or write |
-| Evidence/audit/readiness | Batched red proof, focused contract suite, current-set no-write check, strict OpenSpec and scope/diff checks |
+| Evidence/audit/readiness | Batched red proof, focused contract suite, committed-oracle no-write check, strict OpenSpec and scope/diff checks |
 
 Regression rows:
 
-- `source-input-record-paired-surrogate.json` at the exact byte bound -> deterministic source-record success receipt twice; exact depth/item inputs reach schema validation through the public checker.
+- `source-input-record-paired-surrogate.json` padded to the exact byte bound -> deterministic source-record success receipt; exact depth/item synthetic inputs pass their limit guard and return `CONTRACT_SCHEMA_INVALID` only after strict schema validation, while +1 returns the matching limit code.
 - Source and metadata node exact/+1 inputs exercise the isolated parser with the declared node ceiling unchanged and only the dominated item ceiling relaxed; exact continues and +1 returns `CONTRACT_JSON_NODE_LIMIT`.
 - `source-identity-projection-v1.json` with all four SHA peers equal -> deterministic identity success; each independent or synchronized strict-subset forgery -> `CONTRACT_SCHEMA_INVALID` and no success output.
 - Exact three-entry/152-byte synthetic frame + literal digest -> current-source success; 58-byte truncation or same-length mutation with recomputed sidecar -> `CONTRACT_SCHEMA_INVALID`.
-- Normal/linked SHA-1/SHA-256 repositories accept only explicitly supported common-config extension semantics; unknown/duplicate/invalid extensions and quoted object-format whitespace fail closed.
-- Every v2/v3/v4 index entry has a legal mode before candidate filtering; legal noncandidate symlink/gitlink entries remain admitted while checksum-rehashed illegal modes fail closed.
-- Worktree candidates are admitted, identity-checked and hashed through one no-follow descriptor; deterministic symlink/foreign-inode replacement and CR/LF path identities fail closed.
+- The manifest is strict UTF-8, LF-terminated, canonical relative-path syntax, byte-sorted and duplicate-free, and contains the metadata/frame/sidecar paths; declared future-task paths do not trigger filesystem or Git enumeration.
+- The manifest and three mandatory committed oracle files are bounded and admitted through no-follow descriptors; missing/symlink/nonregular inputs, descriptor replacement, and frozen metadata/frame/sidecar mutations fail closed.
+- Git config/object format/index/tracked-set/mode/blob/filesystem-generation semantics and live-manifest equality are absent from this slice and owned by Task 1.1c / #166.
 - Invalid UTF-8 -> `CONTRACT_UTF8_INVALID`; lone/reversed/mismatched escaped surrogate -> `CONTRACT_JSON_MALFORMED`; public source byte/depth/item bound+1 -> its named limit code, all with exact failure I/O.
 - Unchanged future-owned input kind -> rejected as unsupported in 1.1a or consumed only through its named source-identity projection; no semantic state, process, or publication behavior appears.
 
@@ -967,16 +974,17 @@ Exact verification commands:
 - `npx --yes @fission-ai/openspec@1.3.1 validate m2-capability-observer-spike --strict --no-interactive`
 - `test "$(git merge-base f8b74e724dc978acb889f715a936feabfd69680d HEAD)" = f8b74e724dc978acb889f715a936feabfd69680d` and `git merge-base --is-ancestor f8b74e724dc978acb889f715a936feabfd69680d HEAD`
 - `git diff --check f8b74e724dc978acb889f715a936feabfd69680d...HEAD`
-- `git diff --name-only f8b74e724dc978acb889f715a936feabfd69680d...HEAD -- . ':(exclude)spikes/git-status-capability/contracts/**' ':(exclude)openspec/changes/m2-capability-observer-spike/**'` emits nothing.
+- `git diff --name-only f8b74e724dc978acb889f715a936feabfd69680d -- . ':(exclude)spikes/git-status-capability/contracts/**' ':(exclude)openspec/changes/m2-capability-observer-spike/**' ':(exclude).review-gate-issues.json' ':(exclude).workplans/pr-167/**'` emits nothing. The final two exclusions are review-only evidence; they do not widen implementation, package, workflow, production, or submodule scope.
 - `git diff --submodule=short --exit-code f8b74e724dc978acb889f715a936feabfd69680d...HEAD -- SHUD rSHUD AutoSHUD zero`
 - Capture `git status --porcelain=v1 --untracked-files=all` bytes immediately before and after each public command and require byte identity; `current-source-authority.test.ts` additionally instruments child-process APIs and requires zero child/helper invocation.
 - `test -z "$(git stash list --format='%gd %s' | rg 'red-proof')"`
 
 Boundary-surface checklist: public entrypoints, bounded contract-ingress and
-metadata read surfaces, descriptor-bound current-source reads, canonical
+committed-oracle read surfaces, descriptor-bound current-oracle reads, canonical
 producer/consumer evidence boundary, stale/mismatched identity, no-write failure
 paths, and unchanged downstream contract consumers are in scope. Write/delete,
-staging/publish/rollback, shared runtime helpers, network, and production consumers
+staging/publish/rollback, live Git repository/config/index/tracked-set/mode/blob/
+generation authority, shared runtime helpers, network, and production consumers
 are explicitly out of scope.
 
 ## Risk-pack selection

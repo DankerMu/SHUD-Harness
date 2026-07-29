@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { ERROR_SCHEMA, SOURCE_PROFILE, SUCCESS_SCHEMA } from "./constants";
-import { checkCurrentSourceAuthority } from "./current-source";
+import { checkCurrentSourceOracle } from "./current-source";
 import { ContractError, readBoundedFile } from "./ingress";
 import { admitSourceInput, type SourceInputKind } from "./schemas";
 
@@ -48,7 +48,7 @@ async function execute(options: Options): Promise<string> {
     admitSourceInput(options.kind, bytes);
     return options.kind;
   }
-  await checkCurrentSourceAuthority(options.repositoryRoot, options.manifest);
+  await checkCurrentSourceOracle(options.repositoryRoot, options.manifest);
   return "current_source_authority";
 }
 

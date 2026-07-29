@@ -1,5 +1,9 @@
 # Round 3 invariant-closure batched red proof
 
+> Historical proof only. The user-approved Round 4 breadth split removed live
+> Git/index/filesystem authority from PR #167 and routed it to #166. Current
+> retained-slice behavior is proved by `red-proof-final-retained-slice.md`.
+
 PR: #167
 Issue: #164
 Pre-repair source baseline: `a04f5c379a290ade2fe43a408e613bd95fc88088`

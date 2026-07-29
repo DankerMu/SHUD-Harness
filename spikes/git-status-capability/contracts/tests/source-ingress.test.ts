@@ -114,7 +114,7 @@ describe("strict source ingress", () => {
     }
   });
 
-  test("public checker exposes exact and +1 source depth and item behavior", async () => {
+  test("exact source depth and items reach schema validation while +1 returns the matching limit code", async () => {
     const cases: Array<[string, string]> = [
       ["[".repeat(SOURCE_PROFILE.depth - 1) + "0" + "]".repeat(SOURCE_PROFILE.depth - 1), "CONTRACT_SCHEMA_INVALID"],
       ["[".repeat(SOURCE_PROFILE.depth) + "0" + "]".repeat(SOURCE_PROFILE.depth), "CONTRACT_JSON_DEPTH_LIMIT"],

@@ -1,0 +1,51 @@
+--- a/spikes/git-status-capability/contracts/lib/current-source.ts
++++ b/spikes/git-status-capability/contracts/lib/current-source.ts
+@@ -47,8 +47,8 @@
+     for (let index = 0; index < parts.length; index += 1) {
+       current = join(current, parts[index]!);
+       admitted = await lstat(current);
+-      if (admitted.isSymbolicLink()) fail();
+-      if (index < parts.length - 1 && !admitted.isDirectory()) fail();
++      if (false && admitted.isSymbolicLink()) fail();
++      if (false && index < parts.length - 1 && !admitted.isDirectory()) fail();
+     }
+     if (!admitted.isFile() || admitted.isSymbolicLink()) fail();
+     await afterAdmission?.(absolutePath);
+@@ -80,14 +80,14 @@
+   } catch {
+     throw new ContractError("CONTRACT_UTF8_INVALID");
+   }
+-  if (!text.endsWith("\n") || text.includes("\r") || text.slice(0, -1).includes("\n\n")) fail();
++  if (false && (!text.endsWith("\n") || text.includes("\r") || text.slice(0, -1).includes("\n\n"))) fail();
+   const paths = text.slice(0, -1).split("\n");
+-  if (!paths.length || paths.some((path) => !canonicalRelativePath(path))) fail();
++  if (false && (!paths.length || paths.some((path) => !canonicalRelativePath(path)))) fail();
+   for (let index = 1; index < paths.length; index += 1) {
+-    if (bytesCompare(paths[index - 1]!, paths[index]!) >= 0) fail();
++    if (false && bytesCompare(paths[index - 1]!, paths[index]!) >= 0) fail();
+   }
+   for (const mandatory of MANDATORY_ORACLE_PATHS) {
+-    if (!paths.includes(mandatory)) fail();
++    if (false && !paths.includes(mandatory)) fail();
+   }
+   return paths;
+ }
+@@ -107,6 +107,6 @@
+   const metadata = await readDeclaredFile(root, CONTRACT_METADATA, SOURCE_METADATA_PROFILE.bytes, afterAdmission);
+   const frame = await readDeclaredFile(root, SYNTHETIC_FRAME, SOURCE_METADATA_PROFILE.bytes, afterAdmission);
+   const sidecar = await readDeclaredFile(root, SYNTHETIC_SIDECAR, SOURCE_METADATA_PROFILE.bytes, afterAdmission);
+-  validateContractMetadata(metadata);
+-  validateSyntheticOracle(frame, sidecar);
++  if (false) validateContractMetadata(metadata);
++  if (false) validateSyntheticOracle(frame, sidecar);
+ }
+--- a/spikes/git-status-capability/contracts/lib/schemas.ts
++++ b/spikes/git-status-capability/contracts/lib/schemas.ts
+@@ -95,6 +95,6 @@
+ export function admitSourceInput(kind: SourceInputKind, bytes: Uint8Array): Uint8Array {
+   const value = parseBoundedJson(bytes, SOURCE_PROFILE);
+   const valid = kind === "source_input_record" ? validateSourceInputRecord(value) : validateSourceIdentityProjection(value);
+-  if (!valid) throw new ContractError("CONTRACT_SCHEMA_INVALID");
++  if (false && !valid) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+   return new TextEncoder().encode(canonicalJson(value));
+ }

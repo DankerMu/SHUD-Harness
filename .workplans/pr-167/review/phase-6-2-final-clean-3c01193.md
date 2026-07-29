@@ -1,5 +1,9 @@
 # Phase 6.2 final clean audit
 
+> Superseded. Round 4 invalidated this clean conclusion and the approved breadth
+> retro subsequently removed live Git/index/filesystem authority from PR #167.
+> Final retained-slice Phase 6.2 and Round 5 review are pending.
+
 PR: #167
 Issue: #164
 Reviewed head: `3c011939ac5c793f7ab1028931b5b216b7b2008c`

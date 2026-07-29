@@ -1,73 +1,49 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { CONTRACT_METADATA, SOURCE_MANIFEST, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR } from "../lib/constants";
-import * as currentSourceAuthority from "../lib/current-source";
+import { checkCurrentSourceOracleForTest } from "../lib/current-source";
 import { capture, contractsRoot, failure, success } from "./helpers";
 
-const projectRoot = join(contractsRoot, "..", "..", "..");
 const roots: string[] = [];
-type StatusSnapshot = Readonly<{ index: Buffer; status: string }>;
+const mandatory = [CONTRACT_METADATA, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR] as const;
 
-function git(root: string, args: string[], environment?: Record<string, string>): string {
-  const result = Bun.spawnSync(["git", ...args], {
-    cwd: root, env: { ...process.env, ...environment }, stdout: "pipe", stderr: "pipe"
-  });
-  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-  return result.stdout.toString();
-}
-
-async function repository(objectFormat: "sha1" | "sha256" = "sha1"): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "shud-current-source-"));
+async function fixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "shud-current-oracle-"));
   roots.push(root);
-  await mkdir(join(root, "spikes", "git-status-capability"), { recursive: true });
-  await cp(contractsRoot, join(root, "spikes", "git-status-capability", "contracts"), { recursive: true });
-  await cp(
-    join(projectRoot, "openspec", "changes", "m2-capability-observer-spike"),
-    join(root, "openspec", "changes", "m2-capability-observer-spike"),
-    { recursive: true }
-  );
-  git(root, ["init", "-q", `--object-format=${objectFormat}`]);
-  git(root, ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"]);
+  for (const path of [SOURCE_MANIFEST, ...mandatory]) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await cp(join(contractsRoot, relative("spikes/git-status-capability/contracts", path)), join(root, path));
+  }
+  const init = Bun.spawnSync(["git", "init", "-q"], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  if (init.exitCode !== 0) throw new Error(init.stderr.toString());
   return root;
 }
 
-async function linkedRepository(objectFormat: "sha1" | "sha256" = "sha1"): Promise<{ main: string; linked: string; gitDir: string }> {
-  const main = await repository(objectFormat);
-  git(main, ["-c", "user.name=SHUD Contract Test", "-c", "user.email=contract@example.invalid", "commit", "-qm", "initial"]);
-  const container = await mkdtemp(join(tmpdir(), "shud-linked-container-"));
-  roots.push(container);
-  const linked = join(container, "linked");
-  git(main, ["worktree", "add", "-q", "-b", `contract-linked-${Date.now()}-${Math.random()}`, linked]);
-  const gitfile = await readFile(join(linked, ".git"), "utf8");
-  const match = /^gitdir: ([^\r\n]+)\n$/.exec(gitfile);
-  if (!match) throw new Error("git did not create an ordinary linked-worktree gitfile");
-  return { main, linked, gitDir: match[1]! };
+async function current(root: string) {
+  return await capture(["--repository-root", root, "--manifest", SOURCE_MANIFEST, "--check-current"]);
 }
 
-async function rewriteManifest(root: string, mutate: (paths: string[]) => string[]): Promise<void> {
-  const path = join(root, SOURCE_MANIFEST);
-  const entries = (await readFile(path, "utf8")).trimEnd().split("\n");
-  await writeFile(path, `${mutate(entries).join("\n")}\n`);
-  git(root, ["add", SOURCE_MANIFEST]);
+async function rewriteManifest(root: string, paths: readonly string[], lineEnding = "\n"): Promise<void> {
+  await writeFile(join(root, SOURCE_MANIFEST), `${paths.join(lineEnding)}${lineEnding}`);
 }
 
-async function inventory(root: string): Promise<Record<string, string>> {
+async function treeIdentity(root: string): Promise<Record<string, string>> {
   const result: Record<string, string> = {};
   async function walk(directory: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const absolute = join(directory, entry.name);
       const path = relative(root, absolute);
+      const stat = await lstat(absolute);
       if (entry.isDirectory()) {
-        result[path] = "directory";
+        result[path] = `directory:${stat.mode}`;
         await walk(absolute);
-      }
-      else {
-        const stat = await lstat(absolute);
-        const bytes = entry.isFile() ? await readFile(absolute) : Buffer.from("symlink");
-        result[path] = `${stat.mode}:${stat.size}:${createHash("sha256").update(bytes).digest("hex")}`;
+      } else if (entry.isFile()) {
+        result[path] = `file:${stat.mode}:${createHash("sha256").update(await readFile(absolute)).digest("hex")}`;
+      } else {
+        result[path] = `other:${stat.mode}:${entry.isSymbolicLink() ? await readFile(absolute).catch(() => Buffer.from("symlink")) : ""}`;
       }
     }
   }
@@ -75,956 +51,132 @@ async function inventory(root: string): Promise<Record<string, string>> {
   return result;
 }
 
-async function current(root: string) {
-  return await capture(["--repository-root", root, "--manifest", SOURCE_MANIFEST, "--check-current"]);
-}
-
-async function expectStableCurrentSuccess(root: string): Promise<void> {
-  const beforeStatus = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]);
-  const beforeInventory = await inventory(root);
-  const originalSpawn = Bun.spawn;
-  const originalSpawnSync = Bun.spawnSync;
-  let launches = 0;
-  try {
-    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
-    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
-    const expected = { exit: 0, stdout: success("current_source_authority"), stderr: "" };
-    expect(await current(root)).toEqual(expected);
-    expect(await current(root)).toEqual(expected);
-  } finally {
-    (Bun as any).spawn = originalSpawn;
-    (Bun as any).spawnSync = originalSpawnSync;
-  }
-  expect(launches).toBe(0);
-  expect(await inventory(root)).toEqual(beforeInventory);
-  expect(git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(beforeStatus);
-}
-
-async function indexVersion(root: string): Promise<number> {
-  return (await readFile(await indexPath(root))).readUInt32BE(4);
-}
-
-async function indexPath(root: string): Promise<string> {
-  const gitfile = await lstat(join(root, ".git"));
-  if (gitfile.isDirectory()) return join(root, ".git", "index");
-  const match = /^gitdir: ([^\r\n]+)\n$/.exec(await readFile(join(root, ".git"), "utf8"));
-  if (!match) throw new Error("git did not create an ordinary linked-worktree gitfile");
-  return join(match[1]!, "index");
-}
-
-function sha1Index(body: Buffer): Buffer {
-  return Buffer.concat([body, createHash("sha1").update(body).digest()]);
-}
-
-type RawIndexEntry = Readonly<{
-  modeOffset: number;
-  flagsOffset: number;
-  extendedFlagsOffset?: number;
-  path: Buffer;
-  paddingStart?: number;
-  end: number;
-}>;
-
-function rawIndexEntries(body: Buffer, oidLength = 20): RawIndexEntry[] {
-  if (body.toString("ascii", 0, 4) !== "DIRC") throw new Error("expected Git index");
-  const version = body.readUInt32BE(4);
-  if (version !== 2 && version !== 3 && version !== 4) throw new Error("expected supported Git index");
-  const count = body.readUInt32BE(8);
-  const entries: RawIndexEntry[] = [];
-  let cursor = 12;
-  let previousPath = Buffer.alloc(0);
-  for (let index = 0; index < count; index += 1) {
-    const start = cursor;
-    const modeOffset = cursor + 24;
-    const flagsOffset = cursor + 40 + oidLength;
-    if (flagsOffset + 2 > body.length) throw new Error("truncated index entry");
-    const flags = body.readUInt16BE(flagsOffset);
-    cursor = flagsOffset + 2;
-    const extendedFlagsOffset = (flags & 0x4000) !== 0 ? cursor : undefined;
-    if (extendedFlagsOffset !== undefined) cursor += 2;
-    if (version === 4) {
-      let removed = 0;
-      while (true) {
-        if (cursor >= body.length) throw new Error("truncated v4 prefix");
-        const byte = body[cursor++]!;
-        removed = removed * 128 + (byte & 0x7f);
-        if ((byte & 0x80) === 0) break;
-        removed += 1;
-      }
-      const nul = body.indexOf(0, cursor);
-      if (nul < 0) throw new Error("unterminated v4 path");
-      const path = Buffer.concat([previousPath.subarray(0, previousPath.length - removed), body.subarray(cursor, nul)]);
-      cursor = nul + 1;
-      entries.push({ modeOffset, flagsOffset, extendedFlagsOffset, path, end: cursor });
-      previousPath = path;
-    } else {
-      const nul = body.indexOf(0, cursor);
-      if (nul < 0) throw new Error("unterminated index path");
-      const path = Buffer.from(body.subarray(cursor, nul));
-      const end = start + Math.ceil((nul + 1 - start) / 8) * 8;
-      entries.push({ modeOffset, flagsOffset, extendedFlagsOffset, path, paddingStart: nul + 1, end });
-      cursor = end;
-      previousPath = path;
-    }
-  }
-  return entries;
-}
-
-function appendIndexExtension(body: Buffer, signature: string, payload = Buffer.alloc(0)): Buffer {
-  const header = Buffer.alloc(8);
-  header.write(signature, 0, 4, "ascii");
-  header.writeUInt32BE(payload.length, 4);
-  return Buffer.concat([body, header, payload]);
-}
-
-async function rewriteSha1Index(root: string, mutate: (body: Buffer) => Buffer): Promise<void> {
-  const path = await indexPath(root);
-  const bytes = Buffer.from(await readFile(path));
-  await writeFile(path, sha1Index(mutate(bytes.subarray(0, -20))));
-}
-
-async function rewriteIndex(
-  root: string,
-  algorithm: "sha1" | "sha256",
-  mutate: (body: Buffer, oidLength: number) => Buffer
-): Promise<void> {
-  const path = await indexPath(root);
-  const oidLength = algorithm === "sha256" ? 32 : 20;
-  const bytes = Buffer.from(await readFile(path));
-  const body = mutate(bytes.subarray(0, -oidLength), oidLength);
-  await writeFile(path, Buffer.concat([body, createHash(algorithm).update(body).digest()]));
-}
-
-async function snapshotStatus(root: string): Promise<StatusSnapshot> {
-  const status = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]);
-  return { index: Buffer.from(await readFile(await indexPath(root))), status };
-}
-
-async function statusFromSnapshot(root: string, snapshot: StatusSnapshot): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "shud-current-source-index-status-"));
-  roots.push(directory);
-  const path = join(directory, "index");
-  await writeFile(path, snapshot.index);
-  return git(root, ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"], { GIT_INDEX_FILE: path });
-}
-
-function duplicateFinalV4Noncandidate(body: Buffer, expectedPath: string): Buffer {
-  if (body.toString("ascii", 0, 4) !== "DIRC" || body.readUInt32BE(4) !== 4) throw new Error("expected v4 index");
-  const count = body.readUInt32BE(8);
-  let cursor = 12;
-  let previousPath = Buffer.alloc(0);
-  let finalHeader: Buffer | undefined;
-  for (let index = 0; index < count; index += 1) {
-    const start = cursor;
-    const fixed = 62;
-    if (cursor + fixed > body.length) throw new Error("truncated v4 index");
-    const flags = body.readUInt16BE(cursor + 60);
-    cursor += fixed;
-    if ((flags & 0x4000) !== 0) cursor += 2;
-    const header = Buffer.from(body.subarray(start, cursor));
-    let removed = 0;
-    while (true) {
-      if (cursor >= body.length) throw new Error("truncated v4 prefix");
-      const byte = body[cursor++]!;
-      const value = byte & 0x7f;
-      if (removed > Math.floor((previousPath.length - value) / 128)) throw new Error("invalid v4 prefix");
-      removed = removed * 128 + value;
-      if ((byte & 0x80) === 0) break;
-      if (removed >= previousPath.length) throw new Error("invalid v4 prefix");
-      removed += 1;
-    }
-    const nul = body.indexOf(0, cursor);
-    if (nul < 0) throw new Error("unterminated v4 path");
-    previousPath = Buffer.concat([previousPath.subarray(0, previousPath.length - removed), body.subarray(cursor, nul)]);
-    cursor = nul + 1;
-    if (index === count - 1) finalHeader = header;
-  }
-  if (previousPath.toString("utf8") !== expectedPath || !finalHeader) throw new Error("expected final noncandidate path");
-  if (previousPath.length >= 128) throw new Error("test path exceeds single-byte v4 prefix encoding");
-  const duplicate = Buffer.concat([finalHeader, Buffer.from([previousPath.length]), previousPath, Buffer.from([0])]);
-  const changed = Buffer.concat([body.subarray(0, cursor), duplicate, body.subarray(cursor)]);
-  changed.writeUInt32BE(count + 1, 8);
-  return changed;
-}
-
-function swappedV4Entries(body: Buffer, earlierPath: string, laterPath: string): Buffer {
-  if (body.toString("ascii", 0, 4) !== "DIRC" || body.readUInt32BE(4) !== 4) throw new Error("expected v4 index");
-  const count = body.readUInt32BE(8);
-  const entries: Array<{ path: Buffer; previousPath: Buffer; removed: number; suffixStart: number }> = [];
-  let cursor = 12;
-  let previousPath = Buffer.alloc(0);
-  for (let index = 0; index < count; index += 1) {
-    const fixed = 62;
-    if (cursor + fixed > body.length) throw new Error("truncated v4 index");
-    const flags = body.readUInt16BE(cursor + 60);
-    cursor += fixed;
-    if ((flags & 0x4000) !== 0) cursor += 2;
-    let removed = 0;
-    while (true) {
-      if (cursor >= body.length) throw new Error("truncated v4 prefix");
-      const byte = body[cursor++]!;
-      const value = byte & 0x7f;
-      if (removed > Math.floor((previousPath.length - value) / 128)) throw new Error("invalid v4 prefix");
-      removed = removed * 128 + value;
-      if ((byte & 0x80) === 0) break;
-      if (removed >= previousPath.length) throw new Error("invalid v4 prefix");
-      removed += 1;
-    }
-    const nul = body.indexOf(0, cursor);
-    if (nul < 0) throw new Error("unterminated v4 path");
-    const path = Buffer.concat([previousPath.subarray(0, previousPath.length - removed), body.subarray(cursor, nul)]);
-    entries.push({ path, previousPath, removed, suffixStart: cursor });
-    previousPath = path;
-    cursor = nul + 1;
-  }
-  const earlier = entries.findIndex((entry) => entry.path.equals(Buffer.from(earlierPath, "utf8")));
-  const later = entries.findIndex((entry) => entry.path.equals(Buffer.from(laterPath, "utf8")));
-  if (earlier < 0 || later !== earlier + 1) throw new Error("expected adjacent ordered v4 paths");
-  const shared = Buffer.from(earlierPath, "utf8").findIndex((byte, index) => byte !== Buffer.from(laterPath, "utf8")[index]);
-  if (shared < 0) throw new Error("expected distinct v4 paths");
-  const changed = Buffer.from(body);
-  for (const [entry, replacement] of [[entries[earlier]!, laterPath], [entries[later]!, earlierPath]] as const) {
-    const offset = shared - (entry.previousPath.length - entry.removed);
-    if (offset < 0 || entry.suffixStart + offset >= changed.length) throw new Error("expected mutable v4 suffix");
-    changed[entry.suffixStart + offset] = Buffer.from(replacement, "utf8")[shared]!;
-  }
-  return changed;
-}
-
-async function expectTreeExtension(root: string): Promise<void> {
-  git(root, ["write-tree"]);
-  const bytes = await readFile(await indexPath(root));
-  expect(bytes.includes(Buffer.from("TREE", "ascii"))).toBe(true);
-}
-
-async function expectStableCurrentFailure(root: string): Promise<void> {
-  const beforeStatus = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]);
-  const beforeInventory = await inventory(root);
-  const originalSpawn = Bun.spawn;
-  const originalSpawnSync = Bun.spawnSync;
-  let launches = 0;
-  try {
-    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
-    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
-    expect(await current(root)).toEqual({
-      exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID")
-    });
-  } finally {
-    (Bun as any).spawn = originalSpawn;
-    (Bun as any).spawnSync = originalSpawnSync;
-  }
-  expect(launches).toBe(0);
-  expect(await inventory(root)).toEqual(beforeInventory);
-  expect(git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(beforeStatus);
-}
-
-async function expectStableConfigFailure(root: string): Promise<void> {
-  const beforeInventory = await inventory(root);
-  const originalSpawn = Bun.spawn;
-  const originalSpawnSync = Bun.spawnSync;
-  let launches = 0;
-  try {
-    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
-    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
-    const expected = { exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") };
-    expect(await current(root)).toEqual(expected);
-    expect(await current(root)).toEqual(expected);
-  } finally {
-    (Bun as any).spawn = originalSpawn;
-    (Bun as any).spawnSync = originalSpawnSync;
-  }
-  expect(launches).toBe(0);
-  expect(await inventory(root)).toEqual(beforeInventory);
-}
-
-async function expectStableCurrentCorruptIndexFailure(root: string, status: StatusSnapshot): Promise<void> {
-  const beforeIndex = await readFile(await indexPath(root));
-  const beforeInventory = await inventory(root);
-  const originalSpawn = Bun.spawn;
-  const originalSpawnSync = Bun.spawnSync;
-  let launches = 0;
-  try {
-    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
-    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
-    const expected = { exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") };
-    expect(await current(root)).toEqual(expected);
-    expect(await current(root)).toEqual(expected);
-  } finally {
-    (Bun as any).spawn = originalSpawn;
-    (Bun as any).spawnSync = originalSpawnSync;
-  }
-  expect(launches).toBe(0);
-  expect(await readFile(await indexPath(root))).toEqual(beforeIndex);
-  expect(await inventory(root)).toEqual(beforeInventory);
-  expect(await statusFromSnapshot(root, status)).toBe(status.status);
-}
-
-async function expectStableCurrentMutatedIndexSuccess(root: string, status: StatusSnapshot): Promise<void> {
-  const beforeIndex = await readFile(await indexPath(root));
-  const beforeInventory = await inventory(root);
-  const originalSpawn = Bun.spawn;
-  const originalSpawnSync = Bun.spawnSync;
-  let launches = 0;
-  try {
-    (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
-    (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
-    const expected = { exit: 0, stdout: success("current_source_authority"), stderr: "" };
-    expect(await current(root)).toEqual(expected);
-    expect(await current(root)).toEqual(expected);
-  } finally {
-    (Bun as any).spawn = originalSpawn;
-    (Bun as any).spawnSync = originalSpawnSync;
-  }
-  expect(launches).toBe(0);
-  expect(await readFile(await indexPath(root))).toEqual(beforeIndex);
-  expect(await inventory(root)).toEqual(beforeInventory);
-  expect(await statusFromSnapshot(root, status)).toBe(status.status);
+function status(root: string): string {
+  const result = Bun.spawnSync(["git", "status", "--porcelain=v1", "--untracked-files=all"], {
+    cwd: root, stdout: "pipe", stderr: "pipe"
+  });
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return result.stdout.toString();
 }
 
 afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe("current source authority", () => {
-  test("a valid temporary tracked repository succeeds twice with exact receipts, no writes, and no child launch", async () => {
-    const root = await repository();
-    await expectStableCurrentSuccess(root);
-  });
-
-  test("real SHA-1 and SHA-256 normal and linked repositories succeed repeatedly without writes or child launch", async () => {
-    for (const objectFormat of ["sha1", "sha256"] as const) {
-      await expectStableCurrentSuccess(await repository(objectFormat));
-      const { linked } = await linkedRepository(objectFormat);
-      await expectStableCurrentSuccess(linked);
+describe("committed source oracle current check", () => {
+  test("emits the exact deterministic receipt twice without writes, child processes, or status drift", async () => {
+    const root = await fixture();
+    const beforeTree = await treeIdentity(root);
+    const beforeStatus = status(root);
+    const originalSpawn = Bun.spawn;
+    const originalSpawnSync = Bun.spawnSync;
+    let launches = 0;
+    try {
+      (Bun as any).spawn = () => { launches += 1; throw new Error("child process forbidden"); };
+      (Bun as any).spawnSync = () => { launches += 1; throw new Error("child process forbidden"); };
+      const expected = { exit: 0, stdout: success("current_source_authority"), stderr: "" };
+      expect(await current(root)).toEqual(expected);
+      expect(await current(root)).toEqual(expected);
+    } finally {
+      (Bun as any).spawn = originalSpawn;
+      (Bun as any).spawnSync = originalSpawnSync;
     }
+    expect(launches).toBe(0);
+    expect(await treeIdentity(root)).toEqual(beforeTree);
+    expect(status(root)).toBe(beforeStatus);
   });
 
-  test("object-format authority is section-aware and Git section and key names are case-insensitive", async () => {
-    const sha256 = await repository("sha256");
-    const sha256Config = join(sha256, ".git", "config");
-    await writeFile(
-      sha256Config,
-      (await readFile(sha256Config, "utf8")).replace("[extensions]", "[ExTeNsIoNs]").replace("objectformat", "ObJeCtFoRmAt")
-    );
-    await expectStableCurrentSuccess(sha256);
-
-    const unrelated = await repository("sha1");
-    const unrelatedConfig = join(unrelated, ".git", "config");
-    await writeFile(unrelatedConfig, `${await readFile(unrelatedConfig, "utf8")}\n[custom]\n\tobjectFormat = sha256\n`);
-    await expectStableCurrentSuccess(unrelated);
+  test("accepts declared future source paths without discovering the filesystem or a tracked set", async () => {
+    const root = await fixture();
+    const paths = (await readFile(join(root, SOURCE_MANIFEST), "utf8")).trimEnd().split("\n");
+    paths.push("spikes/git-status-capability/future/not-yet-present.json");
+    paths.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+    await rewriteManifest(root, paths);
+    expect(await current(root)).toEqual({ exit: 0, stdout: success("current_source_authority"), stderr: "" });
   });
 
-  test("explicit supported object formats require compatible repository-format semantics", async () => {
-    const explicitSha1 = await repository("sha1");
-    const explicitSha1Config = join(explicitSha1, ".git", "config");
-    await writeFile(
-      explicitSha1Config,
-      `${(await readFile(explicitSha1Config, "utf8")).replace("repositoryformatversion = 0", "repositoryformatversion = 1")}\n` +
-        "[extensions]\n\tobjectFormat = sha1\n"
-    );
-    await expectStableCurrentSuccess(explicitSha1);
-
-    const invalidConfigs = [
-      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = sha512\n",
-      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat sha256\n",
-      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = sha1\n\tobjectformat = sha1\n",
-      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = sha1\n[extensions]\n\tobjectFormat = sha256\n",
-      "[core]\n\trepositoryFormatVersion = 0\n[extensions]\n\tobjectFormat = sha1\n",
-      "[core]\n\trepositoryFormatVersion = 2\n",
-      "[core]\n\trepositoryFormatVersion = 0\n\trepositoryformatversion = 1\n",
-      "[core]\n\trepositoryFormatVersion = 0\n[include]\n\tpath = ../object-format.config\n"
+  test("rejects missing, duplicate, unsorted, unsafe, non-LF, and CRLF manifest declarations", async () => {
+    const original = (await readFile(join(await fixture(), SOURCE_MANIFEST), "utf8")).trimEnd().split("\n");
+    const cases: Array<{ paths: string[]; ending?: string }> = [
+      { paths: original.filter((path) => path !== CONTRACT_METADATA) },
+      { paths: [...original, original.at(-1)!] },
+      { paths: [...original].reverse() },
+      { paths: [...original.slice(0, -1), "../unsafe"] },
+      { paths: original, ending: "\r\n" }
     ];
-    for (const config of invalidConfigs) {
-      const root = await repository("sha1");
-      await writeFile(join(root, ".git", "config"), config);
-      await expectStableConfigFailure(root);
-    }
-
-    const linked = await linkedRepository("sha1");
-    await writeFile(
-      join(linked.main, ".git", "config"),
-      "[core]\n\trepositoryFormatVersion = 1\n[extensions]\n\tobjectFormat = sha1\n\tobjectFormat = sha256\n"
-    );
-    await expectStableConfigFailure(linked.linked);
-  });
-
-  test("the Git-compatible noop repository extension is strict across normal and linked SHA-1 and SHA-256 repositories", async () => {
-    for (const objectFormat of ["sha1", "sha256"] as const) {
-      for (const root of [await repository(objectFormat), (await linkedRepository(objectFormat)).linked]) {
-        const commonGitDir = (await lstat(join(root, ".git"))).isDirectory()
-          ? join(root, ".git")
-          : join((await readFile(join(root, ".git"), "utf8")).match(/^gitdir: ([^\r\n]+)\n$/)![1]!, "..", "..");
-        const configPath = join(commonGitDir, "config");
-        const config = (await readFile(configPath, "utf8")).replace("repositoryformatversion = 0", "repositoryformatversion = 1");
-        await writeFile(configPath, `${config}\n[extensions]\n\tnoop = true\n`);
-        expect(() => git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).not.toThrow();
-        await expectStableCurrentSuccess(root);
-      }
-    }
-
-    for (const extension of ["future = true", "noop = false", "noop = 1", "noop = true\n\tnoop = true"]) {
-      const root = await repository();
-      const configPath = join(root, ".git", "config");
-      await writeFile(
-        configPath,
-        `${(await readFile(configPath, "utf8")).replace("repositoryformatversion = 0", "repositoryformatversion = 1")}\n` +
-          `[extensions]\n\t${extension}\n`
-      );
-      await expectStableConfigFailure(root);
-    }
-  });
-
-  test("quoted objectFormat trailing whitespace is preserved and fails closed across repository layouts and object formats", async () => {
-    for (const objectFormat of ["sha1", "sha256"] as const) {
-      for (const root of [await repository(objectFormat), (await linkedRepository(objectFormat)).linked]) {
-        const commonGitDir = (await lstat(join(root, ".git"))).isDirectory()
-          ? join(root, ".git")
-          : join((await readFile(join(root, ".git"), "utf8")).match(/^gitdir: ([^\r\n]+)\n$/)![1]!, "..", "..");
-        const configPath = join(commonGitDir, "config");
-        const config = await readFile(configPath, "utf8");
-        await writeFile(
-          configPath,
-          objectFormat === "sha1"
-            ? `${config.replace("repositoryformatversion = 0", "repositoryformatversion = 1")}\n` +
-              `[extensions]\n\tobjectFormat = "sha1 "\n`
-            : config.replace("objectformat = sha256", 'objectformat = "sha256 "')
-        );
-        await expectStableConfigFailure(root);
-      }
-    }
-  });
-
-  test("valid Git index v2 and v3 remain accepted", async () => {
-    const v2 = await repository();
-    git(v2, ["update-index", "--index-version", "2"]);
-    expect(await indexVersion(v2)).toBe(2);
-    await expectStableCurrentSuccess(v2);
-
-    const v3 = await repository();
-    git(v3, ["update-index", "--skip-worktree", "spikes/git-status-capability/contracts/contract-v1.json"]);
-    git(v3, ["update-index", "--index-version", "3"]);
-    expect(await indexVersion(v3)).toBe(3);
-    await expectStableCurrentSuccess(v3);
-  });
-
-  test("legal ordinary and extended Git index v2, v3, and v4 entries remain accepted", async () => {
-    const v2 = await repository();
-    git(v2, ["update-index", "--index-version", "2"]);
-    await expectStableCurrentSuccess(v2);
-
-    for (const version of [3, 4]) {
-      const root = await repository();
-      git(root, ["update-index", "--skip-worktree", "spikes/git-status-capability/contracts/contract-v1.json"]);
-      git(root, ["update-index", "--index-version", String(version)]);
-      expect(await indexVersion(root)).toBe(version);
-      await expectStableCurrentSuccess(root);
-    }
-  });
-
-  test("every index entry mode is validated before governed candidate filtering across versions, layouts, and hashes", async () => {
-    for (const objectFormat of ["sha1", "sha256"] as const) {
-      for (const version of [2, 3, 4]) {
-        for (const root of [await repository(objectFormat), (await linkedRepository(objectFormat)).linked]) {
-          const noncandidate = "unrelated/noncandidate.txt";
-          await mkdir(join(root, "unrelated"), { recursive: true });
-          await writeFile(join(root, noncandidate), "noncandidate\n");
-          git(root, ["add", noncandidate]);
-          git(root, ["update-index", "--index-version", String(version)]);
-          await rewriteIndex(root, objectFormat, (body, oidLength) => {
-            const changed = Buffer.from(body);
-            const entry = rawIndexEntries(body, oidLength).find((candidate) => candidate.path.equals(Buffer.from(noncandidate)));
-            if (!entry) throw new Error("expected noncandidate index entry");
-            changed.writeUInt32BE(0o100600, entry.modeOffset);
-            return changed;
-          });
-          await expectStableCurrentFailure(root);
-        }
-      }
-    }
-  });
-
-  test("legal symlink and gitlink noncandidate modes remain ignored by governed source authority", async () => {
-    for (const objectFormat of ["sha1", "sha256"] as const) {
-      for (const version of [2, 3, 4]) {
-        const root = await repository(objectFormat);
-        git(root, ["-c", "user.name=SHUD Contract Test", "-c", "user.email=contract@example.invalid", "commit", "-qm", "source"]);
-        await mkdir(join(root, "unrelated"));
-        await symlink("missing-target", join(root, "unrelated", "link"));
-        git(root, ["add", "unrelated/link"]);
-        const head = git(root, ["rev-parse", "HEAD"]).trim();
-        git(root, ["update-index", "--add", "--cacheinfo", `160000,${head},unrelated/gitlink`]);
-        git(root, ["update-index", "--index-version", String(version)]);
-        await expectStableCurrentSuccess(root);
-      }
-    }
-  });
-
-  test("worktree verification binds admission and content hashing to one no-follow descriptor", async () => {
-    for (const replacement of ["symlink", "foreign-inode"] as const) {
-      const root = await repository();
-      const path = "spikes/git-status-capability/contracts/contract-v1.json";
-      const absolute = join(root, path);
-      const admitted = `${absolute}.admitted`;
-      await currentSourceAuthority.checkCurrentSourceAuthorityForTest(root, SOURCE_MANIFEST, async (admittedPath) => {
-        if (admittedPath !== absolute) return;
-        await rename(absolute, admitted);
-        if (replacement === "symlink") await symlink(admitted, absolute);
-        else await writeFile(absolute, await readFile(admitted));
-      }).then(
-        () => { throw new Error(`expected ${replacement} replacement to fail closed`); },
-        (error) => expect((error as { code?: string }).code).toBe("CONTRACT_SCHEMA_INVALID")
-      );
-    }
-  });
-
-  test.each([CONTRACT_METADATA, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR])(
-    "semantic source %s retains verified bytes and fails closed when a later admission replaces its inode",
-    async (path) => {
-      const root = await repository();
-      const absolute = join(root, path);
-      const originalBytes = await readFile(absolute);
-      let targetAdmitted = false;
-      let replaced = false;
-      await currentSourceAuthority.checkCurrentSourceAuthorityForTest(root, SOURCE_MANIFEST, async (admittedPath) => {
-        if (targetAdmitted && !replaced) {
-          await rename(absolute, join(root, ".verified-semantic-source-original"));
-          await writeFile(absolute, originalBytes);
-          replaced = true;
-        }
-        if (admittedPath === absolute) targetAdmitted = true;
-      }).then(
-        () => { throw new Error(`expected late inode replacement to fail closed: ${path}`); },
-        (error) => {
-          expect(replaced).toBe(true);
-          expect((error as { code?: string }).code).toBe("CONTRACT_SCHEMA_INVALID");
-        }
-      );
-    }
-  );
-
-  test("CR and LF governed path identities fail closed at the public current-source seam", async () => {
-    for (const path of ["spikes/git-status-capability/cr\r.ts", "spikes/git-status-capability/lf\n.ts"]) {
-      const root = await repository();
-      await writeFile(join(root, path), "export {};\n");
-      git(root, ["add", path]);
+    for (const entry of cases) {
+      const root = await fixture();
+      await rewriteManifest(root, entry.paths, entry.ending);
       expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
     }
-  });
-
-  test("checksum-rehashed wrong pathname lengths fail closed for Git index v2, v3, and v4", async () => {
-    for (const version of [2, 3, 4]) {
-      const root = await repository();
-      git(root, ["update-index", "--index-version", String(version)]);
-      const status = await snapshotStatus(root);
-      await rewriteSha1Index(root, (body) => {
-        const changed = Buffer.from(body);
-        const entry = rawIndexEntries(body)[0]!;
-        const declared = changed.readUInt16BE(entry.flagsOffset) & 0x0fff;
-        changed.writeUInt16BE((changed.readUInt16BE(entry.flagsOffset) & 0xf000) | ((declared + 1) & 0x0fff), entry.flagsOffset);
-        return changed;
-      });
-      await expectStableCurrentCorruptIndexFailure(root, status);
-    }
-  });
-
-  test("illegal base and extended entry flags fail closed across Git index versions", async () => {
-    const v2 = await repository();
-    git(v2, ["update-index", "--index-version", "2"]);
-    const v2Status = await snapshotStatus(v2);
-    await rewriteSha1Index(v2, (body) => {
-      const changed = Buffer.from(body);
-      const entry = rawIndexEntries(body)[0]!;
-      changed.writeUInt16BE(changed.readUInt16BE(entry.flagsOffset) | 0x4000, entry.flagsOffset);
-      return changed;
-    });
-    await expectStableCurrentCorruptIndexFailure(v2, v2Status);
-
-    for (const version of [3, 4]) {
-      const root = await repository();
-      git(root, ["update-index", "--skip-worktree", "spikes/git-status-capability/contracts/contract-v1.json"]);
-      git(root, ["update-index", "--index-version", String(version)]);
-      const status = await snapshotStatus(root);
-      await rewriteSha1Index(root, (body) => {
-        const changed = Buffer.from(body);
-        const entry = rawIndexEntries(body).find((candidate) => candidate.extendedFlagsOffset !== undefined);
-        if (entry?.extendedFlagsOffset === undefined) throw new Error("expected extended index entry");
-        changed.writeUInt16BE(version === 3 ? 0 : 0x0001, entry.extendedFlagsOffset);
-        return changed;
-      });
-      await expectStableCurrentCorruptIndexFailure(root, status);
-    }
-  });
-
-  test("nonzero Git index v2 and v3 alignment padding fails closed", async () => {
-    for (const version of [2, 3]) {
-      const root = await repository();
-      git(root, ["update-index", "--index-version", String(version)]);
-      const status = await snapshotStatus(root);
-      await rewriteSha1Index(root, (body) => {
-        const changed = Buffer.from(body);
-        const entry = rawIndexEntries(body).find((candidate) => candidate.paddingStart !== undefined && candidate.paddingStart < candidate.end);
-        if (entry?.paddingStart === undefined) throw new Error("expected padded index entry");
-        changed[entry.paddingStart] = 1;
-        return changed;
-      });
-      await expectStableCurrentCorruptIndexFailure(root, status);
-    }
-  });
-
-  test("a valid normal Git index v4 succeeds twice with exact receipts, no writes, and no child launch", async () => {
-    const root = await repository();
-    const longPath = `spikes/git-status-capability/v4-${"a".repeat(180)}.ts`;
-    const followingPath = "spikes/git-status-capability/v5.ts";
-    await writeFile(join(root, longPath), "export {};\n");
-    await writeFile(join(root, followingPath), "export {};\n");
-    await rewriteManifest(root, (paths) => [...paths, longPath, followingPath].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))));
-    git(root, ["add", longPath, followingPath]);
-    git(root, ["update-index", "--index-version", "4"]);
-    expect(await indexVersion(root)).toBe(4);
-    await expectStableCurrentSuccess(root);
-  });
-
-  test("a valid linked-worktree Git index v4 succeeds twice with exact receipts, no writes, and no child launch", async () => {
-    const { linked } = await linkedRepository();
-    git(linked, ["update-index", "--index-version", "4"]);
-    expect(await indexVersion(linked)).toBe(4);
-    await expectStableCurrentSuccess(linked);
-  });
-
-  test("legal bounded TREE extensions remain admitted for normal and linked Git index v4", async () => {
-    const root = await repository();
-    git(root, ["update-index", "--index-version", "4"]);
-    await expectTreeExtension(root);
-    await expectStableCurrentSuccess(root);
-
-    const { linked } = await linkedRepository();
-    git(linked, ["update-index", "--index-version", "4"]);
-    await expectTreeExtension(linked);
-    await expectStableCurrentSuccess(linked);
-  });
-
-  test("arbitrary bounded uppercase optional extensions remain admitted without writes or child launch", async () => {
-    const root = await repository();
-    const rootStatus = await snapshotStatus(root);
-    await rewriteSha1Index(root, (body) => appendIndexExtension(body, "Z123", Buffer.from([0, 1, 2, 3])));
-    await expectStableCurrentMutatedIndexSuccess(root, rootStatus);
-
-    const { linked } = await linkedRepository();
-    const linkedStatus = await snapshotStatus(linked);
-    await rewriteSha1Index(linked, (body) => appendIndexExtension(body, "ABcd"));
-    await expectStableCurrentMutatedIndexSuccess(linked, linkedStatus);
-  });
-
-  test("empty, truncated, and lowercase mandatory extension envelopes fail closed", async () => {
-    const mutations = [
-      (body: Buffer) => Buffer.concat([body, Buffer.from([0, 0, 0, 0, 0, 0, 0, 0])]),
-      (body: Buffer) => Buffer.concat([body, Buffer.from("ABCD", "ascii")]),
-      (body: Buffer) => appendIndexExtension(body, "link"),
-      (body: Buffer) => appendIndexExtension(body, "sdir", Buffer.from([0]))
-    ];
-    for (let index = 0; index < mutations.length; index += 1) {
-      const target = index === mutations.length - 1 ? (await linkedRepository()).linked : await repository();
-      const status = await snapshotStatus(target);
-      await rewriteSha1Index(target, mutations[index]!);
-      await expectStableCurrentCorruptIndexFailure(target, status);
-    }
-  });
-
-  test("checksum-rehashed malformed extension envelopes fail closed for normal and linked Git index v4", async () => {
-    const root = await repository();
-    git(root, ["update-index", "--index-version", "4"]);
-    await expectStableCurrentSuccess(root);
-    const rootStatus = await snapshotStatus(root);
-    await rewriteSha1Index(root, (body) => Buffer.concat([body, Buffer.from([0])]));
-    await expectStableCurrentCorruptIndexFailure(root, rootStatus);
-
-    const { linked } = await linkedRepository();
-    git(linked, ["update-index", "--index-version", "4"]);
-    const linkedStatus = await snapshotStatus(linked);
-    await rewriteSha1Index(linked, (body) => Buffer.concat([
-      body, Buffer.from("TREE", "ascii"), Buffer.from([0, 0, 0, 1])
-    ]));
-    await expectStableCurrentCorruptIndexFailure(linked, linkedStatus);
-  });
-
-  test("duplicate noncandidate stage-0 entries fail closed for normal and linked Git index v4", async () => {
-    const noncandidate = "unrelated/noncandidate.txt";
-    const root = await repository();
-    await mkdir(join(root, "unrelated"));
-    await writeFile(join(root, noncandidate), "noncandidate\n");
-    git(root, ["add", noncandidate]);
-    git(root, ["update-index", "--index-version", "4"]);
-    await expectStableCurrentSuccess(root);
-    const rootStatus = await snapshotStatus(root);
-    await rewriteSha1Index(root, (body) => duplicateFinalV4Noncandidate(body, noncandidate));
-    await expectStableCurrentCorruptIndexFailure(root, rootStatus);
-
-    const { linked } = await linkedRepository();
-    await mkdir(join(linked, "unrelated"));
-    await writeFile(join(linked, noncandidate), "noncandidate\n");
-    git(linked, ["add", noncandidate]);
-    git(linked, ["update-index", "--index-version", "4"]);
-    const linkedStatus = await snapshotStatus(linked);
-    await rewriteSha1Index(linked, (body) => duplicateFinalV4Noncandidate(body, noncandidate));
-    await expectStableCurrentCorruptIndexFailure(linked, linkedStatus);
-  });
-
-  test("checksum-rehashed out-of-order stage-0 entries fail closed for normal and linked Git index v4", async () => {
-    const earlierPath = "unrelated/a.txt";
-    const laterPath = "unrelated/b.txt";
-    const root = await repository();
-    await mkdir(join(root, "unrelated"));
-    await writeFile(join(root, earlierPath), "a\n");
-    await writeFile(join(root, laterPath), "b\n");
-    git(root, ["add", earlierPath, laterPath]);
-    git(root, ["update-index", "--index-version", "4"]);
-    const rootStatus = await snapshotStatus(root);
-    await rewriteSha1Index(root, (body) => swappedV4Entries(body, earlierPath, laterPath));
-    await expectStableCurrentCorruptIndexFailure(root, rootStatus);
-
-    const { linked } = await linkedRepository();
-    await mkdir(join(linked, "unrelated"));
-    await writeFile(join(linked, earlierPath), "a\n");
-    await writeFile(join(linked, laterPath), "b\n");
-    git(linked, ["add", earlierPath, laterPath]);
-    git(linked, ["update-index", "--index-version", "4"]);
-    const linkedStatus = await snapshotStatus(linked);
-    await rewriteSha1Index(linked, (body) => swappedV4Entries(body, earlierPath, laterPath));
-    await expectStableCurrentCorruptIndexFailure(linked, linkedStatus);
-  });
-
-  test("checker implementation has no process, Git command, network, production import, or write seam", async () => {
-    const implementation = [
-      join(contractsRoot, "check.ts"),
-      ...((await readdir(join(contractsRoot, "lib"))).map((name) => join(contractsRoot, "lib", name)))
-    ];
-    const forbidden = ["node:child_process", "Bun.spawn", "spawnSync(", "execFile(", "execSync(", "fetch(", "node:http", "node:https", "node:net", "writeFile(", "appendFile(", "mkdir("];
-    for (const path of implementation) {
-      const source = await readFile(path, "utf8");
-      for (const token of forbidden) expect(source).not.toContain(token);
-      expect(source).not.toContain("packages/");
-      expect(source).not.toContain("verify.sh ");
-    }
-  });
-
-  test("ordinary linked worktree uses its per-worktree index and common object format", async () => {
-    const { main, linked, gitDir } = await linkedRepository();
-    const mainOnly = join(main, "spikes", "git-status-capability", "contracts", "contract-v1.json");
-    await writeFile(mainOnly, `${await readFile(mainOnly, "utf8")} `);
-    git(main, ["add", "spikes/git-status-capability/contracts/contract-v1.json"]);
-    await writeFile(join(gitDir, "config"), "[extensions]\n\tobjectFormat = sha256\n");
-    expect(await current(linked)).toEqual({ exit: 0, stdout: success("current_source_authority"), stderr: "" });
-  });
-
-  test("malformed, unsafe, and oversized linked-worktree gitfiles fail closed", async () => {
-    const cases: Array<[Uint8Array | string, string]> = [
-      ["gitdir: ../relative\n", "CONTRACT_SCHEMA_INVALID"],
-      ["gitdir: /tmp/../escape\n", "CONTRACT_SCHEMA_INVALID"],
-      ["gitdir: /tmp/missing\r\n", "CONTRACT_SCHEMA_INVALID"],
-      ["gitdir: /tmp/missing\nextra\n", "CONTRACT_SCHEMA_INVALID"],
-      [Buffer.from("gitdir: /tmp/missing\0suffix\n"), "CONTRACT_SCHEMA_INVALID"],
-      [`gitdir: /${"a".repeat(4_096)}\n`, "CONTRACT_BYTES_LIMIT"]
-    ];
-    for (const [gitfile, code] of cases) {
-      const { linked } = await linkedRepository();
-      await writeFile(join(linked, ".git"), gitfile);
-      expect(await current(linked)).toEqual({ exit: 2, stdout: "", stderr: failure(code) });
-    }
-  });
-
-  test("linked-worktree gitfile cannot borrow another worktree's metadata directory", async () => {
-    const { main, linked } = await linkedRepository();
-    const container = await mkdtemp(join(tmpdir(), "shud-linked-borrowed-container-"));
-    roots.push(container);
-    const borrowed = join(container, "borrowed");
-    git(main, ["worktree", "add", "-q", "-b", `contract-borrowed-${Date.now()}-${Math.random()}`, borrowed]);
-    const borrowedGitfile = await readFile(join(borrowed, ".git"), "utf8");
-    await writeFile(join(linked, ".git"), borrowedGitfile);
-    expect(await current(linked)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-  });
-
-  test("manifest missing, extra/future, duplicate, unsafe, and tracked-set drift fail at the public seam", async () => {
-    const mutations: Array<(paths: string[]) => string[]> = [
-      (paths) => paths.slice(1),
-      (paths) => [...paths, "spikes/git-status-capability/future.ts"].sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))),
-      (paths) => [...paths, paths[0]!],
-      (paths) => ["../escape", ...paths.slice(1)]
-    ];
-    for (const mutate of mutations) {
-      const root = await repository();
-      await rewriteManifest(root, mutate);
-      expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-    }
-    const root = await repository();
-    const extra = join(root, "spikes", "git-status-capability", "future.ts");
-    await writeFile(extra, "export {};\n");
-    git(root, ["add", "spikes/git-status-capability/future.ts"]);
+    const root = await fixture();
+    await writeFile(join(root, SOURCE_MANIFEST), original.join("\n"));
     expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-  });
-
-  test("every governed filesystem lane is inventoried while unrelated and excluded evidence paths stay excluded", async () => {
-    const untrackedSpec = await repository();
-    const futureSpec = join(
-      untrackedSpec, "openspec", "changes", "m2-capability-observer-spike", "specs", "future-capability", "spec.md"
-    );
-    await mkdir(join(futureSpec, ".."), { recursive: true });
-    await writeFile(futureSpec, "# future candidate\n");
-    await expectStableCurrentFailure(untrackedSpec);
-
-    const untrackedWorkflow = await repository();
-    const workflow = join(untrackedWorkflow, ".github", "workflows", "git-status-capability-spike.yml");
-    await mkdir(join(workflow, ".."), { recursive: true });
-    await writeFile(workflow, "name: untracked candidate\n");
-    await expectStableCurrentFailure(untrackedWorkflow);
-
-    const symlinkedSpec = await repository();
-    const symlinkSpecPath = join(
-      symlinkedSpec, "openspec", "changes", "m2-capability-observer-spike", "specs", "linked-capability", "spec.md"
-    );
-    await mkdir(join(symlinkSpecPath, ".."), { recursive: true });
-    await symlink("../git-status-capability-spike/spec.md", symlinkSpecPath);
-    await expectStableCurrentFailure(symlinkedSpec);
-
-    const symlinkedSpecDirectory = await repository();
-    const specAlias = join(
-      symlinkedSpecDirectory, "openspec", "changes", "m2-capability-observer-spike", "specs", "alias"
-    );
-    await symlink("git-status-capability-spike", specAlias);
-    await expectStableCurrentFailure(symlinkedSpecDirectory);
-
-    const symlinkedAncestor = await repository();
-    const openspecRoot = join(symlinkedAncestor, "openspec");
-    const realOpenspecRoot = join(symlinkedAncestor, "real-openspec");
-    await rename(openspecRoot, realOpenspecRoot);
-    await symlink("real-openspec", openspecRoot);
-    await expectStableCurrentFailure(symlinkedAncestor);
-
-    const nonRegularWorkflow = await repository();
-    const workflowDirectory = join(nonRegularWorkflow, ".github", "workflows", "git-status-capability-spike.yml");
-    await mkdir(workflowDirectory, { recursive: true });
-    await expectStableCurrentFailure(nonRegularWorkflow);
-
-    for (const mandatory of [
-      "openspec/changes/m2-capability-observer-spike/.openspec.yaml",
-      "openspec/changes/m2-capability-observer-spike/proposal.md",
-      "openspec/changes/m2-capability-observer-spike/design.md",
-      "openspec/changes/m2-capability-observer-spike/tasks.md",
-      "openspec/changes/m2-capability-observer-spike/specs/git-status-capability-spike/spec.md"
-    ]) {
-      const synchronizedRemoval = await repository();
-      await unlink(join(synchronizedRemoval, mandatory));
-      await rewriteManifest(synchronizedRemoval, (paths) => paths.filter((path) => path !== mandatory));
-      git(synchronizedRemoval, ["add", "-u", mandatory]);
-      await expectStableCurrentFailure(synchronizedRemoval);
-    }
-
-    const excluded = await repository();
-    const evidence = join(
-      excluded, "openspec", "changes", "m2-capability-observer-spike", "evidence", "source", "digest", "receipt.json"
-    );
-    await mkdir(join(evidence, ".."), { recursive: true });
-    await writeFile(evidence, "{}\n");
-    await mkdir(join(excluded, "unrelated"));
-    await writeFile(join(excluded, "unrelated", "note.md"), "not a governed candidate\n");
-    await writeFile(
-      join(excluded, "openspec", "changes", "m2-capability-observer-spike", "specs", "notes.md"),
-      "not a recursive spec candidate\n"
-    );
-    expect(await current(excluded)).toEqual({ exit: 0, stdout: success("current_source_authority"), stderr: "" });
-  });
-
-  test("untracked, symlink, non-regular, and mode drift inputs fail closed", async () => {
-    const untracked = await repository();
-    await writeFile(join(untracked, "spikes", "git-status-capability", "untracked.ts"), "export {};\n");
-    expect(await current(untracked)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-
-    const symlinked = await repository();
-    const symlinkPath = join(symlinked, "spikes", "git-status-capability", "contracts", "contract-v1.json");
-    await unlink(symlinkPath);
-    await symlink("fixtures/valid/source-identity-projection-v1.json", symlinkPath);
-    expect(await current(symlinked)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-
-    const nonRegular = await repository();
-    const directoryPath = join(nonRegular, "spikes", "git-status-capability", "contracts", "contract-v1.json");
-    await unlink(directoryPath);
-    await mkdir(directoryPath);
-    expect(await current(nonRegular)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-
-    const mode = await repository();
-    await chmod(join(mode, "spikes", "git-status-capability", "contracts", "contract-v1.json"), 0o755);
-    expect(await current(mode)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-  });
-
-  test("synchronized truncated and same-length synthetic frame+sidecar attacks fail through --check-current", async () => {
-    for (const mutate of [
-      (frame: Buffer) => frame.subarray(0, 58),
-      (frame: Buffer) => { const changed = Buffer.from(frame); changed[changed.length - 1] ^= 1; return changed; }
-    ]) {
-      const root = await repository();
-      const framePath = join(root, "spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.frame");
-      const sidecarPath = join(root, "spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.sha256");
-      const changed = mutate(await readFile(framePath));
-      await writeFile(framePath, changed);
-      await writeFile(sidecarPath, `${createHash("sha256").update(changed).digest("hex")}\n`);
-      git(root, ["add", "spikes/git-status-capability/contracts/goldens"]);
-      expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-    }
-  });
-
-  test("every frozen synthetic mutation fails through --check-current without writes or child launch", async () => {
-    type Mutation = (frame: Buffer, sidecar: Buffer) => { frame: Buffer; sidecar: Buffer };
-    const frameOnly = (mutate: (frame: Buffer) => Buffer): Mutation => (frame, sidecar) => ({
-      frame: mutate(frame), sidecar
+    const invalidUtf8Root = await fixture();
+    await writeFile(join(invalidUtf8Root, SOURCE_MANIFEST), Buffer.from([0xff, 0x0a]));
+    expect(await current(invalidUtf8Root)).toEqual({
+      exit: 2, stdout: "", stderr: failure("CONTRACT_UTF8_INVALID")
     });
-    const synchronized = (mutate: (frame: Buffer) => Buffer): Mutation => (frame) => {
-      const changed = mutate(frame);
-      return { frame: changed, sidecar: Buffer.from(`${createHash("sha256").update(changed).digest("hex")}\n`, "ascii") };
-    };
-    const mutations: Array<[string, Mutation]> = [
-      ["entry count", frameOnly((frame) => { const changed = Buffer.from(frame); changed.writeUInt32BE(2, 58); return changed; })],
-      ["entry order", frameOnly((frame) => Buffer.concat([
-        frame.subarray(0, 62), frame.subarray(89, 116), frame.subarray(62, 89), frame.subarray(116)
-      ]))],
-      ["path", frameOnly((frame) => { const changed = Buffer.from(frame); changed[66] ^= 1; return changed; })],
-      ["mode", frameOnly((frame) => { const changed = Buffer.from(frame); changed[71] ^= 1; return changed; })],
-      ["content", frameOnly((frame) => { const changed = Buffer.from(frame); changed[83] ^= 1; return changed; })],
-      ["framing", frameOnly((frame) => { const changed = Buffer.from(frame); changed[0] ^= 1; return changed; })],
-      ["digest", (frame, sidecar) => {
-        const changed = Buffer.from(sidecar); changed[0] = changed[0] === 0x30 ? 0x31 : 0x30;
-        return { frame, sidecar: changed };
-      }],
-      ["trailing", frameOnly((frame) => Buffer.concat([frame, Buffer.from([0])]))],
-      ["truncation", frameOnly((frame) => frame.subarray(0, frame.length - 1))],
-      ["synchronized 58-byte truncation", synchronized((frame) => frame.subarray(0, 58))],
-      ["synchronized same-length mutation", synchronized((frame) => {
-        const changed = Buffer.from(frame); changed[83] ^= 1; return changed;
-      })]
-    ];
-    for (const [name, mutate] of mutations) {
-      const root = await repository();
-      const framePath = join(root, "spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.frame");
-      const sidecarPath = join(root, "spikes/git-status-capability/contracts/goldens/source-input-v1.synthetic.sha256");
-      const changed = mutate(await readFile(framePath), await readFile(sidecarPath));
-      await writeFile(framePath, changed.frame);
-      await writeFile(sidecarPath, changed.sidecar);
-      git(root, ["add", "spikes/git-status-capability/contracts/goldens"]);
-      try {
-        await expectStableCurrentFailure(root);
-      } catch (error) {
-        throw new Error(`public synthetic mutation did not fail closed: ${name}`, { cause: error });
+  });
+
+  test("rejects a missing, symlink, or nonregular manifest and every mandatory oracle file", async () => {
+    for (const relativePath of [SOURCE_MANIFEST, ...mandatory]) {
+      for (const kind of ["missing", "symlink", "directory"] as const) {
+        const root = await fixture();
+        const path = join(root, relativePath);
+        await rm(path);
+        if (kind === "symlink") await symlink(join(root, SYNTHETIC_SIDECAR), path);
+        if (kind === "directory") await mkdir(path);
+        expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
       }
     }
   });
 
-  test("unknown or missing metadata fields and exact-oracle drift fail without a success receipt", async () => {
-    for (const mutate of [(value: any) => { value.future = true; }, (value: any) => { delete value.synthetic_oracle.entry_count; }]) {
-      const root = await repository();
-      const path = join(root, "spikes/git-status-capability/contracts/contract-v1.json");
-      const value = JSON.parse(await readFile(path, "utf8"));
-      mutate(value);
-      await writeFile(path, JSON.stringify(value));
-      git(root, ["add", "spikes/git-status-capability/contracts/contract-v1.json"]);
+  test("rejects an external same-content symlink at any declared file ancestor", async () => {
+    for (const relativePath of [SOURCE_MANIFEST, ...mandatory]) {
+      const root = await fixture();
+      const ancestor = dirname(join(root, relativePath));
+      const external = await mkdtemp(join(tmpdir(), "shud-current-oracle-external-"));
+      roots.push(external);
+      const copy = join(external, "same-content");
+      await cp(ancestor, copy, { recursive: true });
+      await rm(ancestor, { recursive: true });
+      await symlink(copy, ancestor);
       expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+    }
+  });
+
+  test("rejects frozen metadata, frame, and sidecar mutations", async () => {
+    for (const path of mandatory) {
+      const root = await fixture();
+      const absolute = join(root, path);
+      const bytes = Buffer.from(await readFile(absolute));
+      if (path === CONTRACT_METADATA) {
+        const value = JSON.parse(bytes.toString("utf8"));
+        value.synthetic_oracle.entry_count = 4;
+        await writeFile(absolute, `${JSON.stringify(value)}\n`);
+      } else {
+        bytes[Math.floor(bytes.length / 2)]! ^= 1;
+        await writeFile(absolute, bytes);
+      }
+      expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+    }
+  });
+
+  test("descriptor admission rejects symlink and foreign-file replacement before open", async () => {
+    for (const replacement of ["symlink", "regular"] as const) {
+      const root = await fixture();
+      const target = join(root, CONTRACT_METADATA);
+      const admitted = `${target}.admitted`;
+      let replaced = false;
+      await expect(checkCurrentSourceOracleForTest(root, SOURCE_MANIFEST, async (absolutePath) => {
+        if (absolutePath !== target || replaced) return;
+        replaced = true;
+        await rename(target, admitted);
+        if (replacement === "symlink") await symlink(admitted, target);
+        else await writeFile(target, await readFile(admitted));
+      })).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
+      expect(replaced).toBe(true);
     }
   });
 });

@@ -1,5 +1,10 @@
 # Phase 6.2 semantic identity source-only red proof
 
+> Historical proof only. The user-approved Round 4 breadth split removed the
+> pathname-generation authority exercised here from PR #167 and routed it to
+> #166. Current retained-slice behavior is proved by
+> `red-proof-final-retained-slice.md`.
+
 PR: #167
 Issue: #164
 Pre-repair source baseline: `4d7fa1664d2fcf718daaa800d8a5d13878a65912`

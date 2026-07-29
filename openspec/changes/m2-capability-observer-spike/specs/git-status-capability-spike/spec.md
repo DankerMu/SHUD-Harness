@@ -216,18 +216,27 @@ Its exact success receipt is compact UTF-8 with field order
 The current command SHALL be
 `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current`
 and emits the same exact receipt with `input_kind=current_source_authority`.
+Despite the retained receipt vocabulary, Task 1.1a's current command SHALL validate
+only the strict declared manifest and the committed contract metadata, synthetic
+frame, and sidecar through bounded descriptor/no-follow reads. The manifest MUST
+be strict UTF-8, LF-terminated, canonical relative-path syntax, byte-sorted, and
+duplicate-free, and MUST contain those three mandatory oracle paths; it MAY contain
+declared future-task source paths. Task 1.1a SHALL NOT inspect Git configuration,
+object format, index, tracked set, file mode, blob identity, untracked inventory,
+or filesystem generation and SHALL NOT establish repository authority. Task 1.1c
+(#166) owns those authorities and the future live-manifest exact-equality check.
 Every error receipt has exact field order `schema_version,status,code`:
 `{"schema_version":"shud.git-status-capability.contract-error.v1","status":"error","code":"<CODE>"}\n`.
-Both commands SHALL leave tracked and untracked status bytes identical before and
+All three commands SHALL leave tracked and untracked status bytes identical before and
 after, create no path, write no file, and launch no child/helper process.
 
 #### Scenario: Contract input reaches an exact bound
-- **WHEN** an input kind reaches exactly one declared byte, depth, or item bound after its owning task has landed, with otherwise valid content
-- **THEN** ingestion continues to strict schema validation and may succeed
+- **WHEN** an input kind reaches exactly one declared byte, depth, or item bound after its owning task has landed
+- **THEN** ingestion passes the matching limit guard and continues to strict schema validation; success is claimed only when that exact-bound document is also schema-valid
 
 #### Scenario: Task 1.1a source input reaches an exact bound
-- **WHEN** a source-input record or source-identity projection reaches exactly 64 KiB, depth 12, or 512 items independently with otherwise valid authority fields
-- **THEN** Task 1.1a continues to source schema/identity validation and may emit its exact success receipt
+- **WHEN** Task 1.1a exercises source input at exactly 64 KiB, depth 12, or 512 items independently
+- **THEN** the byte-exact schema-valid record may emit its exact success receipt, while exact depth/item synthetic documents continue beyond the limit guard to schema validation and may return `CONTRACT_SCHEMA_INVALID`; Task 1.1a makes no claim that a closed-schema otherwise-valid authority record exists at exact depth or item count
 
 #### Scenario: Parser node guard reaches its isolated boundary
 - **WHEN** the bounded parser is exercised with the source or metadata node ceiling unchanged and only its dominated item ceiling relaxed, using otherwise valid JSON at the exact node ceiling and node ceiling +1
@@ -361,7 +370,7 @@ only excluded evidence lanes and MUST NOT update the manifest.
 
 #### Scenario: A DAG slice changes the covered source set
 - **WHEN** task 1.1b, 1.1c, 1.1d, 1.1e, or a task from 1.2 through 5.1 adds, removes, or renames a covered source file
-- **THEN** the same PR regenerates the manifest from current tracked files, rejects predeclared future paths, proves exact-set equality, and invalidates older source-bound evidence
+- **THEN** the same PR mechanically regenerates the declared manifest; Task 1.1a checks only its syntax and mandatory committed oracle declarations, while after Task 1.1c lands its Git repository/tracked-set authority proves future live-manifest exact equality and invalidates older source-bound evidence
 
 #### Scenario: A post-freeze slice persists evidence
 - **WHEN** task 5.2, 5.3, or 5.4 commits platform, gate, or terminal evidence after task 5.1
