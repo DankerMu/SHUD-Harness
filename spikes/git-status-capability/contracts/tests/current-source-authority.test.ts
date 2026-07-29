@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { SOURCE_MANIFEST } from "../lib/constants";
+import { CONTRACT_METADATA, SOURCE_MANIFEST, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR } from "../lib/constants";
 import * as currentSourceAuthority from "../lib/current-source";
 import { capture, contractsRoot, failure, success } from "./helpers";
 
@@ -576,6 +576,31 @@ describe("current source authority", () => {
       );
     }
   });
+
+  test.each([CONTRACT_METADATA, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR])(
+    "semantic source %s retains verified bytes and fails closed when a later admission replaces its inode",
+    async (path) => {
+      const root = await repository();
+      const absolute = join(root, path);
+      const originalBytes = await readFile(absolute);
+      let targetAdmitted = false;
+      let replaced = false;
+      await currentSourceAuthority.checkCurrentSourceAuthorityForTest(root, SOURCE_MANIFEST, async (admittedPath) => {
+        if (targetAdmitted && !replaced) {
+          await rename(absolute, join(root, ".verified-semantic-source-original"));
+          await writeFile(absolute, originalBytes);
+          replaced = true;
+        }
+        if (admittedPath === absolute) targetAdmitted = true;
+      }).then(
+        () => { throw new Error(`expected late inode replacement to fail closed: ${path}`); },
+        (error) => {
+          expect(replaced).toBe(true);
+          expect((error as { code?: string }).code).toBe("CONTRACT_SCHEMA_INVALID");
+        }
+      );
+    }
+  );
 
   test("CR and LF governed path identities fail closed at the public current-source seam", async () => {
     for (const path of ["spikes/git-status-capability/cr\r.ts", "spikes/git-status-capability/lf\n.ts"]) {

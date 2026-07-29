@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants, type BigIntStats, type Stats } from "node:fs";
 import { lstat, open, readdir, stat as followStat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
@@ -11,6 +11,20 @@ import { validateSyntheticOracle } from "./source-frame";
 
 type IndexEntry = Readonly<{ path: string; mode: "100644" | "100755"; objectId: string }>;
 type GitDirectories = Readonly<{ worktree: string; common: string }>;
+type GenerationIdentity = Readonly<{
+  dev: bigint;
+  ino: bigint;
+  mode: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+  birthtimeNs: bigint;
+}>;
+type VerifiedWorktreeEntry = Readonly<{
+  absolutePath: string;
+  bytes: Buffer;
+  generation: GenerationIdentity;
+}>;
 
 const GITFILE_BYTES = 4_096;
 const COMMONDIR_BYTES = 1_024;
@@ -366,35 +380,59 @@ async function manifestPaths(root: string, manifest: string): Promise<string[]> 
 
 type WorktreeAdmissionHook = (absolutePath: string) => void | Promise<void>;
 
+function generationIdentity(stat: BigIntStats): GenerationIdentity {
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    mode: stat.mode,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+    birthtimeNs: stat.birthtimeNs
+  };
+}
+
+function sameGeneration(left: GenerationIdentity, right: GenerationIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.birthtimeNs === right.birthtimeNs;
+}
+
 async function verifyWorktreeEntry(
   root: string,
   entry: IndexEntry,
   algorithm: "sha1" | "sha256",
   afterAdmission?: WorktreeAdmissionHook
-): Promise<void> {
+): Promise<VerifiedWorktreeEntry> {
   const absolute = join(root, entry.path);
   if (!inside(root, entry.path)) fail();
-  const admitted = await lstat(absolute).catch(() => undefined);
+  const admitted = await lstat(absolute, { bigint: true }).catch(() => undefined);
   if (!admitted?.isFile() || admitted.isSymbolicLink()) fail();
   await afterAdmission?.(absolute);
   let descriptor: Awaited<ReturnType<typeof open>> | undefined;
   try {
     descriptor = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const opened = await descriptor.stat();
+    const opened = await descriptor.stat({ bigint: true });
     if (!opened.isFile() || opened.isSymbolicLink() || opened.dev !== admitted.dev || opened.ino !== admitted.ino) fail();
-    const mode = (opened.mode & 0o111) === 0 ? "100644" : "100755";
+    const mode = (opened.mode & 0o111n) === 0n ? "100644" : "100755";
     if (mode !== entry.mode) fail();
-    const bytes = await descriptor.readFile();
-    const final = await descriptor.stat();
-    if (final.dev !== opened.dev || final.ino !== opened.ino || final.size !== bytes.length) fail();
+    const bytes = Buffer.from(await descriptor.readFile());
+    const final = await descriptor.stat({ bigint: true });
+    const generation = generationIdentity(opened);
+    if (!sameGeneration(generation, generationIdentity(final)) || final.size !== BigInt(bytes.length)) fail();
     const header = Buffer.from(`blob ${bytes.length}\0`, "ascii");
     if (createHash(algorithm).update(header).update(bytes).digest("hex") !== entry.objectId) fail();
+    return { absolutePath: absolute, bytes, generation };
   } catch (error) {
     if (error instanceof ContractError) throw error;
     fail();
   } finally {
     await descriptor?.close().catch(() => undefined);
   }
+}
+
+async function verifyCurrentGeneration(entry: VerifiedWorktreeEntry): Promise<void> {
+  const current = await lstat(entry.absolutePath, { bigint: true }).catch(() => undefined);
+  if (!current?.isFile() || current.isSymbolicLink() || !sameGeneration(entry.generation, generationIdentity(current))) fail();
 }
 
 async function checkCurrentSourceAuthorityWithHook(
@@ -413,12 +451,22 @@ async function checkCurrentSourceAuthorityWithHook(
   const trackedPaths = tracked.map((entry) => entry.path);
   if (!canonicalEqualStrings(declared, trackedPaths)) fail();
   if (!canonicalEqualStrings(filesystemCandidates, trackedPaths)) fail();
-  for (const entry of tracked) await verifyWorktreeEntry(root, entry, algorithm, afterAdmission);
-  validateContractMetadata(await readBoundedFile(join(root, CONTRACT_METADATA), SOURCE_METADATA_PROFILE.bytes));
-  validateSyntheticOracle(
-    await readBoundedFile(join(root, SYNTHETIC_FRAME), SOURCE_METADATA_PROFILE.bytes),
-    await readBoundedFile(join(root, SYNTHETIC_SIDECAR), SOURCE_METADATA_PROFILE.bytes)
-  );
+  const semanticSources = new Map<string, VerifiedWorktreeEntry>();
+  for (const entry of tracked) {
+    const verified = await verifyWorktreeEntry(root, entry, algorithm, afterAdmission);
+    if (entry.path === CONTRACT_METADATA || entry.path === SYNTHETIC_FRAME || entry.path === SYNTHETIC_SIDECAR) {
+      semanticSources.set(entry.path, verified);
+    }
+  }
+  const metadata = semanticSources.get(CONTRACT_METADATA);
+  const frame = semanticSources.get(SYNTHETIC_FRAME);
+  const sidecar = semanticSources.get(SYNTHETIC_SIDECAR);
+  if (!metadata || !frame || !sidecar) fail();
+  validateContractMetadata(metadata.bytes);
+  validateSyntheticOracle(frame.bytes, sidecar.bytes);
+  await verifyCurrentGeneration(metadata);
+  await verifyCurrentGeneration(frame);
+  await verifyCurrentGeneration(sidecar);
 }
 
 export async function checkCurrentSourceAuthority(repositoryRoot: string, manifest: string): Promise<void> {
