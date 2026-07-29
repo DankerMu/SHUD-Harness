@@ -1,0 +1,4 @@
+Round 1 | e984729b30db43bdc22af738ddacc23fbbb8a751 | not-clean | verified findings: 4 | highest severity: major | failure classes: data-integrity, contract, test-evidence | repeats prior class: no | gate: none
+Round 2 | 618bc86f1708513d3bf2666537fde0359019c800 | not-clean | verified findings: 1 | highest severity: major | failure classes: compatibility | repeats prior class: no | gate: none
+Round 3 | a04f5c379a290ade2fe43a408e613bd95fc88088 | not-clean | verified findings: 7 | highest severity: major | failure classes: compatibility, contract, data-integrity, test-evidence | repeats prior class: yes (compatibility (also round 2); contract (also round 1); data-integrity (also round 1); test-evidence (also round 1)) | gate: three-round
+Retro | shape: depth | at round 3 | .workplans/pr-167/review/review-failure-retro-round-3.md | budget: 1 round(s)
