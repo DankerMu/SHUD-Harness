@@ -110,6 +110,22 @@ function immutableReference(
   };
 }
 
+function exactImmutableReference(
+  lane: EvidenceLane,
+  platform: "macos" | "linux" | "none",
+  sourceRecordSha: string,
+  bytes: Uint8Array
+): JsonRecord {
+  const reference = immutableReference(lane, platform, sourceRecordSha, "00", bytes.byteLength);
+  const artifactSha = sha256(bytes);
+  reference.sha256 = artifactSha;
+  reference.immutable_identity = `sha256:${artifactSha}`;
+  reference.offline_retrieval.path = `artifacts/sha256/${artifactSha}`;
+  reference.offline_retrieval.sha256 = artifactSha;
+  reference.offline_retrieval.byte_length = bytes.byteLength;
+  return reference;
+}
+
 function laneSummary(
   lane: EvidenceLane,
   platform: "macos" | "linux" | "none",
@@ -266,6 +282,37 @@ async function assertViews(
   }
 }
 
+async function validationViews(root: string, candidates: string[]): Promise<[boolean, boolean, boolean]> {
+  let worktree = true;
+  try {
+    await enumerateSourceCandidates(root);
+  } catch (error) {
+    if (!(error instanceof ContractError)) throw error;
+    worktree = false;
+  }
+  expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
+  expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], {
+    cwd: root
+  }).status).toBe(0);
+  let staged = true;
+  try {
+    validateGitCandidateSet(root, candidates);
+  } catch (error) {
+    if (!(error instanceof ContractError)) throw error;
+    staged = false;
+  }
+  const result = spawnSync(process.execPath, [
+    checkerPath, "--repository-root", root, "--manifest", manifestRelative, "--check-current"
+  ], { cwd: root, encoding: "utf8" });
+  expect([0, 2]).toContain(result.status);
+  if (result.status === 0) expect(result.stderr).toBe("");
+  else {
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("CONTRACT_SCHEMA_INVALID");
+  }
+  return [worktree, staged, result.status === 0];
+}
+
 const mandatoryPaths = Object.freeze([
   `source/${digest}/source-input-record.json`,
   `platform/${digest}/macos/platform-bundle.json`,
@@ -412,11 +459,95 @@ async function persistDirect(collection: DirectCollection, sourceBytes = jsonByt
   await writeEvidence(root, `final/${digest}/publication-governance-recheck.json`, governance);
 }
 
+const replaceableArtifacts = Object.freeze([
+  ["macos", "platform", "macos", `platform/${digest}/macos/platform-bundle.json`],
+  ["linux", "platform", "linux", `platform/${digest}/linux/platform-bundle.json`],
+  ["gate", "gates", "none", `gates/${digest}/repository-gate.json`],
+  ["finalBundle", "final", "none", `final/${digest}/final-bundle.json`],
+  ["decision", "final", "none", `final/${digest}/decision.json`],
+  ["assertion", "final", "none", `final/${digest}/publication-assertion.json`],
+  ["governance", "final", "none", `final/${digest}/publication-governance-recheck.json`]
+] as const satisfies ReadonlyArray<readonly [keyof DirectCollection, EvidenceLane, "macos" | "linux" | "none", string]>);
+
+async function replaceWithExactReference(
+  collection: DirectCollection,
+  key: typeof replaceableArtifacts[number][0]
+): Promise<void> {
+  const descriptor = replaceableArtifacts.find(([candidate]) => candidate === key);
+  if (!descriptor) throw new Error(`missing replaceable artifact descriptor: ${key}`);
+  const [, lane, platform, path] = descriptor;
+  const value = collection[key];
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`missing direct artifact: ${key}`);
+  const bytes = jsonBytes(value);
+  await writeEvidence(collection.root, path,
+    exactImmutableReference(lane, platform, collection.sourceRecordSha, bytes));
+}
+
 afterEach(async () => {
   for (const root of temporaryRoots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
 describe("Phase 6.2 terminal evidence collection", () => {
+  test("each exact single-artifact reference preserves an accepted published collection in every view", async () => {
+    const results: Array<[string, [boolean, boolean, boolean]]> = [];
+    for (const [key] of replaceableArtifacts) {
+      const collection = await installDirect("accepted");
+      await replaceWithExactReference(collection, key);
+      results.push([key, await validationViews(collection.root, collection.candidates)]);
+    }
+    expect(results).toEqual(replaceableArtifacts.map(([key]) => [key, [true, true, true]]));
+  }, 600_000);
+
+  test("visible invalid terminal peers reject mixed reference publications in every view", async () => {
+    const results: Array<[string, [boolean, boolean, boolean]]> = [];
+
+    const referencedDecision = await installDirect("invalid");
+    await replaceWithExactReference(referencedDecision, "decision");
+    await writeEvidence(referencedDecision.root, `final/${digest}/publication-assertion.json`,
+      immutableReference("final", "none", referencedDecision.sourceRecordSha, "d1", 1));
+    results.push(["direct-invalid-final", await validationViews(referencedDecision.root, referencedDecision.candidates)]);
+
+    const referencedFinal = await installDirect("invalid");
+    await replaceWithExactReference(referencedFinal, "finalBundle");
+    await writeEvidence(referencedFinal.root, `final/${digest}/publication-assertion.json`,
+      immutableReference("final", "none", referencedFinal.sourceRecordSha, "d2", 1));
+    results.push(["direct-invalid-decision", await validationViews(referencedFinal.root, referencedFinal.candidates)]);
+
+    const referencedReceipts = await installDirect("invalid");
+    await writeEvidence(referencedReceipts.root, `final/${digest}/publication-assertion.json`,
+      immutableReference("final", "none", referencedReceipts.sourceRecordSha, "d3", 1));
+    await replaceWithExactReference(referencedReceipts, "governance");
+    results.push(["direct-invalid-peers", await validationViews(referencedReceipts.root, referencedReceipts.candidates)]);
+
+    expect(results).toEqual([
+      ["direct-invalid-final", [false, false, false]],
+      ["direct-invalid-decision", [false, false, false]],
+      ["direct-invalid-peers", [false, false, false]]
+    ]);
+  }, 300_000);
+
+  test("direct final hash consumers reject drift from exact referenced producers", async () => {
+    const cases: Array<[string, "macos" | "gate", keyof JsonRecord]> = [
+      ["platform", "macos", "macos_bundle_sha256"],
+      ["gate", "gate", "repository_gate_sha256"]
+    ];
+    for (const [label, key, digestField] of cases) {
+      const collection = await installDirect("accepted");
+      await replaceWithExactReference(collection, key);
+      collection.finalBundle[digestField] = "fe".repeat(32);
+      await writeEvidence(collection.root, `final/${digest}/final-bundle.json`, collection.finalBundle);
+      await assertViews(collection.root, collection.candidates, false, `referenced-producer:${label}`, true);
+    }
+
+    const referencedDecision = await installDirect("accepted");
+    await replaceWithExactReference(referencedDecision, "decision");
+    referencedDecision.assertion!.decision_sha256 = "fe".repeat(32);
+    await writeEvidence(referencedDecision.root, `final/${digest}/publication-assertion.json`,
+      referencedDecision.assertion!);
+    await assertViews(referencedDecision.root, referencedDecision.candidates, false,
+      "referenced-producer:decision", true);
+  }, 180_000);
+
   test("direct platform supply identities are bound to the decision projection in both views", async () => {
     const mutations: Array<[string, (bundle: JsonRecord) => void]> = [
       ["source-commit", (bundle) => { bundle.source_commit = "02".repeat(20); }],
