@@ -1,0 +1,19 @@
+{
+  "schema_version": "shud.git-status-capability.row-evidence.v1",
+  "platform": "macos",
+  "row_id": "BAS-001",
+  "expected_outcome": {
+    "kind": "clean"
+  },
+  "observer_outcome": {
+    "kind": "clean"
+  },
+  "producing_boundary": "observer",
+  "row_verdict": "pass",
+  "oracle_digest": "3333333333333333333333333333333333333333333333333333333333333333",
+  "tripwire_verdicts": {},
+  "protection_set_equal": true,
+  "cleanup": {},
+  "resource_record": {},
+  "source_input_record_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+}

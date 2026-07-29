@@ -1,0 +1,14 @@
+{
+  "schema_version": "shud.git-status-capability.source-input-record.v1",
+  "source_sha": "a24b106d2766eadcff73da4c238639f520e5a80b",
+  "source_input_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "entry_count": 2,
+  "admitted_paths": [
+    "spikes/git-status-capability/fixtures/\uD83D\uDE00.json",
+    "spikes/git-status-capability/native/Cargo.toml"
+  ],
+  "primary_encoder": "source-input-primary-v1",
+  "witness_encoder": "source-input-witness-v1",
+  "command_receipt": {}
+}

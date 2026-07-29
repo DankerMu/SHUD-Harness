@@ -10,7 +10,7 @@ submodules; and MUST NOT close Issue #132 or restore PR #133 behavior.
 
 #### Scenario: Spike executes without production integration
 - **WHEN** the spike runner, native prototype, fixtures, validator, evidence, and isolated CI entry are added
-- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, and the Phase-0.5-only `openspec/project-profile.md` update
+- **THEN** the only changed paths relative to frozen implementation base `a24b106d2766eadcff73da4c238639f520e5a80b` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, and the Phase-0.5-only `openspec/project-profile.md` update
 
 #### Scenario: Accepted evidence is produced
 - **WHEN** a valid complete run yields terminal decision `accepted`
@@ -158,7 +158,7 @@ The manifest SHALL also contain the exact `F132-01..25` evidence-floor crosswalk
 - **THEN** the evidence is harness-invalid and cannot record a decision-bearing pass
 
 ### Requirement: Contract ingestion is bounded and fail-closed
-Task 1.1 SHALL provide a Bun-only contract checker under
+Tasks 1.1a–1.1c SHALL provide one Bun-only contract checker under
 `spikes/git-status-capability/contracts/{check.ts,lib,tests,fixtures}/**`. It SHALL
 use only the pinned Bun runtime and standard library, SHALL NOT depend on task
 1.3's `verify.sh`, launcher, observer, or production package, and SHALL write no
@@ -181,8 +181,12 @@ duplicate-key detection, depth/node/item accounting, and trailing-token rejectio
 occur before semantic trust. Failures use exactly
 `CONTRACT_BYTES_LIMIT|CONTRACT_UTF8_INVALID|CONTRACT_JSON_MALFORMED|CONTRACT_JSON_DUPLICATE_KEY|CONTRACT_JSON_DEPTH_LIMIT|CONTRACT_JSON_NODE_LIMIT|CONTRACT_JSON_ITEM_LIMIT|CONTRACT_SCHEMA_INVALID`.
 The checker exits `2`, keeps stdout empty, emits one bounded machine-readable error
-receipt on stderr, and produces no partial file or success receipt. Success exits
-`0` and emits one canonical receipt only after all checks pass.
+receipt on stderr, and produces no partial file or success receipt. Error bytes are
+exact compact UTF-8 in field order `schema_version,status,code`, without BOM or
+extra whitespace and with one LF:
+`{"schema_version":"shud.git-status-capability.contract-error.v1","status":"error","code":"<CODE>"}\n`.
+Success exits `0` and emits one canonical receipt only after all checks pass;
+identical invocations produce byte-identical receipts.
 
 #### Scenario: Contract input reaches an exact bound
 - **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
@@ -191,6 +195,18 @@ receipt on stderr, and produces no partial file or success receipt. Success exit
 #### Scenario: Contract input exceeds a bound or is malformed
 - **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
 - **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
+
+#### Scenario: Unicode input is invalid or canonical
+- **WHEN** raw input contains ill-formed UTF-8 bytes that attempt to encode a surrogate scalar
+- **THEN** the checker returns only `CONTRACT_UTF8_INVALID`, exit `2`, empty stdout, one bounded error receipt on stderr, and no partial success receipt
+- **WHEN** valid UTF-8 JSON contains an escaped lone high surrogate, lone low surrogate, reversed pair, or mismatched pair
+- **THEN** the checker returns the same public failure shape with only `CONTRACT_JSON_MALFORMED`
+- **WHEN** a valid source-input-record fixture contains escaped `\uD83D\uDE00` in an admitted path
+- **THEN** it decodes as one Unicode scalar and the checker emits exactly `{"schema_version":"shud.git-status-capability.contract-check-receipt.v1","status":"ok","input_kind":"source_input_record"}\n`, byte-identically across repeats
+
+#### Scenario: Downstream contract vocabulary remains structural-only in task 1.1a
+- **WHEN** valid compatibility fixtures `row-platform-state-v1.json` and `final-reference-receipt-v1.json` are checked as `row_evidence` and `final_bundle`
+- **THEN** each emits its exact input-kind success receipt while no platform/harness state is derived, no normalized decision is emitted, and no reference is retrieved or published
 
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:
@@ -258,6 +274,18 @@ direct crate version/feature, and a target dependency-graph catalog before nativ
 semantic implementation. Builds SHALL use locked/frozen resolution and SHALL have
 no floating Git, branch, wildcard, or path source.
 
+The frozen Rust supply identity is release `1.88.0`, commit
+`6b00bc3880198600130e1cf62b8f8a93494488cc`, with macOS host/target
+`aarch64-apple-darwin` and Linux host/target `x86_64-unknown-linux-gnu`;
+its bundled Cargo identity is CLI release `1.88.0`, commit `873a06493`, package
+version `0.89.0`. The initial `native/Cargo.lock` SHA-256 is
+`0b464510a35a2812bdc3fd5960d98a350baa949019ce7181ef01a4eb8195c02a`
+and `native/rust-toolchain.toml` SHA-256 is
+`2497367eeaf2f826dc39daeeb64d8782ea022abe73f2df98e64cd967f1f37fd5`.
+Each platform bundle and the decision schema SHALL carry both `lockfile_digest`
+and `rust_toolchain_digest`. For each field the actual checked-in file digest,
+macOS value, Linux value, and decision value SHALL be equal.
+
 Both targets MUST use identical source, lockfile, and direct features. Complete
 graphs may differ only by target-predicate edges predeclared from the same lockfile;
 each platform's actual complete graph digest MUST exactly match its frozen catalog
@@ -271,6 +299,10 @@ dependency graph, SBOM, and package/license-file inventory with digests.
 #### Scenario: Dependency identity diverges unexpectedly
 - **WHEN** a lockfile/direct feature/source differs or an actual target graph contains an unlisted difference
 - **THEN** the harness is `invalid`, CI is red, and no terminal decision exists
+
+#### Scenario: Frozen tool or lock identity is independently or synchronously forged
+- **WHEN** any Rust release/commit/host, Cargo release/commit/package version, Git version, target triple, checked-in lock/toolchain digest, either platform `lockfile_digest`/`rust_toolchain_digest`, or either decision digest changes independently or in any synchronized strict subset
+- **THEN** Task 1.1a's checker returns `CONTRACT_SCHEMA_INVALID`, exit `2`, empty stdout, one bounded error receipt, and no partial success receipt
 
 #### Scenario: SBOM or license inventory is incomplete
 - **WHEN** a built dependency, feature, source, SBOM entry, or license file cannot be accounted for
@@ -297,7 +329,7 @@ excluded and admits only bounded non-executable `source|platform|gates|final/<di
 JSON/Markdown or immutable content-addressed references. The source
 commit SHALL be recorded beside the digest but MUST NOT be hashed into it.
 
-Task 1.1 SHALL generate the initial manifest from only the covered files present
+Task 1.1a SHALL generate the initial manifest from only the covered files present
 at its HEAD and SHALL freeze the sync/check algorithm; absent future paths are
 forbidden. Every task 1.2–5.1 that adds or removes a covered candidate SHALL use
 that algorithm to update the shared derived manifest and prove exact equality at
@@ -335,9 +367,18 @@ All other evidence SHALL bind only the source-record SHA-256, not repeat the liv
 digest field. D9's `GATE-SOURCE-INPUT` SHALL rerun both encoders with `--no-write`
 and verify the immutable record.
 
+The source record's `source_sha`, each platform bundle's `source_commit`, and the
+decision's `base_sha` SHALL be one equal Git object identity. No combination of
+synchronously changed peers may substitute for equality with the remaining
+admitted record.
+
 #### Scenario: Source digest is reproduced independently
 - **WHEN** the primary and witness runtime encoders consume the same live manifest and `SOURCE_SHA`
 - **THEN** both runtime encoders compute the same live SHA-256 without consulting a live literal, while each separately matches the committed literal only for the fixed synthetic frame
+
+#### Scenario: Source commit peers diverge or a strict subset is forged
+- **WHEN** source-record `source_sha`, either platform `source_commit`, or decision `base_sha` differs, including synchronized mutation of any strict subset
+- **THEN** Task 1.1a's checker returns `CONTRACT_SCHEMA_INVALID`, exit `2`, empty stdout, one bounded error receipt, and no partial success receipt
 
 #### Scenario: Live digest recording fails closed
 - **WHEN** either encoder fails, their outputs or admitted sets differ, a live digest literal exists in committed inputs, the create-new external record already exists, or its bytes drift before publication
@@ -387,7 +428,7 @@ record. Task 5.2 SHALL invoke task 3.1's fixed emitter and `PLATFORM-MATRIX`
 without changing covered source. After both matrices and supply capture, task 5.3
 SHALL invoke task 1.3's already source-digested implementation for every and only fixed pre-decision command in design D9
 using Bun `1.2.19`, OpenSpec `1.3.1`, Git `2.49.0`, and frozen base/merge-base
-`9b761459760db16c1088ec81f91387790f8567e2`. It SHALL record exact argv/version,
+`a24b106d2766eadcff73da4c238639f520e5a80b`. It SHALL record exact argv/version/environment,
 exit code, bounded summary/digest, and source-input-record SHA-256 for source framing,
 full `check`,
 `schema:check`, PERF-API-001, docs self-test/links, strict OpenSpec validation,
@@ -399,6 +440,14 @@ SHUD/rSHUD/AutoSHUD/zero. It SHALL also run the fixed GET-only governance gate:
 `2bf3ef8859278dd0817100c01775765612170648`, and GitHub mutation count is zero.
 D9 MUST NOT derive/read a candidate decision or run
 health/expect/publication commands.
+
+`GATE-UNTRACKED` is one existing gate ID and ordinal with two ordered stages:
+`git status --porcelain=v1 --untracked-files=all` at Git `2.49.0`, then
+`spikes/git-status-capability/verify.sh untracked-inventory` at script version
+`1`. Both stages freeze the exact environment vector
+`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+`GIT_OPTIONAL_LOCKS=0`, `LC_ALL=C`. Omission, addition, duplication, reordering,
+or mutation of any gate ID/ordinal/stage/argv/version/environment is schema-invalid.
 
 #### Scenario: Volatile raw data changes without a decision change
 - **WHEN** timestamps, temporary roots, map order, job IDs, numeric FDs, or below-bound counters vary while included identities/outcomes/classes are identical
@@ -415,6 +464,10 @@ health/expect/publication commands.
 #### Scenario: Repository or reproducibility gate fails
 - **WHEN** any fixed gate command fails or its command/source record is missing or mismatched
 - **THEN** run status is `invalid`, CI is red, and no terminal technology decision is emitted
+
+#### Scenario: Repository gate profile differs from the frozen 17-gate contract
+- **WHEN** a gate is missing, extra, duplicated, reordered, or has a changed ordinal, or either `GATE-UNTRACKED` stage has changed argv, version, environment, or order
+- **THEN** Task 1.1a's checker returns `CONTRACT_SCHEMA_INVALID`, exit `2`, empty stdout, one bounded error receipt, and no partial success receipt
 
 #### Scenario: Governance state is unsafe or cannot be verified read-only
 - **WHEN** #132 is not OPEN/blocked, #133 is no longer reverted from `main`, any GitHub mutation-capable request occurs, or the GET-only receipt is absent/mismatched
