@@ -279,6 +279,31 @@ async function installPublicationCompanions(root: string, recordSha: string): Pr
   return { gate, decision };
 }
 
+async function installReferencedPlatforms(root: string, recordSha: string): Promise<void> {
+  await writeEvidence(root, `platform/${digest}/macos/platform-bundle.json`,
+    immutableReference("platform", "macos", recordSha, "e1", 1));
+  await writeEvidence(root, `platform/${digest}/linux/platform-bundle.json`,
+    immutableReference("platform", "linux", recordSha, "e2", 1));
+}
+
+async function installReferencedTerminalCompanions(
+  root: string,
+  recordSha: string,
+  omittedPath: string
+): Promise<void> {
+  const paths: Array<[string, JsonRecord]> = [
+    [`platform/${digest}/macos/platform-bundle.json`, immutableReference("platform", "macos", recordSha, "e1", 1)],
+    [`platform/${digest}/linux/platform-bundle.json`, immutableReference("platform", "linux", recordSha, "e2", 1)],
+    [`gates/${digest}/repository-gate.json`, immutableReference("gates", "none", recordSha, "e3", 1)],
+    [`final/${digest}/final-bundle.json`, immutableReference("final", "none", recordSha, "e4", 1)],
+    [`final/${digest}/decision.json`, immutableReference("final", "none", recordSha, "e5", 1)],
+    [`final/${digest}/publication-assertion.json`, immutableReference("final", "none", recordSha, "e6", 1)],
+    [`final/${digest}/publication-governance-recheck.json`, immutableReference("final", "none", recordSha, "e7", 1)]
+  ];
+  await writeEvidence(root, `final/${digest}/source-input-record.json`, sourceRecordBytes(sourceRecordForDigest(digest)));
+  for (const [path, value] of paths) if (path !== omittedPath) await writeEvidence(root, path, value);
+}
+
 function invalidDecisionFrom(base: JsonRecord, codes: string[]): JsonRecord {
   const decision = clone(base);
   decision.run_status = "invalid";
@@ -386,7 +411,11 @@ describe("source-input-v1 current-set authority", () => {
     const root = await temporaryRepository();
     const before = await enumerateSourceCandidates(root);
     const digest = "01".repeat(32);
-    await installSourceRecord(root, digest);
+    const recordSha = await installSourceRecord(root, digest);
+    await writeEvidence(root, `platform/${digest}/macos/platform-bundle.json`,
+      bindSourceRecord(clone(generic.platform_bundle), recordSha));
+    await writeEvidence(root, `platform/${digest}/linux/platform-bundle.json`,
+      bindSourceRecord(clone(generic.linux_platform_bundle), recordSha));
     await mkdir(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos`), { recursive: true });
     await writeFile(join(root, `openspec/changes/m2-capability-observer-spike/evidence/platform/${digest}/macos/result.md`),
       canonicalMarkdown("platform", digest, "macos"));
@@ -408,15 +437,18 @@ describe("source-input-v1 current-set authority", () => {
     const validLinux = bindSourceRecord(clone(generic.linux_platform_bundle), recordSha);
     const validDecision = bindSourceRecord(clone(generic.decision), recordSha);
     const validFinal = bindSourceRecord(clone(generic.final_bundle), recordSha);
-    synchronizeFinalBundle(validFinal, validDecision, validMacos, validLinux);
+    const validGate = repositoryGate(recordSha);
+    synchronizeFinalBundle(validFinal, validDecision, validMacos, validLinux, validGate);
     const validRecords: Array<[string, unknown | string]> = [
       [`source/${digest}/source-input-record.json`, record],
       [`platform/${digest}/macos/platform-bundle.json`, validMacos],
       [`platform/${digest}/linux/platform-bundle.json`, validLinux],
-      [`gates/${digest}/receipt.json`, immutableReference("gates", "none", recordSha, "04")],
+      [`gates/${digest}/repository-gate.json`, validGate],
       [`final/${digest}/source-input-record.json`, record],
       [`final/${digest}/final-bundle.json`, validFinal],
       [`final/${digest}/decision.json`, validDecision],
+      [`final/${digest}/publication-assertion.json`, publicationAssertion(validDecision, recordSha)],
+      [`final/${digest}/publication-governance-recheck.json`, publicationGovernance(validGate, recordSha)],
       [`final/${digest}/summary.md`, canonicalMarkdown("final", digest, "none", "accepted", recordSha)]
     ];
     const validRoot = await temporaryRepository();
@@ -464,7 +496,13 @@ describe("source-input-v1 current-set authority", () => {
     await expect(enumerateSourceCandidates(symlinkRoot)).rejects.toMatchObject({ code: "CONTRACT_SCHEMA_INVALID" });
 
     const stagedRoot = await temporaryRepository();
-    await installSourceRecord(stagedRoot, digest);
+    const stagedRecordSha = await installSourceRecord(stagedRoot, digest);
+    await writeEvidence(stagedRoot, `platform/${digest}/macos/platform-bundle.json`,
+      immutableReference("platform", "macos", stagedRecordSha, "c1", 1));
+    await writeEvidence(stagedRoot, `platform/${digest}/linux/platform-bundle.json`,
+      immutableReference("platform", "linux", stagedRecordSha, "c2", 1));
+    await writeEvidence(stagedRoot, `gates/${digest}/repository-gate.json`,
+      immutableReference("gates", "none", stagedRecordSha, "c3", 1));
     const stagedDirectory = join(stagedRoot, `openspec/changes/m2-capability-observer-spike/evidence/gates/${digest}`);
     const stagedPath = join(stagedDirectory, "receipt.md");
     await mkdir(stagedDirectory, { recursive: true });
@@ -487,7 +525,11 @@ describe("source-input-v1 current-set authority", () => {
       [`final/${digest}/rejected.md`, canonicalMarkdown("final", digest, "none", "rejected")]
     ] as const;
     const positiveRoot = await temporaryRepository();
-    await installSourceRecord(positiveRoot, digest);
+    const recordSha = await installSourceRecord(positiveRoot, digest);
+    const { gate, decision } = await installPublicationCompanions(positiveRoot, recordSha);
+    await writeEvidence(positiveRoot, `final/${digest}/source-input-record.json`, sourceRecordBytes(sourceRecordForDigest(digest)));
+    await writeEvidence(positiveRoot, `final/${digest}/publication-assertion.json`, publicationAssertion(decision, recordSha));
+    await writeEvidence(positiveRoot, `final/${digest}/publication-governance-recheck.json`, publicationGovernance(gate, recordSha));
     for (const [path, content] of positives) await writeEvidence(positiveRoot, path, content);
     const candidates = await enumerateSourceCandidates(positiveRoot);
     expect(candidates).toHaveLength(40);
@@ -570,7 +612,7 @@ describe("source-input-v1 current-set authority", () => {
       ["decision", `final/${digest}/decision.json`, "shud.git-status-capability.decision.v1", INGESTION_LIMITS.decision, bindSourceRecord(generic.decision, recordSha)],
       ["publication-assertion", `final/${digest}/publication-assertion.json`, "shud.git-status-capability.publication-assertion.v1", { bytes: 64 * 1024, depth: 12, nodes: 2048, items: 512 }, bindSourceRecord(generic.publication_assertion, recordSha)],
       ["publication-governance-recheck", `final/${digest}/publication-governance-recheck.json`, "shud.git-status-capability.publication-governance-recheck.v1", { bytes: 64 * 1024, depth: 12, nodes: 2048, items: 512 }, bindSourceRecord(generic.publication_governance_recheck, recordSha)],
-      ["immutable-reference", `gates/${digest}/reference.json`, "shud.git-status-capability.immutable-evidence-reference.v1",
+      ["immutable-reference", `gates/${digest}/repository-gate.json`, "shud.git-status-capability.immutable-evidence-reference.v1",
         { bytes: 4096, depth: 6, nodes: 64, items: 32 }, immutableReference("gates", "none", recordSha, "13")]
     ] as const;
     const boundaries = [
@@ -582,18 +624,41 @@ describe("source-input-v1 current-set authority", () => {
     for (const [kind, path, schemaVersion, limits, valid] of cases) {
       const root = await temporaryRepository();
       if (kind !== "source-input-record") await installSourceRecord(root, digest);
+      if (kind === "platform-bundle") {
+        await writeEvidence(root, `platform/${digest}/linux/platform-bundle.json`,
+          immutableReference("platform", "linux", recordSha, "d2", 1));
+      }
+      if (kind === "repository-gate" || kind === "immutable-reference") await installReferencedPlatforms(root, recordSha);
+      if (kind === "final-bundle" || kind === "decision") {
+        await installReferencedTerminalCompanions(root, recordSha, path);
+        if (kind === "final-bundle") {
+          valid.macos_bundle_sha256 = "e1".repeat(32);
+          valid.linux_bundle_sha256 = "e2".repeat(32);
+          valid.repository_gate_sha256 = "e3".repeat(32);
+        }
+      }
       if (kind === "publication-assertion") {
         const companions = await installPublicationCompanions(root, recordSha);
+        await writeEvidence(root, `final/${digest}/source-input-record.json`, sourceRecordBytes(sourceRecordForDigest(digest)));
+        await writeEvidence(root, `final/${digest}/publication-governance-recheck.json`, publicationGovernance(companions.gate, recordSha));
         Object.assign(valid, publicationAssertion(companions.decision, recordSha));
       }
       if (kind === "publication-governance-recheck") {
-        const gate = repositoryGate(recordSha);
-        await writeEvidence(root, `gates/${digest}/repository-gate.json`, gate);
-        Object.assign(valid, publicationGovernance(gate, recordSha));
+        const companions = await installPublicationCompanions(root, recordSha);
+        await writeEvidence(root, `final/${digest}/source-input-record.json`, sourceRecordBytes(sourceRecordForDigest(digest)));
+        await writeEvidence(root, `final/${digest}/publication-assertion.json`, publicationAssertion(companions.decision, recordSha));
+        Object.assign(valid, publicationGovernance(companions.gate, recordSha));
       }
-      await writeEvidence(root, path, paddedJson(valid, limits.bytes));
+      const admittedBytes = kind === "final-bundle"
+        ? limits.bytes - sourceRecordBytes(sourceRecordForDigest(digest)).byteLength - [
+          immutableReference("final", "none", recordSha, "e5", 1),
+          immutableReference("final", "none", recordSha, "e6", 1),
+          immutableReference("final", "none", recordSha, "e7", 1)
+        ].reduce((total, reference) => total + Buffer.byteLength(`${JSON.stringify(reference)}\n`), 0)
+        : limits.bytes;
+      await writeEvidence(root, path, paddedJson(valid, admittedBytes));
       expect(await enumerateSourceCandidates(root), `${kind}:bytes:exact`).toBeInstanceOf(Array);
-      await writeEvidence(root, path, paddedJson(valid, limits.bytes + 1));
+      await writeEvidence(root, path, paddedJson(valid, admittedBytes + 1));
       await expect(enumerateSourceCandidates(root), `${kind}:bytes:plus-one`)
         .rejects.toMatchObject({ code: "CONTRACT_BYTES_LIMIT" });
       await writeEvidence(root, path, `${JSON.stringify(valid)}\n`);
@@ -636,20 +701,32 @@ describe("source-input-v1 current-set authority", () => {
         `${JSON.stringify(immutableReference("source", "none", recordSha, "20", 128 * 1024 - sourceBytes))}\n`);
       try { expect(await enumerateSourceCandidates(exact), "source-lane-exact").toBeInstanceOf(Array); }
       catch (error) { throw new Error(`source-lane-exact:${String(error)}`); }
-      await writeEvidence(exact, `gates/${digestA}/first.json`,
+      await writeEvidence(exact, `platform/${digestA}/macos/platform-bundle.json`,
+        `${JSON.stringify(immutableReference("platform", "macos", recordSha, "23", 4 * 1024 * 1024))}\n`);
+      await writeEvidence(exact, `platform/${digestA}/macos/second.json`,
+        `${JSON.stringify(immutableReference("platform", "macos", recordSha, "24", 4 * 1024 * 1024))}\n`);
+      await writeEvidence(exact, `platform/${digestA}/linux/platform-bundle.json`,
+        `${JSON.stringify(immutableReference("platform", "linux", recordSha, "26", 1))}\n`);
+      try { expect(await enumerateSourceCandidates(exact), "platform-lane-exact").toBeInstanceOf(Array); }
+      catch (error) { throw new Error(`platform-lane-exact:${String(error)}`); }
+      await writeEvidence(exact, `gates/${digestA}/repository-gate.json`,
         `${JSON.stringify(immutableReference("gates", "none", recordSha, "21", 512 * 1024))}\n`);
       await writeEvidence(exact, `gates/${digestA}/second.json`,
         `${JSON.stringify(immutableReference("gates", "none", recordSha, "22", 512 * 1024))}\n`);
       try { expect(await enumerateSourceCandidates(exact), "gates-lane-exact").toBeInstanceOf(Array); }
       catch (error) { throw new Error(`gates-lane-exact:${String(error)}`); }
-      await writeEvidence(exact, `platform/${digestA}/macos/first.json`,
-        `${JSON.stringify(immutableReference("platform", "macos", recordSha, "23", 4 * 1024 * 1024))}\n`);
-      await writeEvidence(exact, `platform/${digestA}/macos/second.json`,
-        `${JSON.stringify(immutableReference("platform", "macos", recordSha, "24", 4 * 1024 * 1024))}\n`);
-      try { expect(await enumerateSourceCandidates(exact), "platform-lane-exact").toBeInstanceOf(Array); }
-      catch (error) { throw new Error(`platform-lane-exact:${String(error)}`); }
-      await writeEvidence(exact, `final/${digestA}/exact.json`,
-        `${JSON.stringify(immutableReference("final", "none", recordSha, "25", finalLimit))}\n`);
+      const finalSource = sourceRecordBytes(sourceRecordForDigest(digestA));
+      const finalReferences: Array<[string, JsonRecord]> = [
+        [`final/${digestA}/decision.json`, immutableReference("final", "none", recordSha, "27", 1)],
+        [`final/${digestA}/publication-assertion.json`, immutableReference("final", "none", recordSha, "28", 1)],
+        [`final/${digestA}/publication-governance-recheck.json`, immutableReference("final", "none", recordSha, "29", 1)]
+      ];
+      const fixedFinalBytes = finalSource.byteLength + finalReferences.reduce((total, [, reference]) =>
+        total + Buffer.byteLength(`${JSON.stringify(reference)}\n`), 0);
+      await writeEvidence(exact, `final/${digestA}/source-input-record.json`, finalSource);
+      await writeEvidence(exact, `final/${digestA}/final-bundle.json`,
+        `${JSON.stringify(immutableReference("final", "none", recordSha, "25", finalLimit - fixedFinalBytes))}\n`);
+      for (const [path, reference] of finalReferences) await writeEvidence(exact, path, `${JSON.stringify(reference)}\n`);
       try { expect(await enumerateSourceCandidates(exact), "all-lanes-exact").toBeInstanceOf(Array); }
       catch (error) { throw new Error(`all-lanes-exact:${String(error)}`); }
       if (tracked) await admitTracked(exact, "tracked-all-lanes-exact");
@@ -677,8 +754,10 @@ describe("source-input-v1 current-set authority", () => {
       const inline = canonicalMarkdown("platform", digestA, "macos", "platform-observation-recorded", mixedSha);
       const inlineBytes = Buffer.byteLength(inline);
       await writeEvidence(mixed, `platform/${digestA}/macos/summary.md`, inline);
-      await writeEvidence(mixed, `platform/${digestA}/macos/supplement.json`,
+      await writeEvidence(mixed, `platform/${digestA}/macos/platform-bundle.json`,
         `${JSON.stringify(immutableReference("platform", "macos", mixedSha, `4${extra}`, platformLimit - inlineBytes + extra))}\n`);
+      await writeEvidence(mixed, `platform/${digestA}/linux/platform-bundle.json`,
+        `${JSON.stringify(immutableReference("platform", "linux", mixedSha, `7${extra}`, 1))}\n`);
       if (extra === 0) {
         try { expect(await enumerateSourceCandidates(mixed), "mixed-exact").toBeInstanceOf(Array); }
         catch (error) { throw new Error(`mixed-exact:${String(error)}`); }
@@ -697,23 +776,23 @@ describe("source-input-v1 current-set authority", () => {
     const isolated = await temporaryRepository();
     const shaA = (await initialized(isolated, digestA)).recordSha;
     const shaB = (await initialized(isolated, digestB)).recordSha;
-    await writeEvidence(isolated, `platform/${digestA}/macos/a.json`,
+    await writeEvidence(isolated, `platform/${digestA}/macos/platform-bundle.json`,
       `${JSON.stringify(immutableReference("platform", "macos", shaA, "61", 5 * 1024 * 1024))}\n`);
-    await writeEvidence(isolated, `platform/${digestA}/linux/a.json`,
+    await writeEvidence(isolated, `platform/${digestA}/linux/platform-bundle.json`,
       `${JSON.stringify(immutableReference("platform", "linux", shaA, "62", 5 * 1024 * 1024))}\n`);
-    await writeEvidence(isolated, `platform/${digestB}/macos/b.json`,
+    await writeEvidence(isolated, `platform/${digestB}/macos/platform-bundle.json`,
       `${JSON.stringify(immutableReference("platform", "macos", shaB, "63", 5 * 1024 * 1024))}\n`);
-    await writeEvidence(isolated, `final/${digestA}/a.json`,
-      `${JSON.stringify(immutableReference("final", "none", shaA, "64", 12 * 1024 * 1024))}\n`);
-    await writeEvidence(isolated, `final/${digestB}/b.json`,
-      `${JSON.stringify(immutableReference("final", "none", shaB, "65", 12 * 1024 * 1024))}\n`);
+    await writeEvidence(isolated, `platform/${digestB}/linux/platform-bundle.json`,
+      `${JSON.stringify(immutableReference("platform", "linux", shaB, "64", 5 * 1024 * 1024))}\n`);
     try { expect(await enumerateSourceCandidates(isolated), "platform-and-digest-isolation").toBeInstanceOf(Array); }
     catch (error) { throw new Error(`platform-and-digest-isolation:${String(error)}`); }
 
     const staged = await temporaryRepository();
     const stagedSha = (await initialized(staged)).recordSha;
-    const stagedPath = await writeEvidence(staged, `platform/${digestA}/macos/plus-one.json`,
+    const stagedPath = await writeEvidence(staged, `platform/${digestA}/macos/platform-bundle.json`,
       `${JSON.stringify(immutableReference("platform", "macos", stagedSha, "70", platformLimit + 1))}\n`);
+    await writeEvidence(staged, `platform/${digestA}/linux/platform-bundle.json`,
+      `${JSON.stringify(immutableReference("platform", "linux", stagedSha, "71", 1024))}\n`);
     expect(spawnSync("git", ["init", "-q"], { cwd: staged }).status).toBe(0);
     expect(spawnSync("git", ["add", "spikes/git-status-capability", "openspec/changes/m2-capability-observer-spike"], { cwd: staged }).status).toBe(0);
     await writeFile(stagedPath, `${JSON.stringify(immutableReference("platform", "macos", stagedSha, "70", 1024))}\n`);

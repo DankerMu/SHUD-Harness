@@ -2,14 +2,19 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalJsonDigest } from "../lib/canonical-frame";
 import { encodeDecisionRowProjection } from "../lib/decision";
 import { D9_COMMAND_PROFILE } from "../lib/frozen";
 import { ContractError } from "../lib/ingestion";
-import { enumerateSourceCandidates, validateGitCandidateSet } from "../lib/schema";
+import {
+  enumerateSourceCandidates,
+  validateDecision,
+  validateFinalBundle,
+  validateGitCandidateSet
+} from "../lib/schema";
 
 type JsonRecord = Record<string, any>;
 type EvidenceLane = "source" | "platform" | "gates" | "final";
@@ -103,6 +108,25 @@ function immutableReference(
       byte_length: byteLength
     }
   };
+}
+
+function laneSummary(
+  lane: EvidenceLane,
+  platform: "macos" | "linux" | "none",
+  sourceRecordSha: string,
+  status: "source-input-recorded" | "platform-observation-recorded" | "repository-gates-passed"
+): Buffer {
+  return Buffer.from([
+    "# SHUD Git Status Capability Evidence",
+    "Schema: shud.git-status-capability.markdown-evidence.v1",
+    `Lane: ${lane}`,
+    `Platform: ${platform}`,
+    `Source input: ${digest}`,
+    `Source record SHA-256: ${sourceRecordSha}`,
+    `Artifact SHA-256: ${"cd".repeat(32)}`,
+    `Status: ${status}`,
+    ""
+  ].join("\n"), "utf8");
 }
 
 function outcomeRejected(bundle: JsonRecord): void {
@@ -215,7 +239,13 @@ async function writeEvidence(root: string, relative: string, value: Uint8Array |
   await writeFile(path, value instanceof Uint8Array ? value : jsonBytes(value));
 }
 
-async function assertViews(root: string, candidates: string[], accepted: boolean, label: string): Promise<void> {
+async function assertViews(
+  root: string,
+  candidates: string[],
+  accepted: boolean,
+  label: string,
+  publicCheck = false
+): Promise<void> {
   if (accepted) await expect(enumerateSourceCandidates(root), `worktree:${label}`).resolves.toBeInstanceOf(Array);
   else await expect(enumerateSourceCandidates(root), `worktree:${label}`).rejects.toBeInstanceOf(ContractError);
   expect(spawnSync("git", ["init", "-q"], { cwd: root }).status).toBe(0);
@@ -223,6 +253,82 @@ async function assertViews(root: string, candidates: string[], accepted: boolean
   const staged = () => validateGitCandidateSet(root, candidates);
   if (accepted) expect(staged, `staged:${label}`).not.toThrow();
   else expect(staged, `staged:${label}`).toThrow(ContractError);
+  if (publicCheck) {
+    const result = spawnSync(process.execPath, [
+      checkerPath, "--repository-root", root, "--manifest", manifestRelative, "--check-current"
+    ], { cwd: root, encoding: "utf8" });
+    expect(result.status, `public:${label}`).toBe(accepted ? 0 : 2);
+    if (accepted) expect(result.stderr, `public-stderr:${label}`).toBe("");
+    else {
+      expect(result.stdout, `public-stdout:${label}`).toBe("");
+      expect(result.stderr, `public-stderr:${label}`).toContain("CONTRACT_SCHEMA_INVALID");
+    }
+  }
+}
+
+const mandatoryPaths = Object.freeze([
+  `source/${digest}/source-input-record.json`,
+  `platform/${digest}/macos/platform-bundle.json`,
+  `platform/${digest}/linux/platform-bundle.json`,
+  `gates/${digest}/repository-gate.json`,
+  `final/${digest}/source-input-record.json`,
+  `final/${digest}/final-bundle.json`,
+  `final/${digest}/decision.json`,
+  `final/${digest}/publication-assertion.json`,
+  `final/${digest}/publication-governance-recheck.json`
+]);
+
+async function removeEvidence(root: string, relative: string): Promise<void> {
+  await rm(join(root, evidenceRoot, ...relative.split("/")));
+}
+
+async function installReferencedTerminal(): Promise<{ root: string; candidates: string[]; sourceRecordSha: string }> {
+  const { root, candidates } = await temporaryRepository();
+  const sourceBytes = jsonBytes(sourceRecord());
+  const sourceRecordSha = sha256(sourceBytes);
+  await writeEvidence(root, `source/${digest}/source-input-record.json`, sourceBytes);
+  await writeEvidence(root, `final/${digest}/source-input-record.json`, sourceBytes);
+  const references: Array<[string, JsonRecord]> = [
+    [`platform/${digest}/macos/platform-bundle.json`, immutableReference("platform", "macos", sourceRecordSha, "81", 1)],
+    [`platform/${digest}/linux/platform-bundle.json`, immutableReference("platform", "linux", sourceRecordSha, "82", 1)],
+    [`gates/${digest}/repository-gate.json`, immutableReference("gates", "none", sourceRecordSha, "83", 1)],
+    [`final/${digest}/final-bundle.json`, immutableReference("final", "none", sourceRecordSha, "84", 1)],
+    [`final/${digest}/decision.json`, immutableReference("final", "none", sourceRecordSha, "85", 1)],
+    [`final/${digest}/publication-assertion.json`, immutableReference("final", "none", sourceRecordSha, "86", 1)],
+    [`final/${digest}/publication-governance-recheck.json`, immutableReference("final", "none", sourceRecordSha, "87", 1)]
+  ];
+  for (const [path, value] of references) await writeEvidence(root, path, value);
+  return { root, candidates, sourceRecordSha };
+}
+
+async function installCheckpoint(
+  stage: "source" | "platform" | "gates",
+  referenced: boolean
+): Promise<{ root: string; candidates: string[] }> {
+  const { root, candidates } = await temporaryRepository();
+  const sourceBytes = jsonBytes(sourceRecord());
+  const sourceRecordSha = sha256(sourceBytes);
+  await writeEvidence(root, `source/${digest}/source-input-record.json`, sourceBytes);
+  await writeEvidence(root, `source/${digest}/summary.md`,
+    laneSummary("source", "none", sourceRecordSha, "source-input-recorded"));
+  if (stage === "source") return { root, candidates };
+  await writeEvidence(root, `platform/${digest}/macos/platform-bundle.json`, referenced
+    ? immutableReference("platform", "macos", sourceRecordSha, "91", 1)
+    : bindSourceRecord(clone(generic.platform_bundle), sourceRecordSha));
+  await writeEvidence(root, `platform/${digest}/linux/platform-bundle.json`, referenced
+    ? immutableReference("platform", "linux", sourceRecordSha, "92", 1)
+    : bindSourceRecord(clone(generic.linux_platform_bundle), sourceRecordSha));
+  await writeEvidence(root, `platform/${digest}/macos/summary.md`,
+    laneSummary("platform", "macos", sourceRecordSha, "platform-observation-recorded"));
+  await writeEvidence(root, `platform/${digest}/linux/summary.md`,
+    laneSummary("platform", "linux", sourceRecordSha, "platform-observation-recorded"));
+  if (stage === "platform") return { root, candidates };
+  await writeEvidence(root, `gates/${digest}/repository-gate.json`, referenced
+    ? immutableReference("gates", "none", sourceRecordSha, "93", 1)
+    : repositoryGate(sourceRecordSha));
+  await writeEvidence(root, `gates/${digest}/summary.md`,
+    laneSummary("gates", "none", sourceRecordSha, "repository-gates-passed"));
+  return { root, candidates };
 }
 
 function refreshDirectDigests(collection: DirectCollection): void {
@@ -377,34 +483,90 @@ describe("Phase 6.2 terminal evidence collection", () => {
       const sourceBytes = jsonBytes(sourceRecord());
       const sourceRecordSha = sha256(sourceBytes);
       await writeEvidence(root, `source/${digest}/source-input-record.json`, sourceBytes);
-      await writeEvidence(root, `gates/${digest}/repository-gate.json`, immutableReference("gates", "none", sourceRecordSha, "8a", byteLength));
+      await writeEvidence(root, `platform/${digest}/macos/platform-bundle.json`,
+        immutableReference("platform", "macos", sourceRecordSha, "8a", byteLength));
+      await writeEvidence(root, `platform/${digest}/linux/platform-bundle.json`,
+        immutableReference("platform", "linux", sourceRecordSha, "8b", 1));
       await assertViews(root, candidates, byteLength === 1, `${byteLength}-byte-reference`);
     }
   }, 60_000);
 
   test("complete direct terminal states and content-addressed reference layouts are admitted", async () => {
-    for (const mode of ["accepted", "ordinary-rejected", "protection-rejected", "invalid"] as const) {
+    for (const mode of ["accepted", "ordinary-rejected", "protection-rejected"] as const) {
       const collection = await installDirect(mode);
       await assertViews(collection.root, collection.candidates, true, mode);
     }
 
-    const { root, candidates } = await temporaryRepository();
+    const referenced = await installReferencedTerminal();
+    await assertViews(referenced.root, referenced.candidates, true, "content-addressed-reference-layout");
+  }, 240_000);
+
+  test("only monotonic Tasks 5.1-5.3 checkpoints and complete Task 5.4 publication are admitted", async () => {
+    for (const stage of ["source", "platform", "gates"] as const) {
+      for (const referenced of [false, true]) {
+        if (stage === "source" && referenced) continue;
+        const checkpoint = await installCheckpoint(stage, referenced);
+        await assertViews(checkpoint.root, checkpoint.candidates, true, `${stage}:${referenced ? "referenced" : "direct"}`);
+      }
+    }
+
     const sourceBytes = jsonBytes(sourceRecord());
     const sourceRecordSha = sha256(sourceBytes);
-    await writeEvidence(root, `source/${digest}/source-input-record.json`, sourceBytes);
-    await writeEvidence(root, `final/${digest}/source-input-record.json`, sourceBytes);
-    const references: Array<[string, JsonRecord]> = [
-      [`platform/${digest}/macos/platform-bundle.json`, immutableReference("platform", "macos", sourceRecordSha, "81", 1)],
-      [`platform/${digest}/linux/platform-bundle.json`, immutableReference("platform", "linux", sourceRecordSha, "82", 1)],
-      [`gates/${digest}/repository-gate.json`, immutableReference("gates", "none", sourceRecordSha, "83", 1)],
-      [`final/${digest}/final-bundle.json`, immutableReference("final", "none", sourceRecordSha, "84", 1)],
-      [`final/${digest}/decision.json`, immutableReference("final", "none", sourceRecordSha, "85", 1)],
-      [`final/${digest}/publication-assertion.json`, immutableReference("final", "none", sourceRecordSha, "86", 1)],
-      [`final/${digest}/publication-governance-recheck.json`, immutableReference("final", "none", sourceRecordSha, "87", 1)]
+    const invalidOrders: Array<[string, Array<[string, Uint8Array | JsonRecord]>]> = [
+      ["one-platform", [[`platform/${digest}/macos/platform-bundle.json`,
+        immutableReference("platform", "macos", sourceRecordSha, "a1", 1)]]],
+      ["gate-before-platforms", [[`gates/${digest}/repository-gate.json`,
+        immutableReference("gates", "none", sourceRecordSha, "a2", 1)]]],
+      ["final-source-before-gate", [[`final/${digest}/source-input-record.json`, sourceBytes]]],
+      ["final-artifact-before-gate", [[`final/${digest}/final-bundle.json`,
+        immutableReference("final", "none", sourceRecordSha, "a3", 1)]]]
     ];
-    for (const [path, value] of references) await writeEvidence(root, path, value);
-    await assertViews(root, candidates, true, "content-addressed-reference-layout");
-  }, 240_000);
+    for (const [label, artifacts] of invalidOrders) {
+      const { root, candidates } = await temporaryRepository();
+      await writeEvidence(root, `source/${digest}/source-input-record.json`, sourceBytes);
+      for (const [path, value] of artifacts) await writeEvidence(root, path, value);
+      await assertViews(root, candidates, false, label, true);
+    }
+  }, 300_000);
+
+  test("each mandatory direct and referenced terminal path is required by every public validation view", async () => {
+    for (const representation of ["direct", "referenced"] as const) {
+      for (const path of mandatoryPaths) {
+        const collection = representation === "direct"
+          ? await installDirect("accepted")
+          : await installReferencedTerminal();
+        await removeEvidence(collection.root, path);
+        await assertViews(collection.root, collection.candidates, false, `${representation}:omit:${path}`, true);
+      }
+    }
+  }, 900_000);
+
+  test("exact canonical paths admit references while renamed or misplaced references do not", async () => {
+    const renamed = await installReferencedTerminal();
+    await rename(
+      join(renamed.root, evidenceRoot, `platform/${digest}/macos/platform-bundle.json`),
+      join(renamed.root, evidenceRoot, `platform/${digest}/macos/renamed-platform-bundle.json`)
+    );
+    await assertViews(renamed.root, renamed.candidates, false, "renamed-platform-reference", true);
+
+    const misplaced = await installReferencedTerminal();
+    await removeEvidence(misplaced.root, `gates/${digest}/repository-gate.json`);
+    await writeEvidence(misplaced.root, `final/${digest}/misplaced-repository-gate.json`,
+      immutableReference("final", "none", misplaced.sourceRecordSha, "b1", 1));
+    await assertViews(misplaced.root, misplaced.candidates, false, "misplaced-gate-reference", true);
+
+    const finalSourceReference = await installReferencedTerminal();
+    await writeEvidence(finalSourceReference.root, `final/${digest}/source-input-record.json`,
+      immutableReference("final", "none", finalSourceReference.sourceRecordSha, "b2", 1));
+    await assertViews(finalSourceReference.root, finalSourceReference.candidates, false, "referenced-final-source", true);
+  }, 300_000);
+
+  test("invalid records remain valid in isolation but cannot form a published evidence tree", async () => {
+    const invalid = await installDirect("invalid");
+    expect(validateFinalBundle(invalid.finalBundle)).toBe(true);
+    expect(validateDecision(invalid.decision)).toBe(true);
+    await assertViews(invalid.root, invalid.candidates, false, "invalid-published-tree", true);
+  }, 120_000);
 
   test("cross-record terminal flips and stale projections fail closed in both views", async () => {
     const cases: Array<[string, TerminalMode, (collection: DirectCollection) => void]> = [

@@ -493,6 +493,38 @@ function directPlatformMatchesDecision(platformBundle: JsonRecord, decision: Jso
   return exactJson(projection, decisionRows);
 }
 
+function validateEvidencePresenceState(
+  collection: Array<{ path: string; bytes: Buffer; location: EvidenceLocation }>,
+  values: ReadonlyMap<string, JsonRecord>,
+  digest: string
+): void {
+  const platformPaths = [
+    `${EVIDENCE_ROOT}/platform/${digest}/macos/platform-bundle.json`,
+    `${EVIDENCE_ROOT}/platform/${digest}/linux/platform-bundle.json`
+  ];
+  const gatePath = `${EVIDENCE_ROOT}/gates/${digest}/repository-gate.json`;
+  const finalSourcePath = `${EVIDENCE_ROOT}/final/${digest}/source-input-record.json`;
+  const finalPaths = [
+    finalSourcePath,
+    `${EVIDENCE_ROOT}/final/${digest}/final-bundle.json`,
+    `${EVIDENCE_ROOT}/final/${digest}/decision.json`,
+    `${EVIDENCE_ROOT}/final/${digest}/publication-assertion.json`,
+    `${EVIDENCE_ROOT}/final/${digest}/publication-governance-recheck.json`
+  ];
+  const hasLane = (lane: EvidenceLocation["lane"]): boolean =>
+    collection.some((blob) => blob.location.lane === lane);
+  const hasAll = (paths: readonly string[]): boolean => paths.every((path) => values.has(path));
+  const platformsComplete = hasAll(platformPaths);
+  const gatesComplete = platformsComplete && values.has(gatePath);
+  const finalSource = values.get(finalSourcePath);
+  const finalComplete = gatesComplete && hasAll(finalPaths) &&
+    directRecord(finalSource, "shud.git-status-capability.source-input-record.v1");
+
+  if ((hasLane("platform") && !platformsComplete) ||
+    (hasLane("gates") && !gatesComplete) ||
+    (hasLane("final") && !finalComplete)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+}
+
 function validateEvidenceCollection(blobs: Array<{ path: string; bytes: Buffer; location: EvidenceLocation }>): void {
   const byDigest = new Map<string, typeof blobs>();
   for (const blob of blobs) {
@@ -528,6 +560,7 @@ function validateEvidenceCollection(blobs: Array<{ path: string; bytes: Buffer; 
       if (validated.value) values.set(blob.path, validated.value);
       artifactDigests.set(blob.path, validated.referenceSha ?? createHash("sha256").update(blob.bytes).digest("hex"));
     }
+    validateEvidencePresenceState(collection, values, digest);
     const finalSourcePath = `${EVIDENCE_ROOT}/final/${digest}/source-input-record.json`;
     const finalSource = collection.find((blob) => blob.path === finalSourcePath);
     if (finalSource && !finalSource.bytes.equals(source.bytes)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
