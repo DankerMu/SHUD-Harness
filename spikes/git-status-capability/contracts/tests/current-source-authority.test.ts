@@ -4,6 +4,7 @@ import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlin
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { SOURCE_MANIFEST } from "../lib/constants";
+import * as currentSourceAuthority from "../lib/current-source";
 import { capture, contractsRoot, failure, success } from "./helpers";
 
 const projectRoot = join(contractsRoot, "..", "..", "..");
@@ -116,6 +117,7 @@ function sha1Index(body: Buffer): Buffer {
 }
 
 type RawIndexEntry = Readonly<{
+  modeOffset: number;
   flagsOffset: number;
   extendedFlagsOffset?: number;
   path: Buffer;
@@ -123,7 +125,7 @@ type RawIndexEntry = Readonly<{
   end: number;
 }>;
 
-function rawIndexEntries(body: Buffer): RawIndexEntry[] {
+function rawIndexEntries(body: Buffer, oidLength = 20): RawIndexEntry[] {
   if (body.toString("ascii", 0, 4) !== "DIRC") throw new Error("expected Git index");
   const version = body.readUInt32BE(4);
   if (version !== 2 && version !== 3 && version !== 4) throw new Error("expected supported Git index");
@@ -133,7 +135,8 @@ function rawIndexEntries(body: Buffer): RawIndexEntry[] {
   let previousPath = Buffer.alloc(0);
   for (let index = 0; index < count; index += 1) {
     const start = cursor;
-    const flagsOffset = cursor + 60;
+    const modeOffset = cursor + 24;
+    const flagsOffset = cursor + 40 + oidLength;
     if (flagsOffset + 2 > body.length) throw new Error("truncated index entry");
     const flags = body.readUInt16BE(flagsOffset);
     cursor = flagsOffset + 2;
@@ -152,14 +155,14 @@ function rawIndexEntries(body: Buffer): RawIndexEntry[] {
       if (nul < 0) throw new Error("unterminated v4 path");
       const path = Buffer.concat([previousPath.subarray(0, previousPath.length - removed), body.subarray(cursor, nul)]);
       cursor = nul + 1;
-      entries.push({ flagsOffset, extendedFlagsOffset, path, end: cursor });
+      entries.push({ modeOffset, flagsOffset, extendedFlagsOffset, path, end: cursor });
       previousPath = path;
     } else {
       const nul = body.indexOf(0, cursor);
       if (nul < 0) throw new Error("unterminated index path");
       const path = Buffer.from(body.subarray(cursor, nul));
       const end = start + Math.ceil((nul + 1 - start) / 8) * 8;
-      entries.push({ flagsOffset, extendedFlagsOffset, path, paddingStart: nul + 1, end });
+      entries.push({ modeOffset, flagsOffset, extendedFlagsOffset, path, paddingStart: nul + 1, end });
       cursor = end;
       previousPath = path;
     }
@@ -178,6 +181,18 @@ async function rewriteSha1Index(root: string, mutate: (body: Buffer) => Buffer):
   const path = await indexPath(root);
   const bytes = Buffer.from(await readFile(path));
   await writeFile(path, sha1Index(mutate(bytes.subarray(0, -20))));
+}
+
+async function rewriteIndex(
+  root: string,
+  algorithm: "sha1" | "sha256",
+  mutate: (body: Buffer, oidLength: number) => Buffer
+): Promise<void> {
+  const path = await indexPath(root);
+  const oidLength = algorithm === "sha256" ? 32 : 20;
+  const bytes = Buffer.from(await readFile(path));
+  const body = mutate(bytes.subarray(0, -oidLength), oidLength);
+  await writeFile(path, Buffer.concat([body, createHash(algorithm).update(body).digest()]));
 }
 
 async function snapshotStatus(root: string): Promise<StatusSnapshot> {
@@ -433,6 +448,52 @@ describe("current source authority", () => {
     await expectStableConfigFailure(linked.linked);
   });
 
+  test("the Git-compatible noop repository extension is strict across normal and linked SHA-1 and SHA-256 repositories", async () => {
+    for (const objectFormat of ["sha1", "sha256"] as const) {
+      for (const root of [await repository(objectFormat), (await linkedRepository(objectFormat)).linked]) {
+        const commonGitDir = (await lstat(join(root, ".git"))).isDirectory()
+          ? join(root, ".git")
+          : join((await readFile(join(root, ".git"), "utf8")).match(/^gitdir: ([^\r\n]+)\n$/)![1]!, "..", "..");
+        const configPath = join(commonGitDir, "config");
+        const config = (await readFile(configPath, "utf8")).replace("repositoryformatversion = 0", "repositoryformatversion = 1");
+        await writeFile(configPath, `${config}\n[extensions]\n\tnoop = true\n`);
+        expect(() => git(root, ["status", "--porcelain=v1", "--untracked-files=all"])).not.toThrow();
+        await expectStableCurrentSuccess(root);
+      }
+    }
+
+    for (const extension of ["future = true", "noop = false", "noop = 1", "noop = true\n\tnoop = true"]) {
+      const root = await repository();
+      const configPath = join(root, ".git", "config");
+      await writeFile(
+        configPath,
+        `${(await readFile(configPath, "utf8")).replace("repositoryformatversion = 0", "repositoryformatversion = 1")}\n` +
+          `[extensions]\n\t${extension}\n`
+      );
+      await expectStableConfigFailure(root);
+    }
+  });
+
+  test("quoted objectFormat trailing whitespace is preserved and fails closed across repository layouts and object formats", async () => {
+    for (const objectFormat of ["sha1", "sha256"] as const) {
+      for (const root of [await repository(objectFormat), (await linkedRepository(objectFormat)).linked]) {
+        const commonGitDir = (await lstat(join(root, ".git"))).isDirectory()
+          ? join(root, ".git")
+          : join((await readFile(join(root, ".git"), "utf8")).match(/^gitdir: ([^\r\n]+)\n$/)![1]!, "..", "..");
+        const configPath = join(commonGitDir, "config");
+        const config = await readFile(configPath, "utf8");
+        await writeFile(
+          configPath,
+          objectFormat === "sha1"
+            ? `${config.replace("repositoryformatversion = 0", "repositoryformatversion = 1")}\n` +
+              `[extensions]\n\tobjectFormat = "sha1 "\n`
+            : config.replace("objectformat = sha256", 'objectformat = "sha256 "')
+        );
+        await expectStableConfigFailure(root);
+      }
+    }
+  });
+
   test("valid Git index v2 and v3 remain accepted", async () => {
     const v2 = await repository();
     git(v2, ["update-index", "--index-version", "2"]);
@@ -457,6 +518,71 @@ describe("current source authority", () => {
       git(root, ["update-index", "--index-version", String(version)]);
       expect(await indexVersion(root)).toBe(version);
       await expectStableCurrentSuccess(root);
+    }
+  });
+
+  test("every index entry mode is validated before governed candidate filtering across versions, layouts, and hashes", async () => {
+    for (const objectFormat of ["sha1", "sha256"] as const) {
+      for (const version of [2, 3, 4]) {
+        for (const root of [await repository(objectFormat), (await linkedRepository(objectFormat)).linked]) {
+          const noncandidate = "unrelated/noncandidate.txt";
+          await mkdir(join(root, "unrelated"), { recursive: true });
+          await writeFile(join(root, noncandidate), "noncandidate\n");
+          git(root, ["add", noncandidate]);
+          git(root, ["update-index", "--index-version", String(version)]);
+          await rewriteIndex(root, objectFormat, (body, oidLength) => {
+            const changed = Buffer.from(body);
+            const entry = rawIndexEntries(body, oidLength).find((candidate) => candidate.path.equals(Buffer.from(noncandidate)));
+            if (!entry) throw new Error("expected noncandidate index entry");
+            changed.writeUInt32BE(0o100600, entry.modeOffset);
+            return changed;
+          });
+          await expectStableCurrentFailure(root);
+        }
+      }
+    }
+  });
+
+  test("legal symlink and gitlink noncandidate modes remain ignored by governed source authority", async () => {
+    for (const objectFormat of ["sha1", "sha256"] as const) {
+      for (const version of [2, 3, 4]) {
+        const root = await repository(objectFormat);
+        git(root, ["-c", "user.name=SHUD Contract Test", "-c", "user.email=contract@example.invalid", "commit", "-qm", "source"]);
+        await mkdir(join(root, "unrelated"));
+        await symlink("missing-target", join(root, "unrelated", "link"));
+        git(root, ["add", "unrelated/link"]);
+        const head = git(root, ["rev-parse", "HEAD"]).trim();
+        git(root, ["update-index", "--add", "--cacheinfo", `160000,${head},unrelated/gitlink`]);
+        git(root, ["update-index", "--index-version", String(version)]);
+        await expectStableCurrentSuccess(root);
+      }
+    }
+  });
+
+  test("worktree verification binds admission and content hashing to one no-follow descriptor", async () => {
+    for (const replacement of ["symlink", "foreign-inode"] as const) {
+      const root = await repository();
+      const path = "spikes/git-status-capability/contracts/contract-v1.json";
+      const absolute = join(root, path);
+      const admitted = `${absolute}.admitted`;
+      await currentSourceAuthority.checkCurrentSourceAuthorityForTest(root, SOURCE_MANIFEST, async (admittedPath) => {
+        if (admittedPath !== absolute) return;
+        await rename(absolute, admitted);
+        if (replacement === "symlink") await symlink(admitted, absolute);
+        else await writeFile(absolute, await readFile(admitted));
+      }).then(
+        () => { throw new Error(`expected ${replacement} replacement to fail closed`); },
+        (error) => expect((error as { code?: string }).code).toBe("CONTRACT_SCHEMA_INVALID")
+      );
+    }
+  });
+
+  test("CR and LF governed path identities fail closed at the public current-source seam", async () => {
+    for (const path of ["spikes/git-status-capability/cr\r.ts", "spikes/git-status-capability/lf\n.ts"]) {
+      const root = await repository();
+      await writeFile(join(root, path), "export {};\n");
+      git(root, ["add", path]);
+      expect(await current(root)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
     }
   });
 

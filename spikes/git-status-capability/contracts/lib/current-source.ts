@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { Stats } from "node:fs";
-import { lstat, readdir, readFile, stat as followStat } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, open, readdir, stat as followStat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   CONTRACT_METADATA, SOURCE_MANIFEST, SOURCE_METADATA_PROFILE, SYNTHETIC_FRAME, SYNTHETIC_SIDECAR
@@ -37,7 +37,7 @@ function bytesCompare(left: string, right: string): number {
 }
 
 function canonicalRelativePath(path: string): boolean {
-  if (!path || path.includes("\0") || path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:/.test(path)) return false;
+  if (!path || path.includes("\0") || path.includes("\r") || path.includes("\n") || path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:/.test(path)) return false;
   return path.split("/").every((part) => part && part !== "." && part !== "..");
 }
 
@@ -128,6 +128,7 @@ async function objectFormat(gitDir: string): Promise<"sha1" | "sha256"> {
   let subsection = false;
   let repositoryFormatVersion: string | undefined;
   let declaredObjectFormat: string | undefined;
+  const extensions = new Map<string, string>();
 
   for (const line of config.split("\n")) {
     if (line.endsWith("\r") || /\\\s*$/.test(line)) fail();
@@ -152,20 +153,31 @@ async function objectFormat(gitDir: string): Promise<"sha1" | "sha256"> {
       repositoryFormatVersion = value;
     }
     if (!subsection && section === "extensions" && key === "objectformat") {
-      if (declaredObjectFormat !== undefined) fail();
+      if (declaredObjectFormat !== undefined || extensions.has(key)) fail();
       declaredObjectFormat = value;
+      extensions.set(key, value);
+    } else if (!subsection && section === "extensions") {
+      if (extensions.has(key)) fail();
+      extensions.set(key, value);
     }
   }
 
   const version = repositoryFormatVersion ?? "0";
   if (version !== "0" && version !== "1") fail();
-  if (declaredObjectFormat === undefined) return "sha1";
-  if (version !== "1" || (declaredObjectFormat !== "sha1" && declaredObjectFormat !== "sha256")) fail();
-  return declaredObjectFormat;
+  if (extensions.size > 0 && version !== "1") fail();
+  for (const [key, value] of extensions) {
+    if (key === "objectformat") {
+      if (value !== "sha1" && value !== "sha256") fail();
+    } else if (key === "noop") {
+      if (value !== "true") fail();
+    } else fail();
+  }
+  return declaredObjectFormat ?? "sha1";
 }
 
 function gitConfigValue(raw: string): string {
   let value = "";
+  let meaningfulLength = 0;
   let quoted = false;
   let escaped = false;
   for (let index = 0; index < raw.length; index += 1) {
@@ -175,6 +187,7 @@ function gitConfigValue(raw: string): string {
       const replacement = replacements[character];
       if (replacement === undefined) fail();
       value += replacement;
+      meaningfulLength = value.length;
       escaped = false;
     } else if (character === "\\") {
       escaped = true;
@@ -184,10 +197,11 @@ function gitConfigValue(raw: string): string {
       break;
     } else {
       value += character;
+      if (quoted || !/\s/.test(character)) meaningfulLength = value.length;
     }
   }
   if (quoted || escaped) fail();
-  return value.trimEnd();
+  return value.slice(0, meaningfulLength);
 }
 
 async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<IndexEntry[]> {
@@ -210,6 +224,7 @@ async function readIndex(gitDir: string, algorithm: "sha1" | "sha256"): Promise<
     const fixed = 40 + oidLength + 2;
     if (cursor + fixed > checksumStart) fail();
     const rawMode = bytes.readUInt32BE(cursor + 24);
+    if (rawMode !== 0o100644 && rawMode !== 0o100755 && rawMode !== 0o120000 && rawMode !== 0o160000) fail();
     const objectId = bytes.subarray(cursor + 40, cursor + 40 + oidLength).toString("hex");
     const flags = bytes.readUInt16BE(cursor + 40 + oidLength);
     if (((flags >>> 12) & 3) !== 0) fail();
@@ -349,19 +364,44 @@ async function manifestPaths(root: string, manifest: string): Promise<string[]> 
   return paths;
 }
 
-async function verifyWorktreeEntry(root: string, entry: IndexEntry, algorithm: "sha1" | "sha256"): Promise<void> {
+type WorktreeAdmissionHook = (absolutePath: string) => void | Promise<void>;
+
+async function verifyWorktreeEntry(
+  root: string,
+  entry: IndexEntry,
+  algorithm: "sha1" | "sha256",
+  afterAdmission?: WorktreeAdmissionHook
+): Promise<void> {
   const absolute = join(root, entry.path);
   if (!inside(root, entry.path)) fail();
-  const stat = await lstat(absolute).catch(() => undefined);
-  if (!stat?.isFile() || stat.isSymbolicLink()) fail();
-  const mode = (stat.mode & 0o111) === 0 ? "100644" : "100755";
-  if (mode !== entry.mode) fail();
-  const bytes = await readFile(absolute);
-  const header = Buffer.from(`blob ${bytes.length}\0`, "ascii");
-  if (createHash(algorithm).update(header).update(bytes).digest("hex") !== entry.objectId) fail();
+  const admitted = await lstat(absolute).catch(() => undefined);
+  if (!admitted?.isFile() || admitted.isSymbolicLink()) fail();
+  await afterAdmission?.(absolute);
+  let descriptor: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    descriptor = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const opened = await descriptor.stat();
+    if (!opened.isFile() || opened.isSymbolicLink() || opened.dev !== admitted.dev || opened.ino !== admitted.ino) fail();
+    const mode = (opened.mode & 0o111) === 0 ? "100644" : "100755";
+    if (mode !== entry.mode) fail();
+    const bytes = await descriptor.readFile();
+    const final = await descriptor.stat();
+    if (final.dev !== opened.dev || final.ino !== opened.ino || final.size !== bytes.length) fail();
+    const header = Buffer.from(`blob ${bytes.length}\0`, "ascii");
+    if (createHash(algorithm).update(header).update(bytes).digest("hex") !== entry.objectId) fail();
+  } catch (error) {
+    if (error instanceof ContractError) throw error;
+    fail();
+  } finally {
+    await descriptor?.close().catch(() => undefined);
+  }
 }
 
-export async function checkCurrentSourceAuthority(repositoryRoot: string, manifest: string): Promise<void> {
+async function checkCurrentSourceAuthorityWithHook(
+  repositoryRoot: string,
+  manifest: string,
+  afterAdmission?: WorktreeAdmissionHook
+): Promise<void> {
   const root = resolve(repositoryRoot);
   const stat = await lstat(root).catch(() => undefined);
   if (!stat?.isDirectory() || stat.isSymbolicLink()) fail();
@@ -373,12 +413,25 @@ export async function checkCurrentSourceAuthority(repositoryRoot: string, manife
   const trackedPaths = tracked.map((entry) => entry.path);
   if (!canonicalEqualStrings(declared, trackedPaths)) fail();
   if (!canonicalEqualStrings(filesystemCandidates, trackedPaths)) fail();
-  for (const entry of tracked) await verifyWorktreeEntry(root, entry, algorithm);
+  for (const entry of tracked) await verifyWorktreeEntry(root, entry, algorithm, afterAdmission);
   validateContractMetadata(await readBoundedFile(join(root, CONTRACT_METADATA), SOURCE_METADATA_PROFILE.bytes));
   validateSyntheticOracle(
     await readBoundedFile(join(root, SYNTHETIC_FRAME), SOURCE_METADATA_PROFILE.bytes),
     await readBoundedFile(join(root, SYNTHETIC_SIDECAR), SOURCE_METADATA_PROFILE.bytes)
   );
+}
+
+export async function checkCurrentSourceAuthority(repositoryRoot: string, manifest: string): Promise<void> {
+  await checkCurrentSourceAuthorityWithHook(repositoryRoot, manifest);
+}
+
+/** Deterministic descriptor-race seam for contract tests; production callers use checkCurrentSourceAuthority. */
+export async function checkCurrentSourceAuthorityForTest(
+  repositoryRoot: string,
+  manifest: string,
+  afterAdmission: WorktreeAdmissionHook
+): Promise<void> {
+  await checkCurrentSourceAuthorityWithHook(repositoryRoot, manifest, afterAdmission);
 }
 
 function canonicalEqualStrings(left: readonly string[], right: readonly string[]): boolean {

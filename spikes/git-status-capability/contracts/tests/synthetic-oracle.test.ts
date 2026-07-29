@@ -89,7 +89,7 @@ describe("exact source_input_digest_v1 synthetic oracle", () => {
   });
 
   test("encoder rejects unsafe, duplicate, and unsupported entries", () => {
-    for (const path of ["/absolute", "../escape", "dot/./path", "back\\slash", ""])
+    for (const path of ["/absolute", "../escape", "dot/./path", "back\\slash", "cr\rpath", "lf\npath", ""])
       expect(() => encodeSourceInputFrame([{ path, gitMode: "100644", content: new Uint8Array() }])).toThrow();
     expect(() => encodeSourceInputFrame([
       { path: "same", gitMode: "100644", content: new Uint8Array() },

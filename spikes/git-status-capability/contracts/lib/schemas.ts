@@ -25,7 +25,7 @@ function gitObject(value: unknown): value is string {
 }
 
 function relativePath(value: unknown): value is string {
-  if (typeof value !== "string" || !value || value.includes("\0") || value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
+  if (typeof value !== "string" || !value || value.includes("\0") || value.includes("\r") || value.includes("\n") || value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
   return value.split("/").every((part) => part && part !== "." && part !== "..") && posix.normalize(value) === value;
 }
 

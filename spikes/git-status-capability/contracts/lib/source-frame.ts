@@ -17,7 +17,7 @@ export const SYNTHETIC_ENTRIES: readonly SourceFrameEntry[] = Object.freeze([
 ]);
 
 function canonicalPathBytes(path: string): Buffer {
-  if (!path || path.includes("\0") || path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:/.test(path)) {
+  if (!path || path.includes("\0") || path.includes("\r") || path.includes("\n") || path.includes("\\") || path.startsWith("/") || /^[A-Za-z]:/.test(path)) {
     throw new TypeError("SOURCE_PATH_INVALID");
   }
   if (path.split("/").some((part) => !part || part === "." || part === "..")) throw new TypeError("SOURCE_PATH_INVALID");

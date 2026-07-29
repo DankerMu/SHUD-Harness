@@ -913,8 +913,8 @@ Git authority, state, collector, native runtime, network, or production surfaces
 | Risk pack | Selection | Evidence obligation |
 |---|---|---|
 | Public API / CLI / script entry | Selected | Direct and current-check argv, exit, stdout, stderr, repeatability |
-| Config / project setup | Not selected | No config discovery or project setup changes |
-| File IO / path safety / overwrite | Selected | Bounded regular-file reads, canonical manifest/golden paths, no writes or ambient reopen |
+| Config / project setup | Selected | Common Git config is parsed fail-closed for repository format/object format and explicitly supported repository extensions; normal/linked SHA-1/SHA-256 plus hostile config fixtures exercise the public seam |
+| File IO / path safety / overwrite | Selected | Bounded contract-ingress and metadata reads, canonical manifest/golden paths, descriptor-bound no-follow candidate admission, no writes or ambient pathname reopen; aggregate candidate traversal/read budgets remain owned by Task 1.1e / #162 |
 | Schema / columns / units / field names | Selected | Strict source schema, Unicode scalar rules, exact SHA peer names and framing fields |
 | Auth / permissions / secrets | Not selected | No credential or product authorization surface |
 | Concurrency / shared state / ordering | Not selected | Stable build/source workspace; only deterministic repeat is asserted |
@@ -953,6 +953,9 @@ Regression rows:
 - Source and metadata node exact/+1 inputs exercise the isolated parser with the declared node ceiling unchanged and only the dominated item ceiling relaxed; exact continues and +1 returns `CONTRACT_JSON_NODE_LIMIT`.
 - `source-identity-projection-v1.json` with all four SHA peers equal -> deterministic identity success; each independent or synchronized strict-subset forgery -> `CONTRACT_SCHEMA_INVALID` and no success output.
 - Exact three-entry/152-byte synthetic frame + literal digest -> current-source success; 58-byte truncation or same-length mutation with recomputed sidecar -> `CONTRACT_SCHEMA_INVALID`.
+- Normal/linked SHA-1/SHA-256 repositories accept only explicitly supported common-config extension semantics; unknown/duplicate/invalid extensions and quoted object-format whitespace fail closed.
+- Every v2/v3/v4 index entry has a legal mode before candidate filtering; legal noncandidate symlink/gitlink entries remain admitted while checksum-rehashed illegal modes fail closed.
+- Worktree candidates are admitted, identity-checked and hashed through one no-follow descriptor; deterministic symlink/foreign-inode replacement and CR/LF path identities fail closed.
 - Invalid UTF-8 -> `CONTRACT_UTF8_INVALID`; lone/reversed/mismatched escaped surrogate -> `CONTRACT_JSON_MALFORMED`; public source byte/depth/item bound+1 -> its named limit code, all with exact failure I/O.
 - Unchanged future-owned input kind -> rejected as unsupported in 1.1a or consumed only through its named source-identity projection; no semantic state, process, or publication behavior appears.
 
@@ -969,7 +972,8 @@ Exact verification commands:
 - Capture `git status --porcelain=v1 --untracked-files=all` bytes immediately before and after each public command and require byte identity; `current-source-authority.test.ts` additionally instruments child-process APIs and requires zero child/helper invocation.
 - `test -z "$(git stash list --format='%gd %s' | rg 'red-proof')"`
 
-Boundary-surface checklist: public entrypoints, bounded read surfaces, canonical
+Boundary-surface checklist: public entrypoints, bounded contract-ingress and
+metadata read surfaces, descriptor-bound current-source reads, canonical
 producer/consumer evidence boundary, stale/mismatched identity, no-write failure
 paths, and unchanged downstream contract consumers are in scope. Write/delete,
 staging/publish/rollback, shared runtime helpers, network, and production consumers

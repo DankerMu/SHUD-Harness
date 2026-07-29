@@ -158,4 +158,19 @@ describe("strict source ingress", () => {
       expect(await capture(args)).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
     }
   });
+
+  test("source input records reject CR and LF path identities", async () => {
+    const valid = JSON.parse(await sourceText());
+    for (const path of ["cr\r.json", "lf\n.json"]) {
+      const changed = structuredClone(valid);
+      changed.admitted_paths[0] = path;
+      changed.primary_result.admitted_paths[0] = path;
+      changed.witness_result.admitted_paths[0] = path;
+      await withTemporaryFile(JSON.stringify(changed), async (input) => {
+        expect(await capture(["--input", input, "--kind", "source_input_record"])).toEqual({
+          exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID")
+        });
+      });
+    }
+  });
 });
