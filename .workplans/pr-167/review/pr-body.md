@@ -22,10 +22,10 @@ network-security behavior.
 
 ## Verification
 
-- final retained-slice mutation replay — 16 pass, 8 expected fail, 145
-  assertions, exit 1; restored fixed source — 24 pass, 0 fail, 179 assertions
-- `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests` — 24
-  pass, 0 fail, 179 assertions
+- final retained-slice mutation replay — 14 pass, 14 expected fail, 138
+  assertions, exit 1; restored complete contracts tree — 28 pass, 0 fail, 203 assertions
+- `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests` — 28
+  pass, 0 fail, 203 assertions
 - all three frozen public checker commands — exact success receipts
 - `npx --yes @fission-ai/openspec@1.3.1 validate m2-capability-observer-spike
   --strict --no-interactive` — valid
@@ -41,6 +41,10 @@ Git/index/filesystem authority from #164 and routing it to #166, without
 implementing #166 here. Exact depth/item fixtures now explicitly prove limit
 reachability and may finish at schema validation; the previously approved
 node/item option 1 is unchanged.
+
+Phase 6.2 on `5fb069a` verified two P1 closures: retained input paths now use
+descriptor-bound `openat` traversal with `O_NOFOLLOW`, and final behavior evidence
+binds the complete contracts/test/helper/fixture/golden tree.
 
 ## Review state
 

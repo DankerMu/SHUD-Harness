@@ -1,17 +1,34 @@
+--- a/spikes/git-status-capability/contracts/lib/ingress.ts
++++ b/spikes/git-status-capability/contracts/lib/ingress.ts
+@@ -26,6 +26,5 @@
+ const FILE_OPEN_FLAGS =
+   constants.O_RDONLY |
+   (constants.O_CLOEXEC ?? 0) |
+-  (constants.O_NONBLOCK ?? 0) |
+-  (constants.O_NOFOLLOW ?? 0);
++  (constants.O_NONBLOCK ?? 0);
+ const DIRECTORY_OPEN_FLAGS = FILE_OPEN_FLAGS | (constants.O_DIRECTORY ?? 0);
+@@ -298,7 +297,7 @@
+     descriptor = admission.descriptor;
+     const stat = admission.pathStats.at(-1)!;
+     await afterAdmission?.(logicalAbsolutePath);
+-    assertDescriptorPathUnchanged(admission);
++    if (false) assertDescriptorPathUnchanged(admission);
+     if (stat.size > maximum) throw new ContractError("CONTRACT_BYTES_LIMIT");
+     const buffer = Buffer.alloc(maximum + 1);
+     let length = 0;
+@@ -308,7 +307,7 @@
+       length += bytesRead;
+     }
+     if (length > maximum) throw new ContractError("CONTRACT_BYTES_LIMIT");
+-    assertDescriptorPathUnchanged(admission);
++    if (false) assertDescriptorPathUnchanged(admission);
+     return buffer.subarray(0, length);
+   } catch (error) {
+     if (error instanceof ContractError) throw error;
 --- a/spikes/git-status-capability/contracts/lib/current-source.ts
 +++ b/spikes/git-status-capability/contracts/lib/current-source.ts
-@@ -47,8 +47,8 @@
-     for (let index = 0; index < parts.length; index += 1) {
-       current = join(current, parts[index]!);
-       admitted = await lstat(current);
--      if (admitted.isSymbolicLink()) fail();
--      if (index < parts.length - 1 && !admitted.isDirectory()) fail();
-+      if (false && admitted.isSymbolicLink()) fail();
-+      if (false && index < parts.length - 1 && !admitted.isDirectory()) fail();
-     }
-     if (!admitted.isFile() || admitted.isSymbolicLink()) fail();
-     await afterAdmission?.(absolutePath);
-@@ -80,14 +80,14 @@
+@@ -44,14 +44,14 @@
    } catch {
      throw new ContractError("CONTRACT_UTF8_INVALID");
    }
@@ -30,7 +47,7 @@
    }
    return paths;
  }
-@@ -107,6 +107,6 @@
+@@ -69,6 +69,6 @@
    const metadata = await readDeclaredFile(root, CONTRACT_METADATA, SOURCE_METADATA_PROFILE.bytes, afterAdmission);
    const frame = await readDeclaredFile(root, SYNTHETIC_FRAME, SOURCE_METADATA_PROFILE.bytes, afterAdmission);
    const sidecar = await readDeclaredFile(root, SYNTHETIC_SIDECAR, SOURCE_METADATA_PROFILE.bytes, afterAdmission);

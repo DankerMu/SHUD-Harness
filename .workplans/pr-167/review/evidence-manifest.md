@@ -1,11 +1,12 @@
 # PR #167 evidence manifest
 
-Current implementation state: user-approved Round 4 breadth split, pending commit
-Last pushed head SHA: `64f548385c9cf3bd6cd7fff3bf244641827a4d61`
+Current implementation commit: `6b474b4f78295cab8df59a785913955729943640`
+Current contracts tree: `db1a3a878b1fcef37e0fc90e08e07637adda7e5d`
+Evidence carrier: the pushed HEAD containing this manifest; it changes no contracts-tree bytes
 Base SHA: `f8b74e724dc978acb889f715a936feabfd69680d`
 Issue: #164
 Fixture: expanded; repair intensity high
-Review state: Round 4 not clean; breadth retro registered and approved; final Round 5 pending
+Review state: Phase 6.2 at `5fb069a` not clean; two verified P1 closures implemented; final Phase 6.2 re-audit pending before Round 5
 
 ## Current retained scope
 
@@ -28,11 +29,11 @@ succeeds. This preserves the previously approved node/item option 1.
 
 ## Definitive local evidence
 
-- Final retained-slice mutation replay: 16 pass / 8 expected fail / 145
-  assertions / exit 1; patch reversal restored all recorded source blobs; green
-  replay: 24 pass / 0 fail / 179 assertions. See
+- Final retained-slice mutation replay: 14 pass / 14 expected fail / 138
+  assertions / exit 1; patch reversal restored the complete contracts tree;
+  green replay: 28 pass / 0 fail / 203 assertions. See
   `red-proof-final-retained-slice.md`.
-- Focused contracts: 24 pass / 0 fail / 179 assertions.
+- Focused contracts: 28 pass / 0 fail / 203 assertions.
 - Three frozen public commands: exact success receipts.
 - Strict OpenSpec validation: valid.
 - Full repository check: exit 0.
@@ -54,6 +55,9 @@ history but explicitly superseded; they do not support current PR claims.
   the ownership split above. Gate is unlocked for one final comprehensive Round
   5. If Round 5 is not clean, the retry ceiling is reached and no ordinary
   repair round may continue.
+- Phase 6.2 at `5fb069a`: two P1 findings verified CONFIRMED/FIX_NOW. Descriptor-
+  bound ingress closure is `6b474b4`; stale/tree-binding evidence is refreshed
+  in this carrier. Final retained-slice Phase 6.2 re-audit is pending.
 
 Reviewer lens mix: correctness, integration, resource/path/performance,
 test/evidence, spec compliance, invariant/state/compatibility.
