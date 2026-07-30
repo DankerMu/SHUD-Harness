@@ -6,10 +6,21 @@ import { join } from "node:path";
 import ts from "typescript";
 import { AUTHORITY_PROOF_REGISTRY, AUTHORITY_PROOF_ROWS } from "./authority-vocabulary";
 import type { AuthorityProofRow } from "./authority-vocabulary";
+import {
+  authorityControlLifecycleTopologyViolations,
+  authorityPreloadTopologyViolations,
+  ffiCloseBypassSource,
+  ffiDlopenBypassSource,
+  globalCloseResolveBypassSource,
+  pathApplyBypassSource,
+  workerConstructBypassSource
+} from "./authority-topology";
 
 const contractsRoot = join(import.meta.dir, "..");
 const productionCheckPath = join(contractsRoot, "check.ts");
 const productionLibPath = join(contractsRoot, "lib");
+const authorityPreloadPath = join(import.meta.dir, "authority-preload.ts");
+const authorityControlPath = join(import.meta.dir, "authority-control.ts");
 
 const EXPECTED_AUTHORITY_PROOF_VERSION = "shud.contract.authority-proof.v2";
 const EXPECTED_AUTHORITY_PROOF_ROW_COUNT = 55;
@@ -263,6 +274,7 @@ function structuralAuthorityViolations(relative: string, text: string): string[]
   return [...violations].sort();
 }
 
+
 function injectProductionMutation(source: string, row: AuthorityProofRow): string {
   const firstLineEnd = source.indexOf("\n");
   if (firstLineEnd < 0) throw new Error("CHECK_ENTRYPOINT_MISSING_SHEBANG_LINE");
@@ -316,6 +328,35 @@ describe("source-ingress authority structural proof", () => {
     for (const [relative, source] of Object.entries(sources)) {
       expect(structuralAuthorityViolations(relative, source)).toEqual([]);
     }
+  });
+
+  test("pins the independent authority preload delegate topology", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    expect(authorityPreloadTopologyViolations(preloadSource)).toEqual([]);
+  });
+
+  test("rejects direct authority preload delegate bypasses without invoking runtime proof", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+
+    expect(authorityPreloadTopologyViolations(workerConstructBypassSource(preloadSource)))
+      .toContain("worker_construct_outside_delegateWorkerConstruct");
+    expect(authorityPreloadTopologyViolations(pathApplyBypassSource(preloadSource)))
+      .toContain("path_original_apply_outside_delegatePathFunction_or_delegateChildProcess");
+    expect(authorityPreloadTopologyViolations(ffiDlopenBypassSource(preloadSource)))
+      .toContain("ffi_dlopen_outside_delegateFfiDlopen");
+    expect(authorityPreloadTopologyViolations(ffiCloseBypassSource(preloadSource)))
+      .toContain("ffi_close_outside_delegateFfiClose");
+  });
+
+  test("pins the independent authority-control worker lifecycle topology", async () => {
+    const controlSource = await readFile(authorityControlPath, "utf8");
+    expect(authorityControlLifecycleTopologyViolations(controlSource)).toEqual([]);
+  });
+
+  test("rejects immediate global worker close completion without invoking runtime proof", async () => {
+    const controlSource = await readFile(authorityControlPath, "utf8");
+    expect(authorityControlLifecycleTopologyViolations(globalCloseResolveBypassSource(controlSource)))
+      .toContain("global_close_resolve_outside_close_callback");
   });
 
   test("compiles every hostile mutation in the real check entrypoint before its independent AST rejection", async () => {

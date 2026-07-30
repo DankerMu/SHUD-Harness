@@ -193,7 +193,9 @@ describe("source-ingress authority runtime proof", () => {
               channel: "global",
               entry: AUTHORITY_WORKER_ENTRY,
               inputBytes: inputBytes.byteLength,
-              sentinelBytes: AUTHORITY_WORKER_ENTRY
+              sentinelBytes: AUTHORITY_WORKER_ENTRY,
+              termination: "close",
+              cleanup: "complete"
             },
             {
               route: "node_worker_threads",
@@ -201,7 +203,9 @@ describe("source-ingress authority runtime proof", () => {
               channel: "parent_port",
               entry: AUTHORITY_WORKER_ENTRY,
               inputBytes: inputBytes.byteLength,
-              sentinelBytes: AUTHORITY_WORKER_ENTRY
+              sentinelBytes: AUTHORITY_WORKER_ENTRY,
+              termination: "exit",
+              cleanup: "complete"
             },
             {
               route: "bare_worker_threads",
@@ -209,7 +213,9 @@ describe("source-ingress authority runtime proof", () => {
               channel: "parent_port",
               entry: AUTHORITY_WORKER_ENTRY,
               inputBytes: inputBytes.byteLength,
-              sentinelBytes: AUTHORITY_WORKER_ENTRY
+              sentinelBytes: AUTHORITY_WORKER_ENTRY,
+              termination: "exit",
+              cleanup: "complete"
             }
           ]
         }

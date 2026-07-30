@@ -265,8 +265,11 @@ global, `Object`, element-access, and binding baselines. Any unlisted
 Object/property-descriptor, element-access, binding, static/dynamic/computed
 loader, `eval`/`Function`, Worker, `.constructor`, alternate module declaration,
 filesystem, FFI, child-process, or write authority vocabulary SHALL be rejected
-without arbitrary-string constant folding. It SHALL run without the active
-preload.
+without arbitrary-string constant folding. It SHALL NOT execute the active
+preload or control. It SHALL separately parse those exact harness sources as
+data, permit OS/realm delegate calls only inside their named helpers, bind
+normal/inversion denial order and Worker close/exit/cleanup order, and reject
+direct-delegate or lifecycle-wait bypass mutations without invoking runtime.
 
 The active layer SHALL run every registry control after admission with no
 structural scan. It SHALL independently deny actual Node/Bun/FFI/child-process
@@ -275,8 +278,10 @@ construction before a new realm, worker entry, ambient read, FFI load, child
 start, or write. Raw-operation state SHALL sit beneath forbidden Node/Bun
 read/open/file, FFI load, child/spawn, and Worker delegation through named
 real-delegate helpers that record raw events immediately before their original
-call; normal guards SHALL deny before entering those helpers, and every denial row
-and direct success SHALL report zero raw events. Cached Worker aliases SHALL be
+call; normal guards SHALL deny before entering those helpers, and every denial
+row and direct success SHALL report zero raw events. The independent structural
+topology oracle SHALL make those delegate boundaries exclusive rather than
+accepting their runtime self-report alone. Cached Worker aliases SHALL be
 acquired only after the preload installs guarded constructors. A bounded
 admission-phase sequence of message-configured Worker canaries SHALL pass no
 `workerData`: direct global, `node:worker_threads`, and bare `worker_threads`
@@ -289,21 +294,20 @@ route. The direct global route SHALL use `global`, while Node/bare routes SHALL
 use `parent_port`. The fixture SHALL install both handlers, reply ready only to a
 same-channel probe, accept configuration only from the actual `global` or
 `parent_port` handler matching that channel, report `transport: "message"`, and
-reply only on that same channel without fallback. The real Worker delegate SHALL
-record raw delegation immediately before `Reflect.construct`, so a
-construct-before-deny regression reports a nonzero raw event even when the
-synchronous denial prevents configuration and sentinel creation. Together with
-the positive same-URL/message/channel canaries, that raw oracle SHALL prevent an
-absent-sentinel false green. Each route SHALL prove
-entry, input read, sentinel write, termination, and per-route sentinel cleanup
-before the untouched post-admission
-matrix. Bounded raw-read and raw-FFI inversion canaries SHALL arm only their
-matching registered mode and invoke the same patched public wrapper/delegate as
-hostile rows, deliberately record raw delegation before the same denial; FFI cleanup
-SHALL record raw close at its underlying close boundary, close the loaded library,
-and clear the matching mode in finally before temporary resources are cleaned.
-Exact guard events, absent worker/read/write/spawn sentinels, and byte-identical
-input/replacement files SHALL prove the ordering.
+reply only on that same channel without fallback. After the entry receipt, the
+direct global host SHALL register a `close` listener before `terminate()` and
+boundedly await that lifecycle event; Node/bare hosts SHALL boundedly await their
+promise-returning terminate/exit completion. Only after termination completion
+SHALL each route remove and verify absence of its sentinel, record exact
+`termination: "close"|"exit"` plus `cleanup: "complete"`, and start the next
+route or untouched post-admission matrix. Bounded raw-read and raw-FFI inversion
+canaries SHALL arm only their matching registered mode and invoke the same
+patched public wrapper/delegate as hostile rows, deliberately record raw
+delegation before the same denial; FFI cleanup SHALL record raw close at its
+underlying close boundary, close the loaded library, and clear the matching mode
+in finally before temporary resources are cleaned. Exact guard events, absent
+worker/read/write/spawn sentinels, and byte-identical input/replacement files
+SHALL prove the ordering.
 
 The focused command SHALL be exactly
 `bun test contracts/tests/authority-structural.test.ts contracts/tests/authority-runtime.test.ts`;
@@ -326,6 +330,8 @@ SHALL be mirrored into tracked
   focused/full, both direct commands, typecheck, full repository check, strict
   OpenSpec, hygiene, scope/untracked, and submodule results, plus independently
   recomputed 529 assertions and exact 5,100/5,116-byte boundaries;
+- `round-2-false-green-proof.md` with the Round 2 pre-fix false-green and
+  post-fix red mutation outcomes plus exact patch lengths and SHA-256 identities;
 - `manifest.json` with every relative path, length, media type, SHA-256, retrieval
   command, and the common `PROOF_SHA`.
 
@@ -349,8 +355,13 @@ never rewritten; corrections appear only in new #172 evidence.
 
 #### Scenario: Raw probes and Worker fixture establish live negative oracles
 
-- **WHEN** a bounded admission-phase sequence of message-configured Worker canaries passes no `workerData`, runs direct global, `node:worker_threads`, and bare `worker_threads` routes sequentially with the same fixed fixture URL and one-argument construction as hostile routes, attaches receipt/error listeners, sends an immediate `probe` plus short bounded retries through the constructed Worker's `postMessage`, sends the same input/sentinel/channel configuration exactly once only after a route-matching ready reply, permits only `global` for the direct global route and `parent_port` for Node/bare routes, and the real Worker delegate records raw delegation immediately before `Reflect.construct`
-- **THEN** the Worker receipt proves each sequential route's exact `transport: "message"` and actual channel, entry, input read, sentinel bytes, termination, and per-route cleanup; a construct-before-deny regression reports its raw Worker delegation even if synchronous denial prevents configuration and sentinel creation, so the positive same-URL/message/channel canary plus the zero-raw hostile oracle prevents a missing receipt or absent sentinel from masking the real construct path; each raw inversion records its independent raw event, the FFI library closes and its mode clears in finally, temporary resources are removed, and every direct-success or hostile denial payload has zero raw events
+- **WHEN** a bounded admission-phase sequence of message-configured Worker canaries passes no `workerData`, runs direct global, `node:worker_threads`, and bare `worker_threads` routes sequentially with the same fixed fixture URL and one-argument construction as hostile routes, attaches receipt/error listeners, sends an immediate `probe` plus short bounded retries through the constructed Worker's `postMessage`, sends the same input/sentinel/channel configuration exactly once only after a route-matching ready reply, permits only `global` for the direct global route and `parent_port` for Node/bare routes, registers a global `close` listener before `terminate()`, and boundedly awaits global close or Node/bare terminate/exit completion
+- **THEN** each route receipt proves exact `transport: "message"`, actual channel, entry, input read, sentinel bytes, `termination: "close"|"exit"`, and `cleanup: "complete"` only after sentinel absence; the independent topology oracle rejects any `Reflect.construct`, read/FFI delegate, FFI close, or lifecycle-wait bypass outside its named helper/order; each raw inversion records its independent raw event, the FFI library closes and its mode clears in finally, temporary resources are removed, and every direct-success or hostile denial payload has zero raw events
+
+#### Scenario: A proof-harness helper or lifecycle wait is bypassed
+
+- **WHEN** a compiling preload/control mutation directly invokes Worker construction, path/FFI delegation, or FFI close outside its named helper, or reports global termination without awaiting the registered close event
+- **THEN** the syntax-aware structural topology proof rejects that exact bypass without executing or borrowing success from the runtime layer
 
 #### Scenario: One proof layer is disabled
 

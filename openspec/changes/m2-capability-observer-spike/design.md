@@ -1005,7 +1005,13 @@ imports/globals, static/dynamic/computed loader, `eval`/`Function`, Worker,
 `.constructor` or computed-constructor access, alternate module declaration,
 filesystem, FFI, child-process, or write authority vocabulary. Every registry
 mutation is injected into a real production module and compiled with Bun 1.2.19
-before the scanner rejects it. This run does not load `authority-preload.ts`.
+before the scanner rejects it. This run does not execute `authority-preload.ts`
+or `authority-control.ts`; it separately parses those exact harness sources as
+data, permits `Reflect.construct`, path/child `original.apply`, `originalDlopen`,
+and FFI `library.close` only inside their named real-delegate helpers, and binds
+normal/inversion denial order plus Worker close/exit/cleanup order. In-memory
+direct-delegate and lifecycle-wait bypass mutations must fail this topology
+oracle without invoking the runtime proof.
 
 #172.B owns `contracts/tests/{authority-runtime.test.ts,authority-control.ts,
 authority-preload.ts,authority-worker.ts}` and consumes A's registry without
@@ -1018,8 +1024,10 @@ zero raw events. Bounded read and FFI inversion modes are limited to their
 matching registered controls and route through the same patched public
 wrapper/delegate as hostile rows; they deliberately delegate once, observe raw
 events, close the FFI library and clear mode in finally, preserve the same
-intentional denial/control-error, and clean their temporary root. Cached aliases
-are captured only after the preload has installed guarded constructors. A separate
+intentional denial/control-error, and clean their temporary root. The
+independent structural topology oracle makes those helper boundaries exclusive
+rather than accepting their runtime self-report alone. Cached aliases are
+captured only after the preload has installed guarded constructors. A separate
 bounded admission-phase sequence of message-configured Worker canaries passes no
 `workerData`: direct global, `node:worker_threads`, and bare `worker_threads`
 routes construct only the fixed `authority-worker.ts` URL. The shared entry helper
@@ -1032,12 +1040,15 @@ Node/bare routes. The fixture installs both handlers, replies ready only to a
 same-channel probe, accepts only the actual channel matching the configuration,
 records `transport: "message"`, and replies on that same channel rather than a
 fallback. The real Worker delegate records raw delegation immediately before its
-`Reflect.construct`, so a construct-before-deny regression reports a nonzero raw
-event even if synchronous denial prevents configuration and sentinel creation.
-Combined with the positive same-URL/message/channel canaries, that raw oracle
-cannot hide behind an absent sentinel. Each route proves fixture input-read,
-sentinel-write, message liveness, termination, and
-per-route sentinel removal before the unchanged post-admission matrix. It is not a registry row. The active test then invokes every registry control after admission
+`Reflect.construct`; the independent topology oracle forbids any Worker
+construction outside that helper. A construct-before-deny regression therefore
+cannot hide behind an absent sentinel. After each positive receipt, the direct
+global route registers its `close` listener before calling `terminate()` and
+boundedly awaits that event; Node/bare routes boundedly await their
+promise-returning terminate/exit completion. Only then does the host remove and
+verify absence of the per-route sentinel, record exact `termination:
+"close"|"exit"` and `cleanup: "complete"`, and start the next route or unchanged
+post-admission matrix. It is not a registry row. The active test then invokes every registry control after admission
 with no structural scan. Exact normalized guard events, raw-event state, absent
 worker/read/write/spawn sentinels, and byte-identical input/replacement files
 prove ordering rather than merely observing an error.
@@ -1092,6 +1103,8 @@ bundle. Its bounded, reviewable artifacts are mirrored into tracked
   focused/full, direct-command, typecheck, full repository check, strict
   OpenSpec, hygiene, scope/untracked, and submodule results, plus the independently
   recomputed 529 assertions and 5,100/5,116-byte boundaries;
+- `round-2-false-green-proof.md`: the Round 2 pre-fix false-green and post-fix
+  red mutation outcomes, with exact patch lengths and SHA-256 identities;
 - `manifest.json`: exact relative paths, lengths, media types, SHA-256 values,
   retrieval commands, and the common `PROOF_SHA`.
 

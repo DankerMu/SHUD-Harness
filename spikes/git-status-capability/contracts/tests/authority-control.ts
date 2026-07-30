@@ -22,11 +22,16 @@ type DynamicConstructor = (...parameters: string[]) => (...arguments_: unknown[]
 type IteratorStep = Readonly<{ value: unknown }>;
 type WorkerChannel = "global" | "parent_port";
 type WorkerLivenessRoute = "global_direct" | "node_worker_threads" | "bare_worker_threads";
+type WorkerTermination = "close" | "exit";
 type WorkerEntryReceipt = Readonly<{
   entry: typeof AUTHORITY_WORKER_ENTRY;
   inputBytes: number;
   transport: "message";
   channel: WorkerChannel;
+}>;
+type WorkerEntryCompletion = Readonly<{
+  receipt: WorkerEntryReceipt;
+  termination: WorkerTermination;
 }>;
 type WorkerLivenessRouteReceipt = Readonly<{
   route: WorkerLivenessRoute;
@@ -35,6 +40,8 @@ type WorkerLivenessRouteReceipt = Readonly<{
   entry: typeof AUTHORITY_WORKER_ENTRY;
   inputBytes: number;
   sentinelBytes: string;
+  termination: WorkerTermination;
+  cleanup: "complete";
 }>;
 type WorkerLivenessReceipt = Readonly<{
   phase: "admission";
@@ -128,6 +135,7 @@ const control = selectedControl as ControlInvocation;
 const WORKER_FIXTURE_URL = new URL("./authority-worker.ts", import.meta.url);
 
 const WORKER_ENTRY_TIMEOUT_MS = 5_000;
+const WORKER_TERMINATION_TIMEOUT_MS = 5_000;
 const WORKER_READY_RETRY_MS = 25;
 
 const WORKER_LIVENESS_ROUTES = [
@@ -217,6 +225,96 @@ function workerReady(value: unknown): WorkerReadyReceipt | undefined {
   return { state: "ready", channel };
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof value.then === "function"
+  );
+}
+
+async function awaitGlobalWorkerClose(
+  candidate: WorkerLike,
+  terminate: (...arguments_: unknown[]) => unknown
+): Promise<void> {
+  const addEventListener = candidate.addEventListener;
+  const removeEventListener = candidate.removeEventListener;
+  if (typeof addEventListener !== "function" || typeof removeEventListener !== "function") {
+    throw new Error("AUTHORITY_WORKER_CLOSE_LISTENER_UNAVAILABLE");
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(
+      () => rejectOnce(new Error("AUTHORITY_WORKER_TERMINATION_TIMEOUT")),
+      WORKER_TERMINATION_TIMEOUT_MS
+    );
+    function cleanup(): void {
+      clearTimeout(timeout);
+      removeEventListener.call(candidate, "close", close);
+    }
+    function resolveOnce(): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    }
+    function rejectOnce(error: Error): void {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    }
+    function close(): void {
+      resolveOnce();
+    }
+    try {
+      addEventListener.call(candidate, "close", close, { once: true });
+      terminate.call(candidate);
+    } catch (error) {
+      rejectOnce(error instanceof Error ? error : new Error("AUTHORITY_WORKER_TERMINATION_FAILED"));
+    }
+  });
+}
+
+async function awaitNodeWorkerExit(completion: PromiseLike<unknown>): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("AUTHORITY_WORKER_TERMINATION_TIMEOUT")),
+      WORKER_TERMINATION_TIMEOUT_MS
+    );
+    Promise.resolve(completion).then(
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    );
+  });
+}
+
+async function awaitWorkerTermination(
+  candidate: WorkerLike,
+  channel: WorkerChannel
+): Promise<WorkerTermination> {
+  const terminate = candidate.terminate;
+  if (typeof terminate !== "function") throw new Error("AUTHORITY_WORKER_TERMINATION_UNAVAILABLE");
+  if (channel === "global") {
+    await awaitGlobalWorkerClose(candidate, terminate);
+    return "close";
+  }
+  const completion = terminate.call(candidate);
+  if (!isPromiseLike(completion)) {
+    throw new Error("AUTHORITY_WORKER_TERMINATION_PROMISE_UNAVAILABLE");
+  }
+  await awaitNodeWorkerExit(completion);
+  return "exit";
+}
+
+
 
 function workerConstructorFrom(module: unknown): WorkerConstructor {
   if (typeof module !== "object" || module === null || !("Worker" in module) || typeof module.Worker !== "function") {
@@ -230,16 +328,16 @@ async function awaitWorkerEntry(
   worker: unknown,
   inputPath: string,
   workerEntrySentinel: string,
-  channel: WorkerChannel | undefined
-): Promise<WorkerEntryReceipt> {
+  channel: WorkerChannel
+): Promise<WorkerEntryCompletion> {
   const candidate = worker as WorkerLike;
-  const terminate = candidate.terminate;
-  const postMessage = candidate.postMessage;
-  if (typeof terminate !== "function") throw new Error("AUTHORITY_WORKER_TERMINATION_UNAVAILABLE");
-  if (!channel || typeof postMessage !== "function") throw new Error("AUTHORITY_WORKER_CONFIGURATION_UNAVAILABLE");
-  const configuration: WorkerConfiguration = { input: inputPath, sentinel: workerEntrySentinel, channel };
+  if (typeof candidate.terminate !== "function") throw new Error("AUTHORITY_WORKER_TERMINATION_UNAVAILABLE");
+  let terminationStarted = false;
   try {
-    return await new Promise<WorkerEntryReceipt>((resolve, reject) => {
+    const postMessage = candidate.postMessage;
+    if (typeof postMessage !== "function") throw new Error("AUTHORITY_WORKER_CONFIGURATION_UNAVAILABLE");
+    const configuration: WorkerConfiguration = { input: inputPath, sentinel: workerEntrySentinel, channel };
+    const receipt = await new Promise<WorkerEntryReceipt>((resolve, reject) => {
       let settled = false;
       let ready = false;
       const timeout = setTimeout(() => rejectOnce(new Error("AUTHORITY_WORKER_ENTRY_TIMEOUT")), WORKER_ENTRY_TIMEOUT_MS);
@@ -315,8 +413,14 @@ async function awaitWorkerEntry(
       }
       sendProbe();
     });
+    terminationStarted = true;
+    const termination = await awaitWorkerTermination(candidate, channel);
+    return { receipt, termination };
   } finally {
-    await terminate.call(candidate);
+    if (!terminationStarted) {
+      terminationStarted = true;
+      await awaitWorkerTermination(candidate, channel);
+    }
   }
 }
 
@@ -334,20 +438,26 @@ async function runWorkerLivenessCanary(
         : route === "node_worker_threads"
         ? new StaticNodeWorker(WORKER_FIXTURE_URL)
         : new StaticBareWorker(WORKER_FIXTURE_URL);
-      const receipt = await awaitWorkerEntry(worker, inputPath, workerEntrySentinel, channel);
+      const { receipt, termination } = await awaitWorkerEntry(worker, inputPath, workerEntrySentinel, channel);
       const sentinelBytes = await Bun.file(workerEntrySentinel).text();
       if (receipt.inputBytes !== expectedInputBytes) throw new Error("AUTHORITY_WORKER_INPUT_READ_INVALID");
       if (receipt.transport !== "message" || receipt.channel !== channel) {
         throw new Error("AUTHORITY_WORKER_RECEIPT_ROUTE_INVALID");
       }
       if (sentinelBytes !== AUTHORITY_WORKER_ENTRY) throw new Error("AUTHORITY_WORKER_SENTINEL_INVALID");
+      staticNodeFs.rmSync(workerEntrySentinel, { force: true });
+      if (staticNodeFs.existsSync(workerEntrySentinel)) {
+        throw new Error("AUTHORITY_WORKER_SENTINEL_CLEANUP_INCOMPLETE");
+      }
       routes.push({
         route,
         transport: receipt.transport,
         channel: receipt.channel,
         entry: receipt.entry,
         inputBytes: receipt.inputBytes,
-        sentinelBytes
+        sentinelBytes,
+        termination,
+        cleanup: "complete"
       });
     } finally {
       staticNodeFs.rmSync(workerEntrySentinel, { force: true });
@@ -367,7 +477,8 @@ async function attemptForbiddenOperation(
   const workerUrl = WORKER_FIXTURE_URL;
   const workerChannel = workerChannelForControl(selected);
   async function awaitConfiguredWorkerEntry(worker: unknown): Promise<WorkerEntryReceipt> {
-    return await awaitWorkerEntry(worker, inputPath, workerEntrySentinel, workerChannel);
+    if (!workerChannel) throw new Error("AUTHORITY_WORKER_CONFIGURATION_UNAVAILABLE");
+    return (await awaitWorkerEntry(worker, inputPath, workerEntrySentinel, workerChannel)).receipt;
   }
   const childScript = `require("node:fs").writeFileSync(${JSON.stringify(spawnPath)}, "spawned")`;
   switch (selected) {
