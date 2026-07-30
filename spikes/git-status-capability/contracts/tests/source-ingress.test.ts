@@ -278,9 +278,12 @@ describe("descriptor-bound source ingress", () => {
         closeFault: (attempt) => attempt.owner === "verification",
         onCloseAttempt: (attempt) => { verificationFault.push(attempt); }
       })).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
-      expect(verificationFault).toHaveLength(components + 1);
-      expect(verificationFault[0]?.owner).toBe("verification");
-      expect(verificationFault.slice(1).every((attempt) => attempt.owner === "retained")).toBe(true);
+      expect(verificationFault).toHaveLength(3 * components - 2);
+      expect(verificationFault.filter((attempt) => attempt.owner === "verification")).toHaveLength(2 * (components - 1));
+      expect(verificationFault.filter((attempt) => attempt.owner === "retained")).toHaveLength(components);
+      expect(verificationFault.map((attempt) => attempt.ordinal)).toEqual(
+        Array.from({ length: verificationFault.length }, (_, index) => index + 1)
+      );
     }
 
     for (const kind of ["source_input_record", "source_identity_projection"] as const) {
@@ -291,7 +294,7 @@ describe("descriptor-bound source ingress", () => {
           closeFault: (attempt) => attempt.owner === "retained",
           onCloseAttempt: (attempt) => { attempts.push(attempt); }
         })).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_BYTES_LIMIT") });
-        expect(attempts).toHaveLength(2 * components - 1);
+        expect(attempts).toHaveLength(3 * components - 2);
         expect(attempts.filter((attempt) => attempt.owner === "retained")).toHaveLength(components);
       });
 
@@ -310,6 +313,195 @@ describe("descriptor-bound source ingress", () => {
         await rm(directoryRoot, { recursive: true, force: true });
       }
     }
+  });
+  test("cleanup faults wait for both input kinds to select exact semantic receipts", async () => {
+    const baseline = await descriptorCount();
+    const cases = [
+      { bytes: "{", code: "CONTRACT_JSON_MALFORMED", verificationPasses: 2 },
+      {
+        bytes: Uint8Array.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xed, 0xa0, 0x80, 0x7d]),
+        code: "CONTRACT_UTF8_INVALID",
+        verificationPasses: 2
+      },
+      { bytes: '{"x":1,"x":2}', code: "CONTRACT_JSON_DUPLICATE_KEY", verificationPasses: 2 },
+      {
+        bytes: "[".repeat(SOURCE_PROFILE.depth) + "0" + "]".repeat(SOURCE_PROFILE.depth),
+        code: "CONTRACT_JSON_DEPTH_LIMIT",
+        verificationPasses: 2
+      },
+      { bytes: "{}", code: "CONTRACT_SCHEMA_INVALID", verificationPasses: 2 },
+      { bytes: " ".repeat(SOURCE_PROFILE.bytes + 1), code: "CONTRACT_BYTES_LIMIT", verificationPasses: 2 }
+    ] as const;
+    const observed: unknown[] = [];
+    const expected: unknown[] = [];
+
+    for (const [kind, validPath] of [
+      ["source_input_record", validSourcePath],
+      ["source_identity_projection", validIdentityPath]
+    ] as const) {
+      for (const { bytes, code, verificationPasses } of cases) {
+        await withTemporaryFile(bytes, async (path) => {
+          const attempts: CloseAttempt[] = [];
+          const components = componentCount(path);
+          observed.push(await capture(["--input", path, "--kind", kind], {
+            closeFault: (attempt) => attempt.owner === "retained",
+            onCloseAttempt: (attempt) => { attempts.push(attempt); }
+          }));
+          expected.push({ exit: 2, stdout: "", stderr: failure(code) });
+          expect(attempts).toHaveLength(verificationPasses * (components - 1) + components);
+          expect(attempts.filter((attempt) => attempt.owner === "retained")).toHaveLength(components);
+          expect(attempts.map((attempt) => attempt.ordinal)).toEqual(
+            Array.from({ length: attempts.length }, (_, index) => index + 1)
+          );
+        });
+      }
+
+      const attempts: CloseAttempt[] = [];
+      const components = componentCount(validPath);
+      observed.push(await capture(["--input", validPath, "--kind", kind], {
+        closeFault: (attempt) => attempt.owner === "retained",
+        onCloseAttempt: (attempt) => { attempts.push(attempt); }
+      }));
+      expected.push({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+      expect(attempts).toHaveLength(3 * components - 2);
+      expect(attempts.filter((attempt) => attempt.owner === "retained")).toHaveLength(components);
+      expect(attempts.map((attempt) => attempt.ordinal)).toEqual(
+        Array.from({ length: attempts.length }, (_, index) => index + 1)
+      );
+    }
+
+    Bun.gc(true);
+    expect(await descriptorCount()).toBe(baseline);
+    expect(observed).toEqual(expected);
+  });
+  test("second-pass verification cleanup faults wait for exact semantic receipts from both input kinds", async () => {
+    const baseline = await descriptorCount();
+    const cases = [
+      { bytes: "{", code: "CONTRACT_JSON_MALFORMED" },
+      {
+        bytes: Uint8Array.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xed, 0xa0, 0x80, 0x7d]),
+        code: "CONTRACT_UTF8_INVALID"
+      },
+      { bytes: '{"x":1,"x":2}', code: "CONTRACT_JSON_DUPLICATE_KEY" },
+      {
+        bytes: "[".repeat(SOURCE_PROFILE.depth) + "0" + "]".repeat(SOURCE_PROFILE.depth),
+        code: "CONTRACT_JSON_DEPTH_LIMIT"
+      },
+      {
+        bytes: `[${Array.from({ length: SOURCE_PROFILE.items + 1 }, () => "0").join(",")}]`,
+        code: "CONTRACT_JSON_ITEM_LIMIT"
+      },
+      { bytes: "{}", code: "CONTRACT_SCHEMA_INVALID" }
+    ] as const;
+
+    const expectSecondPassCleanupReceipt = async (kind: Kind, path: string, code: string): Promise<void> => {
+      const attempts: CloseAttempt[] = [];
+      const components = componentCount(path);
+      const finalVerificationCloseOrdinal = 2 * (components - 1);
+      const result = await capture(["--input", path, "--kind", kind], {
+        closeFault: (attempt) =>
+          attempt.owner === "verification" && attempt.ordinal === finalVerificationCloseOrdinal,
+        onCloseAttempt: (attempt) => { attempts.push(attempt); }
+      });
+
+      expect(result).toEqual({ exit: 2, stdout: "", stderr: failure(code) });
+      expect(result.stderr.endsWith("\n")).toBe(true);
+      expect(attempts).toHaveLength(3 * components - 2);
+      expect(attempts.filter((attempt) => attempt.owner === "verification")).toHaveLength(2 * (components - 1));
+      expect(attempts.filter((attempt) => attempt.owner === "retained")).toHaveLength(components);
+      expect(attempts[finalVerificationCloseOrdinal - 1]).toEqual(
+        expect.objectContaining({ owner: "verification", ordinal: finalVerificationCloseOrdinal })
+      );
+      expect(attempts.map((attempt) => attempt.ordinal)).toEqual(
+        Array.from({ length: attempts.length }, (_, index) => index + 1)
+      );
+    };
+
+    // A JSON tree has at most items + 1 nodes. Under the frozen option-1
+    // profile, the 512-item ceiling therefore wins before NODE_LIMIT; the
+    // relaxed-profile parser exact/+1 coverage below owns that unreachable direct-kind boundary.
+    for (const [kind, validPath] of [
+      ["source_input_record", validSourcePath],
+      ["source_identity_projection", validIdentityPath]
+    ] as const) {
+      for (const { bytes, code } of cases) {
+        await withTemporaryFile(bytes, async (path) => {
+          await expectSecondPassCleanupReceipt(kind, path, code);
+        });
+      }
+      await expectSecondPassCleanupReceipt(kind, validPath, "CONTRACT_SCHEMA_INVALID");
+    }
+
+    Bun.gc(true);
+    expect(await descriptorCount()).toBe(baseline);
+  });
+  test("first-pass verification cleanup faults wait for exact byte and semantic receipts from both input kinds", async () => {
+    const baseline = await descriptorCount();
+    const cases = [
+      { bytes: " ".repeat(SOURCE_PROFILE.bytes + 1), code: "CONTRACT_BYTES_LIMIT" },
+      { bytes: "{", code: "CONTRACT_JSON_MALFORMED" },
+      {
+        bytes: Uint8Array.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xed, 0xa0, 0x80, 0x7d]),
+        code: "CONTRACT_UTF8_INVALID"
+      },
+      { bytes: '{"x":1,"x":2}', code: "CONTRACT_JSON_DUPLICATE_KEY" },
+      {
+        bytes: "[".repeat(SOURCE_PROFILE.depth) + "0" + "]".repeat(SOURCE_PROFILE.depth),
+        code: "CONTRACT_JSON_DEPTH_LIMIT"
+      },
+      {
+        bytes: `[${Array.from({ length: SOURCE_PROFILE.items + 1 }, () => "0").join(",")}]`,
+        code: "CONTRACT_JSON_ITEM_LIMIT"
+      },
+      { bytes: "{}", code: "CONTRACT_SCHEMA_INVALID" }
+    ] as const;
+
+    const expectFirstPassCleanupReceipt = async (kind: Kind, path: string, code: string): Promise<void> => {
+      const attempts: CloseAttempt[] = [];
+      const components = componentCount(path);
+      const finalFirstVerificationCloseOrdinal = components - 1;
+      const result = await capture(["--input", path, "--kind", kind], {
+        closeFault: (attempt) =>
+          attempt.owner === "verification" && attempt.ordinal === finalFirstVerificationCloseOrdinal,
+        onCloseAttempt: (attempt) => { attempts.push(attempt); }
+      });
+      const verificationAttempts = attempts.filter((attempt) => attempt.owner === "verification");
+      const retainedAttempts = attempts.filter((attempt) => attempt.owner === "retained");
+
+      expect(result).toEqual({ exit: 2, stdout: "", stderr: failure(code) });
+      expect(result.stderr.endsWith("\n")).toBe(true);
+      expect(attempts).toHaveLength(3 * components - 2);
+      expect(verificationAttempts).toHaveLength(2 * (components - 1));
+      expect(retainedAttempts).toHaveLength(components);
+      expect(verificationAttempts.map((attempt) => attempt.ordinal)).toEqual(
+        Array.from({ length: 2 * (components - 1) }, (_, index) => index + 1)
+      );
+      expect(retainedAttempts.map((attempt) => attempt.ordinal)).toEqual(
+        Array.from({ length: components }, (_, index) => 2 * (components - 1) + index + 1)
+      );
+      expect(attempts[finalFirstVerificationCloseOrdinal - 1]).toEqual(
+        expect.objectContaining({ owner: "verification", ordinal: finalFirstVerificationCloseOrdinal })
+      );
+    };
+
+    for (const [kind, validPath] of [
+      ["source_input_record", validSourcePath],
+      ["source_identity_projection", validIdentityPath]
+    ] as const) {
+      for (const { bytes, code } of cases) {
+        await withTemporaryFile(bytes, async (path) => {
+          for (let repeat = 0; repeat < 2; repeat += 1) {
+            await expectFirstPassCleanupReceipt(kind, path, code);
+          }
+        });
+      }
+      for (let repeat = 0; repeat < 2; repeat += 1) {
+        await expectFirstPassCleanupReceipt(kind, validPath, "CONTRACT_SCHEMA_INVALID");
+      }
+    }
+
+    Bun.gc(true);
+    expect(await descriptorCount()).toBe(baseline);
   });
 });
 

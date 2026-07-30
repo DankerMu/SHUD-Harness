@@ -34,8 +34,9 @@ function line(value: Record<string, string>): string {
 async function runCheckWithHooks(args: readonly string[], io: CheckIo, hooks: DescriptorIngressHooks): Promise<number> {
   try {
     const options = parseArgs(args);
-    const bytes = await readBoundedFile(options.input, SOURCE_PROFILE.bytes, hooks);
-    admitSourceInput(options.kind, bytes);
+    await readBoundedFile(options.input, SOURCE_PROFILE.bytes, hooks, (bytes) => {
+      admitSourceInput(options.kind, bytes);
+    });
     io.stdout(line({ schema_version: SUCCESS_SCHEMA, status: "ok", input_kind: options.kind }));
     return 0;
   } catch (error) {

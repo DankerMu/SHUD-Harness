@@ -148,8 +148,10 @@ function openDescriptorBoundPath(
 function verifyRetainedChain(
   admission: DescriptorAdmission,
   capabilities: ContractCapabilities,
-  observe?: DescriptorOperationObserver
-): void {
+  observe?: DescriptorOperationObserver,
+  deferCleanup = false
+): boolean {
+  let cleanupFailed = false;
   for (let index = 0; index < admission.components.length; index += 1) {
     const retained = admission.components[index]!;
     const retainedStats = capabilities.stat(retained.descriptor);
@@ -181,11 +183,18 @@ function verifyRetainedChain(
       try {
         capabilities.close(verificationDescriptor, "verification");
       } catch {
-        if (!verificationPrimary) verificationPrimary = new ContractError("CONTRACT_SCHEMA_INVALID");
+        if (!verificationPrimary) {
+          if (deferCleanup) {
+            cleanupFailed = true;
+          } else {
+            verificationPrimary = new ContractError("CONTRACT_SCHEMA_INVALID");
+          }
+        }
       }
     }
     if (verificationPrimary) throw verificationPrimary;
   }
+  return cleanupFailed;
 }
 
 class StrictJsonParser {
@@ -348,47 +357,51 @@ export function parseBoundedJson(bytes: Uint8Array, profile: IngressProfile): un
 export async function readBoundedFile(
   path: string,
   maximum: number,
-  hooks: DescriptorIngressHooks = {}
+  hooks: DescriptorIngressHooks = {},
+  beforeCleanup?: (bytes: Uint8Array) => void
 ): Promise<Uint8Array> {
   const capabilities = new ContractCapabilities(hooks);
   let admission: DescriptorAdmission | undefined;
   let primary: ContractError | undefined;
   let result: Uint8Array | undefined;
+  let verificationCleanupFailed = false;
   try {
     admission = openDescriptorBoundPath(path, capabilities, hooks.observe);
     const final = admission.components.at(-1)!;
     await hooks.afterAdmission?.(admission.logicalAbsolutePath);
     if (hooks.authorityFault) capabilities.rejectForbidden(hooks.authorityFault, "post_admission");
-    verifyRetainedChain(admission, capabilities, hooks.observe);
-    if (final.stats.size > maximum) throw new ContractError("CONTRACT_BYTES_LIMIT");
-    const buffer = Buffer.alloc(maximum + 1);
-    let length = 0;
-    while (length < buffer.length) {
-      hooks.observe?.({
-        phase: "post_admission",
-        operation: "read_retained",
-        path: final.childName!,
-        descriptor: final.descriptor
-      });
-      const bytesRead = capabilities.readRetained(
-        final.descriptor,
-        buffer,
-        length,
-        buffer.length - length,
-        length,
-        "post_admission"
-      );
-      if (bytesRead === 0) break;
-      length += bytesRead;
+    verificationCleanupFailed = verifyRetainedChain(admission, capabilities, hooks.observe, true);
+    if (final.stats.size <= maximum) {
+      const buffer = Buffer.alloc(maximum + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        hooks.observe?.({
+          phase: "post_admission",
+          operation: "read_retained",
+          path: final.childName!,
+          descriptor: final.descriptor
+        });
+        const bytesRead = capabilities.readRetained(
+          final.descriptor,
+          buffer,
+          length,
+          buffer.length - length,
+          length,
+          "post_admission"
+        );
+        if (bytesRead === 0) break;
+        length += bytesRead;
+      }
+      if (length <= maximum) result = buffer.subarray(0, length);
     }
-    if (length > maximum) throw new ContractError("CONTRACT_BYTES_LIMIT");
-    verifyRetainedChain(admission, capabilities, hooks.observe);
-    result = buffer.subarray(0, length);
+    verificationCleanupFailed = verifyRetainedChain(admission, capabilities, hooks.observe, true) || verificationCleanupFailed;
+    if (!result) throw new ContractError("CONTRACT_BYTES_LIMIT");
+    beforeCleanup?.(result);
   } catch (error) {
     primary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
   } finally {
     const cleanupFailed = admission ? closeAll(capabilities, admission.components) : false;
-    if (!primary && cleanupFailed) primary = new ContractError("CONTRACT_SCHEMA_INVALID");
+    if (!primary && (verificationCleanupFailed || cleanupFailed)) primary = new ContractError("CONTRACT_SCHEMA_INVALID");
   }
   if (primary) throw primary;
   return result!;
