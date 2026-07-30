@@ -17,6 +17,7 @@ import {
 import { admitSourceInput } from "../lib/schemas";
 import {
   capture,
+  checkPath,
   countedItems,
   descriptorCount,
   directCommand,
@@ -31,6 +32,31 @@ import {
 
 type Kind = "source_input_record" | "source_identity_projection";
 type FailureScenario = "upper_symlink" | "parent_symlink" | "ancestor_replacement" | "final_replacement";
+type AuthorityControl =
+  | "node_absolute_open"
+  | "ffi_absolute_open"
+  | "node_replacement_read"
+  | "bun_replacement_read"
+  | "node_write"
+  | "bun_write"
+  | "node_spawn"
+  | "bun_spawn";
+
+const authorityPreloadPath = join(import.meta.dir, "authority-preload.ts");
+const authorityControlPath = join(import.meta.dir, "authority-control.ts");
+
+async function guardedCommand(args: string[]): Promise<{ exit: number; stdout: string; stderr: string }> {
+  const child = Bun.spawn(
+    [process.execPath, "--preload", authorityPreloadPath, ...args],
+    { stdout: "pipe", stderr: "pipe" }
+  );
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  return { exit, stdout, stderr };
+}
 
 function componentCount(path: string): number {
   let absolute = resolve(path);
@@ -176,6 +202,81 @@ describe("descriptor-bound source ingress", () => {
       expect(await capture(["--input", path, "--kind", kind])).toEqual({
         exit: 0, stdout: success(kind), stderr: ""
       });
+    }
+  });
+
+  test("independent preload denies actual Node, Bun, and FFI authority before side effects", async () => {
+    const controls: readonly AuthorityControl[] = [
+      "node_absolute_open",
+      "ffi_absolute_open",
+      "node_replacement_read",
+      "bun_replacement_read",
+      "node_write",
+      "bun_write",
+      "node_spawn",
+      "bun_spawn"
+    ];
+    for (const [kind, input] of [
+      ["source_input_record", validSourcePath],
+      ["source_identity_projection", validIdentityPath]
+    ] as const) {
+      expect(await guardedCommand([checkPath, "--input", input, "--kind", kind])).toEqual({
+        exit: 0, stdout: success(kind), stderr: ""
+      });
+      const root = await mkdtemp(join(tmpdir(), "shud-source-authority-"));
+      const replacement = join(root, "replacement.json");
+      const replacementBytes = Buffer.from('{"replacement":"must-not-be-read"}');
+      const inputBytes = await readFile(input);
+      await writeFile(replacement, replacementBytes);
+      try {
+        const observed: unknown[] = [];
+        const expected: unknown[] = [];
+        for (const control of controls) {
+          const sentinel = join(root, `${control}.sentinel`);
+          const result = await guardedCommand([
+            authorityControlPath, kind, input, control, replacement, sentinel
+          ]);
+          const payload = JSON.parse(result.stdout) as {
+            exit: number; stdout: string; stderr: string; events: string[];
+          };
+          const operation = control
+            .replace("node_absolute_open", "node_open")
+            .replace("ffi_absolute_open", "ffi_open")
+            .replace("node_replacement_read", "node_read")
+            .replace("bun_replacement_read", "bun_file");
+          const target = control.endsWith("absolute_open") ? input
+            : control.endsWith("replacement_read") ? replacement
+            : control.endsWith("write") ? sentinel
+            : "";
+          observed.push({
+            processExit: result.exit,
+            processStderr: result.stderr,
+            payload,
+            sentinelExists: await Bun.file(sentinel).exists(),
+            replacementUnchanged: (await readFile(replacement)).equals(replacementBytes),
+            inputUnchanged: (await readFile(input)).equals(inputBytes)
+          });
+          expected.push({
+            processExit: 0,
+            processStderr: "",
+            payload: {
+              exit: 2,
+              stdout: "",
+              stderr: failure("CONTRACT_SCHEMA_INVALID"),
+              events: [
+                `${operation}:${target}`,
+                `control_error:CONTRACT_TEST_AUTHORITY_DENIED:${operation}`
+              ]
+            },
+            sentinelExists: false,
+            replacementUnchanged: true,
+            inputUnchanged: true
+          });
+        }
+        expect(observed).toEqual(expected);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     }
   });
 
@@ -372,20 +473,33 @@ describe("normalized source record and frozen capacity", () => {
     expectCode(() => parseBoundedJson(nodes(SOURCE_PROFILE.nodes + 1), profile), "CONTRACT_JSON_NODE_LIMIT");
   });
 
-  test("a missing array value after comma is malformed before item or node accounting", async () => {
-    const itemBoundary = `[${Array.from({ length: SOURCE_PROFILE.items }, () => "0").join(",")},]`;
+  test("malformed array values and object members override pending item or node limits", async () => {
+    const nodeBoundary =
+      `[${Array.from({ length: SOURCE_PROFILE.nodes - 1 }, () => "0").join(",")},"unterminated]`;
+    const cases = [
+      `[${Array.from({ length: SOURCE_PROFILE.items }, () => "0").join(",")},]`,
+      `[${Array.from({ length: SOURCE_PROFILE.items }, () => "0").join(",")},truX]`,
+      `{${Array.from({ length: SOURCE_PROFILE.items }, (_, index) => `"k${index}":0`).join(",")},"tail"}`,
+      nodeBoundary
+    ];
+    const observed: unknown[] = [];
+    const expected: unknown[] = [];
     for (const kind of ["source_input_record", "source_identity_projection"] as const) {
-      await withTemporaryFile(itemBoundary, async (path) => {
-        expect(await capture(["--input", path, "--kind", kind])).toEqual({
-          exit: 2, stdout: "", stderr: failure("CONTRACT_JSON_MALFORMED")
+      for (const text of cases) {
+        await withTemporaryFile(text, async (path) => {
+          observed.push(await capture(["--input", path, "--kind", kind]));
+          expected.push({ exit: 2, stdout: "", stderr: failure("CONTRACT_JSON_MALFORMED") });
         });
-      });
+      }
     }
-    const nodeBoundary = Buffer.from(`[${Array.from({ length: SOURCE_PROFILE.nodes - 1 }, () => "0").join(",")},]`);
-    expectCode(
-      () => parseBoundedJson(nodeBoundary, { ...SOURCE_PROFILE, items: SOURCE_PROFILE.nodes }),
-      "CONTRACT_JSON_MALFORMED"
-    );
+    try {
+      parseBoundedJson(Buffer.from(nodeBoundary), { ...SOURCE_PROFILE, items: SOURCE_PROFILE.nodes });
+      observed.push("parsed");
+    } catch (error) {
+      observed.push(error instanceof ContractError ? error.code : "unknown");
+    }
+    expected.push("CONTRACT_JSON_MALFORMED");
+    expect(observed).toEqual(expected);
   });
 
   test("legal depth 12 reaches schema validation and depth 13 returns only the depth limit for both kinds", async () => {

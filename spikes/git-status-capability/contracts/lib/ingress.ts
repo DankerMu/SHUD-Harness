@@ -192,6 +192,7 @@ class StrictJsonParser {
   private cursor = 0;
   private nodes = 0;
   private items = 0;
+  private pendingLimit: ContractErrorCode | undefined;
 
   constructor(private readonly text: string, private readonly profile: IngressProfile) {}
 
@@ -200,13 +201,14 @@ class StrictJsonParser {
     const result = this.value(1);
     this.whitespace();
     if (this.cursor !== this.text.length) this.fail("CONTRACT_JSON_MALFORMED");
+    if (this.pendingLimit) this.fail(this.pendingLimit);
     return result;
   }
 
   private value(depth: number): unknown {
     if (depth > this.profile.depth) this.fail("CONTRACT_JSON_DEPTH_LIMIT");
     this.nodes += 1;
-    if (this.nodes > this.profile.nodes) this.fail("CONTRACT_JSON_NODE_LIMIT");
+    if (this.nodes > this.profile.nodes) this.recordLimit("CONTRACT_JSON_NODE_LIMIT");
     const current = this.text[this.cursor];
     if (current === "{") return this.object(depth);
     if (current === "[") return this.array(depth);
@@ -308,7 +310,11 @@ class StrictJsonParser {
 
   private countItem(): void {
     this.items += 1;
-    if (this.items > this.profile.items) this.fail("CONTRACT_JSON_ITEM_LIMIT");
+    if (this.items > this.profile.items) this.recordLimit("CONTRACT_JSON_ITEM_LIMIT");
+  }
+
+  private recordLimit(code: ContractErrorCode): void {
+    this.pendingLimit ??= code;
   }
 
   private take(token: string): boolean {

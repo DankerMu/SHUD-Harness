@@ -3,7 +3,7 @@
 Base: `f8b74e724dc978acb889f715a936feabfd69680d`
 Branch: `codex/issue-168-source-ingress-capability`
 Fixture: `expanded`; repair intensity: `high`
-Date: 2026-07-29 EDT
+Date: 2026-07-30 EDT
 
 ## Scope
 
@@ -62,7 +62,46 @@ returned `npx: not found` before tests; the equivalent in-image pinned command w
 `bun test spikes/git-status-capability/contracts/tests`. Required GitHub Linux and
 macOS jobs now contain the literal pinned `npx --yes bun@1.2.19 test ...` step.
 
+## Phase 6.2 invariant closure
+
+- Parser item/node ceiling failures are now pending until the complete root JSON
+  value and trailing-input check succeed. Syntax and duplicate-key failures remain
+  immediate; depth remains immediate; the first valid item/node crossing is
+  committed after syntax validation.
+- Both public kinds prove malformed precedence for 512 array elements followed by
+  `truX`, 512 object members followed by a key without a colon, and the existing
+  post-comma case. A relaxed item ceiling independently proves 2,047 scalars plus
+  an unterminated string is malformed instead of a node-limit result. Existing
+  depth, 237/238-entry, 2,048/2,049-node, duplicate, byte, and valid-limit tests
+  remain green.
+- A spawned public/test process now loads an independent preload boundary. After
+  descriptor admission it attempts actual Node absolute open/read/write/spawn,
+  Bun `file`/`write`/`spawn`, and FFI libc `open` routes. The boundary records the
+  concrete attempted path/operation and throws before the original operation;
+  exact contract failure output plus absent sentinels and byte-identical input and
+  replacement files are asserted for both public kinds. Uncontrolled commands
+  under the same preload retain exact success receipts. The static import audit
+  and enum fault gate remain supplementary checks.
+- `.workplans/issue-168/red-proof-phase-6-2.patch` is a compiling source-only
+  mutation: immediate parser limit failure plus record-only authority guards. The
+  full focused file returned exit `1`, `18 pass`, `2 fail`, `505 assertions`; all
+  eight controls executed, actual writes/spawns created sentinels, and the named
+  parser and authority tests failed. Restored green returned `20 pass`, `0 fail`,
+  `507 assertions`; SHA-256 matched the pre-mutation files; no stash remains.
+- Final Darwin focused suite: `24 pass`, `0 fail`, `531 assertions`. Both exact
+  direct commands exit 0 with their sole LF-terminated success receipt and empty
+  stderr. `typecheck`, full `check`, strict OpenSpec validation, and
+  `git diff --check` pass.
+- Final Linux verification used `oven/bun:1.2.19`, a read-only repository mount,
+  a read-only container root, and an isolated writable `/tmp` tmpfs: `24 pass`,
+  `0 fail`, `483 assertions`. An initial attempt without the `/tmp` tmpfs produced
+  only `EROFS` fixture-setup failures; it was corrected at the container boundary
+  and is not counted as code verification.
+- CI remains unchanged in this phase and contains exactly the prior two pinned
+  focused commands, one in each required Linux/macOS job.
+
 ## Deviations
 
 Sole accepted deviation: `.github/workflows/ci.yml` adds only the pinned focused
 contract command to the existing required `linux-base` and `macos-seatbelt` jobs.
+Phase 6.2 has no additional deviations.

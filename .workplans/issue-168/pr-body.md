@@ -19,10 +19,12 @@ production/runtime/workflows, and network security remain out of scope.
 ## Verification
 
 - `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests`
-  — Darwin 23 pass, 0 fail, 530 assertions
-- `oven/bun:1.2.19` Linux container focused run — 23 pass, 0 fail,
-  482 assertions
+  — Darwin 24 pass, 0 fail, 531 assertions
+- `oven/bun:1.2.19` read-only Linux container focused run — 24 pass, 0 fail,
+  483 assertions
 - both direct public `check.ts` commands — exact success receipt, empty stderr
+- compiling Phase 6.2 mutation — 18 pass, 2 named failures; restored focused
+  source-ingress suite 20 pass, 0 fail
 - `npx --yes bun@1.2.19 run typecheck` — pass
 - `npx --yes bun@1.2.19 run check` — pass
 - strict OpenSpec validation — valid
@@ -38,7 +40,8 @@ gate，在现有 `linux-base` 与 `macos-seatbelt` job 中各增加一条 pinned
 ## Agent Review
 
 - Round 1 at `89eb2aad7895d837617d243a8ce82e3cdc45b211` recorded seven
-  verified findings; the Phase 6 invariant-level fix is implemented and awaits
-  the required post-fix review.
+  verified findings. Phase 6.2 then found and closed malformed-limit precedence
+  and independent Node/Bun/FFI authority-interception gaps; Round 2 has not yet
+  run.
 - OpenSpec change: `m2-capability-observer-spike`; fixture level: expanded;
   repair intensity: high

@@ -1,0 +1,12 @@
+--- a/spikes/git-status-capability/contracts/lib/ingress.ts
++++ b/spikes/git-status-capability/contracts/lib/ingress.ts
+@@ -317 +317 @@
+-    this.pendingLimit ??= code;
++    this.fail(code);
+--- a/spikes/git-status-capability/contracts/tests/authority-preload.ts
++++ b/spikes/git-status-capability/contracts/tests/authority-preload.ts
+@@ -25 +25 @@
+-function deny(operation: string, target?: unknown): never {
++function deny(operation: string, target?: unknown): void {
+@@ -27 +26,0 @@
+-  throw new Error(`CONTRACT_TEST_AUTHORITY_DENIED:${operation}`);
