@@ -1,4 +1,4 @@
-export const AUTHORITY_PROOF_VERSION = "shud.contract.authority-proof.v1" as const;
+export const AUTHORITY_PROOF_VERSION = "shud.contract.authority-proof.v2" as const;
 
 export type AuthorityControl =
   | "worker_global_direct"
@@ -8,6 +8,11 @@ export type AuthorityControl =
   | "worker_node_get_builtin"
   | "worker_node_create_require"
   | "worker_node_cached_module"
+  | "worker_bare_static_import"
+  | "worker_bare_dynamic_import"
+  | "worker_bare_get_builtin"
+  | "worker_bare_create_require"
+  | "worker_bare_cached_module"
   | "dynamic_eval"
   | "dynamic_function"
   | "dynamic_object_double_constructor"
@@ -21,6 +26,9 @@ export type AuthorityControl =
   | "dynamic_async_prototype_constructor"
   | "dynamic_generator_prototype_constructor"
   | "dynamic_async_generator_prototype_constructor"
+  | "dynamic_reflective_descriptor_constructor"
+  | "dynamic_key_constructor"
+  | "dynamic_destructured_constructor"
   | "static_node_fs_read"
   | "node_absolute_open"
   | "node_url_open"
@@ -46,7 +54,8 @@ export type AuthorityControl =
   | "create_require_computed_write_relative"
   | "create_require_promises_read_url"
   | "meta_computed_ffi_dlopen"
-  | "builtin_computed_child_exec_file";
+  | "builtin_computed_child_exec_file"
+  | "meta_bracket_require_read";
 
 export type AuthorityStructuralViolation = string;
 export type AuthorityDenialTarget = "input" | "replacement" | "write_sentinel" | "library" | "none";
@@ -60,6 +69,7 @@ export type AuthoritySideEffectOracle = Readonly<{
   workerEntrySentinel: boolean;
   writeSentinel: boolean;
   spawnSentinel: boolean;
+  rawEvents: readonly string[];
   inputUnchanged: boolean;
   replacementUnchanged: boolean;
 }>;
@@ -79,6 +89,7 @@ const NO_SIDE_EFFECTS: AuthoritySideEffectOracle = Object.freeze({
   workerEntrySentinel: false,
   writeSentinel: false,
   spawnSentinel: false,
+  rawEvents: Object.freeze([]),
   inputUnchanged: true,
   replacementUnchanged: true
 });
@@ -156,6 +167,46 @@ export const AUTHORITY_PROOF_REGISTRY = Object.freeze({
       "AUTH-WORKER-NODE-CACHED-MODULE",
       "worker_node_cached_module",
       'const authorityCachedWorkerModule = process.getBuiltinModule("node:worker_threads"); const authorityCachedNodeWorker = authorityCachedWorkerModule.Worker; void authorityCachedNodeWorker;',
+      "unapproved_global:process.getBuiltinModule",
+      "node_worker",
+      "none"
+    ),
+    row(
+      "AUTH-WORKER-BARE-STATIC-IMPORT",
+      "worker_bare_static_import",
+      'import { Worker as AuthorityStaticBareWorker } from "worker_threads"; void AuthorityStaticBareWorker;',
+      "unapproved_import:worker_threads",
+      "node_worker",
+      "none"
+    ),
+    row(
+      "AUTH-WORKER-BARE-DYNAMIC-IMPORT",
+      "worker_bare_dynamic_import",
+      'void import("worker_threads");',
+      "dynamic_import",
+      "node_worker",
+      "none"
+    ),
+    row(
+      "AUTH-WORKER-BARE-GET-BUILTIN",
+      "worker_bare_get_builtin",
+      'const authorityBareBuiltinWorkerModule = process.getBuiltinModule("worker_threads"); void authorityBareBuiltinWorkerModule.Worker;',
+      "unapproved_global:process.getBuiltinModule",
+      "node_worker",
+      "none"
+    ),
+    row(
+      "AUTH-WORKER-BARE-CREATE-REQUIRE",
+      "worker_bare_create_require",
+      'import { createRequire as authorityBareCreateRequire } from "node:module"; const authorityBareWorkerRequire = authorityBareCreateRequire(import.meta.url); void authorityBareWorkerRequire("worker_threads").Worker;',
+      "unapproved_import:node:module",
+      "node_worker",
+      "none"
+    ),
+    row(
+      "AUTH-WORKER-BARE-CACHED-MODULE",
+      "worker_bare_cached_module",
+      'const authorityCachedBareWorkerModule = process.getBuiltinModule("worker_threads"); const authorityCachedBareWorker = authorityCachedBareWorkerModule.Worker; void authorityCachedBareWorker;',
       "unapproved_global:process.getBuiltinModule",
       "node_worker",
       "none"
@@ -261,6 +312,30 @@ export const AUTHORITY_PROOF_REGISTRY = Object.freeze({
       "dynamic_async_generator_prototype_constructor",
       'void Object.getPrototypeOf(async function* authorityAsyncGeneratorPrototype() {}).constructor("yield 1")();',
       "forbidden_constructor",
+      "global_worker",
+      "none"
+    ),
+    row(
+      "AUTH-DYNAMIC-REFLECTIVE-DESCRIPTOR-CONSTRUCTOR",
+      "dynamic_reflective_descriptor_constructor",
+      'const authorityDescriptorConstructor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(function authorityDescriptor() {}), "constructor")!.value; void authorityDescriptorConstructor("return 1")();',
+      "unapproved_object:Object.getOwnPropertyDescriptor",
+      "global_worker",
+      "none"
+    ),
+    row(
+      "AUTH-DYNAMIC-KEY-CONSTRUCTOR",
+      "dynamic_key_constructor",
+      'const authorityDynamicKey = ["con", "structor"].join(""); const authorityDynamicKeyConstructor = (function authorityDynamicKeySource() {})[authorityDynamicKey as "constructor"]; void authorityDynamicKeyConstructor("return 1")();',
+      "unapproved_element_access",
+      "global_worker",
+      "none"
+    ),
+    row(
+      "AUTH-DYNAMIC-DESTRUCTURED-CONSTRUCTOR",
+      "dynamic_destructured_constructor",
+      'const { constructor: authorityDestructuredConstructor } = function authorityDestructured() {}; void authorityDestructuredConstructor("return 1")();',
+      "unapproved_binding",
       "global_worker",
       "none"
     ),
@@ -438,6 +513,14 @@ export const AUTHORITY_PROOF_REGISTRY = Object.freeze({
       'const authorityMetaBufferFs = import.meta.require(["n", "ode:fs"].join("")); void authorityMetaBufferFs.openSync(Buffer.from("/tmp/authority"));',
       "forbidden_import_meta:require",
       "node_fs_openSync",
+      "replacement"
+    ),
+    row(
+      "AUTH-META-BRACKET-REQUIRE-READ",
+      "meta_bracket_require_read",
+      'const authorityBracketMetaFs = import.meta["require"]("node:fs"); void authorityBracketMetaFs.readFileSync("/tmp/authority");',
+      "forbidden_import_meta:require",
+      "node_fs_readFileSync",
       "replacement"
     ),
     row(

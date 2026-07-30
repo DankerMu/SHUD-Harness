@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   AUTHORITY_PROOF_REGISTRY,
   AUTHORITY_PROOF_ROWS,
-  AUTHORITY_PROOF_VERSION
+  AUTHORITY_WORKER_ENTRY
 } from "./authority-vocabulary";
 import type { AuthorityDenialTarget } from "./authority-vocabulary";
 import {
@@ -19,6 +20,34 @@ import {
 const authorityPreloadPath = join(import.meta.dir, "authority-preload.ts");
 const authorityControlPath = join(import.meta.dir, "authority-control.ts");
 const systemLibraryPath = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
+
+const EXPECTED_AUTHORITY_PROOF_VERSION = "shud.contract.authority-proof.v2";
+const EXPECTED_AUTHORITY_PROOF_ROW_COUNT = 55;
+const EXPECTED_AUTHORITY_PROOF_REGISTRY_SHA256 = "8ae389ead0f1aaad27cdeb080f66e1841376552a963ef9069657d929a118a725";
+
+function authorityRegistryProjection(): string {
+  return JSON.stringify({
+    version: AUTHORITY_PROOF_REGISTRY.version,
+    count: AUTHORITY_PROOF_ROWS.length,
+    rows: AUTHORITY_PROOF_ROWS.map((row) => [
+      row.id,
+      row.control,
+      row.structuralViolation,
+      row.denialEvent.operation,
+      row.denialEvent.target,
+      row.sideEffects
+    ])
+  });
+}
+
+function expectFrozenAuthorityRegistry(): void {
+  expect(AUTHORITY_PROOF_REGISTRY.version).toBe(EXPECTED_AUTHORITY_PROOF_VERSION);
+  expect(AUTHORITY_PROOF_ROWS).toHaveLength(EXPECTED_AUTHORITY_PROOF_ROW_COUNT);
+  expect(createHash("sha256").update(authorityRegistryProjection(), "utf8").digest("hex"))
+    .toBe(EXPECTED_AUTHORITY_PROOF_REGISTRY_SHA256);
+  expect(new Set(AUTHORITY_PROOF_ROWS.map((row) => row.id)).size).toBe(AUTHORITY_PROOF_ROWS.length);
+  expect(new Set(AUTHORITY_PROOF_ROWS.map((row) => row.control)).size).toBe(AUTHORITY_PROOF_ROWS.length);
+}
 
 type GuardedCommand = Readonly<{ exit: number; stdout: string; stderr: string }>;
 
@@ -87,6 +116,10 @@ function controlArguments(
 }
 
 describe("source-ingress authority runtime proof", () => {
+  test("binds the exact independent authority registry contract", () => {
+    expectFrozenAuthorityRegistry();
+  });
+
   test("both unchanged direct commands retain exact receipts and no denial under the active preload", async () => {
     expect(Bun.version).toBe("1.2.19");
     const root = await mkdtemp(join(tmpdir(), "shud-authority-direct-"));
@@ -106,7 +139,14 @@ describe("source-ingress authority runtime proof", () => {
           stdout: success(kind),
           stderr: ""
         });
-        const directPayload = { exit: 0, stdout: success(kind), stderr: "", events: [] as string[] };
+        const directPayload = {
+          exit: 0,
+          stdout: success(kind),
+          stderr: "",
+          events: [] as string[],
+          rawEvents: [] as string[],
+          workerLiveness: null
+        };
         expect(await guardedCommand(controlArguments(
           kind,
           input,
@@ -127,10 +167,111 @@ describe("source-ingress authority runtime proof", () => {
     }
   });
 
+  test("proves bounded Worker fixture liveness during admission before hostile rows", async () => {
+    expect(Bun.version).toBe("1.2.19");
+    const root = await mkdtemp(join(tmpdir(), "shud-authority-worker-liveness-"));
+    const replacement = join(root, "replacement.json");
+    const workerSentinel = join(root, "worker.sentinel");
+    const writeSentinel = join(root, "write.sentinel");
+    const spawnSentinel = join(root, "spawn.sentinel");
+    const replacementBytes = Buffer.from('{"replacement":"must-not-be-read"}');
+    const inputBytes = await readFile(validSourcePath);
+    await writeFile(replacement, replacementBytes);
+    try {
+      const expectedPayload = {
+        exit: 0,
+        stdout: success("source_input_record"),
+        stderr: "",
+        events: [] as string[],
+        rawEvents: [] as string[],
+        workerLiveness: {
+          phase: "admission",
+          entry: AUTHORITY_WORKER_ENTRY,
+          inputBytes: inputBytes.byteLength,
+          sentinelBytes: AUTHORITY_WORKER_ENTRY
+        }
+      };
+      expect(await guardedCommand(controlArguments(
+        "source_input_record",
+        validSourcePath,
+        "worker_liveness_canary",
+        replacement,
+        workerSentinel,
+        writeSentinel,
+        spawnSentinel
+      ))).toEqual({
+        exit: 0,
+        stdout: `${JSON.stringify(expectedPayload)}\n`,
+        stderr: ""
+      });
+      expect(await Bun.file(workerSentinel).exists()).toBe(false);
+      expect(await Bun.file(writeSentinel).exists()).toBe(false);
+      expect(await Bun.file(spawnSentinel).exists()).toBe(false);
+      expect(await readFile(replacement)).toEqual(replacementBytes);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("proves raw-operation inversion canaries observe pre-denial delegation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shud-authority-raw-inversion-"));
+    const replacement = join(root, "replacement.json");
+    const workerSentinel = join(root, "worker.sentinel");
+    const writeSentinel = join(root, "write.sentinel");
+    const spawnSentinel = join(root, "spawn.sentinel");
+    const replacementBytes = Buffer.from('{"replacement":"must-not-be-read"}');
+    await writeFile(replacement, replacementBytes);
+    try {
+      for (const canary of [
+        {
+          control: "raw_read_inversion_canary",
+          operation: "node_fs_readFileSync",
+          target: normalizedAuthorityTarget(replacement),
+          rawEvents: [`raw:node_fs_readFileSync:${normalizedAuthorityTarget(replacement)}`]
+        },
+        {
+          control: "raw_ffi_inversion_canary",
+          operation: "ffi_dlopen",
+          target: systemLibraryPath,
+          rawEvents: [`raw:ffi_dlopen:${systemLibraryPath}`, `raw:ffi_close:${systemLibraryPath}`]
+        }
+      ] as const) {
+        const expectedPayload = {
+          exit: 2,
+          stdout: "",
+          stderr: failure("CONTRACT_SCHEMA_INVALID"),
+          events: [
+            `${canary.operation}:${canary.target}`,
+            `control_error:CONTRACT_TEST_AUTHORITY_DENIED:${canary.operation}`
+          ],
+          rawEvents: canary.rawEvents,
+          workerLiveness: null
+        };
+        expect(await guardedCommand(controlArguments(
+          "source_input_record",
+          validSourcePath,
+          canary.control,
+          replacement,
+          workerSentinel,
+          writeSentinel,
+          spawnSentinel
+        ))).toEqual({
+          exit: 0,
+          stdout: `${JSON.stringify(expectedPayload)}\n`,
+          stderr: ""
+        });
+      }
+      expect(await readFile(replacement)).toEqual(replacementBytes);
+      expect(await Bun.file(workerSentinel).exists()).toBe(false);
+      expect(await Bun.file(writeSentinel).exists()).toBe(false);
+      expect(await Bun.file(spawnSentinel).exists()).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("runs every registry control after admission with no structural scanner and exact pre-side-effect denials", async () => {
-    expect(AUTHORITY_PROOF_REGISTRY.version).toBe(AUTHORITY_PROOF_VERSION);
-    expect(new Set(AUTHORITY_PROOF_ROWS.map((row) => row.id)).size).toBe(AUTHORITY_PROOF_ROWS.length);
-    expect(new Set(AUTHORITY_PROOF_ROWS.map((row) => row.control)).size).toBe(AUTHORITY_PROOF_ROWS.length);
+    expectFrozenAuthorityRegistry();
 
     const root = await mkdtemp(join(tmpdir(), "shud-authority-runtime-"));
     const replacement = join(root, "replacement.json");
@@ -150,7 +291,9 @@ describe("source-ingress authority runtime proof", () => {
           events: [
             `${row.denialEvent.operation}:${target}`,
             `control_error:CONTRACT_TEST_AUTHORITY_DENIED:${row.denialEvent.operation}`
-          ]
+          ],
+          rawEvents: row.sideEffects.rawEvents,
+          workerLiveness: null
         };
         expect(await guardedCommand(controlArguments(
           "source_input_record",

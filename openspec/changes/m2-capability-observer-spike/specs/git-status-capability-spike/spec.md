@@ -211,6 +211,14 @@ ceiling.
 - **WHEN** an otherwise canonical normalized record contains 237 short admitted entries
 - **THEN** it reaches exactly 512 counted items and succeeds; adding the 238th entry reaches 514 items and returns only `CONTRACT_JSON_ITEM_LIMIT`
 
+#### Scenario: Contract input reaches an exact bound
+- **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
+- **THEN** ingestion continues to strict schema validation and may succeed
+
+#### Scenario: Contract input exceeds a bound or is malformed
+- **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
+- **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
+
 #### Scenario: Encoder result drifts from the single admitted set
 - **WHEN** either result mismatches the top-level source-input digest, manifest digest, or entry count, or reintroduces admitted path/mode arrays
 - **THEN** semantic admission fails with only `CONTRACT_SCHEMA_INVALID`
@@ -223,42 +231,56 @@ proof SHALL NOT add production imports, hooks, environment switches, network
 controls, or change the source-record contract implemented by Issue #171.
 
 `contracts/tests/authority-vocabulary.ts` SHALL define version
-`shud.contract.authority-proof.v1` and SHALL be the sole row registry used by
-`authority-structural.test.ts` and `authority-runtime.test.ts`. Each row SHALL
-contain one compile-valid production mutation, active control, structural
-violation, denial event, and side-effect oracle. The closed Bun-1.2.19 inventory
-SHALL include:
+`shud.contract.authority-proof.v2` and SHALL be the sole row registry used by
+`authority-structural.test.ts` and `authority-runtime.test.ts`. Its exact 55
+ordered `(ID, control, structural violation, denial operation/target,
+side-effect oracle)` tuples SHALL bind independently in both modules to
+hard-coded SHA-256
+`8ae389ead0f1aaad27cdeb080f66e1841376552a963ef9069657d929a118a725`.
+Each row SHALL contain one compile-valid production mutation, active control,
+structural violation, denial event, and side-effect oracle. The closed
+Bun-1.2.19 inventory SHALL include:
 
 - direct and cached global Worker plus static-imported, dynamic-imported,
-  `process.getBuiltinModule`, `createRequire`, and cached
-  `node:worker_threads` Worker;
+  `process.getBuiltinModule`, `createRequire`, and cached `node:worker_threads`
+  and bare `worker_threads` Worker;
 - direct `eval` and `Function`;
 - object double-constructor, ordinary-function, arrow-function, async-function,
-  generator-function, async-generator-function, computed-constructor, and cached
-  constructor aliases;
+  generator-function, async-generator-function, computed-constructor, cached,
+  reflective property-descriptor, dynamic-key, and destructured constructor
+  aliases;
 - `Object.getPrototypeOf(...).constructor` for async, generator, and
   async-generator functions;
-- the existing static/dynamic/computed loader, cached filesystem/promises,
-  Bun, FFI, child-process, write, absolute/relative/URL/Buffer PathLike, and
-  sentinel rows.
+- the existing static/dynamic/computed loader, including
+  `import.meta["require"]`, cached filesystem/promises, Bun, FFI, child-process,
+  write, absolute/relative/URL/Buffer PathLike, and sentinel rows.
 
 Generator rows SHALL execute through `.next()` and asynchronous rows SHALL be
 awaited. An unlisted alias does not inherit a pass; a newly reachable pinned-
 runtime spelling requires a new registry row and both oracles.
 
 The structural layer SHALL compile every registry mutation in a real production
-module, parse the complete production tree, and reject any unapproved import,
-global, static/dynamic/computed loader, `eval`/`Function`, Worker,
-`.constructor` or computed-constructor access, alternate module declaration,
-filesystem, FFI, child-process, or write authority vocabulary. It SHALL run
-without the active preload.
+module, parse the complete production tree, and bind exact production import,
+global, `Object`, element-access, and binding baselines. Any unlisted
+Object/property-descriptor, element-access, binding, static/dynamic/computed
+loader, `eval`/`Function`, Worker, `.constructor`, alternate module declaration,
+filesystem, FFI, child-process, or write authority vocabulary SHALL be rejected
+without arbitrary-string constant folding. It SHALL run without the active
+preload.
 
 The active layer SHALL run every registry control after admission with no
 structural scan. It SHALL independently deny actual Node/Bun/FFI/child-process
-operations and global or `node:worker_threads` Worker construction before a new
-realm, worker entry, ambient read, FFI load, child start, or write. Cached Worker
-aliases SHALL be acquired only after the preload installs its guarded
-constructors. Exact guard events, absent worker/read/write/spawn sentinels, and
+operations and global, `node:worker_threads`, or bare `worker_threads` Worker
+construction before a new realm, worker entry, ambient read, FFI load, child
+start, or write. Raw-operation state SHALL sit beneath forbidden Node/Bun
+read/open/file, FFI load, child/spawn, and Worker delegation; every denial row
+and direct success SHALL report zero raw events. Cached Worker aliases SHALL be
+acquired only after the preload installs guarded constructors. A bounded
+admission-phase Worker canary SHALL prove entry, input read, sentinel write,
+message receipt, termination, and cleanup before the untouched post-admission
+matrix. Bounded raw-read and raw-FFI inversion canaries SHALL deliberately
+delegate, record raw events, close any loaded library, and clean temporary
+resources. Exact guard events, absent worker/read/write/spawn sentinels, and
 byte-identical input/replacement files SHALL prove the ordering.
 
 The focused command SHALL be exactly
@@ -295,13 +317,18 @@ never rewritten; corrections appear only in new #172 evidence.
 
 #### Scenario: Direct Worker attempts to read after admission
 
-- **WHEN** each compile-valid direct, cached, or imported Worker mutation would start a Worker after descriptor admission
-- **THEN** the structural-only run rejects the exact row, and the active-only run independently denies the guarded Worker constructor before worker entry, ambient read, sentinel creation, or file mutation
+- **WHEN** each compile-valid direct, cached, static, dynamic, `getBuiltinModule`, or `createRequire` `node:worker_threads` or bare `worker_threads` mutation would start a Worker after descriptor admission
+- **THEN** the structural-only run rejects the exact row, and the active-only run independently denies the guarded Worker constructor before worker entry, ambient read, sentinel creation, file mutation, or raw Worker delegation
 
 #### Scenario: Constructor-derived dynamic execution attempts a new realm
 
-- **WHEN** each registered direct, object, function, arrow, async, generator, async-generator, prototype, computed, or cached constructor form is actually invoked after admission
-- **THEN** the structural-only run rejects its acquisition vocabulary and the active-only run independently denies the resulting Worker/read operation; asynchronous results are awaited and generator bodies are advanced
+- **WHEN** each registered direct, object, function, arrow, async, generator, async-generator, prototype, computed, cached, reflective property-descriptor, dynamic-key, or destructured constructor form is actually invoked after admission
+- **THEN** the structural-only run rejects its acquisition vocabulary and the active-only run independently denies the resulting Worker/read operation; asynchronous results are awaited, generator bodies are advanced, and `import.meta["require"]` is independently rejected and denied
+
+#### Scenario: Raw probes and Worker fixture establish live negative oracles
+
+- **WHEN** the bounded admission-phase Worker canary uses the same fixture URL, input, sentinel, and receipt channel as the hostile matrix, and the bounded raw-read/raw-FFI inversion canaries deliberately delegate before denial
+- **THEN** the Worker canary proves entry, input read, sentinel bytes, receipt, termination, and cleanup without becoming a hostile row or satisfying any hostile sentinel; each raw inversion records its independent raw event, the FFI library closes, temporary resources are removed, and every direct-success or hostile denial payload has zero raw events
 
 #### Scenario: One proof layer is disabled
 
@@ -311,7 +338,7 @@ never rewritten; corrections appear only in new #172 evidence.
 #### Scenario: Unchanged public commands run under the proof harness
 
 - **WHEN** both direct input kinds execute unchanged under Bun 1.2.19 and the active preload on macOS and Linux
-- **THEN** each retains exit `0`, empty stderr, and its one exact LF-terminated success receipt, and no authority-denial event is recorded
+- **THEN** each retains exit `0`, empty stderr, and its one exact LF-terminated success receipt, with no authority-denial or raw-operation event recorded
 
 #### Scenario: Exact evidence facts are reconciled and persisted
 

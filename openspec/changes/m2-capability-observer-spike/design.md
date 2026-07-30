@@ -966,24 +966,30 @@ landed descriptor-bound ingress contract. The governing invariant is:
 The proof is test-only and fail-closed. #172.A owns
 `contracts/tests/authority-vocabulary.ts` and
 `contracts/tests/authority-structural.test.ts`. The versioned
-`shud.contract.authority-proof.v1` registry is the one row inventory consumed by
-both proof layers. Each row carries its stable ID, compile-valid production
+`shud.contract.authority-proof.v2` registry is the one row inventory consumed by
+both proof layers. Its exact 55 ordered `(ID, control, structural violation,
+denial operation/target, side-effect oracle)` tuples bind to independent
+hard-coded SHA-256 `8ae389ead0f1aaad27cdeb080f66e1841376552a963ef9069657d929a118a725`
+in both modules. Each row carries its stable ID, compile-valid production
 mutation, active control, expected structural violation, expected denial event,
 and side-effect oracle. The finite pinned-Bun-1.2.19 inventory is:
 
 - Worker acquisition: direct global, cached global alias, static
-  `node:worker_threads` import, dynamic import, `process.getBuiltinModule`, and
-  `createRequire`/cached module export;
+  `node:worker_threads` and bare `worker_threads` import, dynamic import,
+  `process.getBuiltinModule`, `createRequire`, and cached module export;
 - direct dynamic execution: `eval` and `Function`;
 - constructor acquisition: object double-constructor, ordinary function, arrow
   function, async function, generator function, async-generator function,
-  computed `["constructor"]`, and a cached constructor alias;
+  computed `["constructor"]`, cached constructor alias, reflective
+  `Object.getOwnPropertyDescriptor(..., "constructor")`, dynamic key, and
+  destructured constructor forms;
 - prototype acquisition:
   `Object.getPrototypeOf(async function () {}).constructor`,
   `Object.getPrototypeOf(function* () {}).constructor`, and
   `Object.getPrototypeOf(async function* () {}).constructor`;
 - the retained Round-4 sibling inventory: static/dynamic/computed loaders,
-  cached Node filesystem/promises, Bun file/write/spawn, FFI, child process,
+  `import.meta.require` and `import.meta["require"]`, cached Node
+  filesystem/promises, Bun file/write/spawn, FFI, child process,
   absolute/relative/URL/Buffer PathLike forms, and file/process sentinels.
 
 Generator-created bodies are advanced with `.next()` and async/generator results
@@ -992,22 +998,31 @@ spelling in pinned Bun 1.2.19 is a registry change and a new structural and acti
 row; “equivalent alias” is not an acceptance shortcut.
 
 The structural layer parses the complete `contracts/{check.ts,lib/**}`
-production tree. It owns exact imports and approved ambient property accesses and
-rejects unknown imports/globals, static/dynamic/computed loaders,
-`eval`/`Function`, Worker names, `.constructor` or computed-constructor access,
-and alternate module declarations. Every registry mutation is injected into a
-real production module and compiled with Bun 1.2.19 before the scanner rejects
-it. This run does not load `authority-preload.ts`.
+production tree. It owns exact imports and approved ambient property accesses,
+plus exact `Object`, element-access, and binding baselines; any unlisted member
+or form is rejected rather than constant-folded. It rejects unknown
+imports/globals, static/dynamic/computed loader, `eval`/`Function`, Worker,
+`.constructor` or computed-constructor access, alternate module declaration,
+filesystem, FFI, child-process, or write authority vocabulary. Every registry
+mutation is injected into a real production module and compiled with Bun 1.2.19
+before the scanner rejects it. This run does not load `authority-preload.ts`.
 
 #172.B owns `contracts/tests/{authority-runtime.test.ts,authority-control.ts,
 authority-preload.ts,authority-worker.ts}` and consumes A's registry without
 redefining it. The preload guards actual Node/Bun/FFI/child operations and both
-global and `node:worker_threads` Worker constructors. Denial happens in the
-admitting realm before worker entry. Cached aliases are captured only after the
-preload has installed those guarded constructors. The active test invokes every
-control after admission with no structural scan. A worker-entry sentinel,
-read/write/spawn sentinels, exact normalized guard events, and byte-identical
-input/replacement files prove ordering rather than merely observing an error.
+global and `node:worker_threads` Worker constructors. Independent raw-operation
+events sit immediately beneath forbidden Node/Bun read/open/file, FFI load,
+child/spawn, and Worker delegation; guards deny before delegation, so direct
+success and every denial row require zero raw events. Bounded read and FFI
+inversion canaries deliberately delegate once, observe raw events, close the
+library, and clean their temporary root. Cached aliases are captured only after
+the preload has installed guarded constructors. A separate bounded
+admission-phase Worker canary proves fixture input-read, sentinel-write, and
+message liveness, terminates the Worker, removes its sentinel, and is not a
+registry row. The active test then invokes every registry control after admission
+with no structural scan. Exact normalized guard events, raw-event state, absent
+worker/read/write/spawn sentinels, and byte-identical input/replacement files
+prove ordering rather than merely observing an error.
 
 The unique focused runner is:
 
@@ -1025,11 +1040,11 @@ The required mutation matrix is:
 
 | Class | Structural-only oracle | Active-only oracle | Side-effect oracle |
 |---|---|---|---|
-| Direct/cached/imported Worker | exact AST rejection, no preload | global or Node Worker construction denied | worker-entry sentinel absent |
-| `Function`/`eval` and constructor forms | identifier/property/computed-property rejection | produced Worker/read operation denied after actual invocation | guard event precedes access |
-| Async/generator constructors | constructor acquisition rejected | callable awaited and generator advanced before denial | no worker/file side effect |
-| Static/dynamic/computed loaders | import/call vocabulary rejected | patched cached builtin denies | exact normalized event only |
-| Filesystem/PathLike/FFI/child/write | import/global/call allowlist rejects mutation | concrete OS-facing operation denied | files byte-identical; no write/spawn sentinel |
+| Direct/cached/imported Worker | exact AST rejection, no preload | global or Node Worker construction denied | admission canary proves fixture liveness; every hostile row has no Worker entry |
+| `Function`/`eval` and constructor forms | identifier/property/computed-property rejection | produced Worker/read operation denied after actual invocation | guard event precedes access and raw delegation |
+| Async/generator constructors | constructor acquisition rejected | callable awaited and generator advanced before denial | no worker/file side effect or raw delegation |
+| Static/dynamic/computed loaders | import/call vocabulary rejected | patched cached builtin denies | exact normalized event and zero raw events |
+| Filesystem/PathLike/FFI/child/write | import/global/call allowlist rejects mutation | concrete OS-facing operation denied | files byte-identical; no write/spawn sentinel; raw inversion canaries stay bounded and live |
 
 Selected risk packs and boundary checklist:
 
