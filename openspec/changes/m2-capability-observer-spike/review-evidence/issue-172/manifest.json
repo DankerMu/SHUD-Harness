@@ -2,17 +2,24 @@
   "schema_version": "shud.issue-172.review-evidence-manifest.v1",
   "issue": 172,
   "pull_request": 174,
-  "proof_sha": "526f86d5522423823e9909937f166d72b7c2a49c",
-  "generated_at": "2026-07-30T18:05:41Z",
+  "proof_sha": "c3ae96321f5cde20abcf66ac632b6f4b0cd7ec74",
+  "generated_at": "2026-07-30T20:21:00Z",
   "evidence_commit_rule": "A descendant of proof_sha changing only this review-evidence/issue-172 directory; the exact commit and manifest blob digest are published in PR evidence.",
   "offline_retrieval": "git show $EVIDENCE_COMMIT:$RELATIVE_PATH",
   "artifacts": [
     {
       "relative_path": "openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/implementation-evidence.md",
-      "byte_length": 5437,
+      "byte_length": 7229,
       "media_type": "text/markdown; charset=utf-8",
-      "sha256": "a5a35e788b4e0753dd2034cee122cccb196a716e6f7d10c9a6f683e177867999",
+      "sha256": "f93e898eb4f22e4311c6c261b41371e845a0c1fe0ed31d93d405dca04c80fb8a",
       "retrieval_command": "git show $EVIDENCE_COMMIT:openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/implementation-evidence.md"
+    },
+    {
+      "relative_path": "openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/round-2-false-green-proof.md",
+      "byte_length": 4890,
+      "media_type": "text/markdown; charset=utf-8",
+      "sha256": "0698bc45a4f76f3b39046307919df59cf75f55774fb65619acc3ffa2298d76aa",
+      "retrieval_command": "git show $EVIDENCE_COMMIT:openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/round-2-false-green-proof.md"
     },
     {
       "relative_path": "openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/red-proof-round-1.md",
