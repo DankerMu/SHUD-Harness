@@ -33,9 +33,17 @@ type Kind = "source_input_record" | "source_identity_projection";
 type FailureScenario = "upper_symlink" | "parent_symlink" | "ancestor_replacement" | "final_replacement";
 type AuthorityControl =
   | "node_absolute_open"
+  | "node_url_open"
+  | "node_buffer_open"
+  | "fs_alias_url_open"
   | "ffi_absolute_open"
   | "node_replacement_read"
+  | "node_promises_read"
+  | "fs_promises_read"
+  | "node_promises_property_read"
+  | "fs_promises_property_read"
   | "bun_replacement_read"
+  | "bun_url_read"
   | "node_write"
   | "bun_write"
   | "node_spawn"
@@ -174,13 +182,36 @@ describe("descriptor-bound source ingress", () => {
     const implementations = ["check.ts", ...libraryFiles.map((name) => `lib/${name}`)];
     for (const relative of implementations) {
       const text = await readFile(new URL(`../${relative}`, import.meta.url), "utf8");
-      expect(text).not.toMatch(/node:child_process|Bun\.spawn|spawnSync|execFile|execSync/);
+      expect(text).not.toMatch(/\brequire\s*\(|\bprocess\.binding\s*\(/);
+      const authorityModules = [...text.matchAll(
+        /["'](bun:ffi|node:fs(?:\/promises)?|fs(?:\/promises)?|node:child_process|child_process)["']/g
+      )].map((match) => match[1]);
       if (relative !== "lib/capabilities.ts") {
-        expect(text).not.toMatch(/["'](?:node:fs|node:fs\/promises|bun:ffi|node:child_process)["']|\brequire\s*\(|\bprocess\.binding\s*\(/);
+        expect(authorityModules).toEqual([]);
+        expect(text).not.toMatch(/\bBun\.(?:file|write|spawn|spawnSync)\b/);
       } else {
-        expect(text).toContain('from "bun:ffi"');
-        expect(text).toContain('from "node:fs"');
-        expect(text).not.toMatch(/writeFile|writeSync|renameSync|unlinkSync|mkdirSync|rmSync|createWriteStream/);
+        expect(authorityModules).toEqual(["bun:ffi", "node:fs"]);
+        expect(text.split("\n").filter((line) => /^import\s.+\sfrom\s["'](?:bun:ffi|node:fs)["'];$/.test(line))).toEqual([
+          'import { dlopen } from "bun:ffi";',
+          'import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";'
+        ]);
+        expect(text.match(/const symbols = .*$/gm)).toEqual([
+          'const symbols = { openat: { args: ["i32", "cstring", "i32"], returns: "i32" } } as const;'
+        ]);
+        expect([...text.matchAll(/\.symbols\.([A-Za-z][A-Za-z0-9_]*)/g)].map((match) => match[1])).toEqual([
+          "openat", "openat"
+        ]);
+        expect(text.split("\n").filter((line) =>
+          /\b(?:dlopen|openSync|fstatSync|readSync|closeSync)\s*\(/.test(line)
+        ).map((line) => line.trim())).toEqual([
+          'cachedOpenAt = dlopen("/usr/lib/libSystem.B.dylib", symbols).symbols.openat;',
+          'cachedOpenAt = dlopen("libc.so.6", symbols).symbols.openat;',
+          "return openSync(root, DIRECTORY_OPEN_FLAGS);",
+          "return fstatSync(descriptor, { bigint: true });",
+          "return readSync(descriptor, buffer, offset, length, position);",
+          "closeSync(descriptor);"
+        ]);
+        expect(text).not.toMatch(/\bBun\.(?:file|write|spawn|spawnSync)\b|\b(?:readFile|writeFile|createWriteStream)\w*\b/);
       }
     }
   });
@@ -208,16 +239,37 @@ describe("descriptor-bound source ingress", () => {
   });
 
   test("independent preload denies actual Node, Bun, and FFI authority before side effects", async () => {
-    const controls: readonly AuthorityControl[] = [
-      "node_absolute_open",
-      "ffi_absolute_open",
-      "node_replacement_read",
-      "bun_replacement_read",
-      "node_write",
-      "bun_write",
-      "node_spawn",
-      "bun_spawn"
+    const controls: ReadonlyArray<Readonly<{
+      control: AuthorityControl;
+      operation: string;
+      target: "input" | "replacement" | "sentinel" | "none";
+    }>> = [
+      { control: "node_absolute_open", operation: "node_open", target: "input" },
+      { control: "node_url_open", operation: "node_open", target: "input" },
+      { control: "node_buffer_open", operation: "node_open", target: "input" },
+      { control: "fs_alias_url_open", operation: "node_open", target: "input" },
+      { control: "ffi_absolute_open", operation: "ffi_open", target: "input" },
+      { control: "node_replacement_read", operation: "node_read", target: "replacement" },
+      { control: "node_promises_read", operation: "node_promises_read", target: "replacement" },
+      { control: "fs_promises_read", operation: "node_promises_read", target: "replacement" },
+      { control: "node_promises_property_read", operation: "node_promises_read", target: "replacement" },
+      { control: "fs_promises_property_read", operation: "node_promises_read", target: "replacement" },
+      { control: "bun_replacement_read", operation: "bun_file", target: "replacement" },
+      { control: "bun_url_read", operation: "bun_file", target: "replacement" },
+      { control: "node_write", operation: "node_write", target: "sentinel" },
+      { control: "bun_write", operation: "bun_write", target: "sentinel" },
+      { control: "node_spawn", operation: "node_spawn", target: "none" },
+      { control: "bun_spawn", operation: "bun_spawn", target: "none" }
     ];
+    const productionControls = [
+      "node_fs_open_url",
+      "fs_open_buffer",
+      "node_fs_promises_read_string",
+      "fs_promises_read_url",
+      "node_fs_promises_write_url",
+      "bun_file_url",
+      "node_fs_stat_url"
+    ] as const;
     for (const [kind, input] of [
       ["source_input_record", validSourcePath],
       ["source_identity_projection", validIdentityPath]
@@ -229,42 +281,51 @@ describe("descriptor-bound source ingress", () => {
       const inputBytes = await readFile(input);
       await writeFile(replacement, replacementBytes);
       try {
-        const productionProcess = await guardedCommand(
-          [authorityControlPath, kind, input, "production_path", replacement, productionSentinel],
-          { SHUD_CONTRACT_AUTHORITY_RED_SENTINEL: productionSentinel }
-        );
-        const productionResult = JSON.parse(productionProcess.stdout) as {
-          exit: number; stdout: string; stderr: string; events: string[];
-        };
-        expect({
-          processExit: productionProcess.exit,
-          processStderr: productionProcess.stderr,
-          result: productionResult,
-          sentinelExists: await Bun.file(productionSentinel).exists()
-        }).toEqual({
-          processExit: 0,
-          processStderr: "",
-          result: { exit: 0, stdout: success(kind), stderr: "", events: [] },
-          sentinelExists: false
-        });
+        const productionObserved: unknown[] = [];
+        const productionExpected: unknown[] = [];
+        for (const control of productionControls) {
+          const productionProcess = await guardedCommand(
+            [authorityControlPath, kind, input, "production_path", replacement, productionSentinel],
+            {
+              SHUD_CONTRACT_AUTHORITY_RED_CONTROL: control,
+              SHUD_CONTRACT_AUTHORITY_RED_TARGET: replacement,
+              SHUD_CONTRACT_AUTHORITY_RED_SENTINEL: productionSentinel
+            }
+          );
+          const productionResult = JSON.parse(productionProcess.stdout) as {
+            exit: number; stdout: string; stderr: string; events: string[];
+          };
+          productionObserved.push({
+            control,
+            processExit: productionProcess.exit,
+            processStderr: productionProcess.stderr,
+            result: productionResult,
+            sentinelExists: await Bun.file(productionSentinel).exists(),
+            replacementUnchanged: (await readFile(replacement)).equals(replacementBytes)
+          });
+          productionExpected.push({
+            control,
+            processExit: 0,
+            processStderr: "",
+            result: { exit: 0, stdout: success(kind), stderr: "", events: [] },
+            sentinelExists: false,
+            replacementUnchanged: true
+          });
+        }
+        expect(productionObserved).toEqual(productionExpected);
         const observed: unknown[] = [];
         const expected: unknown[] = [];
-        for (const control of controls) {
-          const sentinel = join(root, `${control}.sentinel`);
+        for (const spec of controls) {
+          const sentinel = join(root, `${spec.control}.sentinel`);
           const result = await guardedCommand([
-            authorityControlPath, kind, input, control, replacement, sentinel
+            authorityControlPath, kind, input, spec.control, replacement, sentinel
           ]);
           const payload = JSON.parse(result.stdout) as {
             exit: number; stdout: string; stderr: string; events: string[];
           };
-          const operation = control
-            .replace("node_absolute_open", "node_open")
-            .replace("ffi_absolute_open", "ffi_open")
-            .replace("node_replacement_read", "node_read")
-            .replace("bun_replacement_read", "bun_file");
-          const target = control.endsWith("absolute_open") ? input
-            : control.endsWith("replacement_read") ? replacement
-            : control.endsWith("write") ? sentinel
+          const target = spec.target === "input" ? input
+            : spec.target === "replacement" ? replacement
+            : spec.target === "sentinel" ? sentinel
             : "";
           observed.push({
             processExit: result.exit,
@@ -282,8 +343,8 @@ describe("descriptor-bound source ingress", () => {
               stdout: "",
               stderr: failure("CONTRACT_SCHEMA_INVALID"),
               events: [
-                `${operation}:${target}`,
-                `control_error:CONTRACT_TEST_AUTHORITY_DENIED:${operation}`
+                `${spec.operation}:${target}`,
+                `control_error:CONTRACT_TEST_AUTHORITY_DENIED:${spec.operation}`
               ]
             },
             sentinelExists: false,

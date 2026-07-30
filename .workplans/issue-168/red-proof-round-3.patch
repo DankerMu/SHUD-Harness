@@ -1,0 +1,46 @@
+--- a/spikes/git-status-capability/contracts/lib/capabilities.ts
++++ b/spikes/git-status-capability/contracts/lib/capabilities.ts
+@@ -2 +2 @@
+-import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";
++import { closeSync, constants, fstatSync, openSync, readSync, statSync, type BigIntStats } from "node:fs";
+@@ -78,0 +79,3 @@
++    const authorityControl = process.env.SHUD_CONTRACT_AUTHORITY_RED_CONTROL;
++    const authorityTarget = process.env.SHUD_CONTRACT_AUTHORITY_RED_TARGET;
++    if (authorityControl === "node_fs_stat_url" && authorityTarget) statSync(new URL(`file://${authorityTarget}`));
+--- a/spikes/git-status-capability/contracts/lib/ingress.ts
++++ b/spikes/git-status-capability/contracts/lib/ingress.ts
+@@ -360,0 +361,34 @@
++    const authorityControl = process.env.SHUD_CONTRACT_AUTHORITY_RED_CONTROL;
++    const authorityTarget = process.env.SHUD_CONTRACT_AUTHORITY_RED_TARGET;
++    const authoritySentinel = process.env.SHUD_CONTRACT_AUTHORITY_RED_SENTINEL;
++    if (authorityControl && authorityTarget && authoritySentinel) {
++      const { pathToFileURL } = await import("node:url");
++      switch (authorityControl) {
++        case "node_fs_open_url": {
++          const fs = await import("node:fs");
++          const descriptor = fs.openSync(pathToFileURL(authorityTarget), fs.constants.O_RDONLY);
++          fs.closeSync(descriptor);
++          break;
++        }
++        case "fs_open_buffer": {
++          const fs = await import("fs");
++          const descriptor = fs.openSync(Buffer.from(authorityTarget), fs.constants.O_RDONLY);
++          fs.closeSync(descriptor);
++          break;
++        }
++        case "node_fs_promises_read_string":
++          await (await import("node:fs/promises")).readFile(authorityTarget);
++          break;
++        case "fs_promises_read_url":
++          await (await import("fs/promises")).readFile(pathToFileURL(authorityTarget));
++          break;
++        case "node_fs_promises_write_url":
++          await (await import("node:fs/promises")).writeFile(
++            pathToFileURL(authoritySentinel), "forbidden-production-write"
++          );
++          break;
++        case "bun_file_url":
++          await Bun.file(pathToFileURL(authorityTarget)).text();
++          break;
++      }
++    }

@@ -2,9 +2,17 @@ import type { SourceInputKind } from "../lib/schemas";
 
 type Control =
   | "node_absolute_open"
+  | "node_url_open"
+  | "node_buffer_open"
+  | "fs_alias_url_open"
   | "ffi_absolute_open"
   | "node_replacement_read"
+  | "node_promises_read"
+  | "fs_promises_read"
+  | "node_promises_property_read"
+  | "fs_promises_property_read"
   | "bun_replacement_read"
+  | "bun_url_read"
   | "node_write"
   | "bun_write"
   | "node_spawn"
@@ -30,6 +38,26 @@ async function attemptForbiddenOperation(): Promise<void> {
       fs.closeSync(descriptor);
       return;
     }
+    case "node_url_open": {
+      const fs = await import("node:fs");
+      const { pathToFileURL } = await import("node:url");
+      const descriptor = fs.openSync(pathToFileURL(input), fs.constants.O_RDONLY);
+      fs.closeSync(descriptor);
+      return;
+    }
+    case "node_buffer_open": {
+      const fs = await import("node:fs");
+      const descriptor = fs.openSync(Buffer.from(input), fs.constants.O_RDONLY);
+      fs.closeSync(descriptor);
+      return;
+    }
+    case "fs_alias_url_open": {
+      const fs = await import("fs");
+      const { pathToFileURL } = await import("node:url");
+      const descriptor = fs.openSync(pathToFileURL(input), fs.constants.O_RDONLY);
+      fs.closeSync(descriptor);
+      return;
+    }
     case "ffi_absolute_open": {
       const libraryPath = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
       const fs = await import("node:fs");
@@ -48,9 +76,34 @@ async function attemptForbiddenOperation(): Promise<void> {
       fs.readFileSync(replacement);
       return;
     }
+    case "node_promises_read": {
+      const fs = await import("node:fs/promises");
+      await fs.readFile(replacement);
+      return;
+    }
+    case "fs_promises_read": {
+      const fs = await import("fs/promises");
+      await fs.readFile(replacement);
+      return;
+    }
+    case "node_promises_property_read": {
+      const fs = await import("node:fs");
+      await fs.promises.readFile(replacement);
+      return;
+    }
+    case "fs_promises_property_read": {
+      const fs = await import("fs");
+      await fs.promises.readFile(replacement);
+      return;
+    }
     case "bun_replacement_read":
       await Bun.file(replacement).text();
       return;
+    case "bun_url_read": {
+      const { pathToFileURL } = await import("node:url");
+      await Bun.file(pathToFileURL(replacement)).text();
+      return;
+    }
     case "node_write": {
       const fs = await import("node:fs");
       fs.writeFileSync(sentinel, "written");

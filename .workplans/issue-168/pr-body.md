@@ -19,14 +19,17 @@ production/runtime/workflows, and network security remain out of scope.
 ## Verification
 
 - `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests`
-  — Darwin 25 pass, 0 fail, 532 assertions
+  — Darwin 25 pass, 0 fail, 541 assertions
 - `oven/bun:1.2.19` read-only Linux container focused run — 25 pass, 0 fail,
-  484 assertions
+  493 assertions
 - both direct public `check.ts` commands — exact success receipt, empty stderr
 - compiling Phase 6.2 mutation — 18 pass, 2 named failures; restored focused
   source-ingress suite 20 pass, 0 fail
 - compiling Round 2 production/parser mutation — Darwin and Linux each report
   18 pass, 3 named failures; production write sentinel remains absent
+- compiling Round 3 closed-authority production matrix — Darwin/Linux each
+  report 19 pass, 2 named failures; six runtime routes are denied without side
+  effects and same-module `statSync(URL)` is caught by exact static vocabulary
 - `npx --yes bun@1.2.19 run typecheck` — pass
 - `npx --yes bun@1.2.19 run check` — pass
 - strict OpenSpec validation — valid
@@ -43,7 +46,8 @@ workflow，Darwin/Linux focused 证据由 exact-tree 本地与只读容器运行
 
 - Round 1 at `89eb2aad7895d837617d243a8ce82e3cdc45b211` recorded seven
   verified findings. Phase 6.2 closed two more gaps. Round 2 at `f49ac270` found
-  four verified findings; this tree implements their synthesized fixes and awaits
-  the next review gate.
+  four verified findings. Round 3 at `17f89edd` found a recurring PathLike/promise
+  authority-depth gap; the registered retro corrective action is implemented in
+  this tree and awaits the next review gate.
 - OpenSpec change: `m2-capability-observer-spike`; fixture level: expanded;
   repair intensity: high

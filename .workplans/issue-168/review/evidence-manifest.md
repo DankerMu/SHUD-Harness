@@ -15,6 +15,9 @@ Round 2 reviewed head: `f49ac2704619bafa31504691daee2a2360ce3452`.
 Round 2: not-clean; 4 verified FIX_NOW findings covering nonfinite precedence,
 production-import interposition, audit availability, and workflow scope. The
 current worktree implements the fix synthesis and awaits the next review gate.
+Round 3 reviewed head: `17f89edd0eecfdd71834e6ee77ba5d5716d1f7d1`.
+Round 3: not-clean; one verified FIX_NOW PathLike/promise authority-depth finding.
+The registered depth retro corrective action is implemented in the current tree.
 
 Selected packs: correctness, integration, file-I/O/path and resource behavior,
 test/evidence coverage, spec compliance, invariant/state/compatibility.
@@ -27,12 +30,15 @@ publication/production siblings.
 Implementation evidence: `.workplans/issue-168/implementation-evidence.md`.
 Fix synthesis: `.workplans/issue-168/review/fix-synthesis-round-1.md`.
 Round 2 fix synthesis: `.workplans/issue-168/review/fix-synthesis-round-2.md`.
+Round 3 retro: `.workplans/issue-168/review/review-failure-retro-round-3.md`.
 Invariant audit: `.workplans/issue-168/review/phase-6-2-invariant-audit-052cb07.md`.
 Compiling Phase 6.2 red proof:
 `.workplans/issue-168/red-proof-phase-6-2.md` and
 `.workplans/issue-168/red-proof-phase-6-2.patch`.
 Compiling Round 2 red proof: `.workplans/issue-168/red-proof-round-2.md` and
 `.workplans/issue-168/red-proof-round-2.patch`.
+Compiling Round 3 red proof: `.workplans/issue-168/red-proof-round-3.md` and
+`.workplans/issue-168/red-proof-round-3.patch`.
 Plan deviation: none. Existing CI workflows match `origin/main`; no isolated
 workflow is added in this issue.
 
@@ -41,3 +47,6 @@ Linux Bun 1.2.19 focused 25 pass / 0 fail / 484 assertions; both direct public
 commands, typecheck, full repository check, strict OpenSpec, diff/stash/submodule
 and scope hygiene all pass. Round 2 final verification is recorded in the
 implementation evidence after the synthesized fixes.
+Post-Round-3-retro verification: Darwin focused 25 pass / 0 fail / 541 assertions;
+Linux Bun 1.2.19 focused 25 pass / 0 fail / 493 assertions. The closed authority
+surface and production mutation matrix are recorded in the implementation evidence.

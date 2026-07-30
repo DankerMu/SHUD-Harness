@@ -1,11 +1,16 @@
 import { mock } from "bun:test";
 import * as actualChildProcess from "node:child_process";
 import * as actualFs from "node:fs";
+import * as actualFsPromises from "node:fs/promises";
 import * as actualFfi from "bun:ffi";
+import { fileURLToPath } from "node:url";
 
 const originalOpenSync = actualFs.openSync;
 const originalReadFileSync = actualFs.readFileSync;
 const originalWriteFileSync = actualFs.writeFileSync;
+const originalPromisesOpen = actualFsPromises.open;
+const originalPromisesReadFile = actualFsPromises.readFile;
+const originalPromisesWriteFile = actualFsPromises.writeFile;
 const originalDlopen = actualFfi.dlopen;
 const originalNodeSpawn = actualChildProcess.spawn;
 const originalNodeSpawnSync = actualChildProcess.spawnSync;
@@ -14,8 +19,18 @@ type GuardState = { phase: "admission" | "post_admission"; events: string[] };
 const state: GuardState = { phase: "admission", events: [] };
 (globalThis as Record<PropertyKey, unknown>)[Symbol.for("shud.contract.authorityGuard")] = state;
 
-function absolutePath(value: unknown): value is string {
-  return typeof value === "string" && value.startsWith("/");
+function normalizedAbsolutePath(value: unknown): string | undefined {
+  let path: string | undefined;
+  if (typeof value === "string") path = value;
+  else if (Buffer.isBuffer(value)) path = value.toString("utf8");
+  else if (value instanceof URL && value.protocol === "file:") {
+    try {
+      path = fileURLToPath(value);
+    } catch {
+      return undefined;
+    }
+  }
+  return path?.startsWith("/") ? path : undefined;
 }
 
 function decodedCString(value: unknown): string | undefined {
@@ -30,11 +45,29 @@ function deny(operation: string, target?: unknown): never {
 }
 
 function guardAbsolute(operation: string, target: unknown): void {
-  if (state.phase === "post_admission" && absolutePath(target)) deny(operation, target);
+  const path = normalizedAbsolutePath(target);
+  if (state.phase === "post_admission" && path) deny(operation, path);
 }
+
+const guardedFsPromises = {
+  ...actualFsPromises,
+  async open(path: Parameters<typeof actualFsPromises.open>[0], ...args: unknown[]) {
+    guardAbsolute("node_promises_open", path);
+    return await (originalPromisesOpen as (...values: unknown[]) => Promise<unknown>)(path, ...args);
+  },
+  async readFile(path: Parameters<typeof actualFsPromises.readFile>[0], ...args: unknown[]) {
+    guardAbsolute("node_promises_read", path);
+    return await (originalPromisesReadFile as (...values: unknown[]) => Promise<unknown>)(path, ...args);
+  },
+  async writeFile(path: Parameters<typeof actualFsPromises.writeFile>[0], ...args: unknown[]) {
+    if (state.phase === "post_admission") deny("node_promises_write", normalizedAbsolutePath(path));
+    return await (originalPromisesWriteFile as (...values: unknown[]) => Promise<void>)(path, ...args);
+  }
+};
 
 const guardedFs = {
   ...actualFs,
+  promises: guardedFsPromises,
   openSync(path: Parameters<typeof actualFs.openSync>[0], ...args: unknown[]) {
     guardAbsolute("node_open", path);
     return (originalOpenSync as (...values: unknown[]) => number)(path, ...args);
@@ -44,7 +77,7 @@ const guardedFs = {
     return (originalReadFileSync as (...values: unknown[]) => unknown)(path, ...args);
   },
   writeFileSync(path: Parameters<typeof actualFs.writeFileSync>[0], ...args: unknown[]) {
-    if (state.phase === "post_admission") deny("node_write", path);
+    if (state.phase === "post_admission") deny("node_write", normalizedAbsolutePath(path));
     return (originalWriteFileSync as (...values: unknown[]) => void)(path, ...args);
   }
 };
@@ -85,7 +118,11 @@ const guardedDlopen = (path: string, symbols: Record<string, unknown>) => {
 };
 
 mock.module("node:fs", () => ({ ...guardedFs, default: guardedFs }));
+mock.module("fs", () => ({ ...guardedFs, default: guardedFs }));
+mock.module("node:fs/promises", () => ({ ...guardedFsPromises, default: guardedFsPromises }));
+mock.module("fs/promises", () => ({ ...guardedFsPromises, default: guardedFsPromises }));
 mock.module("node:child_process", () => ({ ...guardedChildProcess, default: guardedChildProcess }));
+mock.module("child_process", () => ({ ...guardedChildProcess, default: guardedChildProcess }));
 mock.module("bun:ffi", () => ({ ...actualFfi, dlopen: guardedDlopen }));
 
 const originalBunFile = Bun.file.bind(Bun);
@@ -98,7 +135,7 @@ const originalBunSpawnSync = Bun.spawnSync.bind(Bun);
   return (originalBunFile as (...values: unknown[]) => ReturnType<typeof Bun.file>)(path, ...args);
 };
 (Bun as any).write = (path: Parameters<typeof Bun.write>[0], ...args: unknown[]) => {
-  if (state.phase === "post_admission") deny("bun_write", path);
+  if (state.phase === "post_admission") deny("bun_write", normalizedAbsolutePath(path));
   return (originalBunWrite as (...values: unknown[]) => ReturnType<typeof Bun.write>)(path, ...args);
 };
 (Bun as any).spawn = (...args: unknown[]) => {

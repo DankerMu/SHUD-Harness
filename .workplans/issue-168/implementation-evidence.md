@@ -129,6 +129,37 @@ in-image pinned command was `bun test spikes/git-status-capability/contracts/tes
   typecheck, full repository check, strict OpenSpec, red-patch applicability,
   diff/stash/submodule/scope checks, and evidence hygiene pass.
 
+## Round 3 depth-retro closure
+
+- One deterministic `normalizedAbsolutePath` handles absolute strings, Buffer
+  paths, and file URLs. Every guarded sync, promise, and Bun file/write route
+  records the decoded absolute path from this shared normalizer.
+- Preload module interposition now closes canonical and bare `node:fs`/`fs`,
+  `node:fs/promises`/`fs/promises`, and `fs.promises` routes. Existing canonical
+  and bare child-process, Bun global, and FFI routes remain guarded. Normal-import
+  controls cover `openSync` with string/Buffer/URL, promise `readFile` through
+  both aliases and the `fs.promises` property, and `Bun.file` with string/URL.
+- The production static audit now freezes the exact two import declarations,
+  exact authority module references, exact allowed syscall-call lines, exact
+  `openat` FFI symbol schema, and exact `.symbols.openat` vocabulary in
+  `lib/capabilities.ts`. Every implementation file, including capabilities,
+  rejects `require` and `process.binding`; all non-capability files additionally
+  reject canonical/bare sync/promise FS modules, child-process modules, and Bun
+  file/write/spawn APIs.
+- `.workplans/issue-168/red-proof-round-3.patch` is a compiling production-source
+  matrix covering canonical/bare modules, sync/promise APIs, string/Buffer/URL
+  paths, a promise URL write, Bun file URL, and a same-module `statSync(URL)`
+  addition. Darwin returned `19 pass`, `2 fail`, `504 assertions`; Linux returned
+  `19 pass`, `2 fail`, `456 assertions`. The stat branch executed normally but
+  the exact import declaration caught the added named API.
+  Every matrix branch emitted its exact normalized event; replacement bytes were
+  unchanged and the write sentinel remained absent. Restored source matched its
+  pre-mutation SHA-256 and the patch applicability check passes.
+- Final Round 3 focused results: Darwin `25 pass`, `0 fail`, `541 assertions`;
+  Linux Bun 1.2.19 `25 pass`, `0 fail`, `493 assertions`. Direct commands,
+  typecheck, full repository check, strict OpenSpec, evidence hygiene,
+  diff/stash/submodule/scope checks pass; existing workflows remain unchanged.
+
 ## Deviations
 
 No accepted deviations remain. Existing workflows are unchanged and the isolated
