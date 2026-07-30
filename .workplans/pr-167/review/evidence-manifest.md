@@ -6,7 +6,7 @@ Evidence carrier: the pushed HEAD containing this manifest; it changes no contra
 Base SHA: `f8b74e724dc978acb889f715a936feabfd69680d`
 Issue: #164
 Fixture: expanded; repair intensity high
-Review state: Round 5 at `0b832a8` not clean; terminal round ceiling locked; awaiting user split/descope/stop decision
+Review state: Round 5 ceiling resolved by user-approved split; PR #167 superseded by #168 -> #169
 
 ## Current retained scope
 
@@ -66,8 +66,13 @@ history but explicitly superseded; they do not support current PR claims.
   PLAUSIBLE/FIX_NOW (`compatibility`). The gate CLI recorded verified=4,
   highest=major and locked at `round-ceiling`. See
   `round-5-candidate-synthesis-0b832a8.md` and `verify-round-5.md`.
-- CI and human merge gate are blocked by the terminal review gate. No terminal
-  split/descope/stop outcome has been selected or recorded.
+- The user selected `ceiling-split`. #168 owns retained descriptor ingress and
+  normalized single-set source-record capacity; #169 depends on #168 and owns
+  committed-oracle wiring, OpenSpec ownership, and synchronized public evidence.
+- Stage 5.5 is clean after independent verification. The gate state is closed as
+  `superseded-by-split`; terminal review-loop and sizing-retro entries are
+  committed. PR #167 must close without merge and neither child inherits its
+  round counter.
 
 Reviewer lens mix: correctness, integration, resource/path/performance,
 test/evidence, spec compliance, invariant/state/compatibility.

@@ -1,0 +1,1 @@
+{"date":"2026-07-29","change":"m2-capability-observer-spike","issue":164,"sizing_retro":{"outcome":"ceiling-split","rounds_burned":5,"prs":[167],"children":[168,169],"verdict":"slice-error","note":"The source-oracle slice still combined descriptor ingress/capacity with committed-oracle ownership/evidence; split these seams in dependency order before implementation."}}

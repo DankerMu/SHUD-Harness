@@ -1,0 +1,1 @@
+{"issue":164,"pr":167,"date":"2026-07-29","fixture":"high","rounds":5,"outcome":"ceiling-split","children":[168,169],"note":"Round 5 left descriptor-ingress/capacity and committed-oracle ownership/evidence as independent blocking seams; the user approved two dependency-ordered replacement issues."}

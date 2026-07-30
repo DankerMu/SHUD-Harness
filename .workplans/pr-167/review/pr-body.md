@@ -49,7 +49,8 @@ binds the complete contracts/test/helper/fixture/golden tree.
 ## Review state
 
 Final retained-slice Phase 6.2 audit was clean at `abe777f`, but comprehensive
-Round 5 at `0b832a8` was not clean: three confirmed P1 findings and one blocking
-plausible P1 remain. The five-round ceiling is terminally locked. CI progression
-and merge are blocked pending an explicit user decision to split, descope, or
-stop this PR.
+Round 5 at `0b832a8` was not clean and reached the five-round ceiling. The user
+approved a terminal split: #168 owns descriptor-bound ingress and normalized
+single-set record capacity; #169 depends on #168 and owns committed-oracle
+wiring, OpenSpec ownership, and synchronized public evidence. Stage 5.5 is clean.
+This PR is superseded by #168 -> #169 and will close without merge.

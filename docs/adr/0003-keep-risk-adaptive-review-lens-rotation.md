@@ -37,6 +37,13 @@ status: accepted
 2. rotated-in lenses 连续一个样本窗没有独立有效捕获，或其误报显著高于 fixed core lenses。
 3. reviewer 角色/fixture contract 发生结构性变化，使当前 lens 分类不再可比。
 
+## 2026-07-29 审计记录
+
+PR #167 的 terminal `ceiling-split` 行触发了机械审计，但没有新增带 lens
+attribution 的 merged PR 样本；审计仍在复报作出本 ADR 时的同一组 `core=2 / rotated=37`
+数据。维持本 ADR 的 keep 决定，revisit 延后到上述触发器满足，不把同一八项样本
+重复计为新的人类决策窗口。
+
 ## 参照
 
 [`review-loop-log.jsonl`](../review-loop-log.jsonl) · `subagent-workflow` 的 `risk-adaptive-cross-review` 与 `loop_log_audit.py`

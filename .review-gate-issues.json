@@ -55,7 +55,13 @@
         167
       ],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 167,
+          "outcome": "superseded-by-split",
+          "rounds": 5
+        }
+      ]
     }
   }
 }
