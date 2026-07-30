@@ -1,0 +1,52 @@
+{
+  "schema_version": "shud.issue-172.review-evidence-manifest.v1",
+  "issue": 172,
+  "pull_request": 174,
+  "proof_sha": "526f86d5522423823e9909937f166d72b7c2a49c",
+  "generated_at": "2026-07-30T18:05:41Z",
+  "evidence_commit_rule": "A descendant of proof_sha changing only this review-evidence/issue-172 directory; the exact commit and manifest blob digest are published in PR evidence.",
+  "offline_retrieval": "git show $EVIDENCE_COMMIT:$RELATIVE_PATH",
+  "artifacts": [
+    {
+      "relative_path": "openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/implementation-evidence.md",
+      "byte_length": 5437,
+      "media_type": "text/markdown; charset=utf-8",
+      "sha256": "a5a35e788b4e0753dd2034cee122cccb196a716e6f7d10c9a6f683e177867999",
+      "retrieval_command": "git show $EVIDENCE_COMMIT:openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/implementation-evidence.md"
+    },
+    {
+      "relative_path": "openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/red-proof-round-1.md",
+      "byte_length": 1932,
+      "media_type": "text/markdown; charset=utf-8",
+      "sha256": "4058179a37ec7fdef5255c307f3602fea6b0aee46e512c553c1faf32f3505924",
+      "retrieval_command": "git show $EVIDENCE_COMMIT:openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/red-proof-round-1.md",
+      "source": {
+        "worktree": "/Users/danker/Desktop/Hydro-SHUD/SHUD-Harness-issue-168",
+        "reviewed_head": "02ba5189e938c7c04018555ec0347945dc15e829",
+        "path": ".workplans/issue-168/red-proof-round-1.md",
+        "byte_length": 1932,
+        "sha256": "4058179a37ec7fdef5255c307f3602fea6b0aee46e512c553c1faf32f3505924"
+      }
+    },
+    {
+      "relative_path": "openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/pr-170-body.md",
+      "byte_length": 3463,
+      "media_type": "text/markdown; charset=utf-8",
+      "sha256": "4a0d936e5907fd9df8dd358d80a2a98fdb84182aeee112a7e21b8c5b51b00307",
+      "retrieval_command": "git show $EVIDENCE_COMMIT:openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/pr-170-body.md",
+      "source": {
+        "retrieval_command": "gh pr view 170 --json body --jq .body",
+        "retrieved_at": "2026-07-30T18:05:41Z",
+        "reviewed_head": "02ba5189e938c7c04018555ec0347945dc15e829",
+        "byte_length": 3463,
+        "sha256": "4a0d936e5907fd9df8dd358d80a2a98fdb84182aeee112a7e21b8c5b51b00307"
+      }
+    }
+  ],
+  "manifest_identity": {
+    "relative_path": "openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/manifest.json",
+    "media_type": "application/json; charset=utf-8",
+    "self_hash_excluded": true,
+    "publication": "The exact byte length and SHA-256 are recorded in the PR evidence comment after commit."
+  }
+}
