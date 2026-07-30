@@ -1,7 +1,13 @@
-import { dlopen } from "bun:ffi";
-import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";
 import { parse, resolve, sep } from "node:path";
 import { hasOnlyUnicodeScalars } from "./canonical-json";
+import {
+  ContractCapabilities,
+  DIRECTORY_OPEN_FLAGS,
+  FILE_OPEN_FLAGS,
+  type BigIntStats,
+  type CapabilityHooks,
+  type ContractAuthorityFault
+} from "./capabilities";
 
 export type ContractErrorCode =
   | "CONTRACT_BYTES_LIMIT"
@@ -33,34 +39,8 @@ export type DescriptorOperationObserver = (operation: DescriptorOperation) => vo
 export type DescriptorIngressHooks = Readonly<{
   afterAdmission?: DescriptorAdmissionHook;
   observe?: DescriptorOperationObserver;
-}>;
-
-const FILE_OPEN_FLAGS = constants.O_RDONLY | (constants.O_CLOEXEC ?? 0) |
-  (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
-const DIRECTORY_OPEN_FLAGS = FILE_OPEN_FLAGS | (constants.O_DIRECTORY ?? 0);
-
-type OpenAt = (parentDescriptor: number, path: Buffer, flags: number) => number;
-let cachedOpenAt: OpenAt | undefined;
-
-function openAt(): OpenAt {
-  if (cachedOpenAt) return cachedOpenAt;
-  const symbols = { openat: { args: ["i32", "cstring", "i32"], returns: "i32" } } as const;
-  if (process.platform === "darwin") {
-    cachedOpenAt = dlopen("/usr/lib/libSystem.B.dylib", symbols).symbols.openat;
-  } else if (process.platform === "linux") {
-    cachedOpenAt = dlopen("libc.so.6", symbols).symbols.openat;
-  } else {
-    throw new ContractError("CONTRACT_SCHEMA_INVALID");
-  }
-  return cachedOpenAt;
-}
-
-function cString(value: string): Buffer {
-  if (!value || value.includes("\0") || value.includes("/") || value === "." || value === "..") {
-    throw new ContractError("CONTRACT_SCHEMA_INVALID");
-  }
-  return Buffer.from(`${value}\0`, "utf8");
-}
+  authorityFault?: ContractAuthorityFault;
+}> & CapabilityHooks;
 
 function sameEntry(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
@@ -91,23 +71,27 @@ type DescriptorAdmission = Readonly<{
   components: readonly RetainedComponent[];
 }>;
 
-function closeAll(components: readonly RetainedComponent[]): void {
+function closeAll(capabilities: ContractCapabilities, components: readonly RetainedComponent[]): boolean {
   let failed = false;
   for (let index = components.length - 1; index >= 0; index -= 1) {
     try {
-      closeSync(components[index]!.descriptor);
+      capabilities.close(components[index]!.descriptor, "retained");
     } catch {
       failed = true;
     }
   }
-  if (failed) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  return failed;
 }
 
 function assertExpectedType(stats: BigIntStats, final: boolean): void {
   if (final ? !stats.isFile() : !stats.isDirectory()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
 }
 
-function openDescriptorBoundPath(path: string, observe?: DescriptorOperationObserver): DescriptorAdmission {
+function openDescriptorBoundPath(
+  path: string,
+  capabilities: ContractCapabilities,
+  observe?: DescriptorOperationObserver
+): DescriptorAdmission {
   const physicalAbsolutePath = normalizedAbsolutePath(path);
   const root = parse(physicalAbsolutePath).root;
   const segments = absoluteSegments(physicalAbsolutePath);
@@ -115,14 +99,14 @@ function openDescriptorBoundPath(path: string, observe?: DescriptorOperationObse
   const components: RetainedComponent[] = [];
   try {
     observe?.({ phase: "admission", operation: "open_root", path: root });
-    const rootDescriptor = openSync(root, DIRECTORY_OPEN_FLAGS);
+    const rootDescriptor = capabilities.openRoot(root, "admission");
     try {
-      const rootStats = fstatSync(rootDescriptor, { bigint: true });
+      const rootStats = capabilities.stat(rootDescriptor);
       assertExpectedType(rootStats, false);
       components.push({ descriptor: rootDescriptor, stats: rootStats, final: false });
     } catch (error) {
       try {
-        closeSync(rootDescriptor);
+        capabilities.close(rootDescriptor, "unretained");
       } catch {
         throw new ContractError("CONTRACT_SCHEMA_INVALID");
       }
@@ -134,15 +118,19 @@ function openDescriptorBoundPath(path: string, observe?: DescriptorOperationObse
       const final = index === segments.length - 1;
       const parentDescriptor = components.at(-1)!.descriptor;
       observe?.({ phase: "admission", operation: "open_relative", path: childName, parentDescriptor });
-      const descriptor = openAt()(parentDescriptor, cString(childName), final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS);
+      const descriptor = capabilities.openRelative(
+        parentDescriptor,
+        childName,
+        final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS
+      );
       if (descriptor < 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
       try {
-        const stats = fstatSync(descriptor, { bigint: true });
+        const stats = capabilities.stat(descriptor);
         assertExpectedType(stats, final);
         components.push({ descriptor, childName, stats, final });
       } catch (error) {
         try {
-          closeSync(descriptor);
+          capabilities.close(descriptor, "unretained");
         } catch {
           throw new ContractError("CONTRACT_SCHEMA_INVALID");
         }
@@ -151,16 +139,20 @@ function openDescriptorBoundPath(path: string, observe?: DescriptorOperationObse
     }
     return { logicalAbsolutePath: resolve(path), components: Object.freeze(components) };
   } catch (error) {
-    closeAll(components);
+    closeAll(capabilities, components);
     if (error instanceof ContractError) throw error;
     throw new ContractError("CONTRACT_SCHEMA_INVALID");
   }
 }
 
-function verifyRetainedChain(admission: DescriptorAdmission, observe?: DescriptorOperationObserver): void {
+function verifyRetainedChain(
+  admission: DescriptorAdmission,
+  capabilities: ContractCapabilities,
+  observe?: DescriptorOperationObserver
+): void {
   for (let index = 0; index < admission.components.length; index += 1) {
     const retained = admission.components[index]!;
-    const retainedStats = fstatSync(retained.descriptor, { bigint: true });
+    const retainedStats = capabilities.stat(retained.descriptor);
     assertExpectedType(retainedStats, retained.final);
     if (!sameEntry(retained.stats, retainedStats)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     if (index === 0) continue;
@@ -172,23 +164,27 @@ function verifyRetainedChain(admission: DescriptorAdmission, observe?: Descripto
       path: retained.childName!,
       parentDescriptor: parent.descriptor
     });
-    const verificationDescriptor = openAt()(
+    const verificationDescriptor = capabilities.openRelative(
       parent.descriptor,
-      cString(retained.childName!),
+      retained.childName!,
       retained.final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS
     );
     if (verificationDescriptor < 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    let verificationPrimary: ContractError | undefined;
     try {
-      const verificationStats = fstatSync(verificationDescriptor, { bigint: true });
+      const verificationStats = capabilities.stat(verificationDescriptor);
       assertExpectedType(verificationStats, retained.final);
       if (!sameEntry(retained.stats, verificationStats)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    } catch (error) {
+      verificationPrimary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
     } finally {
       try {
-        closeSync(verificationDescriptor);
+        capabilities.close(verificationDescriptor, "verification");
       } catch {
-        throw new ContractError("CONTRACT_SCHEMA_INVALID");
+        if (!verificationPrimary) verificationPrimary = new ContractError("CONTRACT_SCHEMA_INVALID");
       }
     }
+    if (verificationPrimary) throw verificationPrimary;
   }
 }
 
@@ -252,6 +248,7 @@ class StrictJsonParser {
     this.whitespace();
     if (this.text[this.cursor] === "]") { this.cursor += 1; return result; }
     for (;;) {
+      this.assertValueStart();
       this.countItem();
       result.push(this.value(depth + 1));
       this.whitespace();
@@ -260,6 +257,13 @@ class StrictJsonParser {
       if (delimiter !== ",") this.fail("CONTRACT_JSON_MALFORMED");
       this.whitespace();
     }
+  }
+
+  private assertValueStart(): void {
+    const current = this.text[this.cursor];
+    if (current === "{" || current === "[" || current === '"' || current === "t" || current === "f" ||
+        current === "n" || current === "-" || (current !== undefined && current >= "0" && current <= "9")) return;
+    this.fail("CONTRACT_JSON_MALFORMED");
   }
 
   private string(): string {
@@ -338,12 +342,16 @@ export async function readBoundedFile(
   maximum: number,
   hooks: DescriptorIngressHooks = {}
 ): Promise<Uint8Array> {
+  const capabilities = new ContractCapabilities(hooks);
   let admission: DescriptorAdmission | undefined;
+  let primary: ContractError | undefined;
+  let result: Uint8Array | undefined;
   try {
-    admission = openDescriptorBoundPath(path, hooks.observe);
+    admission = openDescriptorBoundPath(path, capabilities, hooks.observe);
     const final = admission.components.at(-1)!;
     await hooks.afterAdmission?.(admission.logicalAbsolutePath);
-    verifyRetainedChain(admission, hooks.observe);
+    if (hooks.authorityFault) capabilities.rejectForbidden(hooks.authorityFault, "post_admission");
+    verifyRetainedChain(admission, capabilities, hooks.observe);
     if (final.stats.size > maximum) throw new ContractError("CONTRACT_BYTES_LIMIT");
     const buffer = Buffer.alloc(maximum + 1);
     let length = 0;
@@ -354,17 +362,26 @@ export async function readBoundedFile(
         path: final.childName!,
         descriptor: final.descriptor
       });
-      const bytesRead = readSync(final.descriptor, buffer, length, buffer.length - length, length);
+      const bytesRead = capabilities.readRetained(
+        final.descriptor,
+        buffer,
+        length,
+        buffer.length - length,
+        length,
+        "post_admission"
+      );
       if (bytesRead === 0) break;
       length += bytesRead;
     }
     if (length > maximum) throw new ContractError("CONTRACT_BYTES_LIMIT");
-    verifyRetainedChain(admission, hooks.observe);
-    return buffer.subarray(0, length);
+    verifyRetainedChain(admission, capabilities, hooks.observe);
+    result = buffer.subarray(0, length);
   } catch (error) {
-    if (error instanceof ContractError) throw error;
-    throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    primary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
   } finally {
-    if (admission) closeAll(admission.components);
+    const cleanupFailed = admission ? closeAll(capabilities, admission.components) : false;
+    if (!primary && cleanupFailed) primary = new ContractError("CONTRACT_SCHEMA_INVALID");
   }
+  if (primary) throw primary;
+  return result!;
 }

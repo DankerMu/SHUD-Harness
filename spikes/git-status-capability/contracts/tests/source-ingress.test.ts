@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, parse, resolve, sep } from "node:path";
 import { canonicalJson } from "../lib/canonical-json";
+import {
+  ContractCapabilities,
+  type CloseAttempt,
+  type ContractAuthorityFault
+} from "../lib/capabilities";
 import { SOURCE_PROFILE } from "../lib/constants";
 import {
   ContractError,
@@ -26,6 +31,17 @@ import {
 
 type Kind = "source_input_record" | "source_identity_projection";
 type FailureScenario = "upper_symlink" | "parent_symlink" | "ancestor_replacement" | "final_replacement";
+
+function componentCount(path: string): number {
+  let absolute = resolve(path);
+  if (process.platform === "darwin") {
+    for (const alias of ["/etc", "/tmp", "/var"] as const) {
+      if (absolute === alias || absolute.startsWith(`${alias}/`)) absolute = `/private${absolute}`;
+    }
+  }
+  const root = parse(absolute).root;
+  return 1 + absolute.slice(root.length).split(sep).filter(Boolean).length;
+}
 
 function expectCode(action: () => unknown, code: string): void {
   try {
@@ -96,15 +112,22 @@ describe("descriptor-bound source ingress", () => {
 
   test("canonical source records preserve canonical JSON and byte-identical repeat receipts", async () => {
     const bytes = await readFile(validSourcePath);
-    expect(admitSourceInput("source_input_record", bytes)).toEqual(admitSourceInput("source_input_record", bytes));
-    expect(new TextDecoder().decode(admitSourceInput("source_input_record", bytes))).toContain("😀.json");
+    const canonicalOracle = await readFile(new URL(
+      "../fixtures/valid/source-input-record-paired-surrogate.canonical.json",
+      import.meta.url
+    ));
+    expect(Buffer.from(admitSourceInput("source_input_record", bytes))).toEqual(canonicalOracle.subarray(0, -1));
+    expect(new TextDecoder().decode(canonicalOracle)).toContain("😀.json");
     expect(canonicalJson({ "😀": "\ud83d\ude00" })).toBe('{"😀":"😀"}');
     const expected = { exit: 0, stdout: success("source_input_record"), stderr: "" };
     expect(await capture(["--input", validSourcePath, "--kind", "source_input_record"])).toEqual(expected);
     expect(await capture(["--input", validSourcePath, "--kind", "source_input_record"])).toEqual(expected);
   });
 
-  test("direct commands preserve input bytes and implementation has no file-write or child-process authority", async () => {
+  test("central capability boundary is the only OS authority import and direct commands preserve input bytes", async () => {
+    expect(Object.getOwnPropertyNames(ContractCapabilities.prototype).sort()).toEqual([
+      "close", "constructor", "openRelative", "openRoot", "readRetained", "rejectForbidden", "stat"
+    ]);
     for (const [kind, path] of [
       ["source_input_record", validSourcePath],
       ["source_identity_projection", validIdentityPath]
@@ -118,14 +141,42 @@ describe("descriptor-bound source ingress", () => {
       expect(afterStat.size).toBe(beforeStat.size);
       expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs);
     }
-    const implementation = await Promise.all([
-      readFile(new URL("../lib/ingress.ts", import.meta.url), "utf8"),
-      readFile(new URL("../lib/checker.ts", import.meta.url), "utf8"),
-      readFile(new URL("../check.ts", import.meta.url), "utf8")
-    ]);
-    expect(implementation.join("\n")).not.toMatch(/node:child_process|Bun\.spawn|spawnSync|execFile|execSync/);
-    expect(implementation[0]).toContain("closeSync, constants, fstatSync, openSync, readSync");
-    expect(implementation[0]).not.toMatch(/writeFile|writeSync|renameSync|unlinkSync|mkdirSync|rmSync/);
+    const libraryRoot = new URL("../lib/", import.meta.url);
+    const libraryFiles = (await readdir(libraryRoot)).filter((name) => name.endsWith(".ts"));
+    const implementations = ["check.ts", ...libraryFiles.map((name) => `lib/${name}`)];
+    for (const relative of implementations) {
+      const text = await readFile(new URL(`../${relative}`, import.meta.url), "utf8");
+      expect(text).not.toMatch(/node:child_process|Bun\.spawn|spawnSync|execFile|execSync/);
+      if (relative !== "lib/capabilities.ts") {
+        expect(text).not.toMatch(/["'](?:node:fs|node:fs\/promises|bun:ffi|node:child_process)["']|\brequire\s*\(|\bprocess\.binding\s*\(/);
+      } else {
+        expect(text).toContain('from "bun:ffi"');
+        expect(text).toContain('from "node:fs"');
+        expect(text).not.toMatch(/writeFile|writeSync|renameSync|unlinkSync|mkdirSync|rmSync|createWriteStream/);
+      }
+    }
+  });
+
+  test("active central gate rejects unreported ambient open, replacement read, write, and child spawn controls", async () => {
+    const faults: ContractAuthorityFault[] = [
+      "ambient_absolute_open", "replacement_object_read", "file_write", "child_spawn"
+    ];
+    for (const [kind, path] of [
+      ["source_input_record", validSourcePath],
+      ["source_identity_projection", validIdentityPath]
+    ] as const) {
+      for (const fault of faults) {
+        const violations: ContractAuthorityFault[] = [];
+        expect(await capture(["--input", path, "--kind", kind], {
+          authorityFault: fault,
+          onAuthorityViolation: (violation) => { violations.push(violation); }
+        })).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+        expect(violations).toEqual([fault]);
+      }
+      expect(await capture(["--input", path, "--kind", kind])).toEqual({
+        exit: 0, stdout: success(kind), stderr: ""
+      });
+    }
   });
 
   test("post-admission tripwire permits only retained-descriptor-relative opens and retained reads", async () => {
@@ -204,6 +255,63 @@ describe("descriptor-bound source ingress", () => {
     Bun.gc(true);
     expect(await descriptorCount()).toBe(baseline);
   });
+
+  test("close faults preserve primary errors, settle every descriptor, and make cleanup-only failure stable", async () => {
+    for (const [kind, path] of [
+      ["source_input_record", validSourcePath],
+      ["source_identity_projection", validIdentityPath]
+    ] as const) {
+      const components = componentCount(path);
+      const cleanupOnly: CloseAttempt[] = [];
+      expect(await capture(["--input", path, "--kind", kind], {
+        closeFault: (attempt) => attempt.owner === "retained",
+        onCloseAttempt: (attempt) => { cleanupOnly.push(attempt); }
+      })).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+      expect(cleanupOnly).toHaveLength(3 * components - 2);
+      expect(cleanupOnly.filter((attempt) => attempt.owner === "verification")).toHaveLength(2 * (components - 1));
+      expect(cleanupOnly.filter((attempt) => attempt.owner === "retained")).toHaveLength(components);
+      expect(cleanupOnly.map((attempt) => attempt.ordinal)).toEqual(
+        Array.from({ length: cleanupOnly.length }, (_, index) => index + 1)
+      );
+
+      const verificationFault: CloseAttempt[] = [];
+      expect(await capture(["--input", path, "--kind", kind], {
+        closeFault: (attempt) => attempt.owner === "verification",
+        onCloseAttempt: (attempt) => { verificationFault.push(attempt); }
+      })).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+      expect(verificationFault).toHaveLength(components + 1);
+      expect(verificationFault[0]!.owner).toBe("verification");
+      expect(verificationFault.slice(1).every((attempt) => attempt.owner === "retained")).toBe(true);
+    }
+
+    for (const kind of ["source_input_record", "source_identity_projection"] as const) {
+      await withTemporaryFile(" ".repeat(SOURCE_PROFILE.bytes + 1), async (path) => {
+        const attempts: CloseAttempt[] = [];
+        const components = componentCount(path);
+        expect(await capture(["--input", path, "--kind", kind], {
+          closeFault: (attempt) => attempt.owner === "retained",
+          onCloseAttempt: (attempt) => { attempts.push(attempt); }
+        })).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_BYTES_LIMIT") });
+        expect(attempts).toHaveLength(2 * components - 1);
+        expect(attempts.filter((attempt) => attempt.owner === "retained")).toHaveLength(components);
+      });
+
+      const directoryRoot = await mkdtemp(join(tmpdir(), "shud-source-admission-close-"));
+      try {
+        const attempts: CloseAttempt[] = [];
+        const components = componentCount(directoryRoot);
+        expect(await capture(["--input", directoryRoot, "--kind", kind], {
+          closeFault: () => true,
+          onCloseAttempt: (attempt) => { attempts.push(attempt); }
+        })).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+        expect(attempts).toHaveLength(components);
+        expect(attempts[0]!.owner).toBe("unretained");
+        expect(attempts.slice(1).every((attempt) => attempt.owner === "retained")).toBe(true);
+      } finally {
+        await rm(directoryRoot, { recursive: true, force: true });
+      }
+    }
+  });
 });
 
 describe("normalized source record and frozen capacity", () => {
@@ -262,6 +370,39 @@ describe("normalized source record and frozen capacity", () => {
     const profile = { ...SOURCE_PROFILE, items: SOURCE_PROFILE.nodes };
     expect(() => parseBoundedJson(nodes(SOURCE_PROFILE.nodes), profile)).not.toThrow();
     expectCode(() => parseBoundedJson(nodes(SOURCE_PROFILE.nodes + 1), profile), "CONTRACT_JSON_NODE_LIMIT");
+  });
+
+  test("a missing array value after comma is malformed before item or node accounting", async () => {
+    const itemBoundary = `[${Array.from({ length: SOURCE_PROFILE.items }, () => "0").join(",")},]`;
+    for (const kind of ["source_input_record", "source_identity_projection"] as const) {
+      await withTemporaryFile(itemBoundary, async (path) => {
+        expect(await capture(["--input", path, "--kind", kind])).toEqual({
+          exit: 2, stdout: "", stderr: failure("CONTRACT_JSON_MALFORMED")
+        });
+      });
+    }
+    const nodeBoundary = Buffer.from(`[${Array.from({ length: SOURCE_PROFILE.nodes - 1 }, () => "0").join(",")},]`);
+    expectCode(
+      () => parseBoundedJson(nodeBoundary, { ...SOURCE_PROFILE, items: SOURCE_PROFILE.nodes }),
+      "CONTRACT_JSON_MALFORMED"
+    );
+  });
+
+  test("legal depth 12 reaches schema validation and depth 13 returns only the depth limit for both kinds", async () => {
+    const exact = "[".repeat(SOURCE_PROFILE.depth - 1) + "0" + "]".repeat(SOURCE_PROFILE.depth - 1);
+    const plusOne = "[".repeat(SOURCE_PROFILE.depth) + "0" + "]".repeat(SOURCE_PROFILE.depth);
+    for (const kind of ["source_input_record", "source_identity_projection"] as const) {
+      for (const [text, code] of [
+        [exact, "CONTRACT_SCHEMA_INVALID"],
+        [plusOne, "CONTRACT_JSON_DEPTH_LIMIT"]
+      ] as const) {
+        await withTemporaryFile(text, async (path) => {
+          expect(await capture(["--input", path, "--kind", kind])).toEqual({
+            exit: 2, stdout: "", stderr: failure(code)
+          });
+        });
+      }
+    }
   });
 
   test("byte, depth, item, UTF-8, malformed, duplicate, unknown, and missing failures retain exact receipts", async () => {

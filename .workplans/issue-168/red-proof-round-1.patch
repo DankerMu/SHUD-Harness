@@ -1,0 +1,33 @@
+--- a/spikes/git-status-capability/contracts/lib/canonical-json.ts
++++ b/spikes/git-status-capability/contracts/lib/canonical-json.ts
+@@ -29 +29 @@
+-    const keys = Object.keys(record).sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
++    const keys = Object.keys(record);
+--- a/spikes/git-status-capability/contracts/lib/constants.ts
++++ b/spikes/git-status-capability/contracts/lib/constants.ts
+@@ -1 +1 @@
+-export const SOURCE_PROFILE = Object.freeze({ bytes: 65_536, depth: 12, nodes: 2_048, items: 512 });
++export const SOURCE_PROFILE = Object.freeze({ bytes: 65_536, depth: 12, nodes: 2_048, items: 511 });
+--- a/spikes/git-status-capability/contracts/lib/ingress.ts
++++ b/spikes/git-status-capability/contracts/lib/ingress.ts
+@@ -1,0 +2 @@
++import { openSync } from "node:fs";
+@@ -152,0 +154,2 @@
++  void openSync;
++  return;
+@@ -207 +210 @@
+-    if (depth > this.profile.depth) this.fail("CONTRACT_JSON_DEPTH_LIMIT");
++    if (depth >= this.profile.depth) this.fail("CONTRACT_JSON_DEPTH_LIMIT");
+@@ -251 +253,0 @@
+-      this.assertValueStart();
+@@ -383 +385 @@
+-    if (!primary && cleanupFailed) primary = new ContractError("CONTRACT_SCHEMA_INVALID");
++    if (cleanupFailed) primary = new ContractError("CONTRACT_SCHEMA_INVALID");
+--- a/spikes/git-status-capability/contracts/lib/schemas.ts
++++ b/spikes/git-status-capability/contracts/lib/schemas.ts
+@@ -46 +46 @@
+-  return record(value) && exactKeys(value, RESULT_KEYS) && value.status === "ok" &&
++  return record(value) && value.status === "ok" &&
+@@ -107 +107 @@
+-  return peers.every((peer) => peer === peers[0]);
++  return true;
