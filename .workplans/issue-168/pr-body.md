@@ -52,7 +52,14 @@ workflow，Darwin/Linux focused 证据由 exact-tree 本地与只读容器运行
   verified findings. Phase 6.2 closed two more gaps. Round 2 at `f49ac270` found
   four verified findings. Round 3 at `17f89edd` found a recurring PathLike/promise
   authority-depth gap. Round 4 at `cc89c89d` found computed-loader/API-name depth
-  gaps; the registered final ordinary corrective action is implemented in this
-  tree and awaits the terminal review gate.
+  gaps and consumed the final post-retro budget.
+- Round 5 at `02ba5189e938c7c04018555ec0347945dc15e829` verified three P1
+  `test-evidence` findings: stale historical counts, constructor-created dynamic
+  execution outside both proof layers, and Worker new-realm authority outside
+  the main-realm preload patches.
+- The Round 5 ledger is `not-clean`; the five-round terminal ceiling is locked.
+  No Round 6, Phase 6/7 repair, CI-for-merge wait, or merge is permitted. PR
+  #170 is superseded by implementation-ready Issues #171 and #172, ordered
+  `#171 -> #172 -> #169`.
 - OpenSpec change: `m2-capability-observer-spike`; fixture level: expanded;
-  repair intensity: high
+  repair intensity: high.

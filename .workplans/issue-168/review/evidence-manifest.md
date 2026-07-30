@@ -60,3 +60,14 @@ Post-Round-4-retro verification: Darwin focused 25 pass / 0 fail / 527 assertion
 read-only Linux Bun 1.2.19 focused 25 pass / 0 fail / 479 assertions. The cached
 FS/FFI/child-process guards, AST structural allowlist, and compiling
 computed-loader matrix are recorded in the implementation evidence.
+
+Round 5 reviewed head: `02ba5189e938c7c04018555ec0347945dc15e829`.
+Round 5: not-clean; 3 verified P1/FIX_NOW `test-evidence` findings. Authoritative
+verdicts are `verify-test-evidence-round-5-{a,b,c}.md`. The gate recorded the
+five-round terminal ceiling; no ordinary fix, Round 6, Phase 7, CI-for-merge
+wait, or merge is allowed on PR #170.
+
+Terminal corrective action: breadth split into implementation-ready Issues #171
+(core retained ingress and normalized record contract) and #172 (dependent
+authority-proof harness and exact evidence closure), then #169. The persisted
+decision and ownership boundaries are in `terminal-split-plan.md`.
