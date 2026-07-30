@@ -1,6 +1,6 @@
 # Review Failure Retro
 
-PR: #170, current head SHA: `17f89edd0eecfdd71834e6ee77ba5d5716d1f7d1`
+PR: #170, retro trigger head SHA: `17f89edd0eecfdd71834e6ee77ba5d5716d1f7d1`
 
 Failure classes: test-evidence
 
