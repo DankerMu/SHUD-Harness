@@ -1,0 +1,13 @@
+--- a/spikes/git-status-capability/contracts/lib/capabilities.ts
++++ b/spikes/git-status-capability/contracts/lib/capabilities.ts
+@@ -2 +2 @@
+-import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";
++import { closeSync, constants, fstatSync, openSync, readSync, writeFileSync, type BigIntStats } from "node:fs";
+@@ -78,0 +79,2 @@
++    const sentinel = process.env.SHUD_CONTRACT_AUTHORITY_RED_SENTINEL;
++    if (sentinel) writeFileSync(sentinel, "forbidden-production-write");
+--- a/spikes/git-status-capability/contracts/lib/ingress.ts
++++ b/spikes/git-status-capability/contracts/lib/ingress.ts
+@@ -309 +309 @@
+-    if (!Number.isFinite(result)) this.pendingSemanticError = true;
++    if (!Number.isFinite(result)) this.fail("CONTRACT_SCHEMA_INVALID");

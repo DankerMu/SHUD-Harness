@@ -1,4 +1,3 @@
-import { runCheckForTest } from "../lib/checker";
 import type { SourceInputKind } from "../lib/schemas";
 
 type Control =
@@ -9,25 +8,14 @@ type Control =
   | "node_write"
   | "bun_write"
   | "node_spawn"
-  | "bun_spawn";
+  | "bun_spawn"
+  | "production_path";
 
 type GuardState = { phase: "admission" | "post_admission"; events: string[] };
 const state = (globalThis as Record<PropertyKey, unknown>)[
   Symbol.for("shud.contract.authorityGuard")
 ] as GuardState | undefined;
 if (!state) throw new Error("CONTRACT_TEST_AUTHORITY_PRELOAD_MISSING");
-const guardedDlopen = (globalThis as Record<PropertyKey, unknown>)[
-  Symbol.for("shud.contract.guardedDlopen")
-] as ((path: string, symbols: Record<string, unknown>) => any) | undefined;
-if (!guardedDlopen) throw new Error("CONTRACT_TEST_FFI_GUARD_MISSING");
-const guardedFs = (globalThis as Record<PropertyKey, unknown>)[
-  Symbol.for("shud.contract.guardedFs")
-] as typeof import("node:fs") | undefined;
-if (!guardedFs) throw new Error("CONTRACT_TEST_NODE_FS_GUARD_MISSING");
-const guardedChildProcess = (globalThis as Record<PropertyKey, unknown>)[
-  Symbol.for("shud.contract.guardedChildProcess")
-] as typeof import("node:child_process") | undefined;
-if (!guardedChildProcess) throw new Error("CONTRACT_TEST_NODE_CHILD_PROCESS_GUARD_MISSING");
 
 const [kind, input, control, replacement, sentinel] = Bun.argv.slice(2) as [
   SourceInputKind, string, Control, string, string
@@ -37,47 +25,56 @@ async function attemptForbiddenOperation(): Promise<void> {
   const childScript = `require("node:fs").writeFileSync(${JSON.stringify(sentinel)}, "spawned")`;
   switch (control) {
     case "node_absolute_open": {
-      const descriptor = guardedFs.openSync(input, guardedFs.constants.O_RDONLY);
-      guardedFs.closeSync(descriptor);
+      const fs = await import("node:fs");
+      const descriptor = fs.openSync(input, fs.constants.O_RDONLY);
+      fs.closeSync(descriptor);
       return;
     }
     case "ffi_absolute_open": {
       const libraryPath = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
-      const library = guardedDlopen(libraryPath, { open: { args: ["cstring", "i32"], returns: "i32" } });
+      const fs = await import("node:fs");
+      const { dlopen } = await import("bun:ffi");
+      const library = dlopen(libraryPath, { open: { args: ["cstring", "i32"], returns: "i32" } });
       try {
-        const descriptor = library.symbols.open(Buffer.from(`${input}\0`), guardedFs.constants.O_RDONLY);
-        if (descriptor >= 0) guardedFs.closeSync(descriptor);
+        const descriptor = library.symbols.open(Buffer.from(`${input}\0`), fs.constants.O_RDONLY);
+        if (descriptor >= 0) fs.closeSync(descriptor);
       } finally {
         library.close();
       }
       return;
     }
     case "node_replacement_read": {
-      guardedFs.readFileSync(replacement);
+      const fs = await import("node:fs");
+      fs.readFileSync(replacement);
       return;
     }
     case "bun_replacement_read":
       await Bun.file(replacement).text();
       return;
     case "node_write": {
-      guardedFs.writeFileSync(sentinel, "written");
+      const fs = await import("node:fs");
+      fs.writeFileSync(sentinel, "written");
       return;
     }
     case "bun_write":
       await Bun.write(sentinel, "written");
       return;
     case "node_spawn": {
-      guardedChildProcess.spawnSync(process.execPath, ["-e", childScript]);
+      const childProcess = await import("node:child_process");
+      childProcess.spawnSync(process.execPath, ["-e", childScript]);
       return;
     }
     case "bun_spawn":
       await Bun.spawn([process.execPath, "-e", childScript]).exited;
+      return;
+    case "production_path":
       return;
   }
 }
 
 let stdout = "";
 let stderr = "";
+const { runCheckForTest } = await import("../lib/checker");
 const exit = await runCheckForTest(
   ["--input", input, "--kind", kind],
   { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },

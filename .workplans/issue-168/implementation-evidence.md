@@ -57,10 +57,8 @@ pre-mutation bytes, and returned `23 pass`, `0 fail`. No stash was used or remai
 
 Darwin executed the full descriptor-stress matrix locally. The exact current tree
 also ran read-only in `oven/bun:1.2.19` on Linux: `Linux`, Bun `1.2.19`, 23 pass,
-0 fail, 482 assertions. The image does not contain `npx`, so the literal CI command
-returned `npx: not found` before tests; the equivalent in-image pinned command was
-`bun test spikes/git-status-capability/contracts/tests`. Required GitHub Linux and
-macOS jobs now contain the literal pinned `npx --yes bun@1.2.19 test ...` step.
+0 fail, 482 assertions. The image does not contain `npx`, so the equivalent
+in-image pinned command was `bun test spikes/git-status-capability/contracts/tests`.
 
 ## Phase 6.2 invariant closure
 
@@ -74,10 +72,11 @@ macOS jobs now contain the literal pinned `npx --yes bun@1.2.19 test ...` step.
   an unterminated string is malformed instead of a node-limit result. Existing
   depth, 237/238-entry, 2,048/2,049-node, duplicate, byte, and valid-limit tests
   remain green.
-- A spawned public/test process now loads an independent preload boundary. After
-  descriptor admission it attempts actual Node absolute open/read/write/spawn,
-  Bun `file`/`write`/`spawn`, and FFI libc `open` routes. The boundary records the
-  concrete attempted path/operation and throws before the original operation;
+- A spawned public/test process loads a preload boundary. After descriptor
+  admission it attempts actual Node absolute open/read/write/spawn, Bun
+  `file`/`write`/`spawn`, and FFI libc `open` routes. Round 2 replaced the original
+  voluntary wrappers with module interposition for normal imports. The boundary
+  records the concrete attempted path/operation and throws before the operation;
   exact contract failure output plus absent sentinels and byte-identical input and
   replacement files are asserted for both public kinds. Uncontrolled commands
   under the same preload retain exact success receipts. The static import audit
@@ -97,11 +96,40 @@ macOS jobs now contain the literal pinned `npx --yes bun@1.2.19 test ...` step.
   `0 fail`, `483 assertions`. An initial attempt without the `/tmp` tmpfs produced
   only `EROFS` fixture-setup failures; it was corrected at the container boundary
   and is not counted as code verification.
-- CI remains unchanged in this phase and contains exactly the prior two pinned
-  focused commands, one in each required Linux/macOS job.
+- The Phase 6.2 tree temporarily contained two focused commands in existing CI
+  jobs; Round 2 removed both to restore the frozen workflow boundary.
+
+## Round 2 invariant closure
+
+- Nonfinite JSON numbers are now a pending semantic error. Complete syntax,
+  duplicate-key and depth errors remain immediate; the first pending item/node
+  limit is committed next; `CONTRACT_SCHEMA_INVALID` is committed last. Both
+  public kinds prove 512 finite elements plus `1e9999` returns the item limit,
+  standalone `1e9999` remains schema-invalid, trailing text remains malformed,
+  and a relaxed-item 2,047-scalar case returns the node limit.
+- `authority-preload.ts` synchronously installs `mock.module` interposition for
+  normal `node:fs`, `node:child_process`, and `bun:ffi` imports before dynamically
+  loading the production checker graph. Bun global `file`/`write`/`spawn` routes
+  remain intercepted. Controls no longer select wrappers through global symbols.
+- The Round 2 compiling production mutation imports `node:fs.writeFileSync` in
+  `ContractCapabilities` and attempts a post-admission sentinel write. Darwin and
+  Linux both returned `18 pass`, `3 fail`; the production-import authority test
+  recorded `node_write:<sentinel>` while proving the sentinel was absent. The
+  parser mutation independently returned schema-invalid instead of pending item/
+  node limits. Full transcript: `.workplans/issue-168/red-proof-round-2.md`.
+- `.workplans/issue-168/review/phase-6-2-invariant-audit-052cb07.md` is present and
+  force-addable. `git hash-object -w` plus `git cat-file -e/-t` verified blob
+  `db4211ef9b0f7b8b526e9a32270a4140d8f96d14`; the orchestrator owns final staging
+  and exact-tree path verification.
+- Existing `.github/workflows/ci.yml` is byte-identical to `origin/main`. No new
+  workflow was added; exact-tree Darwin and read-only Linux Bun 1.2.19 runs are
+  the cross-platform focused evidence for this issue.
+- Final Round 2 focused results: Darwin `25 pass`, `0 fail`, `532 assertions`;
+  Linux Bun 1.2.19 `25 pass`, `0 fail`, `484 assertions`. Both direct commands,
+  typecheck, full repository check, strict OpenSpec, red-patch applicability,
+  diff/stash/submodule/scope checks, and evidence hygiene pass.
 
 ## Deviations
 
-Sole accepted deviation: `.github/workflows/ci.yml` adds only the pinned focused
-contract command to the existing required `linux-base` and `macos-seatbelt` jobs.
-Phase 6.2 has no additional deviations.
+No accepted deviations remain. Existing workflows are unchanged and the isolated
+spike workflow remains separately owned and absent from this issue.

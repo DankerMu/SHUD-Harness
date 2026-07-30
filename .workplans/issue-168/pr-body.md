@@ -19,29 +19,31 @@ production/runtime/workflows, and network security remain out of scope.
 ## Verification
 
 - `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests`
-  — Darwin 24 pass, 0 fail, 531 assertions
-- `oven/bun:1.2.19` read-only Linux container focused run — 24 pass, 0 fail,
-  483 assertions
+  — Darwin 25 pass, 0 fail, 532 assertions
+- `oven/bun:1.2.19` read-only Linux container focused run — 25 pass, 0 fail,
+  484 assertions
 - both direct public `check.ts` commands — exact success receipt, empty stderr
 - compiling Phase 6.2 mutation — 18 pass, 2 named failures; restored focused
   source-ingress suite 20 pass, 0 fail
+- compiling Round 2 production/parser mutation — Darwin and Linux each report
+  18 pass, 3 named failures; production write sentinel remains absent
 - `npx --yes bun@1.2.19 run typecheck` — pass
 - `npx --yes bun@1.2.19 run check` — pass
 - strict OpenSpec validation — valid
 - `git diff --check`, stash, scope, and submodule hygiene — clean
-- Darwin descriptor-stress matrix — pass; Linux is required in PR CI
+- Darwin descriptor-stress matrix — pass; read-only Linux Bun 1.2.19 container
+  supplies exact-tree cross-platform evidence without changing existing CI
 
 ## 偏离记录
 
-唯一偏离：为使 Issue 要求的 Darwin/Linux focused suite 成为 required PR
-gate，在现有 `linux-base` 与 `macos-seatbelt` job 中各增加一条 pinned test
-命令；未增加其他 workflow 或 spike 行为。
+无偏离：现有 CI workflow 与 `origin/main` 保持一致；本 issue 未增加独立
+workflow，Darwin/Linux focused 证据由 exact-tree 本地与只读容器运行提供。
 
 ## Agent Review
 
 - Round 1 at `89eb2aad7895d837617d243a8ce82e3cdc45b211` recorded seven
-  verified findings. Phase 6.2 then found and closed malformed-limit precedence
-  and independent Node/Bun/FFI authority-interception gaps; Round 2 has not yet
-  run.
+  verified findings. Phase 6.2 closed two more gaps. Round 2 at `f49ac270` found
+  four verified findings; this tree implements their synthesized fixes and awaits
+  the next review gate.
 - OpenSpec change: `m2-capability-observer-spike`; fixture level: expanded;
   repair intensity: high

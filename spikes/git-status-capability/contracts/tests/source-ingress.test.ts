@@ -17,7 +17,6 @@ import {
 import { admitSourceInput } from "../lib/schemas";
 import {
   capture,
-  checkPath,
   countedItems,
   descriptorCount,
   directCommand,
@@ -45,10 +44,13 @@ type AuthorityControl =
 const authorityPreloadPath = join(import.meta.dir, "authority-preload.ts");
 const authorityControlPath = join(import.meta.dir, "authority-control.ts");
 
-async function guardedCommand(args: string[]): Promise<{ exit: number; stdout: string; stderr: string }> {
+async function guardedCommand(
+  args: string[],
+  env: Record<string, string> = {}
+): Promise<{ exit: number; stdout: string; stderr: string }> {
   const child = Bun.spawn(
     [process.execPath, "--preload", authorityPreloadPath, ...args],
-    { stdout: "pipe", stderr: "pipe" }
+    { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } }
   );
   const [exit, stdout, stderr] = await Promise.all([
     child.exited,
@@ -220,15 +222,31 @@ describe("descriptor-bound source ingress", () => {
       ["source_input_record", validSourcePath],
       ["source_identity_projection", validIdentityPath]
     ] as const) {
-      expect(await guardedCommand([checkPath, "--input", input, "--kind", kind])).toEqual({
-        exit: 0, stdout: success(kind), stderr: ""
-      });
       const root = await mkdtemp(join(tmpdir(), "shud-source-authority-"));
+      const productionSentinel = join(root, "production-import.sentinel");
       const replacement = join(root, "replacement.json");
       const replacementBytes = Buffer.from('{"replacement":"must-not-be-read"}');
       const inputBytes = await readFile(input);
       await writeFile(replacement, replacementBytes);
       try {
+        const productionProcess = await guardedCommand(
+          [authorityControlPath, kind, input, "production_path", replacement, productionSentinel],
+          { SHUD_CONTRACT_AUTHORITY_RED_SENTINEL: productionSentinel }
+        );
+        const productionResult = JSON.parse(productionProcess.stdout) as {
+          exit: number; stdout: string; stderr: string; events: string[];
+        };
+        expect({
+          processExit: productionProcess.exit,
+          processStderr: productionProcess.stderr,
+          result: productionResult,
+          sentinelExists: await Bun.file(productionSentinel).exists()
+        }).toEqual({
+          processExit: 0,
+          processStderr: "",
+          result: { exit: 0, stdout: success(kind), stderr: "", events: [] },
+          sentinelExists: false
+        });
         const observed: unknown[] = [];
         const expected: unknown[] = [];
         for (const control of controls) {
@@ -499,6 +517,36 @@ describe("normalized source record and frozen capacity", () => {
       observed.push(error instanceof ContractError ? error.code : "unknown");
     }
     expected.push("CONTRACT_JSON_MALFORMED");
+    expect(observed).toEqual(expected);
+  });
+
+  test("pending item or node limits override later nonfinite number semantics", async () => {
+    const itemBoundary =
+      `[${Array.from({ length: SOURCE_PROFILE.items }, () => "0").join(",")},1e9999]`;
+    const observed: unknown[] = [];
+    const expected: unknown[] = [];
+    for (const kind of ["source_input_record", "source_identity_projection"] as const) {
+      for (const [text, code] of [
+        [itemBoundary, "CONTRACT_JSON_ITEM_LIMIT"],
+        ["1e9999", "CONTRACT_SCHEMA_INVALID"],
+        ["1e9999 trailing", "CONTRACT_JSON_MALFORMED"]
+      ] as const) {
+        await withTemporaryFile(text, async (path) => {
+          observed.push(await capture(["--input", path, "--kind", kind]));
+          expected.push({ exit: 2, stdout: "", stderr: failure(code) });
+        });
+      }
+    }
+    const nodeBoundary = Buffer.from(
+      `[${Array.from({ length: SOURCE_PROFILE.nodes - 1 }, () => "0").join(",")},1e9999]`
+    );
+    try {
+      parseBoundedJson(nodeBoundary, { ...SOURCE_PROFILE, items: SOURCE_PROFILE.nodes });
+      observed.push("parsed");
+    } catch (error) {
+      observed.push(error instanceof ContractError ? error.code : "unknown");
+    }
+    expected.push("CONTRACT_JSON_NODE_LIMIT");
     expect(observed).toEqual(expected);
   });
 

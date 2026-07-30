@@ -1,6 +1,8 @@
-const actualFs = await import("node:fs");
-const actualChildProcess = await import("node:child_process");
-const actualFfi = await import("bun:ffi");
+import { mock } from "bun:test";
+import * as actualChildProcess from "node:child_process";
+import * as actualFs from "node:fs";
+import * as actualFfi from "bun:ffi";
+
 const originalOpenSync = actualFs.openSync;
 const originalReadFileSync = actualFs.readFileSync;
 const originalWriteFileSync = actualFs.writeFileSync;
@@ -62,8 +64,6 @@ const guardedChildProcess = {
   execFileSync: () => deny("node_exec_file"),
   fork: () => deny("node_fork")
 };
-(globalThis as Record<PropertyKey, unknown>)[Symbol.for("shud.contract.guardedFs")] = guardedFs;
-(globalThis as Record<PropertyKey, unknown>)[Symbol.for("shud.contract.guardedChildProcess")] = guardedChildProcess;
 
 const guardedDlopen = (path: string, symbols: Record<string, unknown>) => {
   const library = (originalDlopen as (...args: unknown[]) => any)(path, symbols);
@@ -83,7 +83,10 @@ const guardedDlopen = (path: string, symbols: Record<string, unknown>) => {
     }
   });
 };
-(globalThis as Record<PropertyKey, unknown>)[Symbol.for("shud.contract.guardedDlopen")] = guardedDlopen;
+
+mock.module("node:fs", () => ({ ...guardedFs, default: guardedFs }));
+mock.module("node:child_process", () => ({ ...guardedChildProcess, default: guardedChildProcess }));
+mock.module("bun:ffi", () => ({ ...actualFfi, dlopen: guardedDlopen }));
 
 const originalBunFile = Bun.file.bind(Bun);
 const originalBunWrite = Bun.write.bind(Bun);

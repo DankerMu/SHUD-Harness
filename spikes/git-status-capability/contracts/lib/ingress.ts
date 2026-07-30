@@ -193,6 +193,7 @@ class StrictJsonParser {
   private nodes = 0;
   private items = 0;
   private pendingLimit: ContractErrorCode | undefined;
+  private pendingSemanticError = false;
 
   constructor(private readonly text: string, private readonly profile: IngressProfile) {}
 
@@ -202,6 +203,7 @@ class StrictJsonParser {
     this.whitespace();
     if (this.cursor !== this.text.length) this.fail("CONTRACT_JSON_MALFORMED");
     if (this.pendingLimit) this.fail(this.pendingLimit);
+    if (this.pendingSemanticError) this.fail("CONTRACT_SCHEMA_INVALID");
     return result;
   }
 
@@ -304,7 +306,7 @@ class StrictJsonParser {
     if (!match) this.fail("CONTRACT_JSON_MALFORMED");
     this.cursor += match[0].length;
     const result = Number(match[0]);
-    if (!Number.isFinite(result)) this.fail("CONTRACT_SCHEMA_INVALID");
+    if (!Number.isFinite(result)) this.pendingSemanticError = true;
     return result;
   }
 
