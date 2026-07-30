@@ -46,14 +46,14 @@ Zero/runtime governance, production runtime, and network security are not
 selected because this slice changes neither those authorities nor their
 artifacts.
 
-- [ ] #171.A Re-slice retained descriptor capabilities for both direct kinds.
+- [x] #171.A Re-slice retained descriptor capabilities for both direct kinds.
   - In: `contracts/{check.ts,lib/{ingress,capabilities,checker,canonical-json,constants,schemas}.ts,fixtures,tests}/**` needed by `source_input_record` and `source_identity_projection` only.
   - Out: `tests/authority-preload.ts`, exhaustive hostile-source mutation/AST closure, historical review evidence, committed-current behavior, live Git, evidence publication, production/runtime, workflows, and network security.
   - Verification: canonical repeats succeed byte-identically; upper/parent symlink and ancestor/final replacement fail with exact receipts; a narrow post-hook tripwire for the actual implementation records zero root/absolute reopen; descriptor-stress loops repeat success and every named failure for both kinds and prove no cumulative handle growth on Darwin and Linux while preserving bytes, spawning no child, and reading no replacement bytes.
-- [ ] #171.B Normalize the bounded source record without changing parser limits.
+- [x] #171.B Normalize the bounded source record without changing parser limits.
   - In: source-record schema, canonical valid fixture, and direct public regression tests.
   - Verification: primary/witness independently reject a mismatched source digest, manifest digest, or count and reject reintroduced admitted arrays; 237 short entries are exactly 512 items and succeed, 238 are 514 items and return `CONTRACT_JSON_ITEM_LIMIT`, both below the byte limit; isolated node exact/+1 and option 1 remain unchanged.
-- [ ] #171.C Preserve the direct-input compatibility surface.
+- [x] #171.C Preserve the direct-input compatibility surface.
   - Verification: both public direct commands retain exit/stdout/stderr/LF receipts, canonical JSON and exact four-SHA equality including independent and synchronized strict-subset forgeries; focused tests, typecheck, strict OpenSpec, full repository check, no-write, scope, and submodule hygiene pass.
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.

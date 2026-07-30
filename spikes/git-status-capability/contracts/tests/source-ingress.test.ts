@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, parse, resolve, sep } from "node:path";
+import { basename, join, parse, relative, resolve, sep } from "node:path";
 import { canonicalJson } from "../lib/canonical-json";
 import {
   ContractCapabilities,
@@ -33,7 +33,13 @@ import {
 type Kind = "source_input_record" | "source_identity_projection";
 type FailureScenario = "upper_symlink" | "parent_symlink" | "ancestor_replacement" | "final_replacement";
 
+function rawPathComponents(path: string): readonly string[] {
+  const root = parse(path).root;
+  return path.slice(root.length).split(sep).filter(Boolean);
+}
+
 function componentCount(path: string): number {
+  if (rawPathComponents(path).some((component) => component === "." || component === "..")) return 0;
   const absolute = resolve(path);
   const normalized = process.platform === "darwin" && ["/etc", "/tmp", "/var"].some(
     (alias) => absolute === alias || absolute.startsWith(`${alias}/`)
@@ -212,6 +218,63 @@ describe("descriptor-bound source ingress", () => {
         await exerciseFailure(kind, path, scenario);
       }
     }
+  });
+  test("raw dot components fail before descriptor admission while ordinary relative and absolute inputs remain valid", async () => {
+    const baseline = await descriptorCount();
+    const root = await mkdtemp(join(tmpdir(), "shud-source-raw-components-"));
+    const originalCwd = process.cwd();
+    try {
+      process.chdir(root);
+      for (const [kind, fixturePath] of [
+        ["source_input_record", validSourcePath],
+        ["source_identity_projection", validIdentityPath]
+      ] as const) {
+        const inputDirectory = join(root, kind);
+        const outsideDirectory = join(root, `${kind}-outside`);
+        const validPath = join(inputDirectory, "valid-file");
+        const link = join(inputDirectory, "link");
+        await mkdir(inputDirectory);
+        await mkdir(outsideDirectory);
+        await writeFile(validPath, await readFile(fixturePath));
+        await symlink(outsideDirectory, link);
+
+        const rawLinkParentPath = `${link}${sep}..${sep}valid-file`;
+        expect(resolve(rawLinkParentPath)).toBe(validPath);
+        expect(await stat(rawLinkParentPath).then(() => "resolved", () => "missing")).toBe("missing");
+
+        for (const rawPath of [
+          rawLinkParentPath,
+          `${inputDirectory}${sep}.${sep}valid-file`,
+          `${inputDirectory}${sep}..${sep}${kind}${sep}valid-file`
+        ]) {
+          const operations: DescriptorOperation[] = [];
+          const attempts: CloseAttempt[] = [];
+          expect(componentCount(rawPath)).toBe(0);
+          const result = await capture(["--input", rawPath, "--kind", kind], {
+            observe: (operation) => { operations.push(operation); },
+            onCloseAttempt: (attempt) => { attempts.push(attempt); }
+          });
+          expect(result).toEqual({ exit: 2, stdout: "", stderr: failure("CONTRACT_SCHEMA_INVALID") });
+          expect(result.stderr.endsWith("\n")).toBe(true);
+          expect(operations.filter((operation) => operation.operation === "read_retained")).toHaveLength(0);
+          expect(operations).toHaveLength(0);
+          expect(attempts).toEqual([]);
+        }
+
+        const relativePath = relative(root, validPath);
+        expect(rawPathComponents(relativePath).some((component) => component === "." || component === "..")).toBe(false);
+        for (const acceptedPath of [validPath, relativePath]) {
+          const result = await capture(["--input", acceptedPath, "--kind", kind]);
+          expect(result).toEqual({ exit: 0, stdout: success(kind), stderr: "" });
+          expect(result.stdout.endsWith("\n")).toBe(true);
+        }
+      }
+    } finally {
+      process.chdir(originalCwd);
+      await rm(root, { recursive: true, force: true });
+    }
+    Bun.gc(true);
+    expect(await descriptorCount()).toBe(baseline);
   });
 
   test("success and every named failure restore descriptor baseline across repeated loops", async () => {
@@ -506,6 +569,9 @@ describe("descriptor-bound source ingress", () => {
 });
 
 describe("normalized source record and frozen capacity", () => {
+  test("source profile remains the literal compatibility boundary", () => {
+    expect(SOURCE_PROFILE).toEqual({ bytes: 65_536, depth: 12, nodes: 2_048, items: 512 });
+  });
   test("the admitted set appears once and encoder results contain the exact binding keys", async () => {
     const fixture = await sourceRecord();
     expect(Object.keys(fixture.primary_result).sort()).toEqual([

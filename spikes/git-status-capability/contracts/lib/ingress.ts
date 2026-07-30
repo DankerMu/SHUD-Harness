@@ -46,6 +46,11 @@ function sameEntry(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function hasForbiddenRawPathComponent(path: string): boolean {
+  const root = parse(path).root;
+  return path.slice(root.length).split(sep).some((component) => component === "." || component === "..");
+}
+
 function normalizedAbsolutePath(path: string): string {
   const absolute = resolve(path);
   if (process.platform !== "darwin") return absolute;
@@ -92,6 +97,7 @@ function openDescriptorBoundPath(
   capabilities: ContractCapabilities,
   observe?: DescriptorOperationObserver
 ): DescriptorAdmission {
+  if (hasForbiddenRawPathComponent(path)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const physicalAbsolutePath = normalizedAbsolutePath(path);
   const root = parse(physicalAbsolutePath).root;
   const segments = absoluteSegments(physicalAbsolutePath);
