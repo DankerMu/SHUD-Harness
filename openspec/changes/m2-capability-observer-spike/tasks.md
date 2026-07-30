@@ -30,7 +30,7 @@ and source-record capacity; #169 remains responsible for the committed current
 oracle and the final Task 1.1a ownership/DAG normalization.
 
 - [x] #168.A Retain descriptor capabilities for both direct input kinds.
-  - In: `contracts/{check.ts,lib/{ingress,checker,canonical-json,constants,schemas}.ts,fixtures,tests}/**` needed by `source_input_record` and `source_identity_projection` only.
+  - In: `contracts/{check.ts,lib/{ingress,capabilities,checker,canonical-json,constants,schemas}.ts,fixtures,tests}/**` needed by `source_input_record` and `source_identity_projection` only.
   - Out: `current-source.ts`, current-source manifest/frame/sidecar behavior, live Git, evidence publication, production/runtime, workflows, and network security.
   - Verification: canonical repeats succeed byte-identically; upper/parent symlink and ancestor/final replacement fail with exact receipts; deterministic post-hook open tracing records zero root/absolute reopen; descriptor-stress loops repeat success and every named failure for both kinds and prove no cumulative handle growth on Darwin and Linux while preserving bytes, spawning no child, and reading no replacement bytes.
 - [x] #168.B Normalize the bounded source record without changing parser limits.

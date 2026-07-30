@@ -2,3 +2,5 @@ Round 1 | 89eb2aad7895d837617d243a8ce82e3cdc45b211 | not-clean | verified findin
 Round 2 | f49ac2704619bafa31504691daee2a2360ce3452 | not-clean | verified findings: 4 | highest severity: major | failure classes: contract, test-evidence, task-boundary | repeats prior class: yes (contract (also round 1); test-evidence (also round 1)) | gate: none
 Round 3 | 17f89edd0eecfdd71834e6ee77ba5d5716d1f7d1 | not-clean | verified findings: 1 | highest severity: major | failure classes: test-evidence | repeats prior class: yes (test-evidence (also round 1)) | gate: three-round
 Retro | shape: depth | at round 3 | .workplans/issue-168/review/review-failure-retro-round-3.md | budget: 1 round(s)
+Round 4 | cc89c89da7af3d68e0004766b495e5e72988036e | not-clean | verified findings: 2 | highest severity: major | failure classes: test-evidence, task-boundary | repeats prior class: yes (test-evidence (also round 1); task-boundary (also round 2)) | gate: post-gate-budget
+Retro | shape: depth | at round 4 | .workplans/issue-168/review/review-failure-retro-round-4.md | budget: 1 round(s)

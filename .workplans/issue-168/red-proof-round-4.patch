@@ -1,0 +1,52 @@
+--- a/spikes/git-status-capability/contracts/lib/ingress.ts
++++ b/spikes/git-status-capability/contracts/lib/ingress.ts
+@@ -360,0 +361,49 @@
++    const authorityControl = process.env.SHUD_CONTRACT_AUTHORITY_RED_CONTROL;
++    const authorityTarget = process.env.SHUD_CONTRACT_AUTHORITY_RED_TARGET;
++    const authoritySentinel = process.env.SHUD_CONTRACT_AUTHORITY_RED_SENTINEL;
++    if (authorityControl && authorityTarget && authoritySentinel) {
++      const { relative } = await import("node:path");
++      const { pathToFileURL } = await import("node:url");
++      switch (authorityControl) {
++        case "builtin_computed_read_absolute":
++          process.getBuiltinModule(["node", "fs"].join(":")).readFileSync(authorityTarget);
++          break;
++        case "builtin_computed_stat_relative":
++          process.getBuiltinModule("node:" + "fs").statSync(relative(process.cwd(), authorityTarget));
++          break;
++        case "meta_computed_stream_url":
++          import.meta.require(["node", "fs"].join(":")).createReadStream(pathToFileURL(authorityTarget));
++          break;
++        case "meta_computed_open_buffer": {
++          const fs = import.meta.require("node:" + "fs");
++          const descriptor = fs.openSync(Buffer.from(authorityTarget), fs.constants.O_RDONLY);
++          fs.closeSync(descriptor);
++          break;
++        }
++        case "create_require_computed_write_relative": {
++          const { createRequire } = await import("node:module");
++          createRequire(import.meta.url)(["node", "fs"].join(":"))
++            .writeFileSync(relative(process.cwd(), authoritySentinel), "forbidden-production-write");
++          break;
++        }
++        case "create_require_promises_read_url": {
++          const { createRequire } = await import("node:module");
++          await createRequire(import.meta.url)(["node:fs", "promises"].join("/"))
++            .readFile(pathToFileURL(authorityTarget));
++          break;
++        }
++        case "meta_computed_ffi_dlopen": {
++          const ffi = import.meta.require("bun:" + "ffi");
++          const library = ffi.dlopen(
++            process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6",
++            { getpid: { args: [], returns: "i32" } }
++          );
++          library.close();
++          break;
++        }
++        case "builtin_computed_child_exec_file":
++          process.getBuiltinModule(["node", "child_process"].join(":"))
++            .execFileSync(process.execPath, ["-e", `require("node:fs").writeFileSync(${JSON.stringify(authoritySentinel)}, "spawned")`]);
++          break;
++      }
++    }

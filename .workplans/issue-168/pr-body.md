@@ -19,9 +19,9 @@ production/runtime/workflows, and network security remain out of scope.
 ## Verification
 
 - `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests`
-  — Darwin 25 pass, 0 fail, 541 assertions
+  — Darwin 25 pass, 0 fail, 527 assertions
 - `oven/bun:1.2.19` read-only Linux container focused run — 25 pass, 0 fail,
-  493 assertions
+  479 assertions
 - both direct public `check.ts` commands — exact success receipt, empty stderr
 - compiling Phase 6.2 mutation — 18 pass, 2 named failures; restored focused
   source-ingress suite 20 pass, 0 fail
@@ -30,6 +30,10 @@ production/runtime/workflows, and network security remain out of scope.
 - compiling Round 3 closed-authority production matrix — Darwin/Linux each
   report 19 pass, 2 named failures; six runtime routes are denied without side
   effects and same-module `statSync(URL)` is caught by exact static vocabulary
+- compiling Round 4 computed-loader production matrix — Darwin 19 pass / 2 fail /
+  499 assertions and Linux 19 / 2 / 451; all three loaders, cached `bun:ffi`,
+  cached `child_process`, and eight file/library/process routes are denied before
+  side effects, while the AST gate independently rejects the mutation
 - `npx --yes bun@1.2.19 run typecheck` — pass
 - `npx --yes bun@1.2.19 run check` — pass
 - strict OpenSpec validation — valid
@@ -47,7 +51,8 @@ workflow，Darwin/Linux focused 证据由 exact-tree 本地与只读容器运行
 - Round 1 at `89eb2aad7895d837617d243a8ce82e3cdc45b211` recorded seven
   verified findings. Phase 6.2 closed two more gaps. Round 2 at `f49ac270` found
   four verified findings. Round 3 at `17f89edd` found a recurring PathLike/promise
-  authority-depth gap; the registered retro corrective action is implemented in
-  this tree and awaits the next review gate.
+  authority-depth gap. Round 4 at `cc89c89d` found computed-loader/API-name depth
+  gaps; the registered final ordinary corrective action is implemented in this
+  tree and awaits the terminal review gate.
 - OpenSpec change: `m2-capability-observer-spike`; fixture level: expanded;
   repair intensity: high

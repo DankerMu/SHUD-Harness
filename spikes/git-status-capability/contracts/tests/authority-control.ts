@@ -17,6 +17,14 @@ type Control =
   | "bun_write"
   | "node_spawn"
   | "bun_spawn"
+  | "builtin_computed_read_absolute"
+  | "builtin_computed_stat_relative"
+  | "meta_computed_stream_url"
+  | "meta_computed_open_buffer"
+  | "create_require_computed_write_relative"
+  | "create_require_promises_read_url"
+  | "meta_computed_ffi_dlopen"
+  | "builtin_computed_child_exec_file"
   | "production_path";
 
 type GuardState = { phase: "admission" | "post_admission"; events: string[] };
@@ -28,6 +36,7 @@ if (!state) throw new Error("CONTRACT_TEST_AUTHORITY_PRELOAD_MISSING");
 const [kind, input, control, replacement, sentinel] = Bun.argv.slice(2) as [
   SourceInputKind, string, Control, string, string
 ];
+const systemLibraryPath = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
 
 async function attemptForbiddenOperation(): Promise<void> {
   const childScript = `require("node:fs").writeFileSync(${JSON.stringify(sentinel)}, "spawned")`;
@@ -59,10 +68,9 @@ async function attemptForbiddenOperation(): Promise<void> {
       return;
     }
     case "ffi_absolute_open": {
-      const libraryPath = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
       const fs = await import("node:fs");
       const { dlopen } = await import("bun:ffi");
-      const library = dlopen(libraryPath, { open: { args: ["cstring", "i32"], returns: "i32" } });
+      const library = dlopen(systemLibraryPath, { open: { args: ["cstring", "i32"], returns: "i32" } });
       try {
         const descriptor = library.symbols.open(Buffer.from(`${input}\0`), fs.constants.O_RDONLY);
         if (descriptor >= 0) fs.closeSync(descriptor);
@@ -120,6 +128,56 @@ async function attemptForbiddenOperation(): Promise<void> {
     case "bun_spawn":
       await Bun.spawn([process.execPath, "-e", childScript]).exited;
       return;
+    case "builtin_computed_read_absolute": {
+      const fs = process.getBuiltinModule("node:" + "fs");
+      fs.readFileSync(replacement);
+      return;
+    }
+    case "builtin_computed_stat_relative": {
+      const { relative } = await import("node:path");
+      const fs = process.getBuiltinModule(["node", "fs"].join(":"));
+      fs.statSync(relative(process.cwd(), replacement));
+      return;
+    }
+    case "meta_computed_stream_url": {
+      const { pathToFileURL } = await import("node:url");
+      const fs = import.meta.require("node:" + "fs");
+      fs.createReadStream(pathToFileURL(replacement));
+      return;
+    }
+    case "meta_computed_open_buffer": {
+      const fs = import.meta.require(["n", "ode:fs"].join(""));
+      const descriptor = fs.openSync(Buffer.from(replacement), fs.constants.O_RDONLY);
+      fs.closeSync(descriptor);
+      return;
+    }
+    case "create_require_computed_write_relative": {
+      const { createRequire } = await import("node:module");
+      const { relative } = await import("node:path");
+      const loader = createRequire(import.meta.url);
+      const fs = loader("node:" + "fs");
+      fs.writeFileSync(relative(process.cwd(), sentinel), "written");
+      return;
+    }
+    case "create_require_promises_read_url": {
+      const { createRequire } = await import("node:module");
+      const { pathToFileURL } = await import("node:url");
+      const loader = createRequire(import.meta.url);
+      const fs = loader(["node:fs", "promises"].join("/"));
+      await fs.readFile(pathToFileURL(replacement));
+      return;
+    }
+    case "meta_computed_ffi_dlopen": {
+      const ffi = import.meta.require("bun:" + "ffi");
+      const library = ffi.dlopen(systemLibraryPath, { getpid: { args: [], returns: "i32" } });
+      library.close();
+      return;
+    }
+    case "builtin_computed_child_exec_file": {
+      const childProcess = process.getBuiltinModule(["node", "child_process"].join(":"));
+      childProcess.execFileSync(process.execPath, ["-e", childScript]);
+      return;
+    }
     case "production_path":
       return;
   }

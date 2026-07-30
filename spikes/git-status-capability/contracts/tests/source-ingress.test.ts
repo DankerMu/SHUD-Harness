@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import ts from "typescript";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, parse, resolve, sep } from "node:path";
@@ -47,7 +48,96 @@ type AuthorityControl =
   | "node_write"
   | "bun_write"
   | "node_spawn"
-  | "bun_spawn";
+  | "bun_spawn"
+  | "builtin_computed_read_absolute"
+  | "builtin_computed_stat_relative"
+  | "meta_computed_stream_url"
+  | "meta_computed_open_buffer"
+  | "create_require_computed_write_relative"
+  | "create_require_promises_read_url"
+  | "meta_computed_ffi_dlopen"
+  | "builtin_computed_child_exec_file";
+
+const exactProductionImports: Readonly<Record<string, readonly string[]>> = {
+  "check.ts": ['import { runCheck } from "./lib/checker";'],
+  "lib/canonical-json.ts": [],
+  "lib/capabilities.ts": [
+    'import { dlopen } from "bun:ffi";',
+    'import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";'
+  ],
+  "lib/checker.ts": [
+    'import { ERROR_SCHEMA, SOURCE_PROFILE, SUCCESS_SCHEMA } from "./constants";',
+    'import {\n  ContractError,\n  readBoundedFile,\n  type DescriptorIngressHooks\n} from "./ingress";',
+    'import { admitSourceInput, type SourceInputKind } from "./schemas";'
+  ],
+  "lib/constants.ts": [],
+  "lib/ingress.ts": [
+    'import { parse, resolve, sep } from "node:path";',
+    'import { hasOnlyUnicodeScalars } from "./canonical-json";',
+    'import {\n  ContractCapabilities,\n  DIRECTORY_OPEN_FLAGS,\n  FILE_OPEN_FLAGS,\n  type BigIntStats,\n  type CapabilityHooks,\n  type ContractAuthorityFault\n} from "./capabilities";'
+  ],
+  "lib/schemas.ts": [
+    'import { posix } from "node:path";',
+    'import { canonicalJson } from "./canonical-json";',
+    'import { SOURCE_PROFILE } from "./constants";',
+    'import { ContractError, parseBoundedJson } from "./ingress";'
+  ]
+};
+
+const exactGlobalProperties: Readonly<Record<string, Readonly<{ process: readonly string[]; Bun: readonly string[] }>>> = {
+  "check.ts": { process: ["stdout", "stderr", "exit"], Bun: ["argv"] },
+  "lib/canonical-json.ts": { process: [], Bun: [] },
+  "lib/capabilities.ts": { process: ["platform", "platform"], Bun: [] },
+  "lib/checker.ts": { process: [], Bun: [] },
+  "lib/constants.ts": { process: [], Bun: [] },
+  "lib/ingress.ts": { process: ["platform"], Bun: [] },
+  "lib/schemas.ts": { process: [], Bun: [] }
+};
+
+function structuralAuthorityViolations(relative: string, text: string): string[] {
+  const source = ts.createSourceFile(relative, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const violations: string[] = [];
+  const imports = source.statements.filter(ts.isImportDeclaration).map((node) => node.getText(source));
+  if (JSON.stringify(imports) !== JSON.stringify(exactProductionImports[relative])) {
+    violations.push(`imports:${JSON.stringify(imports)}`);
+  }
+  const globalProperties = { process: [] as string[], Bun: [] as string[] };
+  const forbiddenIdentifiers = new Set([
+    "require", "createRequire", "getBuiltinModule", "eval", "Function",
+    "global", "globalThis", "Reflect", "module"
+  ]);
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      violations.push("dynamic_import");
+    }
+    if (ts.isImportEqualsDeclaration(node) || ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      violations.push("alternate_module_declaration");
+    }
+    if (ts.isIdentifier(node) && forbiddenIdentifiers.has(node.text)) {
+      violations.push(`forbidden_identifier:${node.text}`);
+    }
+    if (ts.isIdentifier(node) && (node.text === "process" || node.text === "Bun")) {
+      const parent = node.parent;
+      if (ts.isPropertyAccessExpression(parent) && parent.expression === node) {
+        globalProperties[node.text].push(parent.name.text);
+      } else if (ts.isElementAccessExpression(parent) && parent.expression === node) {
+        violations.push(`computed_global:${node.text}`);
+      } else {
+        violations.push(`bare_global:${node.text}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const expectedGlobals = exactGlobalProperties[relative];
+  if (JSON.stringify(globalProperties.process) !== JSON.stringify(expectedGlobals?.process)) {
+    violations.push(`process_properties:${JSON.stringify(globalProperties.process)}`);
+  }
+  if (JSON.stringify(globalProperties.Bun) !== JSON.stringify(expectedGlobals?.Bun)) {
+    violations.push(`bun_properties:${JSON.stringify(globalProperties.Bun)}`);
+  }
+  return violations;
+}
 
 const authorityPreloadPath = join(import.meta.dir, "authority-preload.ts");
 const authorityControlPath = join(import.meta.dir, "authority-control.ts");
@@ -69,14 +159,19 @@ async function guardedCommand(
 }
 
 function componentCount(path: string): number {
+  const absolute = normalizedAuthorityTarget(path);
+  const root = parse(absolute).root;
+  return 1 + absolute.slice(root.length).split(sep).filter(Boolean).length;
+}
+
+function normalizedAuthorityTarget(path: string): string {
   let absolute = resolve(path);
   if (process.platform === "darwin") {
     for (const alias of ["/etc", "/tmp", "/var"] as const) {
       if (absolute === alias || absolute.startsWith(`${alias}/`)) absolute = `/private${absolute}`;
     }
   }
-  const root = parse(absolute).root;
-  return 1 + absolute.slice(root.length).split(sep).filter(Boolean).length;
+  return absolute;
 }
 
 function expectCode(action: () => unknown, code: string): void {
@@ -177,24 +272,15 @@ describe("descriptor-bound source ingress", () => {
       expect(afterStat.size).toBe(beforeStat.size);
       expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs);
     }
-    const libraryRoot = new URL("../lib/", import.meta.url);
-    const libraryFiles = (await readdir(libraryRoot)).filter((name) => name.endsWith(".ts"));
-    const implementations = ["check.ts", ...libraryFiles.map((name) => `lib/${name}`)];
+    const libraryFiles = (await readdir(new URL("../lib/", import.meta.url)))
+      .filter((name) => name.endsWith(".ts"))
+      .map((name) => `lib/${name}`);
+    const implementations = ["check.ts", ...libraryFiles].sort();
+    expect(implementations).toEqual(Object.keys(exactProductionImports).sort());
     for (const relative of implementations) {
       const text = await readFile(new URL(`../${relative}`, import.meta.url), "utf8");
-      expect(text).not.toMatch(/\brequire\s*\(|\bprocess\.binding\s*\(/);
-      const authorityModules = [...text.matchAll(
-        /["'](bun:ffi|node:fs(?:\/promises)?|fs(?:\/promises)?|node:child_process|child_process)["']/g
-      )].map((match) => match[1]);
-      if (relative !== "lib/capabilities.ts") {
-        expect(authorityModules).toEqual([]);
-        expect(text).not.toMatch(/\bBun\.(?:file|write|spawn|spawnSync)\b/);
-      } else {
-        expect(authorityModules).toEqual(["bun:ffi", "node:fs"]);
-        expect(text.split("\n").filter((line) => /^import\s.+\sfrom\s["'](?:bun:ffi|node:fs)["'];$/.test(line))).toEqual([
-          'import { dlopen } from "bun:ffi";',
-          'import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";'
-        ]);
+      expect(structuralAuthorityViolations(relative, text)).toEqual([]);
+      if (relative === "lib/capabilities.ts") {
         expect(text.match(/const symbols = .*$/gm)).toEqual([
           'const symbols = { openat: { args: ["i32", "cstring", "i32"], returns: "i32" } } as const;'
         ]);
@@ -211,7 +297,6 @@ describe("descriptor-bound source ingress", () => {
           "return readSync(descriptor, buffer, offset, length, position);",
           "closeSync(descriptor);"
         ]);
-        expect(text).not.toMatch(/\bBun\.(?:file|write|spawn|spawnSync)\b|\b(?:readFile|writeFile|createWriteStream)\w*\b/);
       }
     }
   });
@@ -242,33 +327,42 @@ describe("descriptor-bound source ingress", () => {
     const controls: ReadonlyArray<Readonly<{
       control: AuthorityControl;
       operation: string;
-      target: "input" | "replacement" | "sentinel" | "none";
+      target: "input" | "replacement" | "sentinel" | "library" | "none";
     }>> = [
-      { control: "node_absolute_open", operation: "node_open", target: "input" },
-      { control: "node_url_open", operation: "node_open", target: "input" },
-      { control: "node_buffer_open", operation: "node_open", target: "input" },
-      { control: "fs_alias_url_open", operation: "node_open", target: "input" },
-      { control: "ffi_absolute_open", operation: "ffi_open", target: "input" },
-      { control: "node_replacement_read", operation: "node_read", target: "replacement" },
-      { control: "node_promises_read", operation: "node_promises_read", target: "replacement" },
-      { control: "fs_promises_read", operation: "node_promises_read", target: "replacement" },
-      { control: "node_promises_property_read", operation: "node_promises_read", target: "replacement" },
-      { control: "fs_promises_property_read", operation: "node_promises_read", target: "replacement" },
+      { control: "node_absolute_open", operation: "node_fs_openSync", target: "input" },
+      { control: "node_url_open", operation: "node_fs_openSync", target: "input" },
+      { control: "node_buffer_open", operation: "node_fs_openSync", target: "input" },
+      { control: "fs_alias_url_open", operation: "node_fs_openSync", target: "input" },
+      { control: "ffi_absolute_open", operation: "ffi_dlopen", target: "library" },
+      { control: "node_replacement_read", operation: "node_fs_readFileSync", target: "replacement" },
+      { control: "node_promises_read", operation: "node_fs_promises_readFile", target: "replacement" },
+      { control: "fs_promises_read", operation: "node_fs_promises_readFile", target: "replacement" },
+      { control: "node_promises_property_read", operation: "node_fs_promises_readFile", target: "replacement" },
+      { control: "fs_promises_property_read", operation: "node_fs_promises_readFile", target: "replacement" },
       { control: "bun_replacement_read", operation: "bun_file", target: "replacement" },
       { control: "bun_url_read", operation: "bun_file", target: "replacement" },
-      { control: "node_write", operation: "node_write", target: "sentinel" },
+      { control: "node_write", operation: "node_fs_writeFileSync", target: "sentinel" },
       { control: "bun_write", operation: "bun_write", target: "sentinel" },
-      { control: "node_spawn", operation: "node_spawn", target: "none" },
-      { control: "bun_spawn", operation: "bun_spawn", target: "none" }
+      { control: "node_spawn", operation: "node_child_process_spawnSync", target: "none" },
+      { control: "bun_spawn", operation: "bun_spawn", target: "none" },
+      { control: "builtin_computed_read_absolute", operation: "node_fs_readFileSync", target: "replacement" },
+      { control: "builtin_computed_stat_relative", operation: "node_fs_statSync", target: "replacement" },
+      { control: "meta_computed_stream_url", operation: "node_fs_createReadStream", target: "replacement" },
+      { control: "meta_computed_open_buffer", operation: "node_fs_openSync", target: "replacement" },
+      { control: "create_require_computed_write_relative", operation: "node_fs_writeFileSync", target: "sentinel" },
+      { control: "create_require_promises_read_url", operation: "node_fs_promises_readFile", target: "replacement" },
+      { control: "meta_computed_ffi_dlopen", operation: "ffi_dlopen", target: "library" },
+      { control: "builtin_computed_child_exec_file", operation: "node_child_process_execFileSync", target: "none" }
     ];
     const productionControls = [
-      "node_fs_open_url",
-      "fs_open_buffer",
-      "node_fs_promises_read_string",
-      "fs_promises_read_url",
-      "node_fs_promises_write_url",
-      "bun_file_url",
-      "node_fs_stat_url"
+      "builtin_computed_read_absolute",
+      "builtin_computed_stat_relative",
+      "meta_computed_stream_url",
+      "meta_computed_open_buffer",
+      "create_require_computed_write_relative",
+      "create_require_promises_read_url",
+      "meta_computed_ffi_dlopen",
+      "builtin_computed_child_exec_file"
     ] as const;
     for (const [kind, input] of [
       ["source_input_record", validSourcePath],
@@ -326,6 +420,8 @@ describe("descriptor-bound source ingress", () => {
           const target = spec.target === "input" ? input
             : spec.target === "replacement" ? replacement
             : spec.target === "sentinel" ? sentinel
+            : spec.target === "library"
+              ? process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6"
             : "";
           observed.push({
             processExit: result.exit,
@@ -343,7 +439,8 @@ describe("descriptor-bound source ingress", () => {
               stdout: "",
               stderr: failure("CONTRACT_SCHEMA_INVALID"),
               events: [
-                `${spec.operation}:${target}`,
+                `${spec.operation}:${spec.target === "library" ? target
+                  : target ? normalizedAuthorityTarget(target) : ""}`,
                 `control_error:CONTRACT_TEST_AUTHORITY_DENIED:${spec.operation}`
               ]
             },

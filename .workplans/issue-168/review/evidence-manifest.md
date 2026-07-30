@@ -18,6 +18,10 @@ current worktree implements the fix synthesis and awaits the next review gate.
 Round 3 reviewed head: `17f89edd0eecfdd71834e6ee77ba5d5716d1f7d1`.
 Round 3: not-clean; one verified FIX_NOW PathLike/promise authority-depth finding.
 The registered depth retro corrective action is implemented in the current tree.
+Round 4 reviewed head: `cc89c89da7af3d68e0004766b495e5e72988036e`.
+Round 4: not-clean; verified FIX_NOW computed-loader authority-depth and explicit
+OpenSpec-owner findings. The registered final ordinary corrective action is
+implemented in the current tree.
 
 Selected packs: correctness, integration, file-I/O/path and resource behavior,
 test/evidence coverage, spec compliance, invariant/state/compatibility.
@@ -39,6 +43,8 @@ Compiling Round 2 red proof: `.workplans/issue-168/red-proof-round-2.md` and
 `.workplans/issue-168/red-proof-round-2.patch`.
 Compiling Round 3 red proof: `.workplans/issue-168/red-proof-round-3.md` and
 `.workplans/issue-168/red-proof-round-3.patch`.
+Compiling Round 4 red proof: `.workplans/issue-168/red-proof-round-4.md` and
+`.workplans/issue-168/red-proof-round-4.patch`.
 Plan deviation: none. Existing CI workflows match `origin/main`; no isolated
 workflow is added in this issue.
 
@@ -50,3 +56,7 @@ implementation evidence after the synthesized fixes.
 Post-Round-3-retro verification: Darwin focused 25 pass / 0 fail / 541 assertions;
 Linux Bun 1.2.19 focused 25 pass / 0 fail / 493 assertions. The closed authority
 surface and production mutation matrix are recorded in the implementation evidence.
+Post-Round-4-retro verification: Darwin focused 25 pass / 0 fail / 527 assertions;
+read-only Linux Bun 1.2.19 focused 25 pass / 0 fail / 479 assertions. The cached
+FS/FFI/child-process guards, AST structural allowlist, and compiling
+computed-loader matrix are recorded in the implementation evidence.

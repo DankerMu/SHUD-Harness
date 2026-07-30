@@ -1,25 +1,12 @@
 import { mock } from "bun:test";
-import * as actualChildProcess from "node:child_process";
-import * as actualFs from "node:fs";
-import * as actualFsPromises from "node:fs/promises";
-import * as actualFfi from "bun:ffi";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
-const originalOpenSync = actualFs.openSync;
-const originalReadFileSync = actualFs.readFileSync;
-const originalWriteFileSync = actualFs.writeFileSync;
-const originalPromisesOpen = actualFsPromises.open;
-const originalPromisesReadFile = actualFsPromises.readFile;
-const originalPromisesWriteFile = actualFsPromises.writeFile;
-const originalDlopen = actualFfi.dlopen;
-const originalNodeSpawn = actualChildProcess.spawn;
-const originalNodeSpawnSync = actualChildProcess.spawnSync;
 
 type GuardState = { phase: "admission" | "post_admission"; events: string[] };
 const state: GuardState = { phase: "admission", events: [] };
 (globalThis as Record<PropertyKey, unknown>)[Symbol.for("shud.contract.authorityGuard")] = state;
 
-function normalizedAbsolutePath(value: unknown): string | undefined {
+function normalizedPathLike(value: unknown): string | undefined {
   let path: string | undefined;
   if (typeof value === "string") path = value;
   else if (Buffer.isBuffer(value)) path = value.toString("utf8");
@@ -30,7 +17,14 @@ function normalizedAbsolutePath(value: unknown): string | undefined {
       return undefined;
     }
   }
-  return path?.startsWith("/") ? path : undefined;
+  if (!path) return undefined;
+  const resolved = resolve(path);
+  if (process.platform === "darwin") {
+    for (const alias of ["/etc", "/tmp", "/var"] as const) {
+      if (resolved === alias || resolved.startsWith(`${alias}/`)) return `/private${resolved}`;
+    }
+  }
+  return resolved;
 }
 
 function decodedCString(value: unknown): string | undefined {
@@ -44,62 +38,60 @@ function deny(operation: string, target?: unknown): never {
   throw new Error(`CONTRACT_TEST_AUTHORITY_DENIED:${operation}`);
 }
 
-function guardAbsolute(operation: string, target: unknown): void {
-  const path = normalizedAbsolutePath(target);
-  if (state.phase === "post_admission" && path) deny(operation, path);
+function firstPathLike(values: readonly unknown[]): string | undefined {
+  for (const value of values) {
+    const path = normalizedPathLike(value);
+    if (path) return path;
+  }
+  return undefined;
 }
 
-const guardedFsPromises = {
-  ...actualFsPromises,
-  async open(path: Parameters<typeof actualFsPromises.open>[0], ...args: unknown[]) {
-    guardAbsolute("node_promises_open", path);
-    return await (originalPromisesOpen as (...values: unknown[]) => Promise<unknown>)(path, ...args);
-  },
-  async readFile(path: Parameters<typeof actualFsPromises.readFile>[0], ...args: unknown[]) {
-    guardAbsolute("node_promises_read", path);
-    return await (originalPromisesReadFile as (...values: unknown[]) => Promise<unknown>)(path, ...args);
-  },
-  async writeFile(path: Parameters<typeof actualFsPromises.writeFile>[0], ...args: unknown[]) {
-    if (state.phase === "post_admission") deny("node_promises_write", normalizedAbsolutePath(path));
-    return await (originalPromisesWriteFile as (...values: unknown[]) => Promise<void>)(path, ...args);
-  }
-};
+type MutableModule = Record<string, unknown>;
+const retainedDescriptorOperations = new Set(["closeSync", "fstatSync", "readSync"]);
 
-const guardedFs = {
-  ...actualFs,
-  promises: guardedFsPromises,
-  openSync(path: Parameters<typeof actualFs.openSync>[0], ...args: unknown[]) {
-    guardAbsolute("node_open", path);
-    return (originalOpenSync as (...values: unknown[]) => number)(path, ...args);
-  },
-  readFileSync(path: Parameters<typeof actualFs.readFileSync>[0], ...args: unknown[]) {
-    guardAbsolute("node_read", path);
-    return (originalReadFileSync as (...values: unknown[]) => unknown)(path, ...args);
-  },
-  writeFileSync(path: Parameters<typeof actualFs.writeFileSync>[0], ...args: unknown[]) {
-    if (state.phase === "post_admission") deny("node_write", normalizedAbsolutePath(path));
-    return (originalWriteFileSync as (...values: unknown[]) => void)(path, ...args);
+function patchPathFunctions(module: MutableModule, operationPrefix: string): void {
+  for (const name of Object.getOwnPropertyNames(module)) {
+    if (retainedDescriptorOperations.has(name)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(module, name);
+    if (!descriptor || typeof descriptor.value !== "function") continue;
+    const original = descriptor.value as (...args: unknown[]) => unknown;
+    Object.defineProperty(module, name, {
+      ...descriptor,
+      value: function guardedPathFunction(this: unknown, ...args: unknown[]) {
+        if (state.phase === "post_admission") {
+          const path = firstPathLike(args);
+          if (path) deny(`${operationPrefix}_${name}`, path);
+        }
+        return original.apply(this, args);
+      }
+    });
   }
-};
-const guardedChildProcess = {
-  ...actualChildProcess,
-  spawn(...args: unknown[]) {
-    if (state.phase === "post_admission") deny("node_spawn");
-    return (originalNodeSpawn as (...values: unknown[]) => unknown)(...args);
-  },
-  spawnSync(...args: unknown[]) {
-    if (state.phase === "post_admission") deny("node_spawn");
-    return (originalNodeSpawnSync as (...values: unknown[]) => unknown)(...args);
-  },
-  exec: () => deny("node_exec"),
-  execSync: () => deny("node_exec"),
-  execFile: () => deny("node_exec_file"),
-  execFileSync: () => deny("node_exec_file"),
-  fork: () => deny("node_fork")
-};
+}
+
+const guardedFs = process.getBuiltinModule("node:fs") as MutableModule;
+const guardedFsPromises = process.getBuiltinModule("node:fs/promises") as MutableModule;
+patchPathFunctions(guardedFsPromises, "node_fs_promises");
+patchPathFunctions(guardedFs, "node_fs");
+const guardedChildProcess = process.getBuiltinModule("node:child_process") as MutableModule;
+for (const name of ["exec", "execFile", "execFileSync", "execSync", "fork", "spawn", "spawnSync"] as const) {
+  const descriptor = Object.getOwnPropertyDescriptor(guardedChildProcess, name);
+  if (!descriptor || typeof descriptor.value !== "function") throw new Error(`MISSING_CHILD_PROCESS_EXPORT:${name}`);
+  const original = descriptor.value as (...args: unknown[]) => unknown;
+  Object.defineProperty(guardedChildProcess, name, {
+    ...descriptor,
+    value: function guardedProcessCreation(this: unknown, ...args: unknown[]) {
+      if (state.phase === "post_admission") deny(`node_child_process_${name}`);
+      return original.apply(this, args);
+    }
+  });
+}
+
+const guardedFfi = import.meta.require("bun:ffi") as MutableModule;
+const originalDlopen = guardedFfi.dlopen as (...args: unknown[]) => any;
 
 const guardedDlopen = (path: string, symbols: Record<string, unknown>) => {
-  const library = (originalDlopen as (...args: unknown[]) => any)(path, symbols);
+  if (state.phase === "post_admission") deny("ffi_dlopen", path);
+  const library = originalDlopen(path, symbols);
   const guardedSymbols: Record<string, (...args: unknown[]) => unknown> = {};
   for (const [name, symbol] of Object.entries(library.symbols as Record<string, (...args: unknown[]) => unknown>)) {
     guardedSymbols[name] = (...args: unknown[]) => {
@@ -116,6 +108,10 @@ const guardedDlopen = (path: string, symbols: Record<string, unknown>) => {
     }
   });
 };
+Object.defineProperty(guardedFfi, "dlopen", {
+  ...Object.getOwnPropertyDescriptor(guardedFfi, "dlopen"),
+  value: guardedDlopen
+});
 
 mock.module("node:fs", () => ({ ...guardedFs, default: guardedFs }));
 mock.module("fs", () => ({ ...guardedFs, default: guardedFs }));
@@ -123,7 +119,7 @@ mock.module("node:fs/promises", () => ({ ...guardedFsPromises, default: guardedF
 mock.module("fs/promises", () => ({ ...guardedFsPromises, default: guardedFsPromises }));
 mock.module("node:child_process", () => ({ ...guardedChildProcess, default: guardedChildProcess }));
 mock.module("child_process", () => ({ ...guardedChildProcess, default: guardedChildProcess }));
-mock.module("bun:ffi", () => ({ ...actualFfi, dlopen: guardedDlopen }));
+mock.module("bun:ffi", () => ({ ...guardedFfi, dlopen: guardedDlopen }));
 
 const originalBunFile = Bun.file.bind(Bun);
 const originalBunWrite = Bun.write.bind(Bun);
@@ -131,11 +127,12 @@ const originalBunSpawn = Bun.spawn.bind(Bun);
 const originalBunSpawnSync = Bun.spawnSync.bind(Bun);
 
 (Bun as any).file = (path: Parameters<typeof Bun.file>[0], ...args: unknown[]) => {
-  guardAbsolute("bun_file", path);
+  const normalized = normalizedPathLike(path);
+  if (state.phase === "post_admission" && normalized) deny("bun_file", normalized);
   return (originalBunFile as (...values: unknown[]) => ReturnType<typeof Bun.file>)(path, ...args);
 };
 (Bun as any).write = (path: Parameters<typeof Bun.write>[0], ...args: unknown[]) => {
-  if (state.phase === "post_admission") deny("bun_write", normalizedAbsolutePath(path));
+  if (state.phase === "post_admission") deny("bun_write", normalizedPathLike(path));
   return (originalBunWrite as (...values: unknown[]) => ReturnType<typeof Bun.write>)(path, ...args);
 };
 (Bun as any).spawn = (...args: unknown[]) => {

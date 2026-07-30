@@ -114,7 +114,7 @@ in-image pinned command was `bun test spikes/git-status-capability/contracts/tes
 - The Round 2 compiling production mutation imports `node:fs.writeFileSync` in
   `ContractCapabilities` and attempts a post-admission sentinel write. Darwin and
   Linux both returned `18 pass`, `3 fail`; the production-import authority test
-  recorded `node_write:<sentinel>` while proving the sentinel was absent. The
+  recorded the exact `node_write` sentinel path while proving it was absent. The
   parser mutation independently returned schema-invalid instead of pending item/
   node limits. Full transcript: `.workplans/issue-168/red-proof-round-2.md`.
 - `.workplans/issue-168/review/phase-6-2-invariant-audit-052cb07.md` is present and
@@ -159,6 +159,45 @@ in-image pinned command was `bun test spikes/git-status-capability/contracts/tes
   Linux Bun 1.2.19 `25 pass`, `0 fail`, `493 assertions`. Direct commands,
   typecheck, full repository check, strict OpenSpec, evidence hygiene,
   diff/stash/submodule/scope checks pass; existing workflows remain unchanged.
+
+## Round 4 depth-retro closure
+
+- `authority-preload.ts` patches the actual cached builtin `node:fs` and
+  `node:fs/promises` objects before the production graph loads. Consequently
+  ordinary imports, `process.getBuiltinModule`, `import.meta.require`, and
+  `createRequire`, including computed specifiers and `fs.promises`, all receive
+  the same guarded function identities.
+- The same preload patches cached `bun:ffi.dlopen` and all seven cached
+  `node:child_process` process-creation exports. FFI denial occurs before opening
+  the library, and child-process denial occurs before delegating to Bun or the OS;
+  ordinary and computed loader routes therefore share the same boundary.
+- One generic post-admission guard wraps every exported builtin function except
+  the retained descriptor-only `closeSync`, `fstatSync`, and `readSync`
+  operations. It scans every argument for string, Buffer, or file-URL PathLike,
+  resolves both relative and absolute paths, normalizes Darwin aliases, records
+  the exact exported function, and rejects before the original function runs.
+  Existing Bun file/write/spawn, child-process, FFI open/openat, ordinary module
+  mock, and descriptor-capability controls remain green.
+- The production boundary is now a TypeScript-AST structural allowlist, not a
+  regex authority vocabulary. It freezes every import declaration and exact
+  per-file `process`/`Bun` property occurrence, and rejects dynamic import,
+  require/import-meta-require, createRequire/getBuiltinModule, process.binding,
+  eval/Function, global/globalThis/Reflect, module escapes, computed global
+  access, import-equals, and module re-export declarations.
+- `.workplans/issue-168/red-proof-round-4.patch` is a compiling production
+  mutation spanning all three computed loaders; sync/promise read, write and
+  open; unenumerated `statSync` and `createReadStream`; and absolute string,
+  relative string, Buffer, and file-URL paths. Darwin returned `19 pass`,
+  `2 fail`, `499 assertions`; read-only Linux returned `19 pass`, `2 fail`,
+  `451 assertions`. The structural and runtime tests failed independently; all
+  eight runtime events were recorded before file access, library open, or process
+  creation, replacement bytes remained unchanged, and the write/spawn sentinel
+  stayed absent.
+- The #168.A OpenSpec `In` list now explicitly assigns
+  `contracts/lib/capabilities.ts` alongside ingress and the other shared contract
+  owners. No excluded sibling scope was added.
+- Final Round 4 focused results: Darwin `25 pass`, `0 fail`, `527 assertions`;
+  read-only Linux Bun 1.2.19 `25 pass`, `0 fail`, `479 assertions`.
 
 ## Deviations
 
