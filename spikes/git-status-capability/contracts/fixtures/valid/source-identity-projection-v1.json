@@ -1,0 +1,9 @@
+{
+  "schema_version": "shud.git-status-capability.source-identity-projection.v1",
+  "source_record": {"source_sha": "a24b106d2766eadcff73da4c238639f520e5a80b"},
+  "platforms": [
+    {"platform": "macos", "source_commit": "a24b106d2766eadcff73da4c238639f520e5a80b"},
+    {"platform": "linux", "source_commit": "a24b106d2766eadcff73da4c238639f520e5a80b"}
+  ],
+  "decision": {"base_sha": "a24b106d2766eadcff73da4c238639f520e5a80b"}
+}

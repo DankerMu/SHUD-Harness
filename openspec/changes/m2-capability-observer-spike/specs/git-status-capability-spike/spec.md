@@ -184,6 +184,37 @@ The checker exits `2`, keeps stdout empty, emits one bounded machine-readable er
 receipt on stderr, and produces no partial file or success receipt. Success exits
 `0` and emits one canonical receipt only after all checks pass.
 
+For the Issue #171 core direct-input slice, admission MUST retain the directory
+and final-file capabilities needed for every post-admission check. After the
+testable admission hook, the checker MUST NOT open a filesystem root or ambient
+absolute pathname. Both `source_input_record` and
+`source_identity_projection` MUST close every acquired descriptor on success
+and failure, write no file, spawn no child, and read no bytes from a replacement
+object. Repeated success and every named symlink/replacement failure for both
+kinds MUST show no cumulative descriptor growth on Darwin and Linux.
+
+A source-input record MUST contain the admitted `entry_count`,
+`admitted_paths`, and `admitted_modes` exactly once at top level. Each
+primary/witness result MUST contain exactly `status`, `source_input_digest`,
+`manifest_digest`, and `entry_count`, and its three identity values MUST equal
+the top-level tuple. With the unchanged source profile and item-counting rule
+this shape has `38 + 2n` items: 237 entries is the inclusive 512-item success
+boundary and 238 entries has 514 items and MUST fail with
+`CONTRACT_JSON_ITEM_LIMIT`; both boundary fixtures MUST remain below the byte
+ceiling.
+
+#### Scenario: Direct input remains descriptor-bound after admission
+- **WHEN** either direct input kind is admitted and an ancestor or final pathname is replaced before the read completes
+- **THEN** no root or ambient absolute path is reopened, no replacement byte is read, all descriptors are released, and the public command returns only the stable schema-invalid receipt
+
+#### Scenario: Source record reaches its finite item boundary
+- **WHEN** an otherwise canonical normalized record contains 237 short admitted entries
+- **THEN** it reaches exactly 512 counted items and succeeds; adding the 238th entry reaches 514 items and returns only `CONTRACT_JSON_ITEM_LIMIT`
+
+#### Scenario: Encoder result drifts from the single admitted set
+- **WHEN** either result mismatches the top-level source-input digest, manifest digest, or entry count, or reintroduces admitted path/mode arrays
+- **THEN** semantic admission fails with only `CONTRACT_SCHEMA_INVALID`
+
 #### Scenario: Contract input reaches an exact bound
 - **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
 - **THEN** ingestion continues to strict schema validation and may succeed
