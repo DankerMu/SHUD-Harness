@@ -31,7 +31,7 @@ add only bounded output under excluded `evidence/**` lanes and never update it.
 
 ### Issue #171 core-ingress delivery overlay
 
-This overlay is the active implementation fixture for #171. It re-slices only
+This overlay records the landed implementation fixture for #171. It re-slices only
 the core behavior lane from superseded PR #170. Task 1.1 remains incomplete:
 #172 owns exhaustive hostile-source AST/preload proof and historical evidence
 reconciliation; #169 owns the committed-current oracle and final Task 1.1a
@@ -55,6 +55,34 @@ artifacts.
   - Verification: primary/witness independently reject a mismatched source digest, manifest digest, or count and reject reintroduced admitted arrays; 237 short entries are exactly 512 items and succeed, 238 are 514 items and return `CONTRACT_JSON_ITEM_LIMIT`, both below the byte limit; isolated node exact/+1 and option 1 remain unchanged.
 - [x] #171.C Preserve the direct-input compatibility surface.
   - Verification: both public direct commands retain exit/stdout/stderr/LF receipts, canonical JSON and exact four-SHA equality including independent and synchronized strict-subset forgeries; focused tests, typecheck, strict OpenSpec, full repository check, no-write, scope, and submodule hygiene pass.
+
+### Issue #172 authority-proof delivery overlay
+
+This overlay is the active implementation fixture for #172. It consumes the
+landed #171 direct-input contract without changing its ingress/schema behavior.
+Task 1.1 remains incomplete: #169 owns committed-current wiring and the final
+Task 1.1 ownership rewrite.
+
+Fixture level: `expanded`; repair intensity: `high`; upstream suggestion:
+`expanded` (agree). Selected risk packs are Public API / CLI, File IO / path
+safety, Security / performance, Concurrency / ordering, Legacy compatibility,
+Error / rollback, and Test evidence. Network security, production runtime,
+workflows, live Git, publication, scientific governance, SHUD/rSHUD/AutoSHUD,
+and Zero/runtime governance are explicit non-goals.
+
+- [x] #172.A Freeze and enforce the structural authority vocabulary.
+  - In: `contracts/tests/{authority-vocabulary.ts,authority-structural.test.ts}` only; the versioned registry owns every compile-valid mutation row and structural oracle.
+  - Out: core ingress/schema changes, general sandboxing, network controls, production imports, and runtime interception.
+  - Verification: the unchanged `contracts/{check.ts,lib/**}` tree passes an exact import/global/authority allowlist; every registry row is injected into a production module, compiles under Bun 1.2.19, and is structurally rejected with no preload. Rows cover direct/global/imported/cached Worker, `eval`, direct `Function`, object/function/arrow/async/generator/async-generator constructor acquisition, `Object.getPrototypeOf(...).constructor` variants, computed `constructor`, dynamic import, `createRequire`, cached/computed builtins, FFI, child process, writes, and PathLike inputs.
+- [x] #172.B Close the active runtime authority tripwire.
+  - Depends on: #172.A.
+  - In: `contracts/tests/{authority-vocabulary.ts,authority-runtime.test.ts,authority-control.ts,authority-preload.ts,authority-worker.ts}`; B consumes but does not redefine A's registry.
+  - Verification: every registry control actually triggers after admission with structural scanning absent; direct/global/imported/cached Worker plus every constructor-derived executable form is invoked, async-generator bodies are advanced with `.next()`, and denial occurs before Worker entry, ambient read, FFI load, child start, or write. Existing Node/Bun/computed-loader/PathLike controls remain denied. The unique focused runner is `bun test contracts/tests/authority-structural.test.ts contracts/tests/authority-runtime.test.ts`; the full `contracts/tests` runner and both unchanged direct commands are green on Darwin and Linux.
+  - Manifest handoff: all A/B files live under D8's future candidate root. #169 MUST include them when it initializes `contracts/source-input-v1.paths`; #172 does not predeclare or write that not-yet-created manifest.
+- [ ] #172.C Reconcile and persist exact proof evidence.
+  - Depends on: #172.A and #172.B. Freeze one `PROOF_SHA` after A/B, task checkboxes, and production inventory are final; any later covered-file change invalidates C.
+  - In: workflow-local `.workplans/issue-172/**` plus tracked `openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/{manifest.json,red-proof-round-1.md,pr-170-body.md,implementation-evidence.md}`. The tracked directory is bounded pre-merge review evidence inside the existing OpenSpec scope allowlist, not D8 experiment output or a future source-manifest input.
+  - Verification: mirror the original #168 `red-proof-round-1.md` byte-identically and record its source worktree, PR #170 reviewed HEAD, path, byte length, and SHA-256; independently recompute 529 assertions and 5,100/5,116 bytes on `PROOF_SHA`; snapshot PR #170's body. The tracked manifest records every artifact's path, length, media type, SHA-256, retrieval command, and `PROOF_SHA`; `git show <evidence-commit>:<path>` is the offline retrieval proof. The evidence-only commit changes only the declared review-evidence directory, all proof/production bytes equal `PROOF_SHA`, and Darwin/Linux focused/full proof, both direct receipts, typecheck, full repository check, strict OpenSpec, evidence hygiene, scope/untracked, and submodule checks pass at the final branch tip. PR evidence comments record that exact final HEAD and immutable Git-blob paths/hashes.
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.

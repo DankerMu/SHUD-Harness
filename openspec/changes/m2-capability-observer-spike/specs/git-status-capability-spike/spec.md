@@ -215,13 +215,108 @@ ceiling.
 - **WHEN** either result mismatches the top-level source-input digest, manifest digest, or entry count, or reintroduces admitted path/mode arrays
 - **THEN** semantic admission fails with only `CONTRACT_SCHEMA_INVALID`
 
-#### Scenario: Contract input reaches an exact bound
-- **WHEN** each input kind reaches exactly one declared byte, depth, node, or item bound with otherwise valid content
-- **THEN** ingestion continues to strict schema validation and may succeed
+### Requirement: Source-ingress authority proof is independently fail-closed
 
-#### Scenario: Contract input exceeds a bound or is malformed
-- **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
-- **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
+For Issue #172, Task 1.1 SHALL provide a test-only authority proof for the exact
+`spikes/git-status-capability/contracts/{check.ts,lib/**}` production tree. The
+proof SHALL NOT add production imports, hooks, environment switches, network
+controls, or change the source-record contract implemented by Issue #171.
+
+`contracts/tests/authority-vocabulary.ts` SHALL define version
+`shud.contract.authority-proof.v1` and SHALL be the sole row registry used by
+`authority-structural.test.ts` and `authority-runtime.test.ts`. Each row SHALL
+contain one compile-valid production mutation, active control, structural
+violation, denial event, and side-effect oracle. The closed Bun-1.2.19 inventory
+SHALL include:
+
+- direct and cached global Worker plus static-imported, dynamic-imported,
+  `process.getBuiltinModule`, `createRequire`, and cached
+  `node:worker_threads` Worker;
+- direct `eval` and `Function`;
+- object double-constructor, ordinary-function, arrow-function, async-function,
+  generator-function, async-generator-function, computed-constructor, and cached
+  constructor aliases;
+- `Object.getPrototypeOf(...).constructor` for async, generator, and
+  async-generator functions;
+- the existing static/dynamic/computed loader, cached filesystem/promises,
+  Bun, FFI, child-process, write, absolute/relative/URL/Buffer PathLike, and
+  sentinel rows.
+
+Generator rows SHALL execute through `.next()` and asynchronous rows SHALL be
+awaited. An unlisted alias does not inherit a pass; a newly reachable pinned-
+runtime spelling requires a new registry row and both oracles.
+
+The structural layer SHALL compile every registry mutation in a real production
+module, parse the complete production tree, and reject any unapproved import,
+global, static/dynamic/computed loader, `eval`/`Function`, Worker,
+`.constructor` or computed-constructor access, alternate module declaration,
+filesystem, FFI, child-process, or write authority vocabulary. It SHALL run
+without the active preload.
+
+The active layer SHALL run every registry control after admission with no
+structural scan. It SHALL independently deny actual Node/Bun/FFI/child-process
+operations and global or `node:worker_threads` Worker construction before a new
+realm, worker entry, ambient read, FFI load, child start, or write. Cached Worker
+aliases SHALL be acquired only after the preload installs its guarded
+constructors. Exact guard events, absent worker/read/write/spawn sentinels, and
+byte-identical input/replacement files SHALL prove the ordering.
+
+The focused command SHALL be exactly
+`bun test contracts/tests/authority-structural.test.ts contracts/tests/authority-runtime.test.ts`;
+the ordinary `bun test contracts/tests` command SHALL also execute both modules.
+All proof files are future D8 candidate inputs; Issue #169 SHALL include them when
+it initializes `contracts/source-input-v1.paths`. Issue #172 SHALL NOT predeclare
+or create that manifest.
+
+Issue #172 evidence SHALL be generated after the production inventory, task
+checkboxes, and both proof layers are frozen as `PROOF_SHA`; any later covered-
+file change invalidates it. Workflow-local `.workplans/issue-172/**` artifacts
+SHALL be mirrored into tracked
+`openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/` as:
+
+- byte-identical `red-proof-round-1.md`, bound to its #168 source worktree, PR
+  #170 reviewed HEAD, source path, byte length, media type, and SHA-256;
+- `pr-170-body.md` with retrieval command/time, byte length, media type, and
+  SHA-256;
+- `implementation-evidence.md` with Darwin/Linux structural-only, active-only,
+  focused/full, both direct commands, typecheck, full repository check, strict
+  OpenSpec, hygiene, scope/untracked, and submodule results, plus independently
+  recomputed 529 assertions and exact 5,100/5,116-byte boundaries;
+- `manifest.json` with every relative path, length, media type, SHA-256, retrieval
+  command, and the common `PROOF_SHA`.
+
+This bounded tracked directory is pre-merge review evidence inside the admitted
+OpenSpec change path; it is not D8 experiment output or a future source-manifest
+input. The evidence-only commit after `PROOF_SHA` SHALL change only that
+directory, and `git show <evidence-commit>:<path>` SHALL retrieve every exact
+object offline. The PR body and posted review evidence SHALL identify the final
+HEAD, immutable blob paths, and hashes. The original #168 artifact is copied,
+never rewritten; corrections appear only in new #172 evidence.
+
+#### Scenario: Direct Worker attempts to read after admission
+
+- **WHEN** each compile-valid direct, cached, or imported Worker mutation would start a Worker after descriptor admission
+- **THEN** the structural-only run rejects the exact row, and the active-only run independently denies the guarded Worker constructor before worker entry, ambient read, sentinel creation, or file mutation
+
+#### Scenario: Constructor-derived dynamic execution attempts a new realm
+
+- **WHEN** each registered direct, object, function, arrow, async, generator, async-generator, prototype, computed, or cached constructor form is actually invoked after admission
+- **THEN** the structural-only run rejects its acquisition vocabulary and the active-only run independently denies the resulting Worker/read operation; asynchronous results are awaited and generator bodies are advanced
+
+#### Scenario: One proof layer is disabled
+
+- **WHEN** the compile-valid hostile-source matrix runs with the active preload absent, or the concrete runtime matrix runs with structural scanning absent
+- **THEN** the enabled layer alone detects every registry row assigned to it; setup, compilation, identity, execution, cleanup, or oracle failure is invalid and success cannot be borrowed from the disabled layer
+
+#### Scenario: Unchanged public commands run under the proof harness
+
+- **WHEN** both direct input kinds execute unchanged under Bun 1.2.19 and the active preload on macOS and Linux
+- **THEN** each retains exit `0`, empty stderr, and its one exact LF-terminated success receipt, and no authority-denial event is recorded
+
+#### Scenario: Exact evidence facts are reconciled and persisted
+
+- **WHEN** the tracked evidence mirror and its manifest are created after `PROOF_SHA`, the final evidence-only commit is verified, and PR evidence is posted
+- **THEN** every count, byte boundary, digest, command, proof SHA, final HEAD, and receipt agrees; `git show` retrieves each length/hash-matching artifact; the copied #168 artifact matches its source; proof/production bytes equal `PROOF_SHA`; and scope/untracked gates remain clean
 
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:

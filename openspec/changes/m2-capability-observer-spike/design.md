@@ -952,6 +952,129 @@ Regression rows:
 - Each independent and synchronized strict-subset four-SHA mutation ->
   `CONTRACT_SCHEMA_INVALID`; unchanged peers succeed.
 
+### Issue #172 authority-proof delivery overlay
+
+Issue #172 closes the proof/evidence lane left out of #171. It does not change the
+landed descriptor-bound ingress contract. The governing invariant is:
+
+> After source admission, production contract code can only use authority
+> already represented by its retained descriptor chain. No dynamic-code,
+> Worker/new-realm, module-loader, filesystem, FFI, child-process, or write path
+> may obtain fresh ambient authority; the proof must fail independently at both
+> the structural and active-runtime seams.
+
+The proof is test-only and fail-closed. #172.A owns
+`contracts/tests/authority-vocabulary.ts` and
+`contracts/tests/authority-structural.test.ts`. The versioned
+`shud.contract.authority-proof.v1` registry is the one row inventory consumed by
+both proof layers. Each row carries its stable ID, compile-valid production
+mutation, active control, expected structural violation, expected denial event,
+and side-effect oracle. The finite pinned-Bun-1.2.19 inventory is:
+
+- Worker acquisition: direct global, cached global alias, static
+  `node:worker_threads` import, dynamic import, `process.getBuiltinModule`, and
+  `createRequire`/cached module export;
+- direct dynamic execution: `eval` and `Function`;
+- constructor acquisition: object double-constructor, ordinary function, arrow
+  function, async function, generator function, async-generator function,
+  computed `["constructor"]`, and a cached constructor alias;
+- prototype acquisition:
+  `Object.getPrototypeOf(async function () {}).constructor`,
+  `Object.getPrototypeOf(function* () {}).constructor`, and
+  `Object.getPrototypeOf(async function* () {}).constructor`;
+- the retained Round-4 sibling inventory: static/dynamic/computed loaders,
+  cached Node filesystem/promises, Bun file/write/spawn, FFI, child process,
+  absolute/relative/URL/Buffer PathLike forms, and file/process sentinels.
+
+Generator-created bodies are advanced with `.next()` and async/generator results
+are awaited, so construction alone cannot count as execution. A new reachable
+spelling in pinned Bun 1.2.19 is a registry change and a new structural and active
+row; “equivalent alias” is not an acceptance shortcut.
+
+The structural layer parses the complete `contracts/{check.ts,lib/**}`
+production tree. It owns exact imports and approved ambient property accesses and
+rejects unknown imports/globals, static/dynamic/computed loaders,
+`eval`/`Function`, Worker names, `.constructor` or computed-constructor access,
+and alternate module declarations. Every registry mutation is injected into a
+real production module and compiled with Bun 1.2.19 before the scanner rejects
+it. This run does not load `authority-preload.ts`.
+
+#172.B owns `contracts/tests/{authority-runtime.test.ts,authority-control.ts,
+authority-preload.ts,authority-worker.ts}` and consumes A's registry without
+redefining it. The preload guards actual Node/Bun/FFI/child operations and both
+global and `node:worker_threads` Worker constructors. Denial happens in the
+admitting realm before worker entry. Cached aliases are captured only after the
+preload has installed those guarded constructors. The active test invokes every
+control after admission with no structural scan. A worker-entry sentinel,
+read/write/spawn sentinels, exact normalized guard events, and byte-identical
+input/replacement files prove ordering rather than merely observing an error.
+
+The unique focused runner is:
+
+```text
+bun test contracts/tests/authority-structural.test.ts contracts/tests/authority-runtime.test.ts
+```
+
+The ordinary `bun test contracts/tests` runner also includes both modules.
+All A/B paths are under D8's future candidate root; #169 must include them when
+it initializes `contracts/source-input-v1.paths`. #172 does not predeclare or
+write that not-yet-created manifest. Ownership order is
+`#171 -> #172.A -> #172.B -> #172.C -> #169`.
+
+The required mutation matrix is:
+
+| Class | Structural-only oracle | Active-only oracle | Side-effect oracle |
+|---|---|---|---|
+| Direct/cached/imported Worker | exact AST rejection, no preload | global or Node Worker construction denied | worker-entry sentinel absent |
+| `Function`/`eval` and constructor forms | identifier/property/computed-property rejection | produced Worker/read operation denied after actual invocation | guard event precedes access |
+| Async/generator constructors | constructor acquisition rejected | callable awaited and generator advanced before denial | no worker/file side effect |
+| Static/dynamic/computed loaders | import/call vocabulary rejected | patched cached builtin denies | exact normalized event only |
+| Filesystem/PathLike/FFI/child/write | import/global/call allowlist rejects mutation | concrete OS-facing operation denied | files byte-identical; no write/spawn sentinel |
+
+Selected risk packs and boundary checklist:
+
+| Risk pack / boundary | Selection | Required evidence |
+|---|---|---|
+| Public API / CLI | Selected | Both public direct commands preserve exact exit/stdout/stderr/LF receipts |
+| File IO / path safety | Selected | absolute/relative/URL/Buffer/alias and retained-descriptor controls |
+| Security / performance | Selected for local process authority only | structural and active proof fail independently; no network-security claims |
+| Concurrency / ordering | Selected | denial occurs after admission but before Worker start or any child/file side effect |
+| Error / rollback | Selected | stable denial code/event; immutable red-patch/source binding |
+| Legacy compatibility | Selected | unchanged source-record shape, four-SHA equality, and capacity semantics |
+| Test evidence | Selected | compile-valid red mutations, exact red/green counts, Darwin/Linux execution, evidence hygiene |
+| Documentation / evidence | Selected | original #168 transcript preserved; corrected claims live only in #172 evidence |
+
+#172.C runs only after A/B, their task checkboxes, and the production inventory
+are frozen as `PROOF_SHA`. Any later covered-file change invalidates C.
+Workflow-local `.workplans/issue-172/**` remains the subagent-workflow audit
+bundle. Its bounded, reviewable artifacts are mirrored into tracked
+`openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/`:
+
+- `red-proof-round-1.md`: byte-identical copy of the original #168 artifact,
+  bound to its source worktree, PR #170 reviewed HEAD, source path, byte length,
+  media type, and SHA-256;
+- `pr-170-body.md`: retrieved PR #170 body with retrieval command/time, byte
+  length, media type, and SHA-256;
+- `implementation-evidence.md`: Darwin/Linux structural-only, active-only,
+  focused/full, direct-command, typecheck, full repository check, strict
+  OpenSpec, hygiene, scope/untracked, and submodule results, plus the independently
+  recomputed 529 assertions and 5,100/5,116-byte boundaries;
+- `manifest.json`: exact relative paths, lengths, media types, SHA-256 values,
+  retrieval commands, and the common `PROOF_SHA`.
+
+This is bounded pre-merge review evidence inside the already admitted OpenSpec
+change directory. It is not D8 experiment evidence and is not a future
+`source_input_digest_v1` input. The evidence-only commit after `PROOF_SHA` may
+change only this declared review-evidence directory. `git show
+<evidence-commit>:<path>` is the offline retrieval proof, while equality against
+`PROOF_SHA` proves the production/proof files did not move. The PR body and
+review evidence comments publish the exact final HEAD plus immutable Git-blob
+paths and hashes.
+
+A stale source hash, changed covered tree, missing control event, unexpected
+sentinel, compile/setup/cleanup failure, inaccessible blob, or disagreement
+between any count/receipt makes the proof invalid, never green.
+
 ## Invariant Matrix
 
 | Stage | Authority / invariant | Enforcement and evidence |
