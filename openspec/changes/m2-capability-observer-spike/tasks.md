@@ -22,6 +22,23 @@ add only bounded output under excluded `evidence/**` lanes and never update it.
 
 ## 1. Frozen contract and validator
 
+### Issue #168 split-A delivery overlay
+
+This overlay is the active implementation fixture for #168. The umbrella Task
+1.1 checkbox remains incomplete: #168 delivers only direct source-input ingress
+and source-record capacity; #169 remains responsible for the committed current
+oracle and the final Task 1.1a ownership/DAG normalization.
+
+- [x] #168.A Retain descriptor capabilities for both direct input kinds.
+  - In: `contracts/{check.ts,lib/{ingress,checker,canonical-json,constants,schemas}.ts,fixtures,tests}/**` needed by `source_input_record` and `source_identity_projection` only.
+  - Out: `current-source.ts`, current-source manifest/frame/sidecar behavior, live Git, evidence publication, production/runtime, workflows, and network security.
+  - Verification: canonical repeats succeed byte-identically; upper/parent symlink and ancestor/final replacement fail with exact receipts; deterministic post-hook open tracing records zero root/absolute reopen; descriptor-stress loops repeat success and every named failure for both kinds and prove no cumulative handle growth on Darwin and Linux while preserving bytes, spawning no child, and reading no replacement bytes.
+- [x] #168.B Normalize the bounded source record without changing parser limits.
+  - In: source-record schema, canonical valid fixture, and direct public regression tests.
+  - Verification: primary/witness independently reject a mismatched source digest, manifest digest, or count and reject reintroduced admitted arrays; 237 short entries are exactly 512 items and succeed, 238 are 514 items and return `CONTRACT_JSON_ITEM_LIMIT`, both below the byte limit; isolated node exact/+1 and option 1 remain unchanged.
+- [x] #168.C Preserve the direct-input compatibility surface.
+  - Verification: both public direct commands retain exit/stdout/stderr/LF receipts, canonical JSON and exact four-SHA equality including all independent and synchronized strict-subset forgeries; focused tests, typecheck, strict OpenSpec, full repository check, no-write, scope, and submodule hygiene pass.
+
 - [ ] 1.1 Freeze catalog v1, schemas, rejection taxonomy, limits, and dependency contract.
   - PR boundary: contract only; minimal mergeable slice is a Bun-only strict schema/catalog checker plus golden valid/invalid fixtures, with no launcher, observer, validator decision, or stable task-1.3 CLI.
   - In: `spikes/git-status-capability/contracts/**`, specifically `contracts/{check.ts,lib,tests,fixtures}/**`, `source-input-v1.paths`, the synthetic-only `goldens/source-input-v1.synthetic.{frame,sha256}`, `native/Cargo.toml`, `native/Cargo.lock`, `native/rust-toolchain.toml`, and `dependency-graph-catalog.json`; exact 174 IDs/outcomes, exact 25-floor-ID bijection, exhaustive fixture/native ownership maps, four-layer state schema, exact `source_input_digest_v1` frame/record, frame/evidence/bundle/decision schemas, Rust `1.88.0`, Git `2.49.0`, direct crates/features, target graph predicates, and all finite ingestion/observer limits. Phase 0.5 may also update `openspec/project-profile.md` only to register this new isolated surface. The checker uses Bun standard APIs only and writes no files.
