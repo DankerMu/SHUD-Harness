@@ -886,6 +886,72 @@ architecture.
 | SHUD/rSHUD/AutoSHUD compatibility | Not selected | Read-only submodules are untouched and verified unchanged |
 | Zero/agent runtime governance | Not selected | Zero submodule and runtime adapter are untouched and verified unchanged |
 
+### Issue #171 core-ingress fixture overlay
+
+Issue #171 re-slices only the core behavior lane from superseded PR #170. It
+does not complete Task 1.1. Exhaustive hostile-source AST/preload proof and
+historical evidence reconciliation remain #172; committed-current-oracle
+behavior and the final ownership rewrite remain #169.
+
+The effective fixture is `expanded` with `repair=high`. Selected packs are File
+I/O / path, Schema / fields, Resource limits, Error / rollback, Public
+entrypoint, and Legacy / parity. Config/setup, auth/secrets, concurrency/shared
+state, release/packaging, documentation/migration, scientific governance,
+SHUD/rSHUD/AutoSHUD compatibility, Zero/runtime governance, production runtime,
+and network security are not selected because this slice changes neither those
+authorities nor their artifacts.
+
+Governing invariant: once a direct source input is admitted, every subsequent
+read and replacement check is relative to retained descriptors, every descriptor
+is closed on every exit, and semantic admission is derived from one bounded
+canonical record rather than repeated path/mode authority.
+
+Source-of-truth contract: retained root/directory/final-file descriptor identity
+plus the single top-level `entry_count`, `admitted_paths`, `admitted_modes`,
+`source_input_digest`, and `manifest_digest` tuple under source profile
+65,536 bytes / depth 12 / nodes 2,048 / items 512.
+
+| Invariant surface | #171 ownership and evidence |
+|---|---|
+| Producers | Canonical JSON fixture bytes supplied to `--input`; no producer write is part of this slice. |
+| Validators/preflight | No-follow component walk retains every capability required for descriptor-relative revalidation; normalized primary/witness tuples must equal the single admitted set. |
+| Storage/cache/query | None: direct commands persist no state and may not write. |
+| Public entrypoints | Exactly `check.ts --input ... --kind source_input_record|source_identity_projection`, preserving exact success/error receipts and opposite-stream emptiness. |
+| Downstream consumers | #172 consumes the landed behavior for exhaustive proof; #169 consumes it for committed-current wiring without redefining ingress. |
+| Failure/cleanup/stale state | Upper/parent symlink, ancestor/final replacement, malformed/schema/bound failure, and ordinary success preserve bytes, spawn no child, consume no replacement bytes, and restore descriptor baseline. |
+| Evidence/audit/readiness | Focused direct tests, narrow actual-implementation post-hook tripwire, Darwin/Linux descriptor stress, exact 237/238 capacity receipts, typecheck/check/OpenSpec/hygiene. |
+
+Boundary-surface checklist:
+
+- Shared helper root: descriptor admission/read/close only; every acquired handle
+  has one cleanup path and all post-hook opens are descriptor-relative.
+- Read surfaces: input components and retained final descriptor only; no write,
+  delete, overwrite, child-process, Git, network, Worker, or dynamic-code surface.
+- Schema boundary: one top-level admitted set; results bind only status, the two
+  digests, and entry count.
+- Compatibility boundary: exact receipt bytes, canonical JSON, four-SHA equality,
+  source profile limits, option-1 node/item counting, and existing oracle tests.
+- Explicit exclusions: #172 hostile-source proof/evidence; #169 committed-current
+  oracle; #166 live Git; #162 publication; production/runtime/workflows/network.
+
+Regression rows:
+
+- Each direct kind on a canonical file, repeated and descriptor-stressed on
+  Darwin/Linux -> byte-identical success, no write/child, no handle growth.
+- Each direct kind with upper/parent symlink or ancestor/final replacement at
+  the admission hook -> exit 2, empty stdout, one LF error receipt, zero
+  replacement bytes, and no descriptor growth.
+- Narrow post-admission tripwire on the actual implementation -> zero root or
+  ambient absolute-path opens; every allowed lookup is descriptor-relative.
+- Primary or witness independently mismatches source digest, manifest digest, or
+  count, or reintroduces admitted arrays -> `CONTRACT_SCHEMA_INVALID`.
+- 237 short entries -> exactly 512 items and success; 238 -> 514 items and
+  `CONTRACT_JSON_ITEM_LIMIT`; both remain below 65,536 bytes.
+- Parser node exact/+1 under relaxed item ceiling -> 2,048 nodes pass parsing;
+  +1 returns `CONTRACT_JSON_NODE_LIMIT`, preserving option 1.
+- Each independent and synchronized strict-subset four-SHA mutation ->
+  `CONTRACT_SCHEMA_INVALID`; unchanged peers succeed.
+
 ## Invariant Matrix
 
 | Stage | Authority / invariant | Enforcement and evidence |

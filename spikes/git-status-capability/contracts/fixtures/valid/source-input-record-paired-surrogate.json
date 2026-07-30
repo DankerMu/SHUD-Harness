@@ -1,0 +1,44 @@
+{
+  "schema_version": "shud.git-status-capability.source-input-record.v1",
+  "source_sha": "a24b106d2766eadcff73da4c238639f520e5a80b",
+  "source_input_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "entry_count": 1,
+  "admitted_paths": ["spikes/git-status-capability/fixtures/\uD83D\uDE00.json"],
+  "admitted_modes": ["100644"],
+  "primary_encoder": "source-input-primary-v1",
+  "primary_result": {
+    "status": "ok",
+    "source_input_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+    "entry_count": 1
+  },
+  "witness_encoder": "source-input-witness-v1",
+  "witness_result": {
+    "status": "ok",
+    "source_input_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "manifest_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+    "entry_count": 1
+  },
+  "command_receipt": {
+    "argv": [
+      "spikes/git-status-capability/verify.sh",
+      "source-input-digest",
+      "--version",
+      "1",
+      "--source-sha",
+      "a24b106d2766eadcff73da4c238639f520e5a80b",
+      "--manifest",
+      "spikes/git-status-capability/contracts/source-input-v1.paths",
+      "--primary",
+      "source-input-primary-v1",
+      "--witness",
+      "source-input-witness-v1",
+      "--record",
+      "/external-evidence/source-input-record.json",
+      "--create"
+    ],
+    "version": "1",
+    "exit_code": 0
+  }
+}

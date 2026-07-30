@@ -29,6 +29,33 @@ add only bounded output under excluded `evidence/**` lanes and never update it.
   - Depends on: none.
   - Verification: first run `npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests` with only `contracts/{check.ts,lib}/**` source stashed; every new-behavior test must be red, then restore source and require green. The same command covers valid/exact/bound+1, invalid UTF-8, malformed/trailing/duplicate/deep/wide JSON, unknown/missing fields, stable codes, exit/stdout/stderr, no partial output, manifest missing/extra/future/duplicate/skip/platform-conditional rows, floor merge/gap, ownership overlap/gap, synthetic-only literal, unsafe paths, floating dependencies, and inclusive observer limits. Then `npx --yes bun@1.2.19 spikes/git-status-capability/contracts/check.ts --repository-root . --manifest spikes/git-status-capability/contracts/source-input-v1.paths --check-current` must emit one success receipt without writes; no launcher/observer/`verify.sh` command runs.
 
+### Issue #171 core-ingress delivery overlay
+
+This overlay is the active implementation fixture for #171. It re-slices only
+the core behavior lane from superseded PR #170. Task 1.1 remains incomplete:
+#172 owns exhaustive hostile-source AST/preload proof and historical evidence
+reconciliation; #169 owns the committed-current oracle and final Task 1.1a
+ownership rewrite.
+
+Fixture level: `expanded`; repair intensity: `high`; upstream suggestion:
+`expanded` (agree). Selected risk packs are Public API / CLI, File IO / path
+safety, Schema / fields, Resource limits, Legacy compatibility, and Error /
+rollback. Config/setup, auth/secrets, concurrency/shared state, release/
+packaging, documentation/migration, scientific governance, SHUD/rSHUD/AutoSHUD,
+Zero/runtime governance, production runtime, and network security are not
+selected because this slice changes neither those authorities nor their
+artifacts.
+
+- [x] #171.A Re-slice retained descriptor capabilities for both direct kinds.
+  - In: `contracts/{check.ts,lib/{ingress,capabilities,checker,canonical-json,constants,schemas}.ts,fixtures,tests}/**` needed by `source_input_record` and `source_identity_projection` only.
+  - Out: `tests/authority-preload.ts`, exhaustive hostile-source mutation/AST closure, historical review evidence, committed-current behavior, live Git, evidence publication, production/runtime, workflows, and network security.
+  - Verification: canonical repeats succeed byte-identically; upper/parent symlink and ancestor/final replacement fail with exact receipts; a narrow post-hook tripwire for the actual implementation records zero root/absolute reopen; descriptor-stress loops repeat success and every named failure for both kinds and prove no cumulative handle growth on Darwin and Linux while preserving bytes, spawning no child, and reading no replacement bytes.
+- [x] #171.B Normalize the bounded source record without changing parser limits.
+  - In: source-record schema, canonical valid fixture, and direct public regression tests.
+  - Verification: primary/witness independently reject a mismatched source digest, manifest digest, or count and reject reintroduced admitted arrays; 237 short entries are exactly 512 items and succeed, 238 are 514 items and return `CONTRACT_JSON_ITEM_LIMIT`, both below the byte limit; isolated node exact/+1 and option 1 remain unchanged.
+- [x] #171.C Preserve the direct-input compatibility surface.
+  - Verification: both public direct commands retain exit/stdout/stderr/LF receipts, canonical JSON and exact four-SHA equality including independent and synchronized strict-subset forgeries; focused tests, typecheck, strict OpenSpec, full repository check, no-write, scope, and submodule hygiene pass.
+
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.
   - In: `spikes/git-status-capability/validator/**`, including the independently implemented `source-input-witness-v1`, and validator tests/fixtures only.
