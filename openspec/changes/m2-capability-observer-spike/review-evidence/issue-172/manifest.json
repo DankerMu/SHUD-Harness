@@ -16,9 +16,9 @@
     },
     {
       "relative_path": "openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/round-2-false-green-proof.md",
-      "byte_length": 4890,
+      "byte_length": 4909,
       "media_type": "text/markdown; charset=utf-8",
-      "sha256": "0698bc45a4f76f3b39046307919df59cf75f55774fb65619acc3ffa2298d76aa",
+      "sha256": "5247a4d73c893fe579db3a360b7eebbdd98ce3f250a95c27ac56c34ece134099",
       "retrieval_command": "git show $EVIDENCE_COMMIT:openspec/changes/m2-capability-observer-spike/review-evidence/issue-172/round-2-false-green-proof.md"
     },
     {

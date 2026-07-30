@@ -38,8 +38,8 @@ A minimal ignored probe confirmed that the Bun global Worker has both global `po
 
 All patches below were applied independently to the fixed tree, followed by the same focused runtime command, then reversed immediately:
 
-- `raw-wrapper-post-fix-red.patch`: 891 bytes; SHA-256 `538564d6d6f2e8614da6e251eb724c0a5fc12fe87408f83eee03b06af633ff`. Result: exit `1`; the `node_fs_readFileSync` row retained the exact denial but reported `raw:node_fs_readFileSync:<replacement>`.
-- `raw-ffi-post-fix-red.patch`: 1,018 bytes; SHA-256 `094254aabddd7d532d49dce5d7e227abb3b4b4ed31ab36ca9eae73826a0f09e4`. Result: exit `1`; the `ffi_dlopen` row retained the exact denial but reported `raw:ffi_dlopen:<library>` and `raw:ffi_close:<library>`.
+- `raw-wrapper-post-fix-red.patch`: 891 bytes; SHA-256 `538564d6d6f2e8614da6e251eb724c0a5fc12fe87408f83eee03b06af633ff`. Result: exit `1`; the `node_fs_readFileSync` row retained the exact denial but reported `raw:node_fs_readFileSync:[replacement-path]`.
+- `raw-ffi-post-fix-red.patch`: 1,018 bytes; SHA-256 `094254aabddd7d532d49dce5d7e227abb3b4b4ed31ab36ca9eae73826a0f09e4`. Result: exit `1`; the `ffi_dlopen` row retained the exact denial but reported `raw:ffi_dlopen:[system-library]` and `raw:ffi_close:[system-library]`.
 - `worker-delegate-post-fix-red.patch`: 1,167 bytes; SHA-256 `16e6dbbfcfb207d6217bdf0c5a15a61b6724b004523b098f4c25d666e8220a2e`. Result: exit `1`; the `global_worker` row retained the exact denial but reported `raw:global_worker:`.
 - `worker-channel-post-fix-red.patch`: 786 bytes; SHA-256 `72116d66acd81f41e994a55ee1ab90d046fb4813a445b644b95f88bbc6e8c2f8`. Result: exit `1`; the positive global liveness canary failed before the hostile matrix when its explicit global handler was broken.
 
