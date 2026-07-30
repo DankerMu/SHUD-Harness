@@ -1010,16 +1010,34 @@ before the scanner rejects it. This run does not load `authority-preload.ts`.
 #172.B owns `contracts/tests/{authority-runtime.test.ts,authority-control.ts,
 authority-preload.ts,authority-worker.ts}` and consumes A's registry without
 redefining it. The preload guards actual Node/Bun/FFI/child operations and both
-global and `node:worker_threads` Worker constructors. Independent raw-operation
-events sit immediately beneath forbidden Node/Bun read/open/file, FFI load,
-child/spawn, and Worker delegation; guards deny before delegation, so direct
-success and every denial row require zero raw events. Bounded read and FFI
-inversion canaries deliberately delegate once, observe raw events, close the
-library, and clean their temporary root. Cached aliases are captured only after
-the preload has installed guarded constructors. A separate bounded
-admission-phase Worker canary proves fixture input-read, sentinel-write, and
-message liveness, terminates the Worker, removes its sentinel, and is not a
-registry row. The active test then invokes every registry control after admission
+global and `node:worker_threads` Worker constructors. Named real-delegate
+helpers own raw-operation events immediately before forbidden Node/Bun
+read/open/file, FFI load, child/spawn, and Worker delegation; normal guards deny
+before entering those helpers, so direct success and every denial row require
+zero raw events. Bounded read and FFI inversion modes are limited to their
+matching registered controls and route through the same patched public
+wrapper/delegate as hostile rows; they deliberately delegate once, observe raw
+events, close the FFI library and clear mode in finally, preserve the same
+intentional denial/control-error, and clean their temporary root. Cached aliases
+are captured only after the preload has installed guarded constructors. A separate
+bounded admission-phase sequence of message-configured Worker canaries passes no
+`workerData`: direct global, `node:worker_threads`, and bare `worker_threads`
+routes construct only the fixed `authority-worker.ts` URL. The shared entry helper
+attaches receipt/error listeners, sends an immediate `probe` and short bounded
+retries through the constructed Worker's `postMessage`, and sends
+input/sentinel/channel exactly once only after the fixture replies ready on the
+matching actual channel; wrong or duplicate ready replies cannot certify the
+route. `global` is required for the direct global route and `parent_port` for
+Node/bare routes. The fixture installs both handlers, replies ready only to a
+same-channel probe, accepts only the actual channel matching the configuration,
+records `transport: "message"`, and replies on that same channel rather than a
+fallback. The real Worker delegate records raw delegation immediately before its
+`Reflect.construct`, so a construct-before-deny regression reports a nonzero raw
+event even if synchronous denial prevents configuration and sentinel creation.
+Combined with the positive same-URL/message/channel canaries, that raw oracle
+cannot hide behind an absent sentinel. Each route proves fixture input-read,
+sentinel-write, message liveness, termination, and
+per-route sentinel removal before the unchanged post-admission matrix. It is not a registry row. The active test then invokes every registry control after admission
 with no structural scan. Exact normalized guard events, raw-event state, absent
 worker/read/write/spawn sentinels, and byte-identical input/replacement files
 prove ordering rather than merely observing an error.
@@ -1040,7 +1058,7 @@ The required mutation matrix is:
 
 | Class | Structural-only oracle | Active-only oracle | Side-effect oracle |
 |---|---|---|---|
-| Direct/cached/imported Worker | exact AST rejection, no preload | global or Node Worker construction denied | admission canary proves fixture liveness; every hostile row has no Worker entry |
+| Direct/cached/imported Worker | exact AST rejection, no preload | global or Node Worker construction denied | message-configured admission canaries bind raw construction to matching global/parent-port fixture liveness; every hostile row has no Worker entry |
 | `Function`/`eval` and constructor forms | identifier/property/computed-property rejection | produced Worker/read operation denied after actual invocation | guard event precedes access and raw delegation |
 | Async/generator constructors | constructor acquisition rejected | callable awaited and generator advanced before denial | no worker/file side effect or raw delegation |
 | Static/dynamic/computed loaders | import/call vocabulary rejected | patched cached builtin denies | exact normalized event and zero raw events |

@@ -273,15 +273,37 @@ structural scan. It SHALL independently deny actual Node/Bun/FFI/child-process
 operations and global, `node:worker_threads`, or bare `worker_threads` Worker
 construction before a new realm, worker entry, ambient read, FFI load, child
 start, or write. Raw-operation state SHALL sit beneath forbidden Node/Bun
-read/open/file, FFI load, child/spawn, and Worker delegation; every denial row
+read/open/file, FFI load, child/spawn, and Worker delegation through named
+real-delegate helpers that record raw events immediately before their original
+call; normal guards SHALL deny before entering those helpers, and every denial row
 and direct success SHALL report zero raw events. Cached Worker aliases SHALL be
 acquired only after the preload installs guarded constructors. A bounded
-admission-phase Worker canary SHALL prove entry, input read, sentinel write,
-message receipt, termination, and cleanup before the untouched post-admission
-matrix. Bounded raw-read and raw-FFI inversion canaries SHALL deliberately
-delegate, record raw events, close any loaded library, and clean temporary
-resources. Exact guard events, absent worker/read/write/spawn sentinels, and
-byte-identical input/replacement files SHALL prove the ordering.
+admission-phase sequence of message-configured Worker canaries SHALL pass no
+`workerData`: direct global, `node:worker_threads`, and bare `worker_threads`
+routes SHALL construct only the fixed `authority-worker.ts` URL. The common entry
+helper SHALL attach receipt/error listeners, send an immediate `probe` and short
+bounded retries through the constructed Worker's `postMessage`, then send
+input/sentinel/channel exactly once only after the fixture replies ready on the
+matching actual channel; wrong or duplicate ready replies SHALL NOT certify a
+route. The direct global route SHALL use `global`, while Node/bare routes SHALL
+use `parent_port`. The fixture SHALL install both handlers, reply ready only to a
+same-channel probe, accept configuration only from the actual `global` or
+`parent_port` handler matching that channel, report `transport: "message"`, and
+reply only on that same channel without fallback. The real Worker delegate SHALL
+record raw delegation immediately before `Reflect.construct`, so a
+construct-before-deny regression reports a nonzero raw event even when the
+synchronous denial prevents configuration and sentinel creation. Together with
+the positive same-URL/message/channel canaries, that raw oracle SHALL prevent an
+absent-sentinel false green. Each route SHALL prove
+entry, input read, sentinel write, termination, and per-route sentinel cleanup
+before the untouched post-admission
+matrix. Bounded raw-read and raw-FFI inversion canaries SHALL arm only their
+matching registered mode and invoke the same patched public wrapper/delegate as
+hostile rows, deliberately record raw delegation before the same denial; FFI cleanup
+SHALL record raw close at its underlying close boundary, close the loaded library,
+and clear the matching mode in finally before temporary resources are cleaned.
+Exact guard events, absent worker/read/write/spawn sentinels, and byte-identical
+input/replacement files SHALL prove the ordering.
 
 The focused command SHALL be exactly
 `bun test contracts/tests/authority-structural.test.ts contracts/tests/authority-runtime.test.ts`;
@@ -327,8 +349,8 @@ never rewritten; corrections appear only in new #172 evidence.
 
 #### Scenario: Raw probes and Worker fixture establish live negative oracles
 
-- **WHEN** the bounded admission-phase Worker canary uses the same fixture URL, input, sentinel, and receipt channel as the hostile matrix, and the bounded raw-read/raw-FFI inversion canaries deliberately delegate before denial
-- **THEN** the Worker canary proves entry, input read, sentinel bytes, receipt, termination, and cleanup without becoming a hostile row or satisfying any hostile sentinel; each raw inversion records its independent raw event, the FFI library closes, temporary resources are removed, and every direct-success or hostile denial payload has zero raw events
+- **WHEN** a bounded admission-phase sequence of message-configured Worker canaries passes no `workerData`, runs direct global, `node:worker_threads`, and bare `worker_threads` routes sequentially with the same fixed fixture URL and one-argument construction as hostile routes, attaches receipt/error listeners, sends an immediate `probe` plus short bounded retries through the constructed Worker's `postMessage`, sends the same input/sentinel/channel configuration exactly once only after a route-matching ready reply, permits only `global` for the direct global route and `parent_port` for Node/bare routes, and the real Worker delegate records raw delegation immediately before `Reflect.construct`
+- **THEN** the Worker receipt proves each sequential route's exact `transport: "message"` and actual channel, entry, input read, sentinel bytes, termination, and per-route cleanup; a construct-before-deny regression reports its raw Worker delegation even if synchronous denial prevents configuration and sentinel creation, so the positive same-URL/message/channel canary plus the zero-raw hostile oracle prevents a missing receipt or absent sentinel from masking the real construct path; each raw inversion records its independent raw event, the FFI library closes and its mode clears in finally, temporary resources are removed, and every direct-success or hostile denial payload has zero raw events
 
 #### Scenario: One proof layer is disabled
 

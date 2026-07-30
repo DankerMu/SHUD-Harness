@@ -167,7 +167,7 @@ describe("source-ingress authority runtime proof", () => {
     }
   });
 
-  test("proves bounded Worker fixture liveness during admission before hostile rows", async () => {
+  test("proves message-configured global and parent-port Worker fixture liveness during admission before hostile rows", async () => {
     expect(Bun.version).toBe("1.2.19");
     const root = await mkdtemp(join(tmpdir(), "shud-authority-worker-liveness-"));
     const replacement = join(root, "replacement.json");
@@ -186,9 +186,32 @@ describe("source-ingress authority runtime proof", () => {
         rawEvents: [] as string[],
         workerLiveness: {
           phase: "admission",
-          entry: AUTHORITY_WORKER_ENTRY,
-          inputBytes: inputBytes.byteLength,
-          sentinelBytes: AUTHORITY_WORKER_ENTRY
+          routes: [
+            {
+              route: "global_direct",
+              transport: "message",
+              channel: "global",
+              entry: AUTHORITY_WORKER_ENTRY,
+              inputBytes: inputBytes.byteLength,
+              sentinelBytes: AUTHORITY_WORKER_ENTRY
+            },
+            {
+              route: "node_worker_threads",
+              transport: "message",
+              channel: "parent_port",
+              entry: AUTHORITY_WORKER_ENTRY,
+              inputBytes: inputBytes.byteLength,
+              sentinelBytes: AUTHORITY_WORKER_ENTRY
+            },
+            {
+              route: "bare_worker_threads",
+              transport: "message",
+              channel: "parent_port",
+              entry: AUTHORITY_WORKER_ENTRY,
+              inputBytes: inputBytes.byteLength,
+              sentinelBytes: AUTHORITY_WORKER_ENTRY
+            }
+          ]
         }
       };
       expect(await guardedCommand(controlArguments(
