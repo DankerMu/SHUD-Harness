@@ -9,6 +9,7 @@ Issue #132 cannot safely finish its cross-platform dirty-state observer with the
 - Separate row observations, row verdicts, harness validity, and the terminal technology decision. A valid complete experiment produces deterministic `accepted` or `rejected`; missing/corrupt evidence, identity drift, supply-chain incompleteness, or repository regression/isolation failure is an invalid harness run with no terminal decision and must be rerun.
 - Persist a bounded, reviewable, content-addressed raw evidence bundle and a separately normalized decision projection. `accepted` requires every mandatory row on both platforms plus every decision-bearing supply, reproducibility, repository, and governance gate; a technical row failure records `rejected` and forbids pathname, Linux-only, or weakened-contract fallback.
 - Keep the spike outside production packages and public StackLock seams. It does not restore PR #133, change Issue #132 runtime behavior, add a production Rust toolchain, or alter the StackLock schema.
+- The current Issue #175 delivery is the first #172 replacement child: it binds only post-admission `openat`/`fstatSync`/`readSync`/`closeSync` operations to retained or verification descriptor provenance and proves fd `0` and Linux `AT_FDCWD` mutations fail before side effects; delegate topology, Worker lifecycle, and final evidence remain dependency-ordered follow-ups.
 
 ## Capabilities
 

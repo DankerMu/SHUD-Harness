@@ -223,6 +223,89 @@ ceiling.
 - **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
 - **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
 
+### Requirement: Retained descriptor primitives prove provenance
+Every post-admission raw descriptor operation MUST validate an opaque,
+same-instance, generation-bound retained or verification handle before invoking
+Node or FFI. The private registry MUST bind raw fd, parent generation, exact
+flags, kind, phase/role, and lifecycle. Raw numbers including fd `0` and Linux
+`AT_FDCWD` (`-100`), foreign/stale/closed handles, mismatched flags/kind/owner,
+and unproven parents MUST fail before `openat`, `fstatSync`, `readSync`, or
+`closeSync`.
+
+Capability tokens and ingress operation observations MUST NOT expose a live raw
+fd; raw fd and generation remain instance-private. This does not change the
+frozen numeric descriptor field carried by a provenance denial event.
+
+Admission opens MUST issue `pending_retained` handles; successful stat/type
+validation MUST transition them to `retained`. Post-admission relative opens
+MUST issue `verification` handles. Close MUST accept only
+pending/unretained, retained/retained, or verification/verification pairs and
+MUST invalidate the generation even when close reporting fails. A later open
+that reuses the raw fd MUST create a new generation and MUST NOT reactivate the
+old handle.
+
+The instance owner MUST seal admission once the initial retained chain is
+complete and before `afterAdmission`. Before the seal, only admission issuance
+and pending-to-retained promotion are permitted; post-admission opens and reads
+deny. After the seal, admission issuance and late promotion deny,
+post-admission relative opens issue verification handles only, and retained
+files admitted before the seal remain readable.
+
+Each provenance denial MUST emit exactly one frozen
+`shud.contract.descriptor-denial.v1` event with operation, reason, raw
+descriptor or null, generation or null, and phase. The CLI MUST preserve exit
+`2`, empty stdout, one LF-terminated `CONTRACT_SCHEMA_INVALID` stderr receipt,
+primary-error/cleanup precedence, and zero target bytes.
+
+#### Scenario: fd zero mutation runs independently
+- **WHEN** the compiling `readRetained` source uses `readSync(0, buffer, offset, length, null)`
+- **THEN** structural-only proof rejects `raw_read_descriptor_not_handle`, and active-only proof with FIFO stdin whose connected writer stays open but sends no bytes separately completes within one second with one `read_sync/unproven_descriptor` event before read, exact failure receipt, and zero bytes
+
+#### Scenario: Linux AT_FDCWD mutation runs independently
+- **WHEN** the compiling `readRetained` source invokes `openAt()(-100, childCString("ambient-secret"), FILE_OPEN_FLAGS)` before its retained read
+- **THEN** structural-only proof rejects `openat_parent_not_handle` on Darwin and Linux, while Linux active-only proof emits one `openat/unproven_parent` event before opening the unread cwd sentinel and consumes zero bytes
+
+#### Scenario: Foreign, stale, or mismatched handle is supplied
+- **WHEN** stat/open/read/close receives another instance's handle, a closed handle after same-fd reuse, invalid flags/kind, or the wrong close owner
+- **THEN** exactly one matching denial event is emitted before the raw syscall; the legitimate current-generation sibling remains usable
+
+#### Scenario: Admission phase cannot be spoofed after its seal
+- **WHEN** a caller requests admission `openRoot` or `openRelative`, late
+  `markRetained`, or a pre-seal post-admission open/read
+- **THEN** it emits one exact pre-syscall phase denial, while a sealed
+  post-admission verification handle remains non-promotable/non-readable and
+  an admitted retained sibling remains usable
+
+#### Scenario: Guard order cannot hide a raw descriptor call
+- **WHEN** fixture-anchored copied production sources hoist `openSync` before a
+  sealed `openRoot` guard, `openat` after relative-parent resolution but before
+  an invalid phase/flag/state guard, or `readSync` after handle resolution but
+  before an invalid phase/state guard
+- **THEN** the clean source emits one exact denial with zero attempted,
+  intercepted, and native calls/target bytes and a usable sibling where
+  applicable; each hoist preserves the later denial but makes its native
+  counter proof fail
+
+#### Scenario: Canonical handoff vocabulary is compiler-enforced
+- **WHEN** the spike-local no-emit proof compares `DescriptorOperation` with
+  `DESCRIPTOR_OPERATION_POLICY` keys and compares
+  `DescriptorIngressOperation` with its ingress-only vocabulary
+- **THEN** both directions are exact, the ingress vocabulary remains distinct,
+  and copied extra/missing descriptor, policy, or ingress literals fail the
+  compiler proof
+
+#### Scenario: Issued descriptor receipts retain audited identity
+- **WHEN** an issued, foreign, closed, stale, or wrong-owner handle is denied
+- **THEN** a legitimate intercepted primitive operand for that same opaque
+  token binds the event's numeric descriptor, the independently counted
+  generation is exact, fixed-0/fd+1 `#denyRecord` mutations fail the proof,
+  and raw `0`/`-100` events remain exact with null generation
+
+#### Scenario: Legitimate retained and verification chains run
+- **WHEN** either direct input kind uses only the exact lifecycle and flags
+- **THEN** its #171 receipt, four-SHA/capacity behavior, cleanup/error precedence, no-side-effect contract, and descriptor baseline remain unchanged on Darwin and Linux Bun 1.2.19
+
+
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:
 `observer_outcome = clean | dirty | rejected(code)`, per-platform

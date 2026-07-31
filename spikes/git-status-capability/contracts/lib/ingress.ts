@@ -5,6 +5,7 @@ import {
   DIRECTORY_OPEN_FLAGS,
   FILE_OPEN_FLAGS,
   type BigIntStats,
+  type CapabilityDescriptor,
   type CapabilityHooks,
   type ContractAuthorityFault
 } from "./capabilities";
@@ -28,14 +29,12 @@ export class ContractError extends Error {
 
 export type IngressProfile = Readonly<{ bytes: number; depth: number; nodes: number; items: number }>;
 export type DescriptorAdmissionHook = (absolutePath: string) => void | Promise<void>;
-export type DescriptorOperation = Readonly<{
+export type DescriptorIngressOperation = Readonly<{
   phase: "admission" | "post_admission";
   operation: "open_root" | "open_relative" | "read_retained";
   path: string;
-  parentDescriptor?: number;
-  descriptor?: number;
 }>;
-export type DescriptorOperationObserver = (operation: DescriptorOperation) => void;
+export type DescriptorOperationObserver = (operation: DescriptorIngressOperation) => void;
 export type DescriptorIngressHooks = Readonly<{
   afterAdmission?: DescriptorAdmissionHook;
   observe?: DescriptorOperationObserver;
@@ -66,7 +65,7 @@ function absoluteSegments(path: string): readonly string[] {
 }
 
 type RetainedComponent = Readonly<{
-  descriptor: number;
+  descriptor: CapabilityDescriptor;
   childName?: string;
   stats: BigIntStats;
   final: boolean;
@@ -109,6 +108,7 @@ function openDescriptorBoundPath(
     try {
       const rootStats = capabilities.stat(rootDescriptor);
       assertExpectedType(rootStats, false);
+      capabilities.markRetained(rootDescriptor, "directory");
       components.push({ descriptor: rootDescriptor, stats: rootStats, final: false });
     } catch (error) {
       try {
@@ -123,16 +123,21 @@ function openDescriptorBoundPath(
       const childName = segments[index]!;
       const final = index === segments.length - 1;
       const parentDescriptor = components.at(-1)!.descriptor;
-      observe?.({ phase: "admission", operation: "open_relative", path: childName, parentDescriptor });
+      observe?.({
+        phase: "admission",
+        operation: "open_relative",
+        path: childName
+      });
       const descriptor = capabilities.openRelative(
         parentDescriptor,
         childName,
-        final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS
+        final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS,
+        "admission"
       );
-      if (descriptor < 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
       try {
         const stats = capabilities.stat(descriptor);
         assertExpectedType(stats, final);
+        capabilities.markRetained(descriptor, final ? "file" : "directory");
         components.push({ descriptor, childName, stats, final });
       } catch (error) {
         try {
@@ -169,15 +174,14 @@ function verifyRetainedChain(
     observe?.({
       phase: "post_admission",
       operation: "open_relative",
-      path: retained.childName!,
-      parentDescriptor: parent.descriptor
+      path: retained.childName!
     });
     const verificationDescriptor = capabilities.openRelative(
       parent.descriptor,
       retained.childName!,
-      retained.final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS
+      retained.final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS,
+      "post_admission"
     );
-    if (verificationDescriptor < 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     let verificationPrimary: ContractError | undefined;
     try {
       const verificationStats = capabilities.stat(verificationDescriptor);
@@ -373,6 +377,7 @@ export async function readBoundedFile(
   let verificationCleanupFailed = false;
   try {
     admission = openDescriptorBoundPath(path, capabilities, hooks.observe);
+    capabilities.sealAdmission();
     const final = admission.components.at(-1)!;
     await hooks.afterAdmission?.(admission.logicalAbsolutePath);
     if (hooks.authorityFault) capabilities.rejectForbidden(hooks.authorityFault, "post_admission");
@@ -384,8 +389,7 @@ export async function readBoundedFile(
         hooks.observe?.({
           phase: "post_admission",
           operation: "read_retained",
-          path: final.childName!,
-          descriptor: final.descriptor
+          path: final.childName!
         });
         const bytesRead = capabilities.readRetained(
           final.descriptor,
