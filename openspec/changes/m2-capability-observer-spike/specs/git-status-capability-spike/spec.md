@@ -276,6 +276,31 @@ primary-error/cleanup precedence, and zero target bytes.
   post-admission verification handle remains non-promotable/non-readable and
   an admitted retained sibling remains usable
 
+#### Scenario: Guard order cannot hide a raw descriptor call
+- **WHEN** fixture-anchored copied production sources hoist `openSync` before a
+  sealed `openRoot` guard, `openat` after relative-parent resolution but before
+  an invalid phase/flag/state guard, or `readSync` after handle resolution but
+  before an invalid phase/state guard
+- **THEN** the clean source emits one exact denial with zero attempted,
+  intercepted, and native calls/target bytes and a usable sibling where
+  applicable; each hoist preserves the later denial but makes its native
+  counter proof fail
+
+#### Scenario: Canonical handoff vocabulary is compiler-enforced
+- **WHEN** the spike-local no-emit proof compares `DescriptorOperation` with
+  `DESCRIPTOR_OPERATION_POLICY` keys and compares
+  `DescriptorIngressOperation` with its ingress-only vocabulary
+- **THEN** both directions are exact, the ingress vocabulary remains distinct,
+  and copied extra/missing descriptor, policy, or ingress literals fail the
+  compiler proof
+
+#### Scenario: Issued descriptor receipts retain audited identity
+- **WHEN** an issued, foreign, closed, stale, or wrong-owner handle is denied
+- **THEN** a legitimate intercepted primitive operand for that same opaque
+  token binds the event's numeric descriptor, the independently counted
+  generation is exact, fixed-0/fd+1 `#denyRecord` mutations fail the proof,
+  and raw `0`/`-100` events remain exact with null generation
+
 #### Scenario: Legitimate retained and verification chains run
 - **WHEN** either direct input kind uses only the exact lifecycle and flags
 - **THEN** its #171 receipt, four-SHA/capacity behavior, cleanup/error precedence, no-side-effect contract, and descriptor baseline remain unchanged on Darwin and Linux Bun 1.2.19

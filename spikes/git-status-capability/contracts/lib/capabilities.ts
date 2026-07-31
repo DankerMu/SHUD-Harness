@@ -62,7 +62,8 @@ export type CapabilityHooks = Readonly<{
   onDescriptorAuthorityDenial?: (denial: DescriptorAuthorityDenial) => void;
 }>;
 
-export const FILE_OPEN_FLAGS = constants.O_RDONLY | (constants.O_CLOEXEC ?? 0) |
+const OPTIONAL_FS_CONSTANTS = constants as typeof constants & Readonly<{ O_CLOEXEC?: number }>;
+export const FILE_OPEN_FLAGS = constants.O_RDONLY | (OPTIONAL_FS_CONSTANTS.O_CLOEXEC ?? 0) |
   (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
 export const DIRECTORY_OPEN_FLAGS = FILE_OPEN_FLAGS | (constants.O_DIRECTORY ?? 0);
 
@@ -123,14 +124,10 @@ type DescriptorRecord = {
   statValidated: boolean;
   statKind: DescriptorKind | undefined;
 };
-type IssuedDescriptorMetadata = Readonly<{
-  descriptor: number;
-  generation: number;
-  phase: CapabilityPhase;
-}>;
+type DescriptorDenialRecord = Readonly<Pick<DescriptorRecord, "fd" | "generation" | "phase">>;
 
 let cachedOpenAt: OpenAt | undefined;
-const issuedDescriptorMetadata = new WeakMap<CapabilityDescriptor, IssuedDescriptorMetadata>();
+const descriptorOwners = new WeakMap<CapabilityDescriptor, ContractCapabilities>();
 
 function openAt(): OpenAt {
   if (cachedOpenAt) return cachedOpenAt;
@@ -331,7 +328,7 @@ export class ContractCapabilities {
     };
     this.#registry.set(descriptor, record);
     this.#currentGenerationByDescriptor.set(raw, generation);
-    issuedDescriptorMetadata.set(descriptor, Object.freeze({ descriptor: raw, generation, phase }));
+    descriptorOwners.set(descriptor, this);
     return descriptor;
   }
 
@@ -353,16 +350,9 @@ export class ContractCapabilities {
     const capability = descriptor as CapabilityDescriptor;
     const record = this.#registry.get(capability);
     if (!record) {
-      const metadata = issuedDescriptorMetadata.get(capability);
-      if (metadata) {
-        return this.#deny(
-          operation,
-          "foreign_descriptor",
-          metadata.descriptor,
-          metadata.generation,
-          metadata.phase
-        );
-      }
+      const owner = descriptorOwners.get(capability);
+      const foreignRecord = owner ? owner.#registry.get(capability) : undefined;
+      if (foreignRecord) return this.#denyRecord(operation, "foreign_descriptor", foreignRecord);
       return this.#deny(operation, unprovenReason, null, null, phase);
     }
     const currentGeneration = this.#currentGenerationByDescriptor.get(record.fd);
@@ -380,7 +370,7 @@ export class ContractCapabilities {
   #denyRecord(
     operation: DescriptorOperation,
     reason: DescriptorAuthorityDenialReason,
-    record: DescriptorRecord
+    record: DescriptorDenialRecord
   ): never {
     return this.#deny(operation, reason, record.fd, record.generation, record.phase);
   }

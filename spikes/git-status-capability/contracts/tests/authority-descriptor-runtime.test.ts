@@ -13,17 +13,54 @@ import {
   type DescriptorAuthorityDenial,
   type DescriptorOperation
 } from "../lib/capabilities";
-import type { DescriptorIngressOperation } from "../lib/ingress";
 import { failure, validSourcePath } from "./helpers";
-import { withProductionTree } from "./authority-descriptor-vocabulary";
+import {
+  withProductionTree,
+  type AuditIdentityMutation,
+  type GuardOrderMutation
+} from "./authority-descriptor-vocabulary";
 
-type ActiveMode = "fd0" | "at_fdcwd" | "fstat0" | "close0" | "lifecycle";
+type ActiveMode = "fd0" | "at_fdcwd" | "fstat0" | "close0" | "lifecycle" | "guard_order";
 type ChildResult = Readonly<{ exit: number | null; stdout: string; stderr: string; elapsedMs: number }>;
 type RawCallCounters = Readonly<{
   attempted: Readonly<Record<"openat" | "fstat_sync" | "read_sync" | "close_sync", number>>;
   intercepted: Readonly<Record<"openat" | "fstat_sync" | "read_sync" | "close_sync", number>>;
   native: Readonly<Record<"openat" | "fstat_sync" | "read_sync" | "close_sync", number>>;
   target_bytes: number;
+}>;
+
+type GuardOrderScenario =
+  | "sealed_open_root"
+  | "open_relative_preseal_post"
+  | "open_relative_sealed_admission"
+  | "open_relative_invalid_flags"
+  | "open_relative_invalid_state"
+  | "read_premature_post"
+  | "read_verification"
+  | "read_nonretained"
+  | "read_wrong_phase";
+type GuardOrderCounters = Readonly<{
+  attempted: Readonly<Record<"open_sync" | "openat" | "read_sync", number>>;
+  intercepted: Readonly<Record<"open_sync" | "openat" | "read_sync", number>>;
+  native: Readonly<Record<"open_sync" | "openat" | "read_sync", number>>;
+  target_bytes: number;
+}>;
+type GuardOrderReceipt = Readonly<{
+  denials: readonly DescriptorAuthorityDenial[];
+  sibling: boolean;
+  targetLabel: string | null;
+  targetGeneration: number | null;
+}>;
+type GuardOrderProof = Readonly<{
+  result: ChildResult;
+  receipt: GuardOrderReceipt;
+  counters: GuardOrderCounters;
+  audit: readonly Readonly<{ label: string; descriptor: number }>[];
+}>;
+type AuditIdentityProof = Readonly<{
+  result: ChildResult;
+  denials: readonly DescriptorAuthorityDenial[];
+  audit: readonly Readonly<{ label: string; descriptor: number }>[];
 }>;
 type RetainedFixture = Readonly<{
   root: string;
@@ -34,22 +71,6 @@ type RetainedFixture = Readonly<{
   dispose: () => Promise<void>;
 }>;
 
-type Equal<Left, Right> =
-  (<Value>() => Value extends Left ? 1 : 2) extends
-  (<Value>() => Value extends Right ? 1 : 2) ? true : false;
-type Assert<Value extends true> = Value;
-type CanonicalDescriptorOperationVocabulary = Assert<Equal<
-  DescriptorOperation,
-  keyof typeof DESCRIPTOR_OPERATION_POLICY
->>;
-type DescriptorIngressOperationVocabulary = Assert<Equal<
-  DescriptorIngressOperation["operation"],
-  "open_root" | "open_relative" | "read_retained"
->>;
-const descriptorOperationVocabularyWitness: readonly [
-  CanonicalDescriptorOperationVocabulary,
-  DescriptorIngressOperationVocabulary
-] = [true, true];
 
 const preloadPath = join(import.meta.dir, "authority-descriptor-preload.ts");
 const ACTIVE_PROOF_TIMEOUT_MS = 900;
@@ -84,6 +105,84 @@ const CLOSE_RAW_CALL_COUNTERS: RawCallCounters = Object.freeze({
   intercepted: Object.freeze({ openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 1 }),
   native: ZERO_RAW_CALL_COUNTERS.native,
   target_bytes: 0
+});
+
+const ZERO_GUARD_ORDER_COUNTERS: GuardOrderCounters = Object.freeze({
+  attempted: Object.freeze({ open_sync: 0, openat: 0, read_sync: 0 }),
+  intercepted: Object.freeze({ open_sync: 0, openat: 0, read_sync: 0 }),
+  native: Object.freeze({ open_sync: 0, openat: 0, read_sync: 0 }),
+  target_bytes: 0
+});
+const GUARD_ORDER_EXPECTATIONS: Readonly<Record<GuardOrderScenario, Readonly<{
+  mutation: GuardOrderMutation;
+  operation: DescriptorOperation;
+  reason: DescriptorAuthorityDenial["reason"];
+  phase: DescriptorAuthorityDenial["phase"];
+  native: keyof GuardOrderCounters["native"];
+}>>> = Object.freeze({
+  sealed_open_root: {
+    mutation: "guard_open_root",
+    operation: "open_root",
+    reason: "phase_invalid",
+    phase: null,
+    native: "open_sync"
+  },
+  open_relative_preseal_post: {
+    mutation: "guard_open_relative",
+    operation: "openat",
+    reason: "phase_invalid",
+    phase: "admission",
+    native: "openat"
+  },
+  open_relative_sealed_admission: {
+    mutation: "guard_open_relative",
+    operation: "openat",
+    reason: "phase_invalid",
+    phase: "admission",
+    native: "openat"
+  },
+  open_relative_invalid_flags: {
+    mutation: "guard_open_relative",
+    operation: "openat",
+    reason: "flags_invalid",
+    phase: "admission",
+    native: "openat"
+  },
+  open_relative_invalid_state: {
+    mutation: "guard_open_relative",
+    operation: "openat",
+    reason: "state_invalid",
+    phase: "admission",
+    native: "openat"
+  },
+  read_premature_post: {
+    mutation: "guard_read_retained",
+    operation: "read_sync",
+    reason: "phase_invalid",
+    phase: "admission",
+    native: "read_sync"
+  },
+  read_verification: {
+    mutation: "guard_read_retained",
+    operation: "read_sync",
+    reason: "state_invalid",
+    phase: "post_admission",
+    native: "read_sync"
+  },
+  read_nonretained: {
+    mutation: "guard_read_retained",
+    operation: "read_sync",
+    reason: "state_invalid",
+    phase: "admission",
+    native: "read_sync"
+  },
+  read_wrong_phase: {
+    mutation: "guard_read_retained",
+    operation: "read_sync",
+    reason: "phase_invalid",
+    phase: "admission",
+    native: "read_sync"
+  }
 });
 
 async function expectUnpreloadedFdZeroReadToBlock(
@@ -142,21 +241,32 @@ function expectDenial(
   return denials[count]!;
 }
 
-function opaqueDenial(
+/**
+ * Exact numeric receipt identity is bound independently by the preloaded
+ * audit fixture below. These direct behavior rows retain the other frozen
+ * fields and require a numeric issued-handle descriptor without deriving it
+ * from an earlier denial.
+ */
+function expectIssuedDenial(
+  denials: DescriptorAuthorityDenial[],
+  action: () => unknown,
   operation: DescriptorOperation,
   reason: DescriptorAuthorityDenial["reason"],
   generation: number,
-  phase: DescriptorAuthorityDenial["phase"],
-  descriptor?: number
-): Readonly<Record<string, unknown>> {
-  return {
-    schema_version: "shud.contract.descriptor-denial.v1",
-    operation,
-    reason,
-    descriptor: descriptor ?? expect.any(Number),
-    generation,
-    phase
-  };
+  phase: DescriptorAuthorityDenial["phase"]
+): DescriptorAuthorityDenial {
+  const count = denials.length;
+  expect(() => { action(); }).toThrow("CONTRACT_CAPABILITY_DESCRIPTOR_DENIED");
+  expect(denials).toHaveLength(count + 1);
+  const denial = denials[count]!;
+  expect(denial.schema_version).toBe("shud.contract.descriptor-denial.v1");
+  expect(denial.operation).toBe(operation);
+  expect(denial.reason).toBe(reason);
+  expect(typeof denial.descriptor).toBe("number");
+  expect(denial.generation).toBe(generation);
+  expect(denial.phase).toBe(phase);
+  expect(Object.isFrozen(denial)).toBe(true);
+  return denial;
 }
 
 async function createRetainedFile(
@@ -315,6 +425,52 @@ async function runPreloadedCheck(
   });
 }
 
+async function runPreloadedProgram(
+  mode: ActiveMode,
+  programPath: string,
+  eventPath: string,
+  sideEffectPath: string,
+  auditPath: string,
+  scenario: string
+): Promise<ChildResult> {
+  const started = performance.now();
+  return await new Promise<ChildResult>((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ["--preload", preloadPath, programPath],
+      {
+        env: {
+          ...process.env,
+          SHUD_DESCRIPTOR_PRELOAD_MODE: mode,
+          SHUD_DESCRIPTOR_PRELOAD_EVENT_PATH: eventPath,
+          SHUD_DESCRIPTOR_PRELOAD_SIDE_EFFECT_PATH: sideEffectPath,
+          SHUD_DESCRIPTOR_PRELOAD_AUDIT_PATH: auditPath,
+          SHUD_DESCRIPTOR_GUARD_SCENARIO: scenario
+        },
+        stdio: ["ignore", "pipe", "pipe"]
+      }
+    );
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let childError: Error | undefined;
+    child.once("error", (error) => { childError = error; });
+    child.stdout!.on("data", (chunk: Buffer) => { stdout.push(Buffer.from(chunk)); });
+    child.stderr!.on("data", (chunk: Buffer) => { stderr.push(Buffer.from(chunk)); });
+    child.once("close", (exit) => {
+      if (childError) {
+        reject(childError);
+        return;
+      }
+      resolve({
+        exit,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        elapsedMs: performance.now() - started
+      });
+    });
+  });
+}
+
 async function expectActiveDenial(
   result: ChildResult,
   eventPath: string,
@@ -332,9 +488,386 @@ async function expectActiveDenial(
   expect(JSON.parse(await readFile(sideEffectPath, "utf8"))).toEqual(expectedCounters);
 }
 
+async function runGuardOrderProof(
+  mutation: GuardOrderMutation | undefined,
+  scenario: GuardOrderScenario
+): Promise<GuardOrderProof> {
+  let proof: GuardOrderProof | undefined;
+  await withProductionTree(mutation, async (tree) => {
+    const proofRoot = await mkdtemp(join(tmpdir(), "shud-descriptor-guard-order-"));
+    try {
+      const runnerPath = join(tree.root, "guard-order.ts");
+      const eventPath = join(proofRoot, "events.jsonl");
+      const sideEffectPath = join(proofRoot, "side-effects.json");
+      const auditPath = join(proofRoot, "audit.jsonl");
+      await writeFile(runnerPath, `
+import { ContractCapabilities, DIRECTORY_OPEN_FLAGS, FILE_OPEN_FLAGS } from "./lib/capabilities";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const scenario = process.env.SHUD_DESCRIPTOR_GUARD_SCENARIO;
+const denials = [];
+const capabilities = new ContractCapabilities({
+  onDescriptorAuthorityDenial: (denial) => { denials.push(denial); }
+});
+const retained = [];
+let pending;
+let verification;
+const root = await mkdtemp(join(tmpdir(), "shud-descriptor-guard-fixture-"));
+const fileName = "retained.txt";
+const filePath = join(root, fileName);
+const physicalRoot = process.platform === "darwin" && ["/etc", "/tmp", "/var"].some(
+  (alias) => root === alias || root.startsWith(alias + "/")
+) ? "/private" + root : root;
+const segments = [...physicalRoot.split("/").filter(Boolean), fileName];
+const rejected = (action) => {
+  try {
+    action();
+  } catch {
+    // The parent assertion validates the exact frozen denial receipt.
+  }
+};
+const statAndBind = (label, descriptor) => {
+  process.env.SHUD_DESCRIPTOR_PRELOAD_AUDIT_LABEL = label;
+  try {
+    return capabilities.stat(descriptor);
+  } finally {
+    delete process.env.SHUD_DESCRIPTOR_PRELOAD_AUDIT_LABEL;
+  }
+};
+try {
+  await writeFile(filePath, "guard-order retained bytes\\n");
+  let parent = capabilities.openRoot("/", "admission");
+  if (!statAndBind("root", parent).isDirectory()) throw new Error("guard root is not a directory");
+  capabilities.markRetained(parent, "directory");
+  retained.push(parent);
+  let directory = parent;
+  let file = parent;
+  for (let index = 0; index < segments.length; index += 1) {
+    const final = index === segments.length - 1;
+    const descriptor = capabilities.openRelative(
+      parent,
+      segments[index],
+      final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS,
+      "admission"
+    );
+    const label = final ? "file" : "directory-" + index;
+    const stats = statAndBind(label, descriptor);
+    if (final ? !stats.isFile() : !stats.isDirectory()) throw new Error("guard fixture type changed");
+    capabilities.markRetained(descriptor, final ? "file" : "directory");
+    retained.push(descriptor);
+    if (final) file = descriptor;
+    else directory = descriptor;
+    parent = descriptor;
+  }
+
+  let action;
+  let targetLabel = null;
+  let targetGeneration = null;
+  if (scenario === "sealed_open_root") {
+    capabilities.sealAdmission();
+    action = () => capabilities.openRoot("/", "admission");
+  } else if (scenario === "open_relative_preseal_post") {
+    targetLabel = "directory-" + (segments.length - 2);
+    targetGeneration = retained.length - 1;
+    action = () => capabilities.openRelative(directory, fileName, FILE_OPEN_FLAGS, "post_admission");
+  } else if (scenario === "open_relative_sealed_admission") {
+    capabilities.sealAdmission();
+    targetLabel = "directory-" + (segments.length - 2);
+    targetGeneration = retained.length - 1;
+    action = () => capabilities.openRelative(directory, fileName, FILE_OPEN_FLAGS, "admission");
+  } else if (scenario === "open_relative_invalid_flags") {
+    targetLabel = "directory-" + (segments.length - 2);
+    targetGeneration = retained.length - 1;
+    action = () => capabilities.openRelative(directory, fileName, FILE_OPEN_FLAGS | 1, "admission");
+  } else if (scenario === "open_relative_invalid_state") {
+    pending = capabilities.openRelative(directory, fileName, FILE_OPEN_FLAGS, "admission");
+    targetLabel = "pending";
+    targetGeneration = retained.length + 1;
+    statAndBind(targetLabel, pending);
+    action = () => capabilities.openRelative(pending, fileName, FILE_OPEN_FLAGS, "admission");
+  } else if (scenario === "read_premature_post") {
+    targetLabel = "file";
+    targetGeneration = retained.length;
+    action = () => capabilities.readRetained(file, Buffer.alloc(1), 0, 1, 0, "post_admission");
+  } else if (scenario === "read_verification") {
+    capabilities.sealAdmission();
+    verification = capabilities.openRelative(directory, fileName, FILE_OPEN_FLAGS, "post_admission");
+    targetLabel = "verification";
+    targetGeneration = retained.length + 1;
+    statAndBind(targetLabel, verification);
+    action = () => capabilities.readRetained(verification, Buffer.alloc(1), 0, 1, 0, "post_admission");
+  } else if (scenario === "read_nonretained") {
+    pending = capabilities.openRelative(directory, fileName, FILE_OPEN_FLAGS, "admission");
+    targetLabel = "pending";
+    targetGeneration = retained.length + 1;
+    statAndBind(targetLabel, pending);
+    capabilities.sealAdmission();
+    action = () => capabilities.readRetained(pending, Buffer.alloc(1), 0, 1, 0, "post_admission");
+  } else if (scenario === "read_wrong_phase") {
+    capabilities.sealAdmission();
+    targetLabel = "file";
+    targetGeneration = retained.length;
+    action = () => capabilities.readRetained(file, Buffer.alloc(1), 0, 1, 0, "admission");
+  } else {
+    throw new Error("unknown guard-order scenario: " + scenario);
+  }
+
+  process.env.SHUD_DESCRIPTOR_PRELOAD_COUNTER_PHASE = "action";
+  rejected(action);
+  process.env.SHUD_DESCRIPTOR_PRELOAD_COUNTER_PHASE = "cleanup";
+  const sibling = capabilities.stat(file).isFile();
+  process.stdout.write(JSON.stringify({ denials, sibling, targetLabel, targetGeneration }));
+} finally {
+  delete process.env.SHUD_DESCRIPTOR_PRELOAD_COUNTER_PHASE;
+  for (const descriptor of [verification, pending].filter(Boolean).reverse()) {
+    try {
+      capabilities.close(descriptor, descriptor === verification ? "verification" : "unretained");
+    } catch {
+      // Fixture teardown must not hide the proof result.
+    }
+  }
+  for (const descriptor of retained.reverse()) {
+    try {
+      capabilities.close(descriptor, "retained");
+    } catch {
+      // Fixture teardown must not hide the proof result.
+    }
+  }
+  await rm(root, { recursive: true, force: true });
+}
+`);
+      const result = await runPreloadedProgram(
+        "guard_order",
+        runnerPath,
+        eventPath,
+        sideEffectPath,
+        auditPath,
+        scenario
+      );
+      const audit = (await readFile(auditPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Readonly<{ label: string; descriptor: number }>);
+      proof = Object.freeze({
+        result,
+        receipt: JSON.parse(result.stdout) as GuardOrderReceipt,
+        counters: JSON.parse(await readFile(sideEffectPath, "utf8")) as GuardOrderCounters,
+        audit
+      });
+    } finally {
+      await rm(proofRoot, { recursive: true, force: true });
+    }
+  });
+  if (!proof) throw new Error("guard-order proof did not produce a receipt");
+  return proof;
+}
+
+function assertGuardOrderReceipt(proof: GuardOrderProof, scenario: GuardOrderScenario): void {
+  const expected = GUARD_ORDER_EXPECTATIONS[scenario];
+  expect(proof.result).toEqual(expect.objectContaining({ exit: 0, stderr: "" }));
+  const binding = proof.receipt.targetLabel
+    ? proof.audit.filter((entry) => entry.label === proof.receipt.targetLabel)
+    : [];
+  expect(binding).toHaveLength(proof.receipt.targetLabel ? 1 : 0);
+  expect(proof.receipt.denials).toEqual([{
+    schema_version: "shud.contract.descriptor-denial.v1",
+    operation: expected.operation,
+    reason: expected.reason,
+    descriptor: binding[0]?.descriptor ?? null,
+    generation: proof.receipt.targetGeneration,
+    phase: expected.phase
+  }]);
+  expect(proof.receipt.sibling).toBe(true);
+  expect(proof.counters).toEqual(ZERO_GUARD_ORDER_COUNTERS);
+}
+
+async function runAuditIdentityProof(mutation: AuditIdentityMutation | undefined): Promise<AuditIdentityProof> {
+  let proof: AuditIdentityProof | undefined;
+  await withProductionTree(mutation, async (tree) => {
+    const proofRoot = await mkdtemp(join(tmpdir(), "shud-descriptor-audit-identity-"));
+    try {
+      const runnerPath = join(tree.root, "audit-identity.ts");
+      const eventPath = join(proofRoot, "events.jsonl");
+      const sideEffectPath = join(proofRoot, "side-effects.json");
+      const auditPath = join(proofRoot, "audit.jsonl");
+      await writeFile(runnerPath, `
+import { ContractCapabilities, DIRECTORY_OPEN_FLAGS } from "./lib/capabilities";
+
+const denials = [];
+const capabilities = new ContractCapabilities({
+  onDescriptorAuthorityDenial: (denial) => { denials.push(denial); }
+});
+const foreignCapabilities = new ContractCapabilities();
+const rejected = (action) => {
+  try {
+    action();
+  } catch {
+    // The parent assertion validates the exact frozen denial receipt.
+  }
+};
+const statAndBind = (label, owner, descriptor) => {
+  process.env.SHUD_DESCRIPTOR_PRELOAD_AUDIT_LABEL = label;
+  try {
+    return owner.stat(descriptor);
+  } finally {
+    delete process.env.SHUD_DESCRIPTOR_PRELOAD_AUDIT_LABEL;
+  }
+};
+let issued;
+let foreign;
+let current;
+try {
+  rejected(() => capabilities.stat(0));
+  rejected(() => capabilities.openRelative(-100, "tmp", DIRECTORY_OPEN_FLAGS, "post_admission"));
+
+  issued = capabilities.openRoot("/", "admission");
+  statAndBind("issued", capabilities, issued);
+  capabilities.markRetained(issued, "directory");
+  rejected(() => capabilities.openRelative(issued, "tmp", DIRECTORY_OPEN_FLAGS, "post_admission"));
+
+  foreign = foreignCapabilities.openRoot("/", "admission");
+  statAndBind("foreign", foreignCapabilities, foreign);
+  rejected(() => capabilities.stat(foreign));
+
+  const closed = capabilities.openRoot("/", "admission");
+  statAndBind("closed", capabilities, closed);
+  capabilities.close(closed, "unretained");
+  rejected(() => capabilities.stat(closed));
+
+  current = capabilities.openRoot("/", "admission");
+  statAndBind("current", capabilities, current);
+  rejected(() => capabilities.stat(closed));
+  rejected(() => capabilities.close(current, "retained"));
+
+  process.stdout.write(JSON.stringify(denials));
+} finally {
+  if (current) {
+    try {
+      capabilities.close(current, "unretained");
+    } catch {
+      // Fixture teardown must not hide the proof result.
+    }
+  }
+  if (issued) {
+    try {
+      capabilities.close(issued, "retained");
+    } catch {
+      // Fixture teardown must not hide the proof result.
+    }
+  }
+  if (foreign) {
+    try {
+      foreignCapabilities.close(foreign, "unretained");
+    } catch {
+      // Fixture teardown must not hide the proof result.
+    }
+  }
+}
+`);
+      const result = await runPreloadedProgram(
+        "lifecycle",
+        runnerPath,
+        eventPath,
+        sideEffectPath,
+        auditPath,
+        "audit_identity"
+      );
+      const audit = (await readFile(auditPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Readonly<{ label: string; descriptor: number }>);
+      proof = Object.freeze({
+        result,
+        denials: JSON.parse(result.stdout) as DescriptorAuthorityDenial[],
+        audit
+      });
+    } finally {
+      await rm(proofRoot, { recursive: true, force: true });
+    }
+  });
+  if (!proof) throw new Error("audit identity proof did not produce a receipt");
+  return proof;
+}
+
+function assertRawDescriptorBaseline(denials: readonly DescriptorAuthorityDenial[]): void {
+  expect(denials.slice(0, 2)).toEqual([
+    {
+      schema_version: "shud.contract.descriptor-denial.v1",
+      operation: "fstat_sync",
+      reason: "unproven_descriptor",
+      descriptor: 0,
+      generation: null,
+      phase: null
+    },
+    {
+      schema_version: "shud.contract.descriptor-denial.v1",
+      operation: "openat",
+      reason: "unproven_parent",
+      descriptor: -100,
+      generation: null,
+      phase: "post_admission"
+    }
+  ]);
+}
+
+function assertAuditIdentityReceipt(proof: AuditIdentityProof): void {
+  expect(proof.result).toEqual(expect.objectContaining({ exit: 0, stderr: "" }));
+  assertRawDescriptorBaseline(proof.denials);
+  const descriptor = (label: string): number => {
+    const bindings = proof.audit.filter((entry) => entry.label === label);
+    expect(bindings).toHaveLength(1);
+    return bindings[0]!.descriptor;
+  };
+  expect(proof.denials.slice(2)).toEqual([
+    {
+      schema_version: "shud.contract.descriptor-denial.v1",
+      operation: "openat",
+      reason: "phase_invalid",
+      descriptor: descriptor("issued"),
+      generation: 1,
+      phase: "admission"
+    },
+    {
+      schema_version: "shud.contract.descriptor-denial.v1",
+      operation: "fstat_sync",
+      reason: "foreign_descriptor",
+      descriptor: descriptor("foreign"),
+      generation: 1,
+      phase: "admission"
+    },
+    {
+      schema_version: "shud.contract.descriptor-denial.v1",
+      operation: "fstat_sync",
+      reason: "closed_descriptor",
+      descriptor: descriptor("closed"),
+      generation: 2,
+      phase: "admission"
+    },
+    {
+      schema_version: "shud.contract.descriptor-denial.v1",
+      operation: "fstat_sync",
+      reason: "stale_descriptor",
+      descriptor: descriptor("closed"),
+      generation: 2,
+      phase: "admission"
+    },
+    {
+      schema_version: "shud.contract.descriptor-denial.v1",
+      operation: "close_sync",
+      reason: "owner_mismatch",
+      descriptor: descriptor("current"),
+      generation: 3,
+      phase: "admission"
+    }
+  ]);
+}
+
 describe("retained descriptor runtime authority", () => {
   test("policy has the canonical vocabulary while issued descriptors are opaque and a retained chain stays usable", async () => {
-    expect(descriptorOperationVocabularyWitness).toEqual([true, true]);
     expect(Object.keys(DESCRIPTOR_OPERATION_POLICY).sort()).toEqual([
       "close_sync", "fstat_sync", "mark_retained", "open_root", "openat", "read_sync"
     ]);
@@ -416,7 +949,6 @@ describe("retained descriptor runtime authority", () => {
     const foreign = foreignCapabilities.openRoot("/", "admission");
     const denials: DescriptorAuthorityDenial[] = [];
     const capabilities = new ContractCapabilities({ onDescriptorAuthorityDenial: (denial) => { denials.push(denial); } });
-    let foreignDescriptor: number | undefined;
     try {
       for (const [operation, action] of [
         ["fstat_sync", () => capabilities.stat(foreign)],
@@ -424,15 +956,7 @@ describe("retained descriptor runtime authority", () => {
         ["read_sync", () => capabilities.readRetained(foreign, Buffer.alloc(1), 0, 1, 0, "post_admission")],
         ["close_sync", () => capabilities.close(foreign, "unretained")]
       ] as const) {
-        const denial = expectDenial(
-          denials,
-          action,
-          opaqueDenial(operation, "foreign_descriptor", 1, "admission", foreignDescriptor)
-        );
-        if (foreignDescriptor === undefined) {
-          if (typeof denial.descriptor !== "number") throw new Error("foreign denial must retain its numeric descriptor");
-          foreignDescriptor = denial.descriptor;
-        }
+        expectIssuedDenial(denials, action, operation, "foreign_descriptor", 1, "admission");
       }
       expect(foreignCapabilities.stat(foreign).isDirectory()).toBe(true);
     } finally {
@@ -445,32 +969,18 @@ describe("retained descriptor runtime authority", () => {
     const capabilities = new ContractCapabilities({ onDescriptorAuthorityDenial: (denial) => { denials.push(denial); } });
     const first = capabilities.openRoot("/", "admission");
     capabilities.close(first, "unretained");
-    let closedDescriptor: number | undefined;
     for (const [operation, action] of [
       ["fstat_sync", () => capabilities.stat(first)],
       ["openat", () => capabilities.openRelative(first, "tmp", DIRECTORY_OPEN_FLAGS, "admission")],
       ["read_sync", () => capabilities.readRetained(first, Buffer.alloc(1), 0, 1, 0, "post_admission")],
       ["close_sync", () => capabilities.close(first, "unretained")]
     ] as const) {
-      const denial = expectDenial(
-        denials,
-        action,
-        opaqueDenial(operation, "closed_descriptor", 1, "admission", closedDescriptor)
-      );
-      if (closedDescriptor === undefined) {
-        if (typeof denial.descriptor !== "number") throw new Error("closed denial must retain its numeric descriptor");
-        closedDescriptor = denial.descriptor;
-      }
+      expectIssuedDenial(denials, action, operation, "closed_descriptor", 1, "admission");
     }
 
     const current = capabilities.openRoot("/", "admission");
     try {
-      const currentOwnerDenial = expectDenial(
-        denials,
-        () => capabilities.close(current, "retained"),
-        opaqueDenial("close_sync", "owner_mismatch", 2, "admission")
-      );
-      expect(currentOwnerDenial.descriptor).toBe(closedDescriptor);
+      expectIssuedDenial(denials, () => capabilities.close(current, "retained"), "close_sync", "owner_mismatch", 2, "admission");
       expect(capabilities.stat(current).isDirectory()).toBe(true);
       for (const [operation, action] of [
         ["fstat_sync", () => capabilities.stat(first)],
@@ -478,11 +988,7 @@ describe("retained descriptor runtime authority", () => {
         ["read_sync", () => capabilities.readRetained(first, Buffer.alloc(1), 0, 1, 0, "post_admission")],
         ["close_sync", () => capabilities.close(first, "unretained")]
       ] as const) {
-        expectDenial(
-          denials,
-          action,
-          opaqueDenial(operation, "stale_descriptor", 1, "admission", closedDescriptor)
-        );
+        expectIssuedDenial(denials, action, operation, "stale_descriptor", 1, "admission");
       }
     } finally {
       capabilities.close(current, "unretained");
@@ -494,39 +1000,38 @@ describe("retained descriptor runtime authority", () => {
     const capabilities = new ContractCapabilities({ onDescriptorAuthorityDenial: (denial) => { denials.push(denial); } });
     const root = capabilities.openRoot("/", "admission");
     expect(capabilities.stat(root).isDirectory()).toBe(true);
-    const kindDenial = expectDenial(
-      denials,
-      () => capabilities.markRetained(root, "file"),
-      opaqueDenial("mark_retained", "kind_mismatch", 1, "admission")
-    );
-    if (typeof kindDenial.descriptor !== "number") throw new Error("kind denial must retain its numeric descriptor");
+    expectIssuedDenial(denials, () => capabilities.markRetained(root, "file"), "mark_retained", "kind_mismatch", 1, "admission");
     capabilities.markRetained(root, "directory");
-    expectDenial(
+    expectIssuedDenial(
       denials,
       () => capabilities.openRelative(root, "tmp", FILE_OPEN_FLAGS | (constants.O_APPEND ?? 1), "admission"),
-      opaqueDenial("openat", "flags_invalid", 1, "admission", kindDenial.descriptor)
+      "openat",
+      "flags_invalid",
+      1,
+      "admission"
     );
-    expectDenial(
-      denials,
-      () => capabilities.close(root, "verification"),
-      opaqueDenial("close_sync", "owner_mismatch", 1, "admission", kindDenial.descriptor)
-    );
+    expectIssuedDenial(denials, () => capabilities.close(root, "verification"), "close_sync", "owner_mismatch", 1, "admission");
     expect(capabilities.stat(root).isDirectory()).toBe(true);
     capabilities.close(root, "retained");
 
     const fileCapabilities = new ContractCapabilities({ onDescriptorAuthorityDenial: (denial) => { denials.push(denial); } });
     const fixture = await createRetainedFile(fileCapabilities);
     try {
-      const phaseDenial = expectDenial(
+      expectIssuedDenial(
         denials,
         () => fileCapabilities.readRetained(fixture.file, Buffer.alloc(1), 0, 1, 0, "admission"),
-        opaqueDenial("read_sync", "phase_invalid", fixture.fileGeneration, "admission")
+        "read_sync",
+        "phase_invalid",
+        fixture.fileGeneration,
+        "admission"
       );
-      if (typeof phaseDenial.descriptor !== "number") throw new Error("phase denial must retain its numeric descriptor");
-      expectDenial(
+      expectIssuedDenial(
         denials,
         () => fileCapabilities.readRetained(fixture.file, Buffer.alloc(1), 1, 1, 0, "post_admission"),
-        opaqueDenial("read_sync", "range_invalid", fixture.fileGeneration, "admission", phaseDenial.descriptor)
+        "read_sync",
+        "range_invalid",
+        fixture.fileGeneration,
+        "admission"
       );
       const buffer = Buffer.alloc(fixture.bytes.length);
       expect(fileCapabilities.readRetained(fixture.file, buffer, 0, buffer.length, 0, "post_admission"))
@@ -544,7 +1049,7 @@ describe("retained descriptor runtime authority", () => {
     let pending: CapabilityDescriptor | undefined;
     let verification: CapabilityDescriptor | undefined;
     try {
-      const prematurePostOpen = expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.openRelative(
           fixture.directory,
@@ -552,19 +1057,19 @@ describe("retained descriptor runtime authority", () => {
           FILE_OPEN_FLAGS,
           "post_admission"
         ),
-        opaqueDenial("openat", "phase_invalid", fixture.fileGeneration - 1, "admission")
+        "openat",
+        "phase_invalid",
+        fixture.fileGeneration - 1,
+        "admission"
       );
-      if (typeof prematurePostOpen.descriptor !== "number") {
-        throw new Error("premature post-admission open must retain its numeric parent descriptor");
-      }
-      const prematureRead = expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.readRetained(fixture.file, Buffer.alloc(1), 0, 1, 0, "post_admission"),
-        opaqueDenial("read_sync", "phase_invalid", fixture.fileGeneration, "admission")
+        "read_sync",
+        "phase_invalid",
+        fixture.fileGeneration,
+        "admission"
       );
-      if (typeof prematureRead.descriptor !== "number") {
-        throw new Error("premature post-admission read must retain its numeric descriptor");
-      }
 
       pending = capabilities.openRelative(
         fixture.directory,
@@ -583,7 +1088,7 @@ describe("retained descriptor runtime authority", () => {
         generation: null,
         phase: null
       });
-      expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.openRelative(
           fixture.directory,
@@ -591,22 +1096,19 @@ describe("retained descriptor runtime authority", () => {
           FILE_OPEN_FLAGS,
           "admission"
         ),
-        opaqueDenial(
-          "openat",
-          "phase_invalid",
-          fixture.fileGeneration - 1,
-          "admission",
-          prematurePostOpen.descriptor
-        )
+        "openat",
+        "phase_invalid",
+        fixture.fileGeneration - 1,
+        "admission"
       );
-      const latePromotion = expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.markRetained(pending!, "file"),
-        opaqueDenial("mark_retained", "phase_invalid", fixture.fileGeneration + 1, "admission")
+        "mark_retained",
+        "phase_invalid",
+        fixture.fileGeneration + 1,
+        "admission"
       );
-      if (typeof latePromotion.descriptor !== "number") {
-        throw new Error("late promotion must retain its numeric descriptor");
-      }
 
       verification = capabilities.openRelative(
         fixture.directory,
@@ -615,64 +1117,55 @@ describe("retained descriptor runtime authority", () => {
         "post_admission"
       );
       expect(capabilities.stat(verification).isFile()).toBe(true);
-      const verificationPromotion = expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.markRetained(verification!, "file"),
-        opaqueDenial("mark_retained", "state_invalid", fixture.fileGeneration + 2, "post_admission")
+        "mark_retained",
+        "state_invalid",
+        fixture.fileGeneration + 2,
+        "post_admission"
       );
-      if (typeof verificationPromotion.descriptor !== "number") {
-        throw new Error("verification promotion must retain its numeric descriptor");
-      }
-      expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.readRetained(verification!, Buffer.alloc(1), 0, 1, 0, "post_admission"),
-        opaqueDenial(
-          "read_sync",
-          "state_invalid",
-          fixture.fileGeneration + 2,
-          "post_admission",
-          verificationPromotion.descriptor
-        )
+        "read_sync",
+        "state_invalid",
+        fixture.fileGeneration + 2,
+        "post_admission"
       );
-      expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.readRetained(fixture.directory, Buffer.alloc(1), 0, 1, 0, "post_admission"),
-        opaqueDenial(
-          "read_sync",
-          "kind_mismatch",
-          fixture.fileGeneration - 1,
-          "admission",
-          prematurePostOpen.descriptor
-        )
+        "read_sync",
+        "kind_mismatch",
+        fixture.fileGeneration - 1,
+        "admission"
       );
-      expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.close(fixture.file, "verification"),
-        opaqueDenial(
-          "close_sync",
-          "owner_mismatch",
-          fixture.fileGeneration,
-          "admission",
-          prematureRead.descriptor
-        )
+        "close_sync",
+        "owner_mismatch",
+        fixture.fileGeneration,
+        "admission"
       );
-      expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.close(pending!, "retained"),
-        opaqueDenial("close_sync", "owner_mismatch", fixture.fileGeneration + 1, "admission", latePromotion.descriptor)
+        "close_sync",
+        "owner_mismatch",
+        fixture.fileGeneration + 1,
+        "admission"
       );
       capabilities.close(pending, "unretained");
       pending = undefined;
-      expectDenial(
+      expectIssuedDenial(
         denials,
         () => capabilities.close(verification!, "retained"),
-        opaqueDenial(
-          "close_sync",
-          "owner_mismatch",
-          fixture.fileGeneration + 2,
-          "post_admission",
-          verificationPromotion.descriptor
-        )
+        "close_sync",
+        "owner_mismatch",
+        fixture.fileGeneration + 2,
+        "post_admission"
       );
       capabilities.close(verification, "verification");
       verification = undefined;
@@ -708,27 +1201,13 @@ describe("retained descriptor runtime authority", () => {
     });
     const first = capabilities.openRoot("/", "admission");
     expect(() => capabilities.close(first, "unretained")).toThrow("CONTRACT_CAPABILITY_CLOSE_FAILED");
-    const closed = expectDenial(
-      denials,
-      () => capabilities.stat(first),
-      opaqueDenial("fstat_sync", "closed_descriptor", 1, "admission")
-    );
-    if (typeof closed.descriptor !== "number") throw new Error("closed generation must retain its numeric descriptor");
+    expectIssuedDenial(denials, () => capabilities.stat(first), "fstat_sync", "closed_descriptor", 1, "admission");
 
     const current = capabilities.openRoot("/", "admission");
     try {
-      const currentOwnerDenial = expectDenial(
-        denials,
-        () => capabilities.close(current, "retained"),
-        opaqueDenial("close_sync", "owner_mismatch", 2, "admission")
-      );
-      expect(currentOwnerDenial.descriptor).toBe(closed.descriptor);
+      expectIssuedDenial(denials, () => capabilities.close(current, "retained"), "close_sync", "owner_mismatch", 2, "admission");
       expect(capabilities.stat(current).isDirectory()).toBe(true);
-      expectDenial(
-        denials,
-        () => capabilities.stat(first),
-        opaqueDenial("fstat_sync", "stale_descriptor", 1, "admission", closed.descriptor)
-      );
+      expectIssuedDenial(denials, () => capabilities.stat(first), "fstat_sync", "stale_descriptor", 1, "admission");
     } finally {
       expect(() => capabilities.close(current, "unretained")).toThrow("CONTRACT_CAPABILITY_CLOSE_FAILED");
     }
@@ -962,5 +1441,34 @@ process.stdout.write(JSON.stringify(denials));
         await rm(proofRoot, { recursive: true, force: true });
       }
     });
+  });
+
+  test("guard-order proofs keep invalid root, relative-open, and read rows before native authority", async () => {
+    for (const scenario of Object.keys(GUARD_ORDER_EXPECTATIONS) as GuardOrderScenario[]) {
+      assertGuardOrderReceipt(await runGuardOrderProof(undefined, scenario), scenario);
+    }
+  });
+
+  test("guard-order production mutations turn each zero-native proof red after preserving its denial", async () => {
+    for (const scenario of Object.keys(GUARD_ORDER_EXPECTATIONS) as GuardOrderScenario[]) {
+      const expected = GUARD_ORDER_EXPECTATIONS[scenario];
+      const proof = await runGuardOrderProof(expected.mutation, scenario);
+      expect(() => assertGuardOrderReceipt(proof, scenario)).toThrow();
+      expect(proof.result).toEqual(expect.objectContaining({ exit: 0, stderr: "" }));
+      expect(proof.receipt.denials).toHaveLength(1);
+      expect(proof.counters.native[expected.native]).toBeGreaterThan(0);
+    }
+  });
+
+  test("issued, foreign, closed, stale, and wrong-owner receipts bind to intercepted descriptor identity", async () => {
+    assertAuditIdentityReceipt(await runAuditIdentityProof(undefined));
+  });
+
+  test("fixed #denyRecord descriptor mutations make every issued-handle receipt audit red without changing raw baselines", async () => {
+    for (const mutation of ["deny_record_zero", "deny_record_fd_plus_one"] as const) {
+      const proof = await runAuditIdentityProof(mutation);
+      expect(() => assertAuditIdentityReceipt(proof)).toThrow();
+      assertRawDescriptorBaseline(proof.denials);
+    }
   });
 });

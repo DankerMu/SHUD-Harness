@@ -1021,7 +1021,7 @@ still returns exit 2, empty stdout, and one LF-terminated
 | Public entrypoints | Both existing direct input kinds; receipts unchanged. |
 | Downstream | #176 may import the named opaque handle/state/operation/event/policy exports only from `contracts/lib/capabilities.ts`; it cannot broaden them and the registry stays private. |
 | Failure/cleanup | fd 0, `AT_FDCWD`, foreign/stale/closed/reused, FIFO, flag/owner mismatch, and combined errors preserve first-error precedence. |
-| Evidence | Structural-only and active-only rows, exact events/receipts, zero raw calls/target bytes, focused/direct/full/platform checks. |
+| Evidence | Structural-only and active-only rows, a spike-local no-emit canonical-vocabulary witness, exact events/receipts, intercepted raw-identity audit fields, zero native calls/target bytes, focused/direct/full/platform checks. |
 
 Boundary checklist: only `ContractCapabilities` plus `ingress.ts` issuance
 callsites change; no sibling raw primitives, writes, publish, runtime, or
@@ -1036,6 +1036,9 @@ stale. Source schema/digests/parser limits and #171 replacement behavior remain.
 | `FOREIGN` | Handle from another instance | Reject raw-fd coercion. | stat/open/read/close each emit `foreign_descriptor`; zero raw calls. |
 | `STALE_REUSE` | Close A, reuse raw fd in new generation, pass old A | Require opaque generation operand. | Old A emits `stale_descriptor`; new handle succeeds; old use makes zero raw calls. |
 | `FLAGS_OWNER` | Extra/missing flags or mismatched close owner | Reject non-policy expressions/literals. | `flags_invalid`/`owner_mismatch` before open/close; legitimate sibling succeeds. |
+| `SEAL_GUARD` | Sealed `openRoot`; pre-seal post, sealed admission, invalid flag/state `openRelative`; premature/verification/nonretained/wrong-phase `readRetained` | Fixture-anchored mutations compile a source with `openSync`, `openat`, or `readSync` hoisted after resolution but before the rejecting guard. | Clean rows emit one exact denial with zero native calls/bytes and a usable sibling; each mutation makes the active attempted/intercepted/native counter proof red. |
+| `HANDOFF` | Canonical capability operation and ingress observation vocabulary | The spike-local no-emit witness proves both directions of `DescriptorOperation`/policy-key equality and the distinct ingress vocabulary. | Extra/missing descriptor, policy, and ingress literals in copied compiler programs fail. |
+| `AUDIT_IDENTITY` | Issued, foreign, closed, stale, and wrong-owner denial receipts | Fixed-0/fd+1 `#denyRecord` source mutations compile. | A legitimate intercepted `fstatSync` operand binds the opaque token's actual descriptor; each frozen receipt compares it with the independently counted generation, while raw `0`/`-100` baseline events remain exact. |
 
 | #171 preserved axis | #175 required evidence |
 |---|---|

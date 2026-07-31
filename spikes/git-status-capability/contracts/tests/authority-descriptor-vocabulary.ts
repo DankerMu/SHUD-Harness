@@ -28,6 +28,9 @@ export type ProductionMutation =
   | "stale_descriptor"
   | "invalid_flags"
   | "invalid_owner";
+export type GuardOrderMutation = "guard_open_root" | "guard_open_relative" | "guard_read_retained";
+export type AuditIdentityMutation = "deny_record_zero" | "deny_record_fd_plus_one";
+type CapabilityMutation = ProductionMutation | GuardOrderMutation | AuditIdentityMutation;
 export type MutatedProductionTree = Readonly<{
   root: string;
   checkPath: string;
@@ -50,14 +53,14 @@ function replaceRawCall(
   source: string,
   anchors: readonly string[],
   replacement: string,
-  mutation: ProductionMutation
+  mutation: CapabilityMutation
 ): string {
   const anchor = anchors.find((candidate) => source.includes(candidate));
   if (!anchor) throw new Error(`descriptor ${mutation} mutation anchor is absent`);
   return source.replace(anchor, replacement);
 }
 
-function mutateCapabilitiesSource(source: string, mutation: ProductionMutation | undefined): string {
+function mutateCapabilitiesSource(source: string, mutation: CapabilityMutation | undefined): string {
   if (!mutation) return source;
   const readAnchors = [
     "readSync(record.fd, buffer, offset, length, position)",
@@ -100,6 +103,46 @@ function mutateCapabilitiesSource(source: string, mutation: ProductionMutation |
       "fstatSync(0, { bigint: true });\n    return readSync(0, buffer, offset, length, null)"
     );
   }
+  if (mutation === "guard_open_root") {
+    return replaceRawCall(
+      source,
+      [
+        '  openRoot(root: string, phase: CapabilityPhase): CapabilityDescriptor {\n' +
+          '    if (!isCapabilityPhase(phase) || phase !== "admission" || this.#admissionSealed) {'
+      ],
+      '  openRoot(root: string, phase: CapabilityPhase): CapabilityDescriptor {\n' +
+        "    openSync(root, DIRECTORY_OPEN_FLAGS);\n" +
+        '    if (!isCapabilityPhase(phase) || phase !== "admission" || this.#admissionSealed) {',
+      mutation
+    );
+  }
+  if (mutation === "guard_open_relative") {
+    return replaceRawCall(
+      source,
+      ['    const parentRecord = this.#resolve(parent, "openat", requestedPhase, "unproven_parent");'],
+      '    const parentRecord = this.#resolve(parent, "openat", requestedPhase, "unproven_parent");\n' +
+        "    openAt()(parentRecord.fd, childCString(childName), flags);",
+      mutation
+    );
+  }
+  if (mutation === "guard_read_retained") {
+    return replaceRawCall(
+      source,
+      ['    const record = this.#resolve(descriptor, "read_sync", requestedPhase);'],
+      '    const record = this.#resolve(descriptor, "read_sync", requestedPhase);\n' +
+        "    readSync(record.fd, buffer, offset, length, position);",
+      mutation
+    );
+  }
+  if (mutation === "deny_record_zero" || mutation === "deny_record_fd_plus_one") {
+    const descriptor = mutation === "deny_record_zero" ? "0" : "record.fd + 1";
+    return replaceRawCall(
+      source,
+      ["return this.#deny(operation, reason, record.fd, record.generation, record.phase);"],
+      `return this.#deny(operation, reason, ${descriptor}, record.generation, record.phase);`,
+      mutation
+    );
+  }
   if (mutation === "raw_descriptor") {
     return source.replace("stat(descriptor: CapabilityDescriptor)", "stat(descriptor: number)");
   }
@@ -108,10 +151,11 @@ function mutateCapabilitiesSource(source: string, mutation: ProductionMutation |
     return source.replaceAll("#currentGenerationByDescriptor", "#generationUnchecked");
   }
   if (mutation === "invalid_flags") return source.replaceAll("flags ===", "flags !==");
-  return source.replace("owner !== expectedOwner", "owner === expectedOwner");
+  if (mutation === "invalid_owner") return source.replace("owner !== expectedOwner", "owner === expectedOwner");
+  throw new Error(`unsupported descriptor mutation: ${mutation}`);
 }
 
-async function copyProductionSources(root: string, mutation: ProductionMutation | undefined): Promise<MutatedProductionTree> {
+async function copyProductionSources(root: string, mutation: CapabilityMutation | undefined): Promise<MutatedProductionTree> {
   const libraryRoot = join(contractsRoot, "lib");
   const copiedLibraryRoot = join(root, "lib");
   await mkdir(copiedLibraryRoot, { recursive: true });
@@ -133,7 +177,7 @@ async function copyProductionSources(root: string, mutation: ProductionMutation 
 
 /** Creates a complete copied production tree without invoking a structural oracle. */
 export async function withProductionTree(
-  mutation: ProductionMutation | undefined,
+  mutation: CapabilityMutation | undefined,
   action: (tree: MutatedProductionTree) => Promise<void>
 ): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "shud-descriptor-production-"));
@@ -146,7 +190,7 @@ export async function withProductionTree(
 
 /** Compiles the complete, real check.ts import graph before a structural oracle inspects it. */
 export async function withCompiledProductionTree(
-  mutation: ProductionMutation | undefined,
+  mutation: CapabilityMutation | undefined,
   action: (tree: MutatedProductionTree) => Promise<void>
 ): Promise<void> {
   await withProductionTree(mutation, async (tree) => {
