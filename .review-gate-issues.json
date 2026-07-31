@@ -73,6 +73,17 @@
           "rounds": 3
         }
       ]
+    },
+    "172": {
+      "ceilingPrs": [],
+      "gateEntries": 3,
+      "closed": [
+        {
+          "pr": 174,
+          "outcome": "superseded-by-split",
+          "rounds": 4
+        }
+      ]
     }
   }
 }
