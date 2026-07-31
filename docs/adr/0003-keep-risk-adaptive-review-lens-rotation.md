@@ -37,6 +37,10 @@ status: accepted
 2. rotated-in lenses 连续一个样本窗没有独立有效捕获，或其误报显著高于 fixed core lenses。
 3. reviewer 角色/fixture contract 发生结构性变化，使当前 lens 分类不再可比。
 
+## 2026-07-31 审计复核
+
+本次机械审计累计 9 个可判定的多轮合并 PR，后续轮次 attribution 为 fixed core `5`、rotated-in `37`。相对本 ADR 作出决策时只新增 1 个样本，且结果继续支持 keep。暂不重开决策；按既定 revisit 触发器，等待再积累 7 个带完整 attribution 的多轮合并 PR 后复核。
+
 ## 参照
 
 [`review-loop-log.jsonl`](../review-loop-log.jsonl) · `subagent-workflow` 的 `risk-adaptive-cross-review` 与 `loop_log_audit.py`
