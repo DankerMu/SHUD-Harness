@@ -10,6 +10,9 @@ import {
 const EXPECTED_STRUCTURAL_DENIAL: Readonly<Record<ProductionMutation, readonly string[]>> = Object.freeze({
   fd0: ["raw_read_descriptor_not_handle"],
   at_fdcwd: ["openat_parent_not_handle"],
+  fstat0: ["raw_fstat_descriptor_not_handle"],
+  close0: ["raw_close_descriptor_not_handle"],
+  before_deny_fstat: ["raw_read_descriptor_not_handle", "raw_fstat_descriptor_not_handle"],
   raw_descriptor: ["raw_descriptor_operation_shape"],
   foreign_descriptor: ["foreign_descriptor_shape"],
   stale_descriptor: ["stale_descriptor_shape"],
@@ -43,24 +46,39 @@ describe("retained descriptor structural authority", () => {
     const source = await readFile(capabilitiesSourcePath, "utf8");
     const formattedRawOperands = replaceSourceAnchor(
       replaceSourceAnchor(
-        source,
-        "    return readSync(descriptor.fd, buffer, offset, length, position);",
-        `    return readSync(
-      descriptor
+        replaceSourceAnchor(
+          replaceSourceAnchor(
+            source,
+            "    return readSync(record.fd, buffer, offset, length, position);",
+            `    return readSync(
+      record
         .fd,
       buffer,
       offset,
       length,
       position
     );`
-      ),
-      "    const descriptor = openAt()(parent.fd, childCString(childName), flags);",
-      `    const descriptor = openAt()(
-      parent
+          ),
+          "    const descriptor = openAt()(parentRecord.fd, childCString(childName), flags);",
+          `    const descriptor = openAt()(
+      parentRecord
         .fd,
       childCString(childName),
       flags
     );`
+        ),
+        "    const stats = fstatSync(record.fd, { bigint: true });",
+        `    const stats = fstatSync(
+      record
+        .fd,
+      { bigint: true }
+    );`
+      ),
+      "      closeSync(record.fd);",
+      `      closeSync(
+        record
+          .fd
+      );`
     );
     expect(structuralDescriptorDenials(formattedRawOperands)).toEqual([]);
 
@@ -68,12 +86,18 @@ describe("retained descriptor structural authority", () => {
 /* readSync(0, buffer, offset, length, position); openAt()(-100, childCString(childName), flags); */
 const structuralDescriptorTextDecoy = "readSync(0, buffer, offset, length, position); openAt()(-100, childCString(childName), flags);";
 function localDescriptorDecoy(): void {
-  const descriptor = { fd: 0 };
-  const parent = { fd: -100 };
+  const descriptor = {};
+  const parent = {};
+  const record = { fd: 0 };
+  const parentRecord = { fd: -100 };
   const readSync = (_descriptor: number): number => 0;
+  const fstatSync = (_descriptor: number): number => 0;
+  const closeSync = (_descriptor: number): void => undefined;
   const openAt = () => (_parent: number): number => 0;
-  readSync(descriptor.fd);
-  openAt()(parent.fd);
+  readSync(record.fd);
+  fstatSync(record.fd);
+  closeSync(record.fd);
+  openAt()(parentRecord.fd);
 }
 `;
     expect(structuralDescriptorDenials(sourceWithDecoys)).toEqual([]);
@@ -94,14 +118,20 @@ function localDescriptorDecoy(): void {
     counterfeit = replaceSourceAnchor(counterfeit, "owner: CloseOwner", "owner: string");
     counterfeit = replaceSourceAnchor(
       counterfeit,
-      "    return readSync(descriptor.fd, buffer, offset, length, position);",
+      "    return readSync(record.fd, buffer, offset, length, position);",
       "    return 0;"
     );
     counterfeit = replaceSourceAnchor(
       counterfeit,
-      "    const descriptor = openAt()(parent.fd, childCString(childName), flags);",
+      "    const descriptor = openAt()(parentRecord.fd, childCString(childName), flags);",
       "    const descriptor = -1;"
     );
+    counterfeit = replaceSourceAnchor(
+      counterfeit,
+      "    const stats = fstatSync(record.fd, { bigint: true });",
+      "    throw new Error(\"counterfeit\");"
+    );
+    counterfeit = replaceSourceAnchor(counterfeit, "      closeSync(record.fd);", "      return;");
     counterfeit = counterfeit
       .replaceAll("#registry", "#registryUnchecked")
       .replaceAll("#currentGenerationByDescriptor", "#generationUnchecked")
@@ -114,12 +144,14 @@ const structuralDescriptorCounterfeit = [
   "stat(descriptor: CapabilityDescriptor)",
   "readRetained(descriptor: CapabilityDescriptor, phase: CapabilityPhase)",
   "close(descriptor: CapabilityDescriptor, owner: CloseOwner)",
-  "readSync(descriptor.fd, buffer, offset, length, position)",
-  "openAt()(parent.fd, childCString(childName), flags)",
+  "readSync(record.fd, buffer, offset, length, position)",
+  "openAt()(parentRecord.fd, childCString(childName), flags)",
+  "fstatSync(record.fd, { bigint: true })",
+  "closeSync(record.fd)",
   "readonly #registry = new WeakMap",
   "this.#registry.get(capability)",
   "readonly #currentGenerationByDescriptor = new Map",
-  "this.#currentGenerationByDescriptor.get(record.descriptor.fd)",
+  "this.#currentGenerationByDescriptor.get(record.fd)",
   "flags === DIRECTORY_OPEN_FLAGS",
   "flags === FILE_OPEN_FLAGS",
   "owner !== expectedOwner"
@@ -128,6 +160,8 @@ const structuralDescriptorCounterfeit = [
     expect(structuralDescriptorDenials(sourceWithCounterfeitText)).toEqual([
       "raw_read_descriptor_not_handle",
       "openat_parent_not_handle",
+      "raw_fstat_descriptor_not_handle",
+      "raw_close_descriptor_not_handle",
       "raw_descriptor_operation_shape",
       "foreign_descriptor_shape",
       "stale_descriptor_shape",
@@ -136,9 +170,11 @@ const structuralDescriptorCounterfeit = [
     ]);
   });
 
-  test("the checked-in source keeps the retained-read anchor and no ambient parent operand", async () => {
+  test("the checked-in source keeps only private retained-descriptor operands and no ambient parent operand", async () => {
     const source = await readFile(capabilitiesSourcePath, "utf8");
-    expect(source).toContain("return readSync(descriptor.fd,");
+    expect(source).toContain("return readSync(record.fd,");
+    expect(source).toContain("fstatSync(record.fd,");
+    expect(source).toContain("closeSync(record.fd)");
     expect(source).not.toContain("openAt()(-100,");
   });
 });

@@ -232,6 +232,10 @@ flags, kind, phase/role, and lifecycle. Raw numbers including fd `0` and Linux
 and unproven parents MUST fail before `openat`, `fstatSync`, `readSync`, or
 `closeSync`.
 
+Capability tokens and ingress operation observations MUST NOT expose a live raw
+fd; raw fd and generation remain instance-private. This does not change the
+frozen numeric descriptor field carried by a provenance denial event.
+
 Admission opens MUST issue `pending_retained` handles; successful stat/type
 validation MUST transition them to `retained`. Post-admission relative opens
 MUST issue `verification` handles. Close MUST accept only
@@ -239,6 +243,13 @@ pending/unretained, retained/retained, or verification/verification pairs and
 MUST invalidate the generation even when close reporting fails. A later open
 that reuses the raw fd MUST create a new generation and MUST NOT reactivate the
 old handle.
+
+The instance owner MUST seal admission once the initial retained chain is
+complete and before `afterAdmission`. Before the seal, only admission issuance
+and pending-to-retained promotion are permitted; post-admission opens and reads
+deny. After the seal, admission issuance and late promotion deny,
+post-admission relative opens issue verification handles only, and retained
+files admitted before the seal remain readable.
 
 Each provenance denial MUST emit exactly one frozen
 `shud.contract.descriptor-denial.v1` event with operation, reason, raw
@@ -257,6 +268,13 @@ primary-error/cleanup precedence, and zero target bytes.
 #### Scenario: Foreign, stale, or mismatched handle is supplied
 - **WHEN** stat/open/read/close receives another instance's handle, a closed handle after same-fd reuse, invalid flags/kind, or the wrong close owner
 - **THEN** exactly one matching denial event is emitted before the raw syscall; the legitimate current-generation sibling remains usable
+
+#### Scenario: Admission phase cannot be spoofed after its seal
+- **WHEN** a caller requests admission `openRoot` or `openRelative`, late
+  `markRetained`, or a pre-seal post-admission open/read
+- **THEN** it emits one exact pre-syscall phase denial, while a sealed
+  post-admission verification handle remains non-promotable/non-readable and
+  an admitted retained sibling remains usable
 
 #### Scenario: Legitimate retained and verification chains run
 - **WHEN** either direct input kind uses only the exact lifecycle and flags

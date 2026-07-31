@@ -5,7 +5,7 @@ export type { BigIntStats };
 
 export type CapabilityPhase = "admission" | "post_admission";
 export type CloseOwner = "unretained" | "retained" | "verification";
-export type CloseAttempt = Readonly<{ descriptor: number; owner: CloseOwner; ordinal: number }>;
+export type CloseAttempt = Readonly<{ owner: CloseOwner; ordinal: number }>;
 export type ContractAuthorityFault =
   | "ambient_absolute_open"
   | "replacement_object_read"
@@ -39,12 +39,10 @@ type DescriptorKind = "file" | "directory";
 declare const capabilityDescriptorBrand: unique symbol;
 
 /**
- * A descriptor is an opaque, frozen capability token. Its numeric fd is exposed
- * only for existing observation and close receipts; the token identity is the
- * authority checked by ContractCapabilities.
+ * A descriptor is an opaque, frozen capability token. The live OS descriptor
+ * is held only in ContractCapabilities instance-private records.
  */
 export type CapabilityDescriptor = Readonly<{
-  readonly fd: number;
   readonly [capabilityDescriptorBrand]: "shud.contract.capability-descriptor.v1";
 }>;
 
@@ -115,7 +113,7 @@ export const DESCRIPTOR_OPERATION_POLICY = Object.freeze({
 
 type OpenAt = (parentDescriptor: number, path: Buffer, flags: number) => number;
 type DescriptorRecord = {
-  readonly descriptor: CapabilityDescriptor;
+  readonly fd: number;
   readonly generation: number;
   readonly parentGeneration: number | null;
   readonly flags: number;
@@ -181,11 +179,16 @@ export class ContractCapabilities {
   readonly #currentGenerationByDescriptor = new Map<number, number>();
   #nextGeneration = 0;
   #closeOrdinal = 0;
+  #admissionSealed = false;
 
   constructor(private readonly hooks: CapabilityHooks = {}) {}
 
+  sealAdmission(): void {
+    this.#admissionSealed = true;
+  }
+
   openRoot(root: string, phase: CapabilityPhase): CapabilityDescriptor {
-    if (!isCapabilityPhase(phase) || phase !== "admission") {
+    if (!isCapabilityPhase(phase) || phase !== "admission" || this.#admissionSealed) {
       return this.#deny("open_root", "phase_invalid", null, null, null);
     }
     if (root !== "/") return this.#deny("open_root", "root_invalid", null, null, phase);
@@ -201,6 +204,13 @@ export class ContractCapabilities {
     const requestedPhase = isCapabilityPhase(phase) ? phase : null;
     const parentRecord = this.#resolve(parent, "openat", requestedPhase, "unproven_parent");
     if (!requestedPhase) return this.#denyRecord("openat", "phase_invalid", parentRecord);
+    if (
+      this.#admissionSealed
+        ? requestedPhase !== "post_admission"
+        : requestedPhase !== "admission"
+    ) {
+      return this.#denyRecord("openat", "phase_invalid", parentRecord);
+    }
     if (parentRecord.state !== "retained") return this.#denyRecord("openat", "state_invalid", parentRecord);
     if (parentRecord.kind !== "directory") return this.#denyRecord("openat", "kind_mismatch", parentRecord);
     if (parentRecord.flags !== DIRECTORY_OPEN_FLAGS) return this.#denyRecord("openat", "flags_invalid", parentRecord);
@@ -208,7 +218,7 @@ export class ContractCapabilities {
     if (!kind) return this.#denyRecord("openat", "flags_invalid", parentRecord);
     if (!isValidChildName(childName)) return this.#denyRecord("openat", "child_invalid", parentRecord);
 
-    const descriptor = openAt()(parent.fd, childCString(childName), flags);
+    const descriptor = openAt()(parentRecord.fd, childCString(childName), flags);
     if (descriptor < 0) throw new Error("CONTRACT_CAPABILITY_OPEN_FAILED");
     return this.#issue(
       descriptor,
@@ -222,6 +232,9 @@ export class ContractCapabilities {
 
   markRetained(descriptor: CapabilityDescriptor, kind: DescriptorKind): void {
     const record = this.#resolve(descriptor, "mark_retained", null);
+    if (this.#admissionSealed && record.state === "pending_retained") {
+      return this.#denyRecord("mark_retained", "phase_invalid", record);
+    }
     if (record.state !== "pending_retained" || !record.statValidated) {
       return this.#denyRecord("mark_retained", "state_invalid", record);
     }
@@ -233,7 +246,7 @@ export class ContractCapabilities {
 
   stat(descriptor: CapabilityDescriptor): BigIntStats {
     const record = this.#resolve(descriptor, "fstat_sync", null);
-    const stats = fstatSync(descriptor.fd, { bigint: true });
+    const stats = fstatSync(record.fd, { bigint: true });
     record.statValidated = true;
     record.statKind = stats.isDirectory() ? "directory" : stats.isFile() ? "file" : undefined;
     return stats;
@@ -249,14 +262,16 @@ export class ContractCapabilities {
   ): number {
     const requestedPhase = isCapabilityPhase(phase) ? phase : null;
     const record = this.#resolve(descriptor, "read_sync", requestedPhase);
-    if (requestedPhase !== "post_admission") return this.#denyRecord("read_sync", "phase_invalid", record);
+    if (requestedPhase !== "post_admission" || !this.#admissionSealed) {
+      return this.#denyRecord("read_sync", "phase_invalid", record);
+    }
     if (record.state !== "retained") return this.#denyRecord("read_sync", "state_invalid", record);
     if (record.kind !== "file") return this.#denyRecord("read_sync", "kind_mismatch", record);
     if (record.flags !== FILE_OPEN_FLAGS) return this.#denyRecord("read_sync", "flags_invalid", record);
     if (!isBoundedRead(buffer, offset, length, position)) {
       return this.#denyRecord("read_sync", "range_invalid", record);
     }
-    return readSync(descriptor.fd, buffer, offset, length, position);
+    return readSync(record.fd, buffer, offset, length, position);
   }
 
   close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
@@ -265,7 +280,7 @@ export class ContractCapabilities {
     if (owner !== expectedOwner) return this.#denyRecord("close_sync", "owner_mismatch", record);
 
     record.state = "closed";
-    const attempt = Object.freeze({ descriptor: descriptor.fd, owner, ordinal: ++this.#closeOrdinal });
+    const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
     let hookError: unknown;
     try {
       this.hooks.onCloseAttempt?.(attempt);
@@ -274,7 +289,7 @@ export class ContractCapabilities {
     }
     let closeError: unknown;
     try {
-      closeSync(descriptor.fd);
+      closeSync(record.fd);
     } catch (error) {
       closeError = error;
     }
@@ -301,10 +316,10 @@ export class ContractCapabilities {
     phase: CapabilityPhase,
     state: "pending_retained" | "verification"
   ): CapabilityDescriptor {
-    const descriptor = Object.freeze({ fd: raw }) as unknown as CapabilityDescriptor;
+    const descriptor = Object.freeze(Object.create(null)) as CapabilityDescriptor;
     const generation = ++this.#nextGeneration;
     const record: DescriptorRecord = {
-      descriptor,
+      fd: raw,
       generation,
       parentGeneration,
       flags,
@@ -350,7 +365,7 @@ export class ContractCapabilities {
       }
       return this.#deny(operation, unprovenReason, null, null, phase);
     }
-    const currentGeneration = this.#currentGenerationByDescriptor.get(record.descriptor.fd);
+    const currentGeneration = this.#currentGenerationByDescriptor.get(record.fd);
     if (record.state === "closed") {
       return this.#denyRecord(
         operation,
@@ -367,7 +382,7 @@ export class ContractCapabilities {
     reason: DescriptorAuthorityDenialReason,
     record: DescriptorRecord
   ): never {
-    return this.#deny(operation, reason, record.descriptor.fd, record.generation, record.phase);
+    return this.#deny(operation, reason, record.fd, record.generation, record.phase);
   }
 
   #deny(

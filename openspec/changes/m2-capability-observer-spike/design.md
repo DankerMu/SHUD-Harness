@@ -989,6 +989,14 @@ exact flags, role/kind, and `pending_retained|retained|verification|closed`
 state. Raw fd numbers are never authority tokens. OS reuse creates a new
 generation and cannot reactivate an old handle.
 
+The instance owner has a one-way admission seal. `ingress.ts` seals the same
+`ContractCapabilities` instance after the initial retained chain is complete
+and before `afterAdmission`. Before the seal, only admission root/relative
+issuance and pending-to-retained promotion are permitted; post-admission opens
+and reads deny. After the seal, admission issuance and late promotion deny,
+post-admission relative opens issue verification handles only, and retained
+files admitted before the seal remain readable.
+
 | Operation | Required state | Result / next operation | Pre-OS denial |
 |---|---|---|---|
 | `openRoot("/", "admission")` | No parent; exact directory flags | New `pending_retained`; only `stat`, `markRetained`, or unretained `close`. | Wrong phase/root/flags before `openSync`. |
@@ -1011,7 +1019,7 @@ still returns exit 2, empty stdout, and one LF-terminated
 | Validators | `markRetained`, `stat`, `readRetained`, and `close` validate registry/role/generation/state/flags/phase/owner before Node/FFI. |
 | Storage | Private in-memory instance registry only. |
 | Public entrypoints | Both existing direct input kinds; receipts unchanged. |
-| Downstream | #176 may import the named opaque handle/state/operation/event/policy exports but cannot broaden them; registry stays private. |
+| Downstream | #176 may import the named opaque handle/state/operation/event/policy exports only from `contracts/lib/capabilities.ts`; it cannot broaden them and the registry stays private. |
 | Failure/cleanup | fd 0, `AT_FDCWD`, foreign/stale/closed/reused, FIFO, flag/owner mismatch, and combined errors preserve first-error precedence. |
 | Evidence | Structural-only and active-only rows, exact events/receipts, zero raw calls/target bytes, focused/direct/full/platform checks. |
 
@@ -1038,10 +1046,11 @@ stale. Source schema/digests/parser limits and #171 replacement behavior remain.
 | Cleanup | Every named path restores descriptor baseline and close/error precedence. |
 | Platform | Focused proof/direct commands run on Darwin/Linux Bun 1.2.19. |
 
-Handoff to #176: only `CapabilityDescriptor`, `DescriptorCapabilityState`,
-`DescriptorOperation`, `DescriptorAuthorityDenial`, and immutable
-`DESCRIPTOR_OPERATION_POLICY` are reusable. #176 may add delegate-topology rows
-but cannot change origins, flags, lifecycle, event fields, or public receipts.
+Handoff to #176 from `contracts/lib/capabilities.ts`: only
+`CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`,
+`DescriptorAuthorityDenial`, and immutable `DESCRIPTOR_OPERATION_POLICY` are
+reusable. #176 may add delegate-topology rows but cannot change origins, flags,
+lifecycle, event fields, or public receipts.
 
 
 ## Invariant Matrix

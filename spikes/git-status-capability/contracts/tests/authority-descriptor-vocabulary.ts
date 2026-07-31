@@ -10,6 +10,8 @@ export const checkSourcePath = join(contractsRoot, "check.ts");
 type StructuralDenial =
   | "raw_read_descriptor_not_handle"
   | "openat_parent_not_handle"
+  | "raw_fstat_descriptor_not_handle"
+  | "raw_close_descriptor_not_handle"
   | "raw_descriptor_operation_shape"
   | "foreign_descriptor_shape"
   | "stale_descriptor_shape"
@@ -18,6 +20,9 @@ type StructuralDenial =
 export type ProductionMutation =
   | "fd0"
   | "at_fdcwd"
+  | "fstat0"
+  | "close0"
+  | "before_deny_fstat"
   | "raw_descriptor"
   | "foreign_descriptor"
   | "stale_descriptor"
@@ -32,6 +37,8 @@ export type MutatedProductionTree = Readonly<{
 const STRUCTURAL_DENIAL_ORDER: readonly StructuralDenial[] = [
   "raw_read_descriptor_not_handle",
   "openat_parent_not_handle",
+  "raw_fstat_descriptor_not_handle",
+  "raw_close_descriptor_not_handle",
   "raw_descriptor_operation_shape",
   "foreign_descriptor_shape",
   "stale_descriptor_shape",
@@ -39,20 +46,58 @@ const STRUCTURAL_DENIAL_ORDER: readonly StructuralDenial[] = [
   "owner_mismatch_shape"
 ];
 
+function replaceRawCall(
+  source: string,
+  anchors: readonly string[],
+  replacement: string,
+  mutation: ProductionMutation
+): string {
+  const anchor = anchors.find((candidate) => source.includes(candidate));
+  if (!anchor) throw new Error(`descriptor ${mutation} mutation anchor is absent`);
+  return source.replace(anchor, replacement);
+}
+
 function mutateCapabilitiesSource(source: string, mutation: ProductionMutation | undefined): string {
   if (!mutation) return source;
-  const readAnchor = "readSync(descriptor.fd, buffer, offset, length, position)";
-  if (!source.includes(readAnchor)) throw new Error("descriptor read mutation anchor is absent");
+  const readAnchors = [
+    "readSync(record.fd, buffer, offset, length, position)",
+    "readSync(descriptor.fd, buffer, offset, length, position)"
+  ] as const;
   if (mutation === "fd0") {
     // FIFO reads reject a positional offset; preserve the raw fd0 operand while making the canary block.
-    return source.replace(readAnchor, "readSync(0, buffer, offset, length, null)");
+    return replaceRawCall(source, readAnchors, "readSync(0, buffer, offset, length, null)", mutation);
   }
   if (mutation === "at_fdcwd") {
-    const retainedRead = "    return readSync(descriptor.fd,";
+    const retainedRead = source.includes("    return readSync(record.fd,")
+      ? "    return readSync(record.fd,"
+      : "    return readSync(descriptor.fd,";
     if (!source.includes(retainedRead)) throw new Error("ambient open mutation anchor is absent");
     return source.replace(
       retainedRead,
       "    const ambient = openAt()(-100, childCString(\"ambient-secret\"), FILE_OPEN_FLAGS);\n" + retainedRead
+    );
+  }
+  if (mutation === "fstat0") {
+    return replaceRawCall(
+      source,
+      ["fstatSync(record.fd, { bigint: true })", "fstatSync(descriptor.fd, { bigint: true })"],
+      "fstatSync(0, { bigint: true })",
+      mutation
+    );
+  }
+  if (mutation === "close0") {
+    const retainedRead = source.includes("    return readSync(record.fd,")
+      ? "    return readSync(record.fd,"
+      : "    return readSync(descriptor.fd,";
+    if (!source.includes(retainedRead)) throw new Error("raw close mutation anchor is absent");
+    return source.replace(retainedRead, "    closeSync(0);\n" + retainedRead);
+  }
+  if (mutation === "before_deny_fstat") {
+    const readAnchor = readAnchors.find((candidate) => source.includes(`return ${candidate}`));
+    if (!readAnchor) throw new Error("before-deny mutation anchor is absent");
+    return source.replace(
+      `return ${readAnchor}`,
+      "fstatSync(0, { bigint: true });\n    return readSync(0, buffer, offset, length, null)"
     );
   }
   if (mutation === "raw_descriptor") {
@@ -230,7 +275,7 @@ function hasOnlyRawReadDescriptorOperand(classDeclaration: ts.ClassDeclaration |
     classDeclaration,
     (call) => isIdentifierNamed(call.expression, "readSync")
   );
-  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "descriptor", "fd");
+  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "record", "fd");
 }
 
 function hasOnlyOpenAtParentOperand(classDeclaration: ts.ClassDeclaration | undefined): boolean {
@@ -240,7 +285,23 @@ function hasOnlyOpenAtParentOperand(classDeclaration: ts.ClassDeclaration | unde
       isIdentifierNamed(call.expression.expression, "openAt") &&
       call.expression.arguments.length === 0
   );
-  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "parent", "fd");
+  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "parentRecord", "fd");
+}
+
+function hasOnlyRawFstatDescriptorOperand(classDeclaration: ts.ClassDeclaration | undefined): boolean {
+  const calls = callExpressionsInClass(
+    classDeclaration,
+    (call) => isIdentifierNamed(call.expression, "fstatSync")
+  );
+  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "record", "fd");
+}
+
+function hasOnlyRawCloseDescriptorOperand(classDeclaration: ts.ClassDeclaration | undefined): boolean {
+  const calls = callExpressionsInClass(
+    classDeclaration,
+    (call) => isIdentifierNamed(call.expression, "closeSync")
+  );
+  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "record", "fd");
 }
 
 function hasPrivateCollectionDeclaration(
@@ -348,6 +409,12 @@ export function structuralDescriptorDenials(source: string): readonly Structural
   if (!hasOnlyOpenAtParentOperand(capabilities)) {
     denials.add("openat_parent_not_handle");
   }
+  if (!hasOnlyRawFstatDescriptorOperand(capabilities)) {
+    denials.add("raw_fstat_descriptor_not_handle");
+  }
+  if (!hasOnlyRawCloseDescriptorOperand(capabilities)) {
+    denials.add("raw_close_descriptor_not_handle");
+  }
   if (
     !hasPrivateCollectionDeclaration(capabilities, "registry", "WeakMap") ||
     !hasPrivateLookup(capabilities, "registry", (argument) => isIdentifierNamed(argument, "capability"))
@@ -357,9 +424,7 @@ export function structuralDescriptorDenials(source: string): readonly Structural
   if (
     !hasPrivateCollectionDeclaration(capabilities, "currentGenerationByDescriptor", "Map") ||
     !hasPrivateLookup(capabilities, "currentGenerationByDescriptor", (argument) =>
-      ts.isPropertyAccessExpression(argument) &&
-      isIdentifierNamed(argument.name, "fd") &&
-      isPropertyAccessNamed(argument.expression, "record", "descriptor")
+      isPropertyAccessNamed(argument, "record", "fd")
     )
   ) {
     denials.add("stale_descriptor_shape");

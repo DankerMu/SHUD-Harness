@@ -29,14 +29,12 @@ export class ContractError extends Error {
 
 export type IngressProfile = Readonly<{ bytes: number; depth: number; nodes: number; items: number }>;
 export type DescriptorAdmissionHook = (absolutePath: string) => void | Promise<void>;
-export type DescriptorOperation = Readonly<{
+export type DescriptorIngressOperation = Readonly<{
   phase: "admission" | "post_admission";
   operation: "open_root" | "open_relative" | "read_retained";
   path: string;
-  parentDescriptor?: number;
-  descriptor?: number;
 }>;
-export type DescriptorOperationObserver = (operation: DescriptorOperation) => void;
+export type DescriptorOperationObserver = (operation: DescriptorIngressOperation) => void;
 export type DescriptorIngressHooks = Readonly<{
   afterAdmission?: DescriptorAdmissionHook;
   observe?: DescriptorOperationObserver;
@@ -128,8 +126,7 @@ function openDescriptorBoundPath(
       observe?.({
         phase: "admission",
         operation: "open_relative",
-        path: childName,
-        parentDescriptor: parentDescriptor.fd
+        path: childName
       });
       const descriptor = capabilities.openRelative(
         parentDescriptor,
@@ -177,8 +174,7 @@ function verifyRetainedChain(
     observe?.({
       phase: "post_admission",
       operation: "open_relative",
-      path: retained.childName!,
-      parentDescriptor: parent.descriptor.fd
+      path: retained.childName!
     });
     const verificationDescriptor = capabilities.openRelative(
       parent.descriptor,
@@ -381,6 +377,7 @@ export async function readBoundedFile(
   let verificationCleanupFailed = false;
   try {
     admission = openDescriptorBoundPath(path, capabilities, hooks.observe);
+    capabilities.sealAdmission();
     const final = admission.components.at(-1)!;
     await hooks.afterAdmission?.(admission.logicalAbsolutePath);
     if (hooks.authorityFault) capabilities.rejectForbidden(hooks.authorityFault, "post_admission");
@@ -392,8 +389,7 @@ export async function readBoundedFile(
         hooks.observe?.({
           phase: "post_admission",
           operation: "read_retained",
-          path: final.childName!,
-          descriptor: final.descriptor.fd
+          path: final.childName!
         });
         const bytesRead = capabilities.readRetained(
           final.descriptor,

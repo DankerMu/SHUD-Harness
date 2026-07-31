@@ -12,7 +12,7 @@ import { SOURCE_PROFILE } from "../lib/constants";
 import {
   ContractError,
   parseBoundedJson,
-  type DescriptorOperation
+  type DescriptorIngressOperation
 } from "../lib/ingress";
 import { admitSourceInput } from "../lib/schemas";
 import {
@@ -60,7 +60,7 @@ function expectCode(action: () => unknown, code: string): void {
 
 async function exerciseFailure(kind: Kind, fixturePath: string, scenario: FailureScenario): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "shud-source-capability-"));
-  const operations: DescriptorOperation[] = [];
+  const operations: DescriptorIngressOperation[] = [];
   let replacementPath: string | undefined;
   const replacementBytes = Buffer.from('{"replacement":"must-not-be-read"}');
   try {
@@ -132,7 +132,8 @@ describe("descriptor-bound source ingress", () => {
 
   test("direct ingress exposes only retained read capabilities, preserves input bytes, and spawns no child", async () => {
     expect(Object.getOwnPropertyNames(ContractCapabilities.prototype).sort()).toEqual([
-      "close", "constructor", "markRetained", "openRelative", "openRoot", "readRetained", "rejectForbidden", "stat"
+      "close", "constructor", "markRetained", "openRelative", "openRoot", "readRetained", "rejectForbidden",
+      "sealAdmission", "stat"
     ]);
     const originalSpawn = Bun.spawn;
     let spawnAttempts = 0;
@@ -167,7 +168,7 @@ describe("descriptor-bound source ingress", () => {
       ["source_input_record", validSourcePath],
       ["source_identity_projection", validIdentityPath]
     ] as const) {
-      const operations: DescriptorOperation[] = [];
+      const operations: DescriptorIngressOperation[] = [];
       expect(await capture(["--input", path, "--kind", kind], {
         observe: (operation) => { operations.push(operation); }
       })).toEqual({ exit: 0, stdout: success(kind), stderr: "" });
@@ -178,11 +179,11 @@ describe("descriptor-bound source ingress", () => {
         expect(operation.path.startsWith("/")).toBe(false);
         if (operation.operation === "open_relative") {
           expect(operation.path.includes("/")).toBe(false);
-          expect(operation.parentDescriptor).toBeNumber();
         } else {
           expect(operation.operation).toBe("read_retained");
-          expect(operation.descriptor).toBeNumber();
         }
+        expect(Reflect.ownKeys(operation).sort()).toEqual(["operation", "path", "phase"]);
+        expect(JSON.stringify(operation)).not.toContain("descriptor");
       }
     }
   });
@@ -247,7 +248,7 @@ describe("descriptor-bound source ingress", () => {
           `${inputDirectory}${sep}.${sep}valid-file`,
           `${inputDirectory}${sep}..${sep}${kind}${sep}valid-file`
         ]) {
-          const operations: DescriptorOperation[] = [];
+          const operations: DescriptorIngressOperation[] = [];
           const attempts: CloseAttempt[] = [];
           expect(componentCount(rawPath)).toBe(0);
           const result = await capture(["--input", rawPath, "--kind", kind], {
