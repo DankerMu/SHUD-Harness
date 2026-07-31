@@ -85,18 +85,18 @@ replacement child of #172. Fixture level is `expanded`; repair intensity is
 is binding-aware ownership for all current real delegates plus one independent
 red mutation per equivalent-call, alias, and shadow family.
 
-- [ ] #176.A Bind every real delegate to one lexical owner.
-  - In: restore the reviewed-head `authority-{control,vocabulary,worker}.ts` files at the exact SHA-256 values in the design; change only `authority-preload.ts`, `authority-topology.ts`, and focused structural/runtime tests.
+- [x] #176.A Bind every real delegate to one lexical owner.
+  - In: restore the reviewed-head `authority-{control,vocabulary,worker}.ts` files at the exact SHA-256 values in the design; change only `authority-preload.ts`, `authority-topology.ts`, optional spike-local `authority-topology-*.ts` internal modules below the repository large-file threshold, and focused structural/runtime tests.
   - Implement the design's complete binding/owner/raw map and denial AST grammar. Resolve declarations, Proxy-target provenance, aliases, shadows, helper exclusivity, allowed arguments, and statement dominance; each captured Node/Bun/Worker/FFI/child original has one helper and one distinct raw operation/target. Only the two frozen inversion canaries may delegate before denial.
   - Preserve registry version `shud.contract.authority-proof.v2`, all 55 tuple fields, projection SHA-256 `8ae389ead0f1aaad27cdeb080f66e1841376552a963ef9069657d929a118a725`, exact control argv/output/side-effect oracles, and structural/runtime independence. Freeze Bun 1.2.19 `process.execPath --preload <preload> <control...>` ordering, inherited unchanged env, piped stdout/stderr, guard-state bootstrap assertion, and all three non-registry canary projections.
   - `contracts/lib/capabilities.ts`, `lib/ingress.ts`, and `authority-descriptor-*` have no diff. Any import allowlist admits only `CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and `DESCRIPTOR_OPERATION_POLICY`.
   - Out: Worker close/exit/listener/timeout/sentinel/cleanup/receipt causality (#177), final evidence publication (#178), production runtime/workflows, network security, scientific governance, packages/locks, and submodules.
-- [ ] #176.B Prove every equivalent-call, alias, constructor, and shadow row source-only.
+- [x] #176.B Prove every equivalent-call, alias, constructor, and shadow row source-only.
   - Add independent compiling copied-tree mutations at the design's exact declaration/call anchors: all four Bun originals; direct unguarded alias and alias-in-deny; `Reflect.apply`; raw Worker constructor alias; separate `state`, `deny`, `rawOperation`, and every named-helper shadow; direct owner bypasses for Node, Worker apply/construct, FFI open/close/symbol, and child; and real delegate evaluation in both normal and inversion denial arguments.
   - For every mapped helper, independently move its real delegate before or separate it from `rawOperation` and expect exact `delegate_order:<helper>`. For every denial-bearing wrapper, invoke its helper before the unchanged ordinary denial and expect exact `deny_order:<wrapper>`.
   - Each mutation runs without the active preload and yields its exact one sorted `delegate_owner|delegate_order|deny_order|deny_arguments|unguarded_alias|equivalent_call|constructor_alias|binding_shadow` violation. Restored source returns `[]`.
   - Run the frozen 55 controls plus separate `worker_liveness_canary`, `raw_read_inversion_canary`, and `raw_ffi_inversion_canary` with structural scanning disabled. Their outer/inner exits, LF JSON fields, ordered Worker route receipt, denial/raw events, sentinels, and unchanged bytes match the design exactly; both direct command receipts and every #171/#175 row remain unchanged.
-- [ ] #176.C Verify and hand off the bounded slice.
+- [x] #176.C Verify and hand off the bounded slice.
   - Verification: focused structural/runtime/direct tests; file, registry, and output projection digests; all mutation families; both public direct commands; typecheck; full `check`; strict OpenSpec; diff/scope/untracked/submodule hygiene; Darwin/Linux Bun 1.2.19.
   - Handoff: #177 may change only the frozen Worker lifecycle symbols after #176 lands. It cannot weaken lexical ownership, raw-before-delegate, deny-before-helper, the #175 five-export allowlist, registry tuples, event fields, or public receipts; #178 remains evidence-only.
 

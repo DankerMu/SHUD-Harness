@@ -1231,8 +1231,7 @@ Boundary proof:
 |---|---|
 | `contracts/lib/capabilities.ts`, `lib/ingress.ts`, `authority-descriptor-*` | No diff. Imports, if any, are restricted to `CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and `DESCRIPTOR_OPERATION_POLICY`; an AST import allowlist fails all others. |
 | `authority-control.ts`, `authority-worker.ts`, `authority-vocabulary.ts` | Exact baseline file/projection digests above; no #176 edit. |
-| `authority-preload.ts` | May change only captures, guard wrappers, named delegates, raw mappings, and FFI symbol delegation needed by the owner map. |
-| `authority-topology.ts`, structural/runtime tests | May implement binding analysis and the frozen mutation/active oracles only. |
+| `authority-topology.ts`, spike-local `authority-topology-*.ts`, structural/runtime tests | May implement binding analysis, split internal topology modules, and the frozen mutation/active oracles only; every new text file remains below the repository large-file threshold. |
 | Packages, locks, workflows, production runtime, submodules | No diff/import/release change. |
 
 Regression rows: canonical copied source produces `[]`; every mutation above
