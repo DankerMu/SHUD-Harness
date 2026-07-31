@@ -1056,6 +1056,197 @@ reusable. #176 may add delegate-topology rows but cannot change origins, flags,
 lifecycle, event fields, or public receipts.
 
 
+### Issue #176 binding-aware real-delegate topology fixture overlay
+
+Issue #176 is the second dependency-ordered replacement child of #172 and
+depends on merged #175. It owns only real-delegate identity/provenance,
+exclusive helper ownership, and source-only topology mutations. Worker
+close/exit causality and final evidence publication remain #177 and #178.
+
+The effective fixture is `expanded` with `repair=high`; the upstream
+`expanded` suggestion is accepted.
+
+| Risk pack | Selection | #176 input -> expected evidence |
+|---|---|---|
+| Public API / CLI | Selected | Both direct kinds and the 55 control rows -> unchanged receipts and registry cardinality. |
+| Config / setup | Selected | Bun 1.2.19 outer process, preload ordering, inherited environment, piped stdio, guard installation, and three non-registry canaries -> exact frozen bootstrap and LF JSON projections. |
+| File I/O / path / overwrite | Selected | Node/Bun file/write delegates and equivalent calls -> only the named helper may perform the operation after its raw marker; denied rows perform no read/write. |
+| Schema / fields | Not selected | Event and public receipt schemas remain unchanged. |
+| Auth / permissions / secrets | Selected | Captured originals, constructor aliases, and foreign helper ownership -> structural rejection before ambient authority is consumed. |
+| Concurrency / shared state / ordering | Selected | Patch state, deny, raw marker, and helper bindings -> one lexical owner and raw-before-delegate/deny-before-helper order. Worker completion timing is excluded to #177. |
+| Resource limits / discovery | Selected | Child/Worker/FFI controls remain bounded by the existing 55-row harness and produce no untracked delegate. |
+| Legacy compatibility / examples | Selected | Darwin/Linux Bun 1.2.19 -> unchanged direct receipts and all existing #171/#175 rows. |
+| Error / rollback / partial outputs | Selected | Deny argument evaluation and inversion paths -> no delegate before denial and no partial read/write/child/Worker/FFI side effect. |
+| Release / dependency compatibility | Selected | Focused/full/typecheck -> no package, lockfile, workflow, production import, or submodule change. |
+| Documentation / migration | Not selected | No user-facing migration. |
+| Scientific governance / PI gate | Not selected | No hydrology or scientific claim. |
+| SHUD/rSHUD/AutoSHUD compatibility | Not selected | Read-only submodules stay unchanged. |
+| Zero / agent role governance | Not selected | Zero/runtime adapters are untouched. |
+
+Governing invariant: every actual post-admission Node, Bun, Worker, FFI, or
+child delegate is reachable only through one binding-resolved named helper;
+the helper records `rawOperation` before invoking its exact captured original,
+while every denied path calls `deny` before any helper or delegate and evaluates
+only the canonical denial arguments.
+
+Source of truth: TypeScript lexical bindings connect immutable captured
+originals, patch-state objects, `deny`, `rawOperation`, named delegate helpers,
+and callsites. Identifier spelling alone is never authority or ownership.
+
+| Invariant surface | #176 ownership/evidence |
+|---|---|
+| Producers | `authority-preload.ts` captures each original and defines the sole named helper for Node/Bun/Worker/FFI/child operations. |
+| Validators | `authority-topology.ts` resolves declarations, owners, aliases, helper calls, argument shape, and raw/deny/delegate ordering. |
+| Storage | In-memory patch/control state only; no production storage or cache. |
+| Public entrypoints | Existing direct commands plus the fixed 55-row control registry; public receipts remain unchanged. |
+| Downstream | Structural proof runs source-only; active runtime proof runs with structural scanning disabled. #177 may strengthen lifecycle edges but cannot weaken delegate identity/ownership. |
+| Failure/cleanup | Direct original, `Reflect.apply`, captured alias, raw constructor alias, helper/state/deny shadow, and impure deny arguments fail structurally before runtime. |
+| Evidence | One independent compiling mutation per family, restored-source green, Darwin/Linux focused proof, direct commands, typecheck/full check/strict OpenSpec/hygiene. |
+
+Frozen active contract:
+
+- Restore `authority-vocabulary.ts` byte-for-byte from reviewed #172 head
+  `0be7eeec9f7ba1366016e91a0dc4b3cf7f120f78`; its file SHA-256 is
+  `0a315ae46fe234046bbb95dc8b65f89a619f0f309fbc7543008637cddec411fc`.
+  The registry version is `shud.contract.authority-proof.v2`, count is 55, and
+  SHA-256 of
+  `JSON.stringify({version,count,rows:[[id,control,structuralViolation,denialEvent.operation,denialEvent.target,sideEffects],...]})`
+  is `8ae389ead0f1aaad27cdeb080f66e1841376552a963ef9069657d929a118a725`.
+  This freezes every tuple rather than only its cardinality.
+- Each active control argv is exactly
+  `[authority-control.ts,kind,input,control,replacement,workerSentinel,writeSentinel,spawnSentinel]`.
+  The sole LF-terminated JSON projection is
+  `{exit,stdout,stderr,events,rawEvents,workerLiveness}`. Every hostile row
+  expects child exit 0 around inner exit 2, empty inner stdout,
+  `CONTRACT_SCHEMA_INVALID`, exact denial plus `control_error` events, its
+  frozen raw-event array, absent sentinels, and unchanged input/replacement.
+- `authority-control.ts` and `authority-worker.ts` are restored byte-for-byte
+  from that same reviewed head with SHA-256
+  `1837b6d1fb587b1442a39cf7d38fa581e0de13810f5864c5442267af666a592d`
+  and `028bbfefad7f62066bc7ef931470c81e732e1246c800dee7fbf6a278da364dd3`.
+  Therefore #176 cannot change `awaitGlobalWorkerClose`,
+  `awaitNodeWorkerExit`, `awaitWorkerTermination`, `awaitWorkerEntry`,
+  listener/timeout cleanup, sentinel removal, termination/cleanup receipts, or
+  liveness behavior; those bodies and outputs remain #177's boundary.
+
+- The active launcher is exactly Bun 1.2.19
+  `[process.execPath,"--preload",authorityPreloadPath,...controlArguments]`
+  with `stdout:"pipe"`, `stderr:"pipe"`, no stdin option, and
+  `env:{...process.env}` with no added/removed variable. `authorityPreloadPath`
+  precedes `authority-control.ts`; the control's first top-level authority use
+  asserts the `Symbol.for("shud.contract.authorityGuard")` state exists, proving
+  installation before control evaluation.
+- Three controls remain outside the registry and do not change count 55.
+  `worker_liveness_canary` returns outer exit 0 and one LF JSON object with
+  inner exit 0, exact direct success stdout, empty stderr/events/rawEvents, and
+  `workerLiveness:{phase:"admission",routes:[global_direct/message/global/
+  shud.contract.authority-worker-entry.v1/<inputBytes>/same-sentinel/close/
+  complete,node_worker_threads/message/parent_port/same/<inputBytes>/same/
+  exit/complete,bare_worker_threads/message/parent_port/same/<inputBytes>/same/
+  exit/complete]}` in that order. All sentinels are absent and input and
+  replacement bytes are unchanged.
+- `raw_read_inversion_canary` returns outer exit 0 around inner exit 2, empty
+  inner stdout, `CONTRACT_SCHEMA_INVALID`, events
+  `node_fs_readFileSync:<normalized-replacement>` then its exact
+  `control_error`, raw events
+  `[raw:node_fs_readFileSync:<normalized-replacement>]`, and null liveness.
+  `raw_ffi_inversion_canary` has the same projection with
+  `ffi_dlopen:<system-library>`, its exact `control_error`, raw events
+  `[raw:ffi_dlopen:<system-library>,raw:ffi_close:<system-library>]`, and null
+  liveness. Both preserve bytes and all sentinels. These three canaries run
+  active-only after the structural process has completed and is disabled.
+
+Binding/owner/raw map:
+
+| Captured/provenance binding | Sole delegate helper | Exact raw operation / target |
+|---|---|---|
+| each `patchPathFunctions` lexical `original` | `delegatePathFunction` | `${operationPrefix}_${name}` / normalized path |
+| `patchConstructor` `original` -> Proxy trap `target` provenance | `delegateWorkerApply` or `delegateWorkerConstruct` | supplied `global_worker` or `node_worker` / none |
+| each child-process loop lexical `original` | `delegateChildProcess` | `node_child_process_${name}` / none |
+| `originalDlopen` | `delegateFfiDlopen` | `ffi_dlopen` / library path |
+| opened library `close` binding | `delegateFfiClose` | `ffi_close` / library path |
+| each wrapped FFI `symbol` | `delegateFfiSymbol` | `ffi_${name}` / decoded path when present |
+| `originalBunFile` | `delegateBunFile` | `bun_file` / normalized path |
+| `originalBunWrite` | `delegateBunWrite` | `bun_write` / normalized path |
+| `originalBunSpawn` | `delegateBunSpawn` | `bun_spawn` / none |
+| `originalBunSpawnSync` | `delegateBunSpawnSync` | `bun_spawn_sync` / none |
+
+Every table binding is immutable. A Proxy trap `target` is accepted only when
+the checker traces it to the `new Proxy(original, handlers)` binding; arbitrary
+same-spelled parameters are foreign. A delegate helper may contain exactly one
+real delegate invocation and no other helper may reference that captured
+binding. The returned violation projection is a sorted, duplicate-free
+`string[]`; stable IDs are `delegate_owner:<binding>`,
+`delegate_order:<helper>`, `deny_order:<wrapper>`,
+`deny_arguments:<wrapper>`, `unguarded_alias:<binding>`,
+`equivalent_call:<binding>`, `constructor_alias:<binding>`, and
+`binding_shadow:<name>`.
+
+Binding-resolved denial grammar:
+
+- `state`, `deny`, `rawOperation`, captured originals, and helpers resolve to
+  their module declarations; a shadow or alias does not inherit authority.
+- A guard is an `if` whose condition is the canonical
+  `state.phase === "post_admission"` predicate, optionally conjoined with its
+  already-bound normalized path/candidate. Its taken path reaches one direct
+  `deny(operation[, target])` before any helper/delegate call. The two named
+  `rawInversion` canaries are the only explicit pre-denial delegate exception.
+- `operation` is a string literal or an immutable local initialized solely
+  from allowlisted string/template literals and primitive loop names.
+  `target` is omitted or an identifier bound to the already-computed
+  normalized path, decoded candidate, or library path. Denial arguments forbid
+  call/new/await/yield/tagged-template/property/element access,
+  assignment/update, comma expressions, and aliases to any captured original.
+- In a helper, `rawOperation` is the final side-effecting statement before the
+  exact delegate invocation on the post-admission path. Its operation/target
+  must equal the map above. `Reflect.apply`/`Reflect.construct` are allowed only
+  inside the two Worker helpers with binding-traced Proxy targets; elsewhere
+  they are equivalent delegate calls and fail.
+
+Source-only mutation matrix (each is one compiling copied-tree mutation, runs
+without the preload, expects the exact one named violation, then restores):
+
+| Family / AST anchor | Mutation | Expected violation |
+|---|---|---|
+| Bun owner declarations | direct invocation of each of `originalBunFile`, `originalBunWrite`, `originalBunSpawn`, `originalBunSpawnSync` outside its mapped helper | `delegate_owner:<binding>` |
+| Alias | `const alias = originalBunFile; alias(...)` on an unguarded path | `unguarded_alias:originalBunFile` |
+| Deny alias | invoke a captured-original alias inside either normal or inversion `deny` argument | `deny_arguments:<wrapper>` |
+| Equivalent call | `Reflect.apply(originalBunFile, Bun, args)` outside the mapped helper | `equivalent_call:originalBunFile` |
+| Constructor | alias the raw Worker `original`/Proxy target and construct it outside `delegateWorkerConstruct` | `constructor_alias:worker` |
+| Binding identity | introduce a local shadow separately for `state`, `deny`, `rawOperation`, and every helper in the owner map | `binding_shadow:<name>` |
+| Node direct owner | invoke a `patchPathFunctions` `original` from `guardedPathFunction` | `delegate_owner:node_fs` |
+| Worker direct owner | call `Reflect.construct` from a Proxy trap rather than `delegateWorkerConstruct` | `delegate_owner:worker_construct` |
+| Worker apply owner | call `Reflect.apply` from the Proxy `apply` trap rather than `delegateWorkerApply` | `delegate_owner:worker_apply` |
+| FFI direct owner | invoke `originalDlopen` from `guardedDlopen` | `delegate_owner:ffi_dlopen` |
+| FFI close owner | invoke the opened library's `close` outside `delegateFfiClose` | `delegate_owner:ffi_close` |
+| FFI symbol owner | invoke a wrapped `symbol` outside `delegateFfiSymbol` | `delegate_owner:ffi_symbol` |
+| Child direct owner | invoke the child loop `original` from `guardedProcessCreation` | `delegate_owner:child_process` |
+| Denial evaluation | insert a real delegate call/new expression into each normal and inversion denial argument form | `deny_arguments:<wrapper>` |
+| Raw/delegate order | in every mapped helper (`delegatePathFunction`, both Worker helpers, `delegateChildProcess`, all three FFI helpers, and all four Bun helpers), hoist the real call before its `rawOperation` or insert a side-effecting statement between them | `delegate_order:<helper>` |
+| Deny/helper order | in every denial-bearing wrapper (`guardedPathFunction`, both Worker Proxy traps, `guardedProcessCreation`, `guardedDlopen`, wrapped FFI symbol, and all four guarded Bun methods), invoke its mapped helper before the unchanged normal-path `deny` | `deny_order:<wrapper>` |
+
+Boundary proof:
+
+| File/symbol surface | #176 rule |
+|---|---|
+| `contracts/lib/capabilities.ts`, `lib/ingress.ts`, `authority-descriptor-*` | No diff. Imports, if any, are restricted to `CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and `DESCRIPTOR_OPERATION_POLICY`; an AST import allowlist fails all others. |
+| `authority-control.ts`, `authority-worker.ts`, `authority-vocabulary.ts` | Exact baseline file/projection digests above; no #176 edit. |
+| `authority-preload.ts` | May change only captures, guard wrappers, named delegates, raw mappings, and FFI symbol delegation needed by the owner map. |
+| `authority-topology.ts`, structural/runtime tests | May implement binding analysis and the frozen mutation/active oracles only. |
+| Packages, locks, workflows, production runtime, submodules | No diff/import/release change. |
+
+Regression rows: canonical copied source produces `[]`; every mutation above
+fails source-only at its literal/declaration/call-expression anchor; restored
+source passes. The frozen 55 rows then run active-only with structural scanning
+disabled and exact outputs. Existing #171/#175 direct, descriptor, capacity,
+identity, cleanup, and platform rows stay byte-identical.
+
+Handoff: #177 may strengthen only the frozen Worker close/exit completion
+symbols after #176 lands. It cannot relax lexical ownership,
+raw-before-delegate, deny-before-helper, registry tuples, capability import
+allowlist, or public receipts. #178 owns only final tracked evidence
+publication.
+
 ## Invariant Matrix
 
 | Stage | Authority / invariant | Enforcement and evidence |

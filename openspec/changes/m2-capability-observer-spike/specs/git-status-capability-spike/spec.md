@@ -306,6 +306,122 @@ primary-error/cleanup precedence, and zero target bytes.
 - **THEN** its #171 receipt, four-SHA/capacity behavior, cleanup/error precedence, no-side-effect contract, and descriptor baseline remain unchanged on Darwin and Linux Bun 1.2.19
 
 
+### Requirement: Real delegate topology is binding-aware and exclusive
+Every post-admission Node, Bun, Worker, FFI, or child delegate MUST resolve to
+one immutable captured/provenance binding and one binding-resolved named
+helper. The helper MUST emit its mapped `rawOperation` immediately before the
+delegate. Every denial MUST dominate helper/delegate invocation and evaluate
+only canonical side-effect-free arguments; the frozen
+`raw_read_inversion_canary` and `raw_ffi_inversion_canary` are the only
+pre-denial delegate exceptions. Spelling, aliases, equivalent syntax, Proxy
+parameters without traced origin, and local shadows MUST NOT confer authority.
+
+The frozen active registry MUST remain version
+`shud.contract.authority-proof.v2` with 55 distinct ID/control tuples and
+projection SHA-256
+`8ae389ead0f1aaad27cdeb080f66e1841376552a963ef9069657d929a118a725`.
+The projection covers version, count, and every row's ID, control, structural
+violation, denial operation/target, and complete side-effect oracle. Active
+argv MUST remain
+`[authority-control.ts,kind,input,control,replacement,workerSentinel,writeSentinel,spawnSentinel]`;
+its LF JSON fields MUST remain
+`{exit,stdout,stderr,events,rawEvents,workerLiveness}`.
+
+Permitted denial arguments are a string literal or immutable local derived
+only from allowlisted primitive string/template bindings, plus an optional
+identifier bound to an already-normalized path, decoded candidate, or library
+path. They MUST contain no call, construction, await/yield, tagged template,
+property/element access, assignment/update, comma expression, or captured
+delegate alias. `Reflect.apply` and `Reflect.construct` are permitted only
+inside the binding-traced Worker helpers.
+
+The binding/raw map MUST include: Node path originals ->
+`delegatePathFunction`/`${operationPrefix}_${name}`; Worker Proxy original ->
+`delegateWorkerApply|delegateWorkerConstruct`/`global_worker|node_worker`;
+child originals -> `delegateChildProcess`/`node_child_process_${name}`;
+`originalDlopen`, library close, and FFI symbols ->
+`delegateFfiDlopen|delegateFfiClose|delegateFfiSymbol`/
+`ffi_dlopen|ffi_close|ffi_${name}`; and the four Bun originals ->
+`delegateBunFile|delegateBunWrite|delegateBunSpawn|delegateBunSpawnSync`/
+`bun_file|bun_write|bun_spawn|bun_spawn_sync`. Paths use the already-normalized
+or decoded target; constructor/process operations have no target.
+
+Source-only violations MUST be sorted and duplicate-free, using exact stable
+IDs `delegate_owner:<binding>`, `delegate_order:<helper>`,
+`deny_order:<wrapper>`, `deny_arguments:<wrapper>`,
+`unguarded_alias:<binding>`, `equivalent_call:<binding>`,
+`constructor_alias:<binding>`, or `binding_shadow:<name>`. Active runtime proof
+MUST run with structural scanning disabled. Public receipts and all #171/#175
+origin, lifecycle, flags, event fields, cleanup, and capacity behavior MUST
+remain unchanged on Darwin/Linux Bun 1.2.19.
+
+Active launch MUST be Bun 1.2.19
+`[process.execPath,"--preload",authorityPreloadPath,...controlArguments]` with
+preload before control, piped stdout/stderr, no stdin override, and an unchanged
+copy of `process.env`. Control evaluation MUST first require the preload's
+symbol-keyed guard state. Outside the 55 rows, `worker_liveness_canary` MUST
+return the ordered global-close/node-exit/bare-exit admission receipt with
+message channels, exact entry/sentinel string, input byte count, complete
+cleanup, no events/raw events/sentinels, and unchanged bytes.
+`raw_read_inversion_canary` MUST return the exact
+`node_fs_readFileSync` denial and one matching raw event;
+`raw_ffi_inversion_canary` MUST return the exact `ffi_dlopen` denial and ordered
+`ffi_dlopen`,`ffi_close` raw events. Both MUST have outer exit 0, inner exit 2,
+the exact failure receipt, null liveness, no sentinels, and unchanged bytes.
+All three canaries MUST run active-only and MUST NOT enter the registry count.
+
+#### Scenario: Every delegate family has an exclusive owner
+- **WHEN** copied source directly invokes each Bun original or bypasses the
+  mapped helper for a Node path, Worker apply/construct, FFI open/close/symbol,
+  or child-process original
+- **THEN** each independent compiling mutation emits its exact one
+  `delegate_owner:<binding>` violation without loading the active proof
+
+#### Scenario: Raw and denial ordering are independently falsifiable
+- **WHEN** each mapped helper separately moves its real delegate before or away
+  from its exact raw marker, and each denial-bearing wrapper separately invokes
+  its helper before the unchanged ordinary denial
+- **THEN** every compiling source-only mutation emits exact one
+  `delegate_order:<helper>` or `deny_order:<wrapper>`, including Worker apply,
+  Worker construct, FFI close, and FFI symbol branches
+
+#### Scenario: Aliases and equivalent calls cannot hide authority
+- **WHEN** copied source directly calls an unguarded captured alias, uses
+  `Reflect.apply` outside a Worker helper, puts a captured alias in a denial
+  argument, or constructs a raw Worker alias
+- **THEN** it emits exactly `unguarded_alias`, `equivalent_call`,
+  `deny_arguments`, or `constructor_alias` for that binding/owner
+
+#### Scenario: Every authority binding rejects local shadows
+- **WHEN** copied source separately shadows `state`, `deny`, `rawOperation`, or
+  any named helper in the binding/raw map
+- **THEN** declaration identity fails with exact
+  `binding_shadow:<name>` rather than accepting the same identifier text
+
+#### Scenario: Denial grammar rejects hidden evaluation
+- **WHEN** a real call/new expression is inserted into either a normal or one
+  of the two inversion-canary denial argument forms
+- **THEN** source-only proof emits exact `deny_arguments:<wrapper>`; restored
+  source preserves the named canary exception and every ordinary denial occurs
+  before its helper/raw event/side effect
+
+#### Scenario: Structural and active proofs remain independent
+- **WHEN** every mutation family is run source-only and the frozen 55 tuples
+  plus the three separate canaries are run active-only
+- **THEN** mutations fail without preload, restored topology returns `[]`,
+  every registry/canary output, raw-event order, Worker route receipt,
+  sentinel, and unchanged-byte oracle matches the frozen projection, and both
+  direct public receipts remain byte-identical
+
+#### Scenario: Dependency boundaries remain mechanically frozen
+- **WHEN** #176 scope is checked
+- **THEN** `capabilities.ts`, `ingress.ts`, descriptor proofs, packages, locks,
+  workflows, production runtime, and submodules have no diff; only the five
+  #175 exports named in the design are importable; the exact control,
+  vocabulary, and Worker source digests remain unchanged for #177; and #178
+  remains evidence-only
+
+
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:
 `observer_outcome = clean | dirty | rejected(code)`, per-platform
