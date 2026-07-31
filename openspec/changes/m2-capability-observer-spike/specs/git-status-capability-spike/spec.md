@@ -223,6 +223,46 @@ ceiling.
 - **WHEN** an input is bound+1, invalid UTF-8, malformed/trailing JSON, duplicate-keyed, too deep, too wide, missing, unknown, or schema-invalid
 - **THEN** the checker returns only the matching stable code, exit `2`, empty stdout, and no partial output
 
+### Requirement: Retained descriptor primitives prove provenance
+Every post-admission raw descriptor operation MUST validate an opaque,
+same-instance, generation-bound retained or verification handle before invoking
+Node or FFI. The private registry MUST bind raw fd, parent generation, exact
+flags, kind, phase/role, and lifecycle. Raw numbers including fd `0` and Linux
+`AT_FDCWD` (`-100`), foreign/stale/closed handles, mismatched flags/kind/owner,
+and unproven parents MUST fail before `openat`, `fstatSync`, `readSync`, or
+`closeSync`.
+
+Admission opens MUST issue `pending_retained` handles; successful stat/type
+validation MUST transition them to `retained`. Post-admission relative opens
+MUST issue `verification` handles. Close MUST accept only
+pending/unretained, retained/retained, or verification/verification pairs and
+MUST invalidate the generation even when close reporting fails. A later open
+that reuses the raw fd MUST create a new generation and MUST NOT reactivate the
+old handle.
+
+Each provenance denial MUST emit exactly one frozen
+`shud.contract.descriptor-denial.v1` event with operation, reason, raw
+descriptor or null, generation or null, and phase. The CLI MUST preserve exit
+`2`, empty stdout, one LF-terminated `CONTRACT_SCHEMA_INVALID` stderr receipt,
+primary-error/cleanup precedence, and zero target bytes.
+
+#### Scenario: fd zero mutation runs independently
+- **WHEN** the compiling `readRetained` source uses `readSync(0, buffer, offset, length, null)`
+- **THEN** structural-only proof rejects `raw_read_descriptor_not_handle`, and active-only proof with FIFO stdin whose connected writer stays open but sends no bytes separately completes within one second with one `read_sync/unproven_descriptor` event before read, exact failure receipt, and zero bytes
+
+#### Scenario: Linux AT_FDCWD mutation runs independently
+- **WHEN** the compiling `readRetained` source invokes `openAt()(-100, childCString("ambient-secret"), FILE_OPEN_FLAGS)` before its retained read
+- **THEN** structural-only proof rejects `openat_parent_not_handle` on Darwin and Linux, while Linux active-only proof emits one `openat/unproven_parent` event before opening the unread cwd sentinel and consumes zero bytes
+
+#### Scenario: Foreign, stale, or mismatched handle is supplied
+- **WHEN** stat/open/read/close receives another instance's handle, a closed handle after same-fd reuse, invalid flags/kind, or the wrong close owner
+- **THEN** exactly one matching denial event is emitted before the raw syscall; the legitimate current-generation sibling remains usable
+
+#### Scenario: Legitimate retained and verification chains run
+- **WHEN** either direct input kind uses only the exact lifecycle and flags
+- **THEN** its #171 receipt, four-SHA/capacity behavior, cleanup/error precedence, no-side-effect contract, and descriptor baseline remain unchanged on Darwin and Linux Bun 1.2.19
+
+
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:
 `observer_outcome = clean | dirty | rejected(code)`, per-platform

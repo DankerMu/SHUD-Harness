@@ -132,7 +132,7 @@ describe("descriptor-bound source ingress", () => {
 
   test("direct ingress exposes only retained read capabilities, preserves input bytes, and spawns no child", async () => {
     expect(Object.getOwnPropertyNames(ContractCapabilities.prototype).sort()).toEqual([
-      "close", "constructor", "openRelative", "openRoot", "readRetained", "rejectForbidden", "stat"
+      "close", "constructor", "markRetained", "openRelative", "openRoot", "readRetained", "rejectForbidden", "stat"
     ]);
     const originalSpawn = Bun.spawn;
     let spawnAttempts = 0;

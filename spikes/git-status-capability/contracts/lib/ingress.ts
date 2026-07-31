@@ -5,6 +5,7 @@ import {
   DIRECTORY_OPEN_FLAGS,
   FILE_OPEN_FLAGS,
   type BigIntStats,
+  type CapabilityDescriptor,
   type CapabilityHooks,
   type ContractAuthorityFault
 } from "./capabilities";
@@ -66,7 +67,7 @@ function absoluteSegments(path: string): readonly string[] {
 }
 
 type RetainedComponent = Readonly<{
-  descriptor: number;
+  descriptor: CapabilityDescriptor;
   childName?: string;
   stats: BigIntStats;
   final: boolean;
@@ -109,6 +110,7 @@ function openDescriptorBoundPath(
     try {
       const rootStats = capabilities.stat(rootDescriptor);
       assertExpectedType(rootStats, false);
+      capabilities.markRetained(rootDescriptor, "directory");
       components.push({ descriptor: rootDescriptor, stats: rootStats, final: false });
     } catch (error) {
       try {
@@ -123,16 +125,22 @@ function openDescriptorBoundPath(
       const childName = segments[index]!;
       const final = index === segments.length - 1;
       const parentDescriptor = components.at(-1)!.descriptor;
-      observe?.({ phase: "admission", operation: "open_relative", path: childName, parentDescriptor });
+      observe?.({
+        phase: "admission",
+        operation: "open_relative",
+        path: childName,
+        parentDescriptor: parentDescriptor.fd
+      });
       const descriptor = capabilities.openRelative(
         parentDescriptor,
         childName,
-        final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS
+        final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS,
+        "admission"
       );
-      if (descriptor < 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
       try {
         const stats = capabilities.stat(descriptor);
         assertExpectedType(stats, final);
+        capabilities.markRetained(descriptor, final ? "file" : "directory");
         components.push({ descriptor, childName, stats, final });
       } catch (error) {
         try {
@@ -170,14 +178,14 @@ function verifyRetainedChain(
       phase: "post_admission",
       operation: "open_relative",
       path: retained.childName!,
-      parentDescriptor: parent.descriptor
+      parentDescriptor: parent.descriptor.fd
     });
     const verificationDescriptor = capabilities.openRelative(
       parent.descriptor,
       retained.childName!,
-      retained.final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS
+      retained.final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS,
+      "post_admission"
     );
-    if (verificationDescriptor < 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     let verificationPrimary: ContractError | undefined;
     try {
       const verificationStats = capabilities.stat(verificationDescriptor);
@@ -385,7 +393,7 @@ export async function readBoundedFile(
           phase: "post_admission",
           operation: "read_retained",
           path: final.childName!,
-          descriptor: final.descriptor
+          descriptor: final.descriptor.fd
         });
         const bytesRead = capabilities.readRetained(
           final.descriptor,

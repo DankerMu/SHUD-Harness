@@ -56,6 +56,27 @@ artifacts.
 - [x] #171.C Preserve the direct-input compatibility surface.
   - Verification: both public direct commands retain exit/stdout/stderr/LF receipts, canonical JSON and exact four-SHA equality including independent and synchronized strict-subset forgeries; focused tests, typecheck, strict OpenSpec, full repository check, no-write, scope, and submodule hygiene pass.
 
+### Issue #175 retained-descriptor provenance overlay
+
+This overlay is the active implementation fixture for #175, the first replacement
+child of #172. Fixture level is `expanded`; repair intensity is `high`; upstream
+suggestion is `expanded` (agree). The minimal mergeable slice is one production
+descriptor-provenance allowlist plus the fd-0 and Linux `AT_FDCWD` mutations.
+
+- [x] #175.A Bind raw descriptor operations to retained provenance.
+  - In: `contracts/lib/capabilities.ts`, its existing `ingress.ts` issuance call sites, `contracts/tests/authority-descriptor-{vocabulary,preload}.ts`, and `contracts/tests/authority-descriptor-{structural,runtime}.test.ts` only.
+  - Implement the design's opaque `CapabilityDescriptor` plus generation-bound private registry; exact `pending_retained -> retained`, `verification`, and `closed` transitions; exact parent/phase/flag/kind/owner checks; and one pre-syscall `DescriptorAuthorityDenial` for every rejection.
+  - Preserve the #171 compatibility crosswalk: exact direct receipts/opposite-stream emptiness, four-SHA binding, 237/238 capacity, no write/child/replacement read, close ordering/error precedence, and descriptor baseline on Darwin/Linux.
+  - Out: Bun/Node/Worker/FFI/child delegate-equivalence topology (#176), Worker close/exit causality (#177), final receipt publication (#178), live Git, production runtime, workflows, scientific governance, and network security.
+  - Verification: the design lifecycle matrix covers valid retained/verification operations plus foreign, raw-number, stale/closed/same-fd-reuse, invalid flag/kind/owner, and `fstatSync`/`closeSync` negatives with exact events and zero raw calls.
+- [x] #175.B Prove ambient descriptor mutations fail before side effects.
+  - Structural-only: compile the full production tree with the literal `readSync(0, buffer, offset, length, null)` and `openAt()(-100, childCString("ambient-secret"), FILE_OPEN_FLAGS)` mutations from the design; reject with `raw_read_descriptor_not_handle` and `openat_parent_not_handle` without loading the active preload.
+  - Active-only: disable structural scanning; fd-0 runs on Darwin/Linux with FIFO stdin whose connected writer remains open but sends no bytes, and completes in <=1 second; `AT_FDCWD` runs on Linux with an unread cwd sentinel. Each returns exit 2, empty stdout, the exact schema-invalid stderr receipt, exactly one named raw-denial event, zero target bytes, and zero open/read side effects.
+- [x] #175.C Verify and hand off the bounded slice.
+  - Verification: focused structural/runtime/direct tests, both public direct commands, typecheck, full `check`, strict OpenSpec, diff/scope/untracked/submodule hygiene, and Darwin/Linux Bun 1.2.19 receipts are green.
+  - Handoff: #176 may consume only `CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and immutable `DESCRIPTOR_OPERATION_POLICY`; the registry stays private and #176 cannot broaden descriptor origin, flags, lifecycle, event fields, or public receipts.
+
+
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.
   - In: `spikes/git-status-capability/validator/**`, including the independently implemented `source-input-witness-v1`, and validator tests/fixtures only.

@@ -952,6 +952,98 @@ Regression rows:
 - Each independent and synchronized strict-subset four-SHA mutation ->
   `CONTRACT_SCHEMA_INVALID`; unchanged peers succeed.
 
+### Issue #175 retained-descriptor provenance fixture overlay
+
+Issue #175 is the first dependency-ordered replacement child of #172. It owns
+only the retained-fd provenance seam and focused structural/active proof.
+Delegate topology, Worker lifecycle, and final evidence remain #176-#178.
+
+The effective fixture is `expanded` with `repair=high`; the upstream
+`expanded` suggestion is accepted.
+
+| Risk pack | Selection | #175 input -> expected evidence |
+|---|---|---|
+| Public API / CLI | Selected | Both direct kinds, canonical and named failures -> unchanged exit/stdout/stderr/LF receipts. |
+| Config / setup | Not selected | No config or bootstrap changes. |
+| File I/O / path / overwrite | Selected | Retained, foreign, closed, reused, fd-0, and `AT_FDCWD` inputs -> only proven descriptor-relative operations; zero writes. |
+| Schema / fields | Not selected | Source record and receipt schemas are unchanged. |
+| Auth / permissions / secrets | Selected | Unproven parent/read handles -> pre-syscall provenance denial with no consumed bytes. |
+| Concurrency / shared state / ordering | Not selected | Registry is command-local; no async/shared state. |
+| Resource limits / discovery | Selected | FIFO/stdin with withheld writer -> denial within 1 second. |
+| Legacy compatibility / examples | Selected | Darwin/Linux Bun 1.2.19 -> byte-identical #171 receipts and descriptor baselines. |
+| Error / rollback / partial outputs | Selected | Primary plus close fault -> primary wins and every handle gets one close attempt. |
+| Release / dependency compatibility | Selected | Typecheck/full check -> no package, lockfile, workflow, or production import change. |
+| Documentation / migration | Not selected | No user-facing migration. |
+| Scientific governance / PI gate | Not selected | No hydrology or scientific claim. |
+| SHUD/rSHUD/AutoSHUD compatibility | Not selected | Read-only submodules stay unchanged. |
+| Zero / agent role governance | Not selected | Zero/runtime adapters are untouched. |
+
+Governing invariant: after admission, raw descriptor operations may consume
+only opaque handles issued by the same `ContractCapabilities` instance;
+provenance, exact flags, phase, owner, generation, and lifecycle are checked
+before every OS call.
+
+Source of truth: an instance-private registry binds each frozen
+`CapabilityDescriptor` to raw fd, increasing generation, parent generation,
+exact flags, role/kind, and `pending_retained|retained|verification|closed`
+state. Raw fd numbers are never authority tokens. OS reuse creates a new
+generation and cannot reactivate an old handle.
+
+| Operation | Required state | Result / next operation | Pre-OS denial |
+|---|---|---|---|
+| `openRoot("/", "admission")` | No parent; exact directory flags | New `pending_retained`; only `stat`, `markRetained`, or unretained `close`. | Wrong phase/root/flags before `openSync`. |
+| `openRelative(parent,name,flags,"admission")` | Same-instance retained directory parent; valid child; exact file/directory flags | New parent-bound `pending_retained`. | Foreign/stale/closed parent, raw fd/`AT_FDCWD`, bad child/flags before `openat`. |
+| `markRetained(handle,kind)` | Pending after successful stat/type validation | State becomes `retained`; kind matches flags. | Foreign/stale/closed/already-marked/kind mismatch without syscall. |
+| `openRelative(parent,name,flags,"post_admission")` | Same-instance retained directory parent; exact child/flags | New `verification`; only `stat` and verification `close`. | Same parent/flag denials before `openat`. |
+| `stat(handle)` | Live pending/retained/verification handle | One `fstatSync`; no state change. | Raw, foreign, stale, or closed before `fstatSync`. |
+| `readRetained(handle,...,"post_admission")` | Retained file handle with exact file flags | One bounded `readSync`; no state change. | fd 0/raw/directory/verification/foreign/stale/closed/wrong phase/range before `readSync`. |
+| `close(handle,owner)` | Pending/unretained, retained/retained, or verification/verification | One `closeSync`; old generation becomes closed even on reported failure. | Foreign/stale/already closed/owner mismatch before `closeSync`. |
+
+Each denial emits one frozen `DescriptorAuthorityDenial` with exact fields
+`{schema_version:"shud.contract.descriptor-denial.v1",operation,reason,
+descriptor,generation,phase}`. Raw-number inputs use `generation:null`. The CLI
+still returns exit 2, empty stdout, and one LF-terminated
+`CONTRACT_SCHEMA_INVALID` stderr receipt; events contain no path/target bytes.
+
+| Invariant surface | #175 ownership/evidence |
+|---|---|
+| Producers | `openRoot`/`openRelative` issue opaque generation-bound handles; integers and `AT_FDCWD` are never admitted. |
+| Validators | `markRetained`, `stat`, `readRetained`, and `close` validate registry/role/generation/state/flags/phase/owner before Node/FFI. |
+| Storage | Private in-memory instance registry only. |
+| Public entrypoints | Both existing direct input kinds; receipts unchanged. |
+| Downstream | #176 may import the named opaque handle/state/operation/event/policy exports but cannot broaden them; registry stays private. |
+| Failure/cleanup | fd 0, `AT_FDCWD`, foreign/stale/closed/reused, FIFO, flag/owner mismatch, and combined errors preserve first-error precedence. |
+| Evidence | Structural-only and active-only rows, exact events/receipts, zero raw calls/target bytes, focused/direct/full/platform checks. |
+
+Boundary checklist: only `ContractCapabilities` plus `ingress.ts` issuance
+callsites change; no sibling raw primitives, writes, publish, runtime, or
+network. Structural-only loads no preload. Active-only disables structural
+scanning and requires the raw-operation event. Closed-handle same-fd reuse stays
+stale. Source schema/digests/parser limits and #171 replacement behavior remain.
+
+| Proof row | Literal input/platform | Structural-only | Active-only |
+|---|---|---|---|
+| `FD0` | In `readRetained`, replace the retained call with `readSync(0, buffer, offset, length, null)`; Darwin/Linux | Reject `raw_read_descriptor_not_handle` against the compiling full tree. | FIFO stdin with a connected writer that remains open but sends no bytes; <=1s; one `read_sync/unproven_descriptor/descriptor=0` event; exit 2; empty stdout; exact stderr; zero bytes. The same mutation without preload remains blocked until the harness kills and reaps it. |
+| `ATFDCWD` | Before retained read insert `const ambient = openAt()(-100, childCString("ambient-secret"), FILE_OPEN_FLAGS);`; both structural, Linux active | Reject `openat_parent_not_handle` without preload. | Linux unread cwd sentinel; one `openat/unproven_parent/descriptor=-100` event before open/read; exact receipt; zero bytes. Darwin records active row platform-inapplicable because -100 is not Darwin `AT_FDCWD`. |
+| `FOREIGN` | Handle from another instance | Reject raw-fd coercion. | stat/open/read/close each emit `foreign_descriptor`; zero raw calls. |
+| `STALE_REUSE` | Close A, reuse raw fd in new generation, pass old A | Require opaque generation operand. | Old A emits `stale_descriptor`; new handle succeeds; old use makes zero raw calls. |
+| `FLAGS_OWNER` | Extra/missing flags or mismatched close owner | Reject non-policy expressions/literals. | `flags_invalid`/`owner_mismatch` before open/close; legitimate sibling succeeds. |
+
+| #171 preserved axis | #175 required evidence |
+|---|---|
+| Canonical direct success | Both kinds: exit 0, empty stderr, LF stdout, canonical JSON/input bytes. |
+| Stable failure | Named replacement/schema/limit: exit 2, empty stdout, one LF stderr receipt. |
+| Identity/capacity | Four-SHA forgeries reject; 237/512 succeeds; 238/514 returns item limit; bytes stay 5,100/5,116. |
+| Side effects | No write/child/ambient reopen/replacement read/target-byte consumption. |
+| Cleanup | Every named path restores descriptor baseline and close/error precedence. |
+| Platform | Focused proof/direct commands run on Darwin/Linux Bun 1.2.19. |
+
+Handoff to #176: only `CapabilityDescriptor`, `DescriptorCapabilityState`,
+`DescriptorOperation`, `DescriptorAuthorityDenial`, and immutable
+`DESCRIPTOR_OPERATION_POLICY` are reusable. #176 may add delegate-topology rows
+but cannot change origins, flags, lifecycle, event fields, or public receipts.
+
+
 ## Invariant Matrix
 
 | Stage | Authority / invariant | Enforcement and evidence |
