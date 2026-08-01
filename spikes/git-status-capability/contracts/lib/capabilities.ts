@@ -316,9 +316,10 @@ export class ContractCapabilities {
     if (!isValidChildName(childName)) return this.#denyRecord("openat", "child_invalid", parentRecord);
 
     const childPath = childCString(childName);
+    const openAtPrimitive = openAt();
     const descriptor = invokeDescriptorPrimitive(
       "openat",
-      () => openAt()(parentRecord.fd, childPath, flags)
+      () => openAtPrimitive(parentRecord.fd, childPath, flags)
     );
     if (descriptor < 0) throw new Error("CONTRACT_CAPABILITY_OPEN_FAILED");
     return this.#issue(

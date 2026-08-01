@@ -32,6 +32,7 @@ type SequenceReceipt = Readonly<{
   invocations: number;
   rawCalls: RawCallCounts;
   segments: number;
+  loaderObservations: readonly string[];
 }>;
 type InstallationReceipt = Readonly<{ secondInstallation: string; restrictedExports: readonly string[] }>;
 type OmittedReceipt = Readonly<{ error: string; rawCalls: Readonly<{ open_root: number }> }>;
@@ -88,7 +89,7 @@ describe("descriptor primitive mediation", () => {
     expect(receipt.restrictedInstanceProperties).toEqual([]);
   });
 
-  test("a synchronous mediator sees the exact raw operation sequence and invokes every primitive once", async () => {
+  test("a synchronous mediator sees the exact raw operation sequence while loader resolution stays outside mediation", async () => {
     const receipt = await runScenario<SequenceReceipt>("sequence");
     const expectedOperations = [
       "open_root",
@@ -109,6 +110,7 @@ describe("descriptor primitive mediation", () => {
       read_sync: 1,
       close_sync: receipt.segments + 2
     });
+    expect(receipt.loaderObservations).toEqual(["loader:false", "symbol:false"]);
     expect(receipt.bytes).toBe(Buffer.byteLength(FIXTURE_TEXT));
     expect(receipt.text).toBe(FIXTURE_TEXT);
   });

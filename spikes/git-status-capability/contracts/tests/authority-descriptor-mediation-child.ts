@@ -21,6 +21,7 @@ type CapabilitiesModule = Readonly<{
 }>;
 type FstatSyncProbe = (descriptor: number, options: { bigint: true }) => BigIntStats;
 type OpenAt = (parentDescriptor: number, path: Buffer, flags: number) => number;
+type OpenAtResolutionStep = "loader" | "symbol";
 type RawCallCounts = {
   open_root: number;
   openat: number;
@@ -83,7 +84,10 @@ function readFixture(module: CapabilitiesModule, fixture: Fixture): Readonly<{ b
   return Object.freeze({ bytes, text: buffer.subarray(0, bytes).toString() });
 }
 
-function installRawSequenceProbe(rawCalls: RawCallCounts): void {
+function installRawSequenceProbe(
+  rawCalls: RawCallCounts,
+  onOpenAtResolution: (step: OpenAtResolutionStep) => void
+): void {
   const originalOpenSync = originalFs.openSync;
   const originalFstatSync = originalFs.fstatSync;
   const originalReadSync = originalFs.readSync;
@@ -112,15 +116,19 @@ function installRawSequenceProbe(rawCalls: RawCallCounts): void {
   mock.module("bun:ffi", () => ({
     ...originalFfi,
     dlopen(...args: Parameters<typeof originalDlopen>) {
+      onOpenAtResolution("loader");
       const library = originalDlopen(...args);
       const nativeOpenAt = (library.symbols as unknown as Readonly<{ openat: OpenAt }>).openat;
       return {
         ...library,
         symbols: {
           ...library.symbols,
-          openat(...openAtArgs: Parameters<OpenAt>): number {
-            rawCalls.openat += 1;
-            return nativeOpenAt(...openAtArgs);
+          get openat(): OpenAt {
+            onOpenAtResolution("symbol");
+            return (...openAtArgs: Parameters<OpenAt>): number => {
+              rawCalls.openat += 1;
+              return nativeOpenAt(...openAtArgs);
+            };
           }
         }
       } as typeof library;
@@ -173,7 +181,9 @@ async function runDefault(): Promise<unknown> {
 async function runSequence(): Promise<unknown> {
   const fixture = await createFixture();
   const rawCalls: RawCallCounts = { open_root: 0, openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 0 };
-  installRawSequenceProbe(rawCalls);
+  const loaderObservations: string[] = [];
+  let mediationActive = false;
+  installRawSequenceProbe(rawCalls, (step) => loaderObservations.push(`${step}:${mediationActive}`));
   try {
     const module = await import("../lib/capabilities");
     const operations: DescriptorOperation[] = [];
@@ -181,14 +191,20 @@ async function runSequence(): Promise<unknown> {
     module.installDescriptorPrimitiveMediator((operation, invoke) => {
       operations.push(operation);
       invocations += 1;
-      return invoke();
+      mediationActive = true;
+      try {
+        return invoke();
+      } finally {
+        mediationActive = false;
+      }
     });
     return {
       ...readFixture(module, fixture),
       operations,
       invocations,
       rawCalls: { ...rawCalls },
-      segments: fixture.segments.length
+      segments: fixture.segments.length,
+      loaderObservations: [...loaderObservations]
     };
   } finally {
     await rm(fixture.root, { recursive: true, force: true });

@@ -1074,7 +1074,7 @@ sites:
 | Operation | Mediated primitive | Outside the window |
 |---|---|---|
 | `open_root` | `openSync` | root/phase validation and descriptor issuance |
-| `openat` | lazy `dlopen`/`openat` call | parent/flags/child validation and issuance |
+| `openat` | already-resolved FFI `openat` callable | parent/flags/child validation, lazy `dlopen`/symbol resolution, and issuance |
 | `fstat_sync` | `fstatSync` | resolution and stat-derived record updates |
 | `read_sync` | `readSync` | phase/state/kind/flag/range validation |
 | `close_sync` | `closeSync` | owner resolution, state invalidation, all hooks/faults, and error precedence |
@@ -1085,11 +1085,15 @@ mediator invokes once and preserves existing #175 behavior. Primitive returns
 and throws retain their existing semantics; caller callbacks never execute
 inside the window.
 
-The #176 handoff expands by this installer and erased signature types only. #176
-uses it to scope its local guard around the exact primitive callback and must
-remove its class import, prototype descriptor changes, and broad global method
-depth. The private registry and `ContractCapabilities` implementation remain
-unavailable. Dependency order is #175 -> #183 -> #176 -> #177 -> #178.
+The #176 handoff expands only by the runtime
+`installDescriptorPrimitiveMediator` export and the type-only
+`DescriptorPrimitiveInvocation = () => unknown` and
+`DescriptorPrimitiveMediator = (operation: DescriptorOperation, invoke:
+DescriptorPrimitiveInvocation) => unknown` exports. #176 uses that installer to
+scope its local guard around the exact primitive callback and must remove its
+class import, prototype descriptor changes, and broad global method depth. The
+private registry and `ContractCapabilities` implementation remain unavailable.
+Dependency order is #175 -> #183 -> #176 -> #177 -> #178.
 
 Issue #183 invariant matrix:
 
@@ -1100,8 +1104,8 @@ Issue #183 invariant matrix:
 | Each valid descriptor operation | The mediator receives the exact canonical operation and one callback-scoped invocation; the raw primitive runs once and its exact result or thrown error wins. | Full retained chain freezes operation order and raw-call counts; sentinel-return and sentinel-error probes prevent mediator substitution. |
 | Omitted, repeated, late, or asynchronous invocation | The attempt returns its stable closed error before any missing or extra raw primitive executes. | Process-isolated zero/one-call counters for omission, repetition, retained invocation, and async mediation. |
 | Invalid descriptor, phase, flags, kind, owner, or range | Existing validation rejects before mediation and before the raw primitive. | Existing descriptor denial and guard-order matrix remains green. |
-| Denial, close-attempt, close-fault, and authority-violation hooks | Caller code never inherits an active primitive invocation; hook-started descriptor work enters a distinct exact mediation callback. | Hook probe records inactive entry at every caller hook and inactive prior state at the nested operation callback, including cleanup failure. |
-| #176 consumer boundary | Only the named installer and erased signature types are added to the frozen handoff; registry state, raw callables, class rewriting, and broad method-depth authority remain unavailable. | Exact module export/restricted-name checks plus the OpenSpec dependency and handoff clauses. |
+| Denial, close-attempt, close-fault, and authority-violation hooks | Hook code enters with no active primitive authority; each eligible raw primitive started by a hook enters a distinct exact mediation callback with inactive prior state. | Hook probes record inactive entry for every named caller hook and inactive prior state at each representative nested-operation callback, including cleanup failure. |
+| #176 consumer boundary | The sole new runtime export is `installDescriptorPrimitiveMediator`; the only new type exports are `DescriptorPrimitiveInvocation` and `DescriptorPrimitiveMediator` with their exact erased signatures. Registry state, raw callables, class rewriting, and broad method-depth authority remain unavailable. | Exact runtime and source export allowlists plus the OpenSpec dependency and import clauses. |
 
 Issue #183 boundary-surface checklist:
 
@@ -1118,7 +1122,9 @@ Issue #183 boundary-surface checklist:
   descriptor structural/runtime/type proofs, and the no-installer path retain
   their prior receipts and vocabulary.
 - Downstream boundary: #176 preload/topology/resource/analyzer work is excluded;
-  it may consume only the installer and erased signature types added here.
+  its only new runtime import is `installDescriptorPrimitiveMediator`, and its
+  only new type imports are `DescriptorPrimitiveInvocation` and
+  `DescriptorPrimitiveMediator`.
 
 
 

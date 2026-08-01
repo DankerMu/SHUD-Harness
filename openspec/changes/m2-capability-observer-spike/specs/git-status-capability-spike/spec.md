@@ -306,19 +306,26 @@ primary-error/cleanup precedence, and zero target bytes.
 - **THEN** its #171 receipt, four-SHA/capacity behavior, cleanup/error precedence, no-side-effect contract, and descriptor baseline remain unchanged on Darwin and Linux Bun 1.2.19
 
 ### Requirement: Descriptor primitive mediation is exact and non-reentrant
-The descriptor capability owner SHALL expose one module-instance, one-shot
-primitive-mediator installer for the downstream authority proof. It MUST NOT
-expose the private registry, raw descriptor records, `ContractCapabilities`,
-raw callables, an authority-enter function, or any getter/reset/uninstall/
+The descriptor capability owner SHALL expose exactly one new runtime export,
+the module-instance one-shot `installDescriptorPrimitiveMediator`, plus exactly
+two new type-only exports:
+`DescriptorPrimitiveInvocation = () => unknown` and
+`DescriptorPrimitiveMediator = (operation: DescriptorOperation, invoke:
+DescriptorPrimitiveInvocation) => unknown`. It MUST NOT expose the private
+registry, raw descriptor records, `ContractCapabilities` internals, raw
+callables, an authority-enter function, or any getter/reset/uninstall/
 replacement path.
 
 The mediator MUST receive the exact `DescriptorOperation` and a synchronous,
-callback-scoped, exactly-once invocation closure only around `openSync`,
-`openat`, `fstatSync`, `readSync`, or `closeSync`. Omitted, repeated, or late
-invocation MUST fail closed. Validation, lifecycle transitions, denial
-callbacks, close-attempt hooks, injected close faults, and authority-violation
-hooks MUST execute outside the mediation window. With no installed mediator,
-all existing descriptor behavior and public receipts MUST remain unchanged.
+callback-scoped, exactly-once invocation closure only around `openSync`, an
+already-resolved FFI `openat` callable, `fstatSync`, `readSync`, or `closeSync`.
+Lazy loader and symbol resolution MUST complete outside the mediation callback.
+Omitted, repeated, or late invocation MUST fail closed. Validation, lifecycle
+transitions, denial callbacks, close-attempt hooks, injected close faults, and
+authority-violation hooks MUST enter with no active primitive invocation. Any
+eligible raw primitive started by a hook MUST enter its own exact mediation
+callback with inactive prior state. With no installed mediator, all existing
+descriptor behavior and public receipts MUST remain unchanged.
 
 #### Scenario: Exact primitive calls are mediated once
 - **WHEN** a process installs the mediator and exercises each valid descriptor operation
@@ -329,12 +336,12 @@ all existing descriptor behavior and public receipts MUST remain unchanged.
 - **THEN** the attempt fails with its stable closed error before an extra raw primitive executes
 
 #### Scenario: Caller hooks never inherit primitive authority
-- **WHEN** denial, close-attempt, injected close-fault, or authority-violation hooks run before or after a mediated operation
-- **THEN** the mediation window is inactive for the full hook body and any operation it starts
+- **WHEN** denial, close-attempt, injected close-fault, or authority-violation hooks run before or after a mediated operation, including a hook that starts descriptor work
+- **THEN** every hook enters with mediation inactive, and each eligible raw primitive it starts enters a distinct exact callback-scoped mediation window with inactive prior state
 
 #### Scenario: Downstream handoff remains narrow
 - **WHEN** #176 imports from `contracts/lib/capabilities.ts`
-- **THEN** only the prior opaque handle/state/operation/event/policy exports plus `installDescriptorPrimitiveMediator` and its erased signature types are permitted; the class, registry, raw callables, and lifecycle implementation remain private
+- **THEN** its only new runtime import is `installDescriptorPrimitiveMediator`, its only new type imports are `DescriptorPrimitiveInvocation` and `DescriptorPrimitiveMediator` with the exact signatures above, and the class internals, registry, raw callables, and lifecycle implementation remain private
 
 
 

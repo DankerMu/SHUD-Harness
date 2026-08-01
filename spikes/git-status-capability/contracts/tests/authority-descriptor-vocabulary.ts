@@ -329,13 +329,59 @@ function hasOnlyRawReadDescriptorOperand(classDeclaration: ts.ClassDeclaration |
 }
 
 function hasOnlyOpenAtParentOperand(classDeclaration: ts.ClassDeclaration | undefined): boolean {
+  const openRelative = classMethod(classDeclaration, "openRelative");
+  if (!openRelative) return false;
+
+  const resolutions: ts.VariableDeclaration[] = [];
+  visitMethodNodes(openRelative, (node) => {
+    if (
+      !ts.isVariableDeclaration(node) ||
+      !ts.isIdentifier(node.name) ||
+      !node.initializer ||
+      !ts.isCallExpression(node.initializer) ||
+      !isIdentifierNamed(node.initializer.expression, "openAt") ||
+      node.initializer.arguments.length !== 0
+    ) {
+      return;
+    }
+    resolutions.push(node);
+  });
+  if (resolutions.length !== 1) return false;
+
+  const resolution = resolutions[0]!;
+  if (!ts.isIdentifier(resolution.name)) return false;
+  const binding = resolution.name.text;
+  const mediators = callExpressionsInMethod(
+    openRelative,
+    (call) =>
+      isIdentifierNamed(call.expression, "invokeDescriptorPrimitive") &&
+      call.arguments.length === 2 &&
+      ts.isStringLiteral(call.arguments[0]) &&
+      call.arguments[0].text === "openat" &&
+      ts.isArrowFunction(call.arguments[1])
+  );
+  if (mediators.length !== 1) return false;
+
+  const callback = mediators[0]!.arguments[1]!;
+  if (!ts.isArrowFunction(callback) || resolution.pos >= callback.pos) return false;
   const calls = callExpressionsInClass(
     classDeclaration,
-    (call) => ts.isCallExpression(call.expression) &&
-      isIdentifierNamed(call.expression.expression, "openAt") &&
-      call.expression.arguments.length === 0
+    (call) =>
+      isIdentifierNamed(call.expression, binding) ||
+      (ts.isCallExpression(call.expression) &&
+        isIdentifierNamed(call.expression.expression, "openAt") &&
+        call.expression.arguments.length === 0)
   );
-  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "parentRecord", "fd");
+  const callbackCalls = calls.filter(
+    (call) =>
+      isIdentifierNamed(call.expression, binding) &&
+      call.pos >= callback.body.pos &&
+      call.end <= callback.body.end
+  );
+  return calls.length === 1 &&
+    callbackCalls.length === 1 &&
+    calls[0] === callbackCalls[0] &&
+    isPropertyAccessNamed(calls[0]!.arguments[0], "parentRecord", "fd");
 }
 
 function hasOnlyRawFstatDescriptorOperand(classDeclaration: ts.ClassDeclaration | undefined): boolean {
