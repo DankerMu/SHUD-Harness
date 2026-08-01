@@ -1,0 +1,17 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "files": [
+    "tests/authority-preload.ts",
+    "tests/authority-topology-ast.ts",
+    "tests/authority-topology-preload.ts",
+    "tests/authority-topology-round-one.ts",
+    "tests/authority-topology-control.ts",
+    "tests/authority-topology.ts",
+    "tests/authority-structural.test.ts",
+    "tests/authority-runtime.test.ts",
+    "tests/authority-typeproof.test.ts"
+  ]
+}

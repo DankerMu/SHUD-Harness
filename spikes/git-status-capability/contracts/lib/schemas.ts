@@ -59,7 +59,8 @@ function commandReceipt(value: unknown, sourceSha: string): boolean {
   const canonicalRecordPath = typeof recordPath === "string" && recordPath.startsWith("/") && !recordPath.includes("\0") &&
     !recordPath.includes("\\") && recordPath.split("/").slice(1).every((part) => part && part !== "." && part !== "..") &&
     recordPath.endsWith("/source-input-record.json");
-  return value.argv.length === 15 && expected.every((item, index) => value.argv[index] === item) && canonicalRecordPath &&
+  return value.argv.length === 15 &&
+    expected.every((item, index) => Array.isArray(value.argv) && value.argv[index] === item) && canonicalRecordPath &&
     value.argv[14] === "--create" && value.version === "1" && value.exit_code === 0;
 }
 
