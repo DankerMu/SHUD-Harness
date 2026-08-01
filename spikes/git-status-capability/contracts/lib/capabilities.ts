@@ -191,6 +191,8 @@ function mediatorReturnedThenable(value: unknown): boolean {
   }
 }
 
+type DescriptorPrimitiveOutcome = "uninvoked" | "invoking" | "returned" | "threw";
+
 function invokeDescriptorPrimitive<Result>(
   operation: DescriptorOperation,
   primitive: () => Result
@@ -200,26 +202,25 @@ function invokeDescriptorPrimitive<Result>(
   assertDescriptorPrimitiveMediationInactive();
 
   let invocationActive = true;
-  let invoked = false;
+  const rawOutcome = { value: "uninvoked" as DescriptorPrimitiveOutcome };
   let primitiveResult!: Result;
-  let primitiveThrew = false;
   let primitiveError: unknown;
   let repeatedError: Error | undefined;
   const invoke: DescriptorPrimitiveInvocation = () => {
     if (!invocationActive) {
       throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.expiredInvocation);
     }
-    if (invoked) {
+    if (rawOutcome.value !== "uninvoked") {
       repeatedError ??= new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.repeatedInvocation);
       throw repeatedError;
     }
-    invoked = true;
+    rawOutcome.value = "invoking";
     try {
       primitiveResult = primitive();
+      rawOutcome.value = "returned";
     } catch (error) {
-      primitiveThrew = true;
       primitiveError = error;
-      throw error;
+      rawOutcome.value = "threw";
     }
     return undefined;
   };
@@ -239,16 +240,17 @@ function invokeDescriptorPrimitive<Result>(
     invocationActive = false;
   }
 
+  const completedRawOutcome: DescriptorPrimitiveOutcome = rawOutcome.value;
   try {
-    if (!mediatorThrew && !invoked) mediatorReturnedAsync = mediatorReturnedThenable(mediatorResult);
+    if (!mediatorThrew && completedRawOutcome === "uninvoked") {
+      mediatorReturnedAsync = mediatorReturnedThenable(mediatorResult);
+    }
   } finally {
     descriptorPrimitiveMediationState = "inactive";
   }
 
-  if (invoked) {
-    if (primitiveThrew) throw primitiveError;
-    return primitiveResult;
-  }
+  if (completedRawOutcome === "returned") return primitiveResult;
+  if (completedRawOutcome === "threw") throw primitiveError;
   if (mediatorReturnedAsync) {
     throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.asyncMediator);
   }

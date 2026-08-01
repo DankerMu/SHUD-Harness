@@ -2,18 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import {
+  CALLBACK_ESCAPE_MUTATIONS,
   capabilitiesSourcePath,
+  expectedRawOwnershipDenial,
+  RAW_ALIAS_MUTATIONS,
   structuralDescriptorDenials,
   withCompiledProductionTree,
   type ProductionMutation
 } from "./authority-descriptor-vocabulary";
 
-const EXPECTED_STRUCTURAL_DENIAL: Readonly<Record<ProductionMutation, readonly string[]>> = Object.freeze({
+const EXPECTED_STRUCTURAL_DENIAL: Readonly<Partial<Record<ProductionMutation, readonly string[]>>> = Object.freeze({
   fd0: ["raw_read_descriptor_not_handle"],
   at_fdcwd: ["openat_parent_not_handle"],
   fstat0: ["raw_fstat_descriptor_not_handle"],
   close0: ["raw_close_descriptor_not_handle"],
-  before_deny_fstat: ["raw_read_descriptor_not_handle", "raw_fstat_descriptor_not_handle"],
+  before_deny_fstat: ["raw_fstat_descriptor_not_handle", "raw_read_descriptor_not_handle"],
   raw_descriptor: ["raw_descriptor_operation_shape"],
   foreign_descriptor: ["foreign_descriptor_shape"],
   stale_descriptor: ["stale_descriptor_shape"],
@@ -202,30 +205,6 @@ function installerSurfaceDenials(source: string): readonly InstallerSurfaceDenia
   return denials;
 }
 
-function rawOpenSyncDenials(source: string): readonly string[] {
-  const sourceFile = ts.createSourceFile(
-    "capabilities.ts",
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS
-  );
-  const calls: ts.CallExpression[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "openSync") {
-      calls.push(node);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  const onlyRootOpen = calls.length === 1 &&
-    calls[0]!.arguments.length === 2 &&
-    ts.isIdentifier(calls[0]!.arguments[0]) &&
-    calls[0]!.arguments[0].text === "root" &&
-    ts.isIdentifier(calls[0]!.arguments[1]) &&
-    calls[0]!.arguments[1].text === "DIRECTORY_OPEN_FLAGS";
-  return onlyRootOpen ? [] : ["open_sync_call_surface"];
-}
 
 type InvocationSurfaceDenial = "invocation_not_frozen" | "invocation_property_surface";
 
@@ -391,16 +370,16 @@ installDescriptorPrimitiveMediator.rawResult = undefined;
     expect(invocationSurfaceDenials(missingFreezeMutation)).toEqual(["invocation_not_frozen"]);
   });
 
-  test("every openSync call has the one exact root argument tuple, including a non-root mutation", async () => {
+  test("the lexical raw ownership model rejects a non-root openSync call", async () => {
     const source = await readFile(capabilitiesSourcePath, "utf8");
-    expect(rawOpenSyncDenials(source)).toEqual([]);
+    expect(structuralDescriptorDenials(source)).toEqual([]);
     const mutated = replaceSourceAnchor(
       source,
       '    const descriptor = invokeDescriptorPrimitive("open_root", () => openSync(root, DIRECTORY_OPEN_FLAGS));',
       '    openSync("/dev/null", FILE_OPEN_FLAGS);\n' +
         '    const descriptor = invokeDescriptorPrimitive("open_root", () => openSync(root, DIRECTORY_OPEN_FLAGS));'
     );
-    expect(rawOpenSyncDenials(mutated)).toEqual(["open_sync_call_surface"]);
+    expect(structuralDescriptorDenials(mutated)).toContain("raw_open_root_not_handle");
   });
 
   test("structural-only oracle rejects the exact ambient mutations and every descriptor vocabulary bypass", async () => {
@@ -409,6 +388,15 @@ installDescriptorPrimitiveMediator.rawResult = undefined;
     >) {
       await withCompiledProductionTree(mutation, async (tree) => {
         expect(structuralDescriptorDenials(await readFile(tree.capabilitiesPath, "utf8"))).toEqual(expected);
+      });
+    }
+  });
+
+  test("binding-aware raw ownership rejects every alias family and every escaped Node primitive callback", async () => {
+    for (const mutation of [...RAW_ALIAS_MUTATIONS, ...CALLBACK_ESCAPE_MUTATIONS]) {
+      await withCompiledProductionTree(mutation, async (tree) => {
+        const denials = structuralDescriptorDenials(await readFile(tree.capabilitiesPath, "utf8"));
+        expect(denials).toContain(expectedRawOwnershipDenial(mutation));
       });
     }
   });
@@ -628,9 +616,9 @@ const structuralDescriptorCounterfeit = [
 ].join(" ");
 `;
     expect(structuralDescriptorDenials(sourceWithCounterfeitText)).toEqual([
-      "raw_read_descriptor_not_handle",
       "openat_parent_not_handle",
       "raw_fstat_descriptor_not_handle",
+      "raw_read_descriptor_not_handle",
       "raw_close_descriptor_not_handle",
       "raw_descriptor_operation_shape",
       "foreign_descriptor_shape",

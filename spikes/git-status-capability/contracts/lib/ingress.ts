@@ -45,6 +45,31 @@ export type DescriptorIngressHooks = Readonly<{
 const RETRYABLE_NO_RAW_CLOSE_ERROR_NAME = "ContractCapabilityNoRawCloseError";
 const NO_RAW_CLOSE_RETRY_LIMIT = 2;
 
+type UnsettledNoRawCloseOwner = Readonly<{
+  capabilities: ContractCapabilities;
+  descriptor: CapabilityDescriptor;
+  owner: CloseOwner;
+}>;
+
+const unsettledNoRawCloseOwners = new Map<CapabilityDescriptor, UnsettledNoRawCloseOwner>();
+let descriptorIngressPoisoned = false;
+
+function assertDescriptorIngressAvailable(): void {
+  if (descriptorIngressPoisoned) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+}
+
+function retainUnsettledNoRawCloseOwner(
+  capabilities: ContractCapabilities,
+  descriptor: CapabilityDescriptor,
+  owner: CloseOwner
+): void {
+  unsettledNoRawCloseOwners.set(
+    descriptor,
+    Object.freeze({ capabilities, descriptor, owner })
+  );
+  descriptorIngressPoisoned = true;
+}
+
 function createIngressCapabilities(hooks: DescriptorIngressHooks): ContractCapabilities {
   return new ContractCapabilities(hooks);
 }
@@ -68,6 +93,7 @@ function closeWithRetry(
       if (!isRetryableNoRawClose(error)) return true;
     }
   }
+  retainUnsettledNoRawCloseOwner(capabilities, descriptor, owner);
   return true;
 }
 
@@ -391,6 +417,7 @@ export async function readBoundedFile(
   hooks: DescriptorIngressHooks = {},
   beforeCleanup?: (bytes: Uint8Array) => void
 ): Promise<Uint8Array> {
+  assertDescriptorIngressAvailable();
   const capabilities = createIngressCapabilities(hooks);
   let admission: DescriptorAdmission | undefined;
   let primary: ContractError | undefined;

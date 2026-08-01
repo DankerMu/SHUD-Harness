@@ -332,8 +332,9 @@ already-resolved FFI `openat` callable, `fstatSync`, `readSync`, or `closeSync`.
 Lazy loader and symbol resolution MUST complete outside the mediation callback.
 The callback closure starts at most one raw primitive synchronously, saves its
 exact result or thrown error for the descriptor owner, and returns `undefined`
-to mediator code; raw numeric fds, stats, byte counts, and every other raw
-result MUST remain private.
+to mediator code. It MUST NOT throw the saved raw error to the mediator or
+expose any raw numeric fd, stat, byte count, other raw result, thrown object,
+or raw-error metadata.
 
 The module SHALL maintain one shared `inactive|callback` mediation state. While
 the mediator callback owns the `callback` state, every public
@@ -377,9 +378,15 @@ retry exactly the `no raw close started` outcome through the mediator, with a
 fixed bound of two total attempts. They MUST NOT retry a
 raw-terminal outcome, invoke an unmediated fallback, or loop indefinitely. A
 transient omission, pre-invocation throw, thenable, or deferred use MUST settle
-once on retry without descriptor growth; persistent refusal MUST terminate at
-the bound, preserving any primary error and otherwise returning the existing
-explicit cleanup failure.
+once on retry without descriptor growth. After the second persistent no-raw
+refusal, the module instance MUST retain strong private
+capabilities/descriptor/owner pairs for every still-live unsettled close and
+poison ingress; the first chain may finish its finite cleanup, but every later
+`readBoundedFile` or checker admission MUST fail with the existing
+`CONTRACT_SCHEMA_INVALID` receipt before `openRoot` or any OS-fd allocation.
+The retained owner set MUST NOT grow after poison. Persistent refusal therefore
+preserves any primary error and otherwise returns the existing explicit cleanup
+failure.
 
 Denial, close-attempt, close-fault, authority-violation, `afterAdmission`,
 `observe`, and `beforeCleanup` callbacks MUST enter with no active primitive

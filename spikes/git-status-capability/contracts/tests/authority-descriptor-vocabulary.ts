@@ -2,21 +2,38 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
+import { rawPrimitiveOwnershipDenials } from "./authority-descriptor-ownership";
 
 export const contractsRoot = join(import.meta.dir, "..");
 export const capabilitiesSourcePath = join(contractsRoot, "lib", "capabilities.ts");
 export const checkSourcePath = join(contractsRoot, "check.ts");
 
-type StructuralDenial =
-  | "raw_read_descriptor_not_handle"
+type RawPrimitiveOwnershipDenial =
+  | "raw_open_root_not_handle"
   | "openat_parent_not_handle"
   | "raw_fstat_descriptor_not_handle"
-  | "raw_close_descriptor_not_handle"
+  | "raw_read_descriptor_not_handle"
+  | "raw_close_descriptor_not_handle";
+type StructuralDenial =
+  | RawPrimitiveOwnershipDenial
   | "raw_descriptor_operation_shape"
   | "foreign_descriptor_shape"
   | "stale_descriptor_shape"
   | "flags_invalid_shape"
   | "owner_mismatch_shape";
+type RawPrimitiveMutationTarget = "open_sync" | "openat" | "fstat_sync" | "read_sync" | "close_sync";
+type RawAliasFamily =
+  | "identifier"
+  | "object_destructure"
+  | "array_destructure"
+  | "renamed_property"
+  | "property_projection"
+  | "assignment"
+  | "bind"
+  | "wrapper"
+  | "nested_function";
+type RawAliasMutation = `raw_${RawPrimitiveMutationTarget}_${RawAliasFamily}_alias`;
+type CallbackEscapeMutation = `raw_${Exclude<RawPrimitiveMutationTarget, "openat">}_outside_callback`;
 export type ProductionMutation =
   | "fd0"
   | "at_fdcwd"
@@ -31,7 +48,9 @@ export type ProductionMutation =
   | "destructured_helper_shadow"
   | "aliased_openat_call"
   | "wrong_openat_argument"
-  | "wrong_openat_flags";
+  | "wrong_openat_flags"
+  | RawAliasMutation
+  | CallbackEscapeMutation;
 export type GuardOrderMutation = "guard_open_root" | "guard_open_relative" | "guard_read_retained";
 export type AuditIdentityMutation = "deny_record_zero" | "deny_record_fd_plus_one";
 type CapabilityMutation = ProductionMutation | GuardOrderMutation | AuditIdentityMutation;
@@ -42,9 +61,10 @@ export type MutatedProductionTree = Readonly<{
 }>;
 
 const STRUCTURAL_DENIAL_ORDER: readonly StructuralDenial[] = [
-  "raw_read_descriptor_not_handle",
+  "raw_open_root_not_handle",
   "openat_parent_not_handle",
   "raw_fstat_descriptor_not_handle",
+  "raw_read_descriptor_not_handle",
   "raw_close_descriptor_not_handle",
   "raw_descriptor_operation_shape",
   "foreign_descriptor_shape",
@@ -52,6 +72,210 @@ const STRUCTURAL_DENIAL_ORDER: readonly StructuralDenial[] = [
   "flags_invalid_shape",
   "owner_mismatch_shape"
 ];
+
+const RAW_PRIMITIVE_MUTATION_TARGETS = [
+  "open_sync",
+  "openat",
+  "fstat_sync",
+  "read_sync",
+  "close_sync"
+] as const satisfies readonly RawPrimitiveMutationTarget[];
+const RAW_ALIAS_FAMILIES = [
+  "identifier",
+  "object_destructure",
+  "array_destructure",
+  "renamed_property",
+  "property_projection",
+  "assignment",
+  "bind",
+  "wrapper",
+  "nested_function"
+] as const satisfies readonly RawAliasFamily[];
+const RAW_OWNERSHIP_DENIAL_BY_TARGET: Readonly<Record<RawPrimitiveMutationTarget, RawPrimitiveOwnershipDenial>> = Object.freeze({
+  open_sync: "raw_open_root_not_handle",
+  openat: "openat_parent_not_handle",
+  fstat_sync: "raw_fstat_descriptor_not_handle",
+  read_sync: "raw_read_descriptor_not_handle",
+  close_sync: "raw_close_descriptor_not_handle"
+});
+
+export const RAW_ALIAS_MUTATIONS: readonly RawAliasMutation[] = Object.freeze(
+  RAW_PRIMITIVE_MUTATION_TARGETS.flatMap((target) =>
+    RAW_ALIAS_FAMILIES.map((family) => `raw_${target}_${family}_alias` as RawAliasMutation)
+  )
+);
+export const CALLBACK_ESCAPE_MUTATIONS: readonly CallbackEscapeMutation[] = Object.freeze([
+  "raw_open_sync_outside_callback",
+  "raw_fstat_sync_outside_callback",
+  "raw_read_sync_outside_callback",
+  "raw_close_sync_outside_callback"
+]);
+
+type RawMutationSite = Readonly<{
+  anchor: string;
+  indent: string;
+  primitive: string;
+  arguments: string;
+  guard: string;
+}>;
+
+const RAW_MUTATION_SITE_BY_TARGET: Readonly<Record<RawPrimitiveMutationTarget, RawMutationSite>> = Object.freeze({
+  open_sync: {
+    anchor: '    const descriptor = invokeDescriptorPrimitive("open_root", () => openSync(root, DIRECTORY_OPEN_FLAGS));',
+    indent: "    ",
+    primitive: "openSync",
+    arguments: "root, DIRECTORY_OPEN_FLAGS",
+    guard: 'root === "__structural_alias__"'
+  },
+  openat: {
+    anchor: "    const descriptor = invokeDescriptorPrimitive(\n" +
+      '      "openat",\n' +
+      "      () => openAtPrimitive(parentRecord.fd, childPath, flags)\n" +
+      "    );",
+    indent: "    ",
+    primitive: "openAtPrimitive",
+    arguments: "parentRecord.fd, childPath, flags",
+    guard: 'childName === "__structural_alias__"'
+  },
+  fstat_sync: {
+    anchor: '    const stats = invokeDescriptorPrimitive("fstat_sync", () => fstatSync(record.fd, { bigint: true }));',
+    indent: "    ",
+    primitive: "fstatSync",
+    arguments: "record.fd, { bigint: true }",
+    guard: "record.fd === -424242"
+  },
+  read_sync: {
+    anchor: "    return invokeDescriptorPrimitive(\"read_sync\", () => readSync(record.fd, buffer, offset, length, position));",
+    indent: "    ",
+    primitive: "readSync",
+    arguments: "record.fd, buffer, offset, length, position",
+    guard: "position === 424242"
+  },
+  close_sync: {
+    anchor: "      invokeDescriptorPrimitive(\"close_sync\", () => {\n" +
+      "        rawCloseAttempted = true;\n" +
+      "        closeSync(record.fd);\n" +
+      "      });",
+    indent: "      ",
+    primitive: "closeSync",
+    arguments: "record.fd",
+    guard: "record.fd === -424242"
+  }
+});
+
+function rawAliasMutationParts(
+  mutation: CapabilityMutation
+): Readonly<{ target: RawPrimitiveMutationTarget; family: RawAliasFamily }> | undefined {
+  for (const target of RAW_PRIMITIVE_MUTATION_TARGETS) {
+    for (const family of RAW_ALIAS_FAMILIES) {
+      if (mutation === `raw_${target}_${family}_alias`) return Object.freeze({ target, family });
+    }
+  }
+  return undefined;
+}
+
+function callbackEscapeTarget(mutation: CapabilityMutation): Exclude<RawPrimitiveMutationTarget, "openat"> | undefined {
+  for (const target of ["open_sync", "fstat_sync", "read_sync", "close_sync"] as const) {
+    if (mutation === `raw_${target}_outside_callback`) return target;
+  }
+  return undefined;
+}
+
+export function expectedRawOwnershipDenial(
+  mutation: RawAliasMutation | CallbackEscapeMutation
+): RawPrimitiveOwnershipDenial {
+  const alias = rawAliasMutationParts(mutation);
+  if (alias) return RAW_OWNERSHIP_DENIAL_BY_TARGET[alias.target];
+  const target = callbackEscapeTarget(mutation);
+  if (!target) throw new Error(`unknown raw ownership mutation: ${mutation}`);
+  return RAW_OWNERSHIP_DENIAL_BY_TARGET[target];
+}
+
+function rawAliasMutationSource(site: RawMutationSite, family: RawAliasFamily): string {
+  const call = `rawAlias(${site.arguments});`;
+  const guardedCall = `${site.indent}if (${site.guard}) ${call}\n`;
+  if (family === "identifier") {
+    return `${site.indent}const rawAlias = ${site.primitive};\n${guardedCall}`;
+  }
+  if (family === "object_destructure") {
+    return `${site.indent}const { rawAlias } = { rawAlias: ${site.primitive} };\n${guardedCall}`;
+  }
+  if (family === "array_destructure") {
+    return `${site.indent}const [rawAlias] = [${site.primitive}];\n${guardedCall}`;
+  }
+  if (family === "renamed_property") {
+    return `${site.indent}const { rawPrimitive: rawAlias } = { rawPrimitive: ${site.primitive} };\n${guardedCall}`;
+  }
+  if (family === "property_projection") {
+    return `${site.indent}const rawAlias = ({ rawPrimitive: ${site.primitive} }).rawPrimitive;\n${guardedCall}`;
+  }
+  if (family === "assignment") {
+    return `${site.indent}let rawAlias: typeof ${site.primitive};\n` +
+      `${site.indent}rawAlias = ${site.primitive};\n${guardedCall}`;
+  }
+  if (family === "bind") {
+    return `${site.indent}const rawAlias = ${site.primitive}.bind(undefined);\n${guardedCall}`;
+  }
+  if (family === "wrapper") {
+    return `${site.indent}const rawAlias = (): void => { ${site.primitive}(${site.arguments}); };\n` +
+      `${site.indent}if (${site.guard}) rawAlias();\n`;
+  }
+  return `${site.indent}function rawAlias(): void { ${site.primitive}(${site.arguments}); }\n` +
+    `${site.indent}if (${site.guard}) rawAlias();\n`;
+}
+
+function mutateRawAlias(source: string, mutation: CapabilityMutation): string | undefined {
+  const parts = rawAliasMutationParts(mutation);
+  if (!parts) return undefined;
+  const site = RAW_MUTATION_SITE_BY_TARGET[parts.target];
+  if (!source.includes(site.anchor)) throw new Error(`raw alias mutation anchor is absent: ${mutation}`);
+  return source.replace(site.anchor, `${rawAliasMutationSource(site, parts.family)}${site.anchor}`);
+}
+
+function mutateCallbackEscape(source: string, mutation: CapabilityMutation): string | undefined {
+  const target = callbackEscapeTarget(mutation);
+  if (!target) return undefined;
+  if (target === "open_sync") {
+    return replaceRawCall(
+      source,
+      ['    const descriptor = invokeDescriptorPrimitive("open_root", () => openSync(root, DIRECTORY_OPEN_FLAGS));'],
+      '    invokeDescriptorPrimitive("open_root", () => undefined);\n' +
+        "    const descriptor = openSync(root, DIRECTORY_OPEN_FLAGS);",
+      mutation
+    );
+  }
+  if (target === "fstat_sync") {
+    return replaceRawCall(
+      source,
+      ['    const stats = invokeDescriptorPrimitive("fstat_sync", () => fstatSync(record.fd, { bigint: true }));'],
+      '    invokeDescriptorPrimitive("fstat_sync", () => undefined);\n' +
+        "    const stats = fstatSync(record.fd, { bigint: true });",
+      mutation
+    );
+  }
+  if (target === "read_sync") {
+    return replaceRawCall(
+      source,
+      ['    return invokeDescriptorPrimitive("read_sync", () => readSync(record.fd, buffer, offset, length, position));'],
+      '    invokeDescriptorPrimitive("read_sync", () => undefined);\n' +
+        "    return readSync(record.fd, buffer, offset, length, position);",
+      mutation
+    );
+  }
+  return replaceRawCall(
+    source,
+    [
+      "      invokeDescriptorPrimitive(\"close_sync\", () => {\n" +
+        "        rawCloseAttempted = true;\n" +
+        "        closeSync(record.fd);\n" +
+        "      });"
+    ],
+    '      invokeDescriptorPrimitive("close_sync", () => undefined);\n' +
+      "      rawCloseAttempted = true;\n" +
+      "      closeSync(record.fd);",
+    mutation
+  );
+}
 
 function replaceRawCall(
   source: string,
@@ -66,6 +290,10 @@ function replaceRawCall(
 
 function mutateCapabilitiesSource(source: string, mutation: CapabilityMutation | undefined): string {
   if (!mutation) return source;
+  const aliasMutation = mutateRawAlias(source, mutation);
+  if (aliasMutation) return aliasMutation;
+  const callbackEscape = mutateCallbackEscape(source, mutation);
+  if (callbackEscape) return callbackEscape;
   const readAnchors = [
     "readSync(record.fd, buffer, offset, length, position)",
     "readSync(descriptor.fd, buffer, offset, length, position)"
@@ -298,114 +526,6 @@ function classMethod(
   return methods.length === 1 ? methods[0] : undefined;
 }
 
-type LexicalBinding = Readonly<{ declaration: ts.Declaration; scope: ts.Node }>;
-
-function topLevelFunction(sourceFile: ts.SourceFile, name: string): ts.FunctionDeclaration | undefined {
-  const declarations = sourceFile.statements.filter(
-    (statement): statement is ts.FunctionDeclaration =>
-      ts.isFunctionDeclaration(statement) && isIdentifierNamed(statement.name, name)
-  );
-  return declarations.length === 1 ? declarations[0] : undefined;
-}
-
-function lexicalBindingScope(declaration: ts.Declaration): ts.Node | undefined {
-  let current: ts.Node | undefined = declaration.parent;
-  while (current) {
-    if (
-      ts.isFunctionLike(current) ||
-      ts.isBlock(current) ||
-      ts.isSourceFile(current) ||
-      ts.isForStatement(current) ||
-      ts.isForInStatement(current) ||
-      ts.isForOfStatement(current) ||
-      ts.isCatchClause(current)
-    ) {
-      return current;
-    }
-    current = current.parent;
-  }
-  return undefined;
-}
-
-function bindingNameIdentifiers(bindingName: ts.BindingName): readonly ts.Identifier[] {
-  if (ts.isIdentifier(bindingName)) return [bindingName];
-  const identifiers: ts.Identifier[] = [];
-  const visit = (name: ts.BindingName): void => {
-    if (ts.isIdentifier(name)) {
-      identifiers.push(name);
-      return;
-    }
-    for (const element of name.elements) {
-      if (ts.isOmittedExpression(element)) continue;
-      visit(element.name);
-    }
-  };
-  visit(bindingName);
-  return identifiers;
-}
-
-function namedLocalBindings(sourceFile: ts.SourceFile, name: string): readonly LexicalBinding[] {
-  const bindings: LexicalBinding[] = [];
-  const record = (declaration: ts.Declaration & { name?: ts.DeclarationName }): void => {
-    const bindingName = declaration.name;
-    if (
-      !bindingName ||
-      (!ts.isIdentifier(bindingName) && !ts.isObjectBindingPattern(bindingName) && !ts.isArrayBindingPattern(bindingName))
-    ) {
-      return;
-    }
-    if (!bindingNameIdentifiers(bindingName).some((identifier) => identifier.text === name)) return;
-    const scope = lexicalBindingScope(declaration);
-    if (scope && !ts.isSourceFile(scope)) bindings.push({ declaration, scope });
-  };
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isVariableDeclaration(node) ||
-      ts.isParameter(node) ||
-      ts.isFunctionDeclaration(node) ||
-      ts.isClassDeclaration(node) ||
-      ts.isImportSpecifier(node) ||
-      ts.isNamespaceImport(node) ||
-      ts.isImportClause(node)
-    ) {
-      record(node);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  return bindings;
-}
-
-function scopeContains(scope: ts.Node, node: ts.Node): boolean {
-  return scope.pos <= node.pos && node.end <= scope.end;
-}
-
-function referencesTopLevelFunction(
-  identifier: ts.Node | undefined,
-  sourceFile: ts.SourceFile,
-  name: string
-): boolean {
-  if (!identifier || !isIdentifierNamed(identifier, name) || !topLevelFunction(sourceFile, name)) return false;
-  return namedLocalBindings(sourceFile, name).every((binding) => !scopeContains(binding.scope, identifier));
-}
-
-function referencesLocalBinding(
-  identifier: ts.Node | undefined,
-  sourceFile: ts.SourceFile,
-  declaration: ts.VariableDeclaration
-): boolean {
-  if (
-    !identifier ||
-    !ts.isIdentifier(declaration.name) ||
-    !isIdentifierNamed(identifier, declaration.name.text)
-  ) {
-    return false;
-  }
-  const containingBindings = namedLocalBindings(sourceFile, declaration.name.text).filter(
-    (binding) => scopeContains(binding.scope, identifier)
-  );
-  return containingBindings.length === 1 && containingBindings[0]!.declaration === declaration;
-}
 
 function hasNamedParameter(
   method: ts.MethodDeclaration | undefined,
@@ -424,25 +544,20 @@ function hasNamedParameter(
 
 function visitMethodNodes(
   method: ts.MethodDeclaration,
-  sourceFile: ts.SourceFile,
+  _sourceFile: ts.SourceFile,
   visitor: (node: ts.Node) => void
 ): void {
   if (!method.body) return;
-  const visit = (node: ts.Node, parent: ts.Node | undefined): void => {
+  const visit = (node: ts.Node): void => {
     if (node !== method.body && (
       ts.isFunctionLike(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node)
     )) {
-      const mediatedPrimitiveCallback = ts.isArrowFunction(node) &&
-        ts.isCallExpression(parent) &&
-        referencesTopLevelFunction(parent.expression, sourceFile, "invokeDescriptorPrimitive") &&
-        parent.arguments.length === 2 &&
-        parent.arguments[1] === node;
-      if (!mediatedPrimitiveCallback) return;
+      return;
     }
     visitor(node);
-    ts.forEachChild(node, (child) => visit(child, node));
+    ts.forEachChild(node, visit);
   };
-  visit(method.body, undefined);
+  visit(method.body);
 }
 
 function callExpressionsInMethod(
@@ -458,19 +573,6 @@ function callExpressionsInMethod(
   return calls;
 }
 
-function callExpressionsInClass(
-  classDeclaration: ts.ClassDeclaration | undefined,
-  sourceFile: ts.SourceFile,
-  predicate: (call: ts.CallExpression) => boolean
-): readonly ts.CallExpression[] {
-  if (!classDeclaration) return [];
-  const calls: ts.CallExpression[] = [];
-  for (const member of classDeclaration.members) {
-    if (!ts.isMethodDeclaration(member)) continue;
-    calls.push(...callExpressionsInMethod(member, sourceFile, predicate));
-  }
-  return calls;
-}
 
 function binaryExpressionsInMethod(
   method: ts.MethodDeclaration | undefined,
@@ -493,280 +595,6 @@ function isPropertyAccessNamed(node: ts.Node | undefined, receiverName: string, 
   );
 }
 
-function hasOnlyRawReadDescriptorOperand(
-  classDeclaration: ts.ClassDeclaration | undefined,
-  sourceFile: ts.SourceFile
-): boolean {
-  const calls = callExpressionsInClass(
-    classDeclaration,
-    sourceFile,
-    (call) => isIdentifierNamed(call.expression, "readSync")
-  );
-  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "record", "fd");
-}
-
-function allCallExpressions(
-  node: ts.Node,
-  predicate: (call: ts.CallExpression) => boolean
-): readonly ts.CallExpression[] {
-  const calls: ts.CallExpression[] = [];
-  const visit = (current: ts.Node): void => {
-    if (ts.isCallExpression(current) && predicate(current)) calls.push(current);
-    ts.forEachChild(current, visit);
-  };
-  visit(node);
-  return calls;
-}
-
-function variableDeclarations(node: ts.Node): readonly ts.VariableDeclaration[] {
-  const declarations: ts.VariableDeclaration[] = [];
-  const visit = (current: ts.Node): void => {
-    if (ts.isVariableDeclaration(current)) declarations.push(current);
-    ts.forEachChild(current, visit);
-  };
-  visit(node);
-  return declarations;
-}
-
-function hasNoTopLevelFunctionAliases(sourceFile: ts.SourceFile, name: string): boolean {
-  return variableDeclarations(sourceFile).every(
-    (declaration) =>
-      !ts.isIdentifier(declaration.name) ||
-      !declaration.initializer ||
-      !referencesTopLevelFunction(declaration.initializer, sourceFile, name)
-  );
-}
-
-function hasOnlyCanonicalMediationCallsites(
-  classDeclaration: ts.ClassDeclaration | undefined,
-  sourceFile: ts.SourceFile
-): boolean {
-  if (!classDeclaration || !topLevelFunction(sourceFile, "invokeDescriptorPrimitive")) return false;
-  if (!hasNoTopLevelFunctionAliases(sourceFile, "invokeDescriptorPrimitive")) return false;
-  const expected = [
-    ["openRoot", "open_root"],
-    ["openRelative", "openat"],
-    ["stat", "fstat_sync"],
-    ["readRetained", "read_sync"],
-    ["close", "close_sync"]
-  ] as const;
-  const calls = allCallExpressions(
-    sourceFile,
-    (call) => referencesTopLevelFunction(call.expression, sourceFile, "invokeDescriptorPrimitive")
-  );
-  if (calls.length !== expected.length) return false;
-  return expected.every(([methodName, operation]) => {
-    const method = classMethod(classDeclaration, methodName);
-    const methodCalls = callExpressionsInMethod(
-      method,
-      sourceFile,
-      (call) => referencesTopLevelFunction(call.expression, sourceFile, "invokeDescriptorPrimitive")
-    );
-    return methodCalls.length === 1 &&
-      ts.isStringLiteral(methodCalls[0]!.arguments[0]) &&
-      methodCalls[0]!.arguments[0].text === operation &&
-      methodCalls[0]!.arguments.length === 2 &&
-      ts.isArrowFunction(methodCalls[0]!.arguments[1]);
-  });
-}
-
-function hasExactChildCString(
-  openRelative: ts.MethodDeclaration,
-  sourceFile: ts.SourceFile
-): boolean {
-  const childPathDeclarations = variableDeclarations(openRelative).filter(
-    (declaration) =>
-      ts.isIdentifier(declaration.name) &&
-      declaration.name.text === "childPath" &&
-      declaration.initializer &&
-      ts.isCallExpression(declaration.initializer) &&
-      referencesTopLevelFunction(declaration.initializer.expression, sourceFile, "childCString") &&
-      declaration.initializer.arguments.length === 1 &&
-      isIdentifierNamed(declaration.initializer.arguments[0], "childName")
-  );
-  if (childPathDeclarations.length !== 1) return false;
-  const childCString = topLevelFunction(sourceFile, "childCString");
-  if (!childCString?.body) return false;
-  const returns: ts.ReturnStatement[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isReturnStatement(node)) returns.push(node);
-    ts.forEachChild(node, visit);
-  };
-  visit(childCString.body);
-  if (returns.length !== 1 || !returns[0]!.expression || !ts.isCallExpression(returns[0]!.expression)) {
-    return false;
-  }
-  const call = returns[0]!.expression;
-  if (
-    !isPropertyAccessNamed(call.expression, "Buffer", "from") ||
-    call.arguments.length !== 2 ||
-    !ts.isTemplateExpression(call.arguments[0]) ||
-    !ts.isStringLiteral(call.arguments[1]) ||
-    call.arguments[1].text !== "utf8"
-  ) {
-    return false;
-  }
-  const template = call.arguments[0];
-  return template.head.text === "" &&
-    template.templateSpans.length === 1 &&
-    isIdentifierNamed(template.templateSpans[0]!.expression, "value") &&
-    template.templateSpans[0]!.literal.text === "\0";
-}
-
-function hasExactOpenAtResultRelation(
-  openRelative: ts.MethodDeclaration,
-  sourceFile: ts.SourceFile,
-  mediator: ts.CallExpression
-): boolean {
-  if (
-    !ts.isVariableDeclaration(mediator.parent) ||
-    !ts.isIdentifier(mediator.parent.name) ||
-    mediator.parent.name.text !== "descriptor"
-  ) {
-    return false;
-  }
-  const negativeChecks = binaryExpressionsInMethod(
-    openRelative,
-    sourceFile,
-    (expression) =>
-      isIdentifierNamed(expression.left, "descriptor") &&
-      expression.operatorToken.kind === ts.SyntaxKind.LessThanToken &&
-      ts.isNumericLiteral(expression.right) &&
-      expression.right.text === "0"
-  );
-  if (negativeChecks.length !== 1) return false;
-  const issueReturns: ts.CallExpression[] = [];
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isReturnStatement(node) &&
-      node.expression &&
-      ts.isCallExpression(node.expression) &&
-      ts.isPropertyAccessExpression(node.expression.expression) &&
-      node.expression.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
-      isPrivateIdentifierNamed(node.expression.expression.name, "issue")
-    ) {
-      issueReturns.push(node.expression);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(openRelative);
-  const issue = issueReturns[0];
-  const state = issue?.arguments[5];
-  return issueReturns.length === 1 &&
-    issue!.arguments.length === 6 &&
-    isIdentifierNamed(issue!.arguments[0], "descriptor") &&
-    isPropertyAccessNamed(issue!.arguments[1], "parentRecord", "generation") &&
-    isIdentifierNamed(issue!.arguments[2], "flags") &&
-    isIdentifierNamed(issue!.arguments[3], "kind") &&
-    isIdentifierNamed(issue!.arguments[4], "requestedPhase") &&
-    Boolean(
-      state &&
-      ts.isConditionalExpression(state) &&
-      ts.isBinaryExpression(state.condition) &&
-      isIdentifierNamed(state.condition.left, "requestedPhase") &&
-      state.condition.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
-      ts.isStringLiteral(state.condition.right) &&
-      state.condition.right.text === "admission" &&
-      ts.isStringLiteral(state.whenTrue) &&
-      state.whenTrue.text === "pending_retained" &&
-      ts.isStringLiteral(state.whenFalse) &&
-      state.whenFalse.text === "verification"
-    );
-}
-
-function hasOnlyOpenAtParentOperand(
-  classDeclaration: ts.ClassDeclaration | undefined,
-  sourceFile: ts.SourceFile
-): boolean {
-  const openRelative = classMethod(classDeclaration, "openRelative");
-  if (!openRelative || !hasOnlyCanonicalMediationCallsites(classDeclaration, sourceFile)) return false;
-  if (!hasNoTopLevelFunctionAliases(sourceFile, "openAt") || !hasExactChildCString(openRelative, sourceFile)) {
-    return false;
-  }
-
-  const resolutions = variableDeclarations(openRelative).filter(
-    (declaration) =>
-      ts.isIdentifier(declaration.name) &&
-      declaration.name.text === "openAtPrimitive" &&
-      declaration.initializer &&
-      ts.isCallExpression(declaration.initializer) &&
-      referencesTopLevelFunction(declaration.initializer.expression, sourceFile, "openAt") &&
-      declaration.initializer.arguments.length === 0
-  );
-  if (resolutions.length !== 1) return false;
-  const resolution = resolutions[0]!;
-  const factoryCalls = allCallExpressions(
-    classDeclaration!,
-    (call) => referencesTopLevelFunction(call.expression, sourceFile, "openAt")
-  );
-  if (factoryCalls.length !== 1 || factoryCalls[0] !== resolution.initializer) return false;
-
-  const aliases = [resolution];
-  for (const declaration of variableDeclarations(openRelative)) {
-    if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isIdentifier(declaration.initializer)) {
-      continue;
-    }
-    if (aliases.some((binding) => referencesLocalBinding(declaration.initializer, sourceFile, binding))) {
-      aliases.push(declaration);
-    }
-  }
-  if (aliases.length !== 1) return false;
-
-  const mediators = callExpressionsInMethod(
-    openRelative,
-    sourceFile,
-    (call) =>
-      referencesTopLevelFunction(call.expression, sourceFile, "invokeDescriptorPrimitive") &&
-      call.arguments.length === 2 &&
-      ts.isStringLiteral(call.arguments[0]) &&
-      call.arguments[0].text === "openat" &&
-      ts.isArrowFunction(call.arguments[1])
-  );
-  if (mediators.length !== 1) return false;
-  const mediator = mediators[0]!;
-  const callback = mediator.arguments[1]!;
-  if (!ts.isArrowFunction(callback) || resolution.pos >= callback.pos) return false;
-  const calls = allCallExpressions(
-    classDeclaration!,
-    (call) => referencesLocalBinding(call.expression, sourceFile, resolution)
-  );
-  const callbackCalls = calls.filter(
-    (call) => call.pos >= callback.body.pos && call.end <= callback.body.end
-  );
-  const rawCall = calls[0];
-  return calls.length === 1 &&
-    callbackCalls.length === 1 &&
-    rawCall === callbackCalls[0] &&
-    rawCall!.arguments.length === 3 &&
-    isPropertyAccessNamed(rawCall!.arguments[0], "parentRecord", "fd") &&
-    isIdentifierNamed(rawCall!.arguments[1], "childPath") &&
-    isIdentifierNamed(rawCall!.arguments[2], "flags") &&
-    hasExactOpenAtResultRelation(openRelative, sourceFile, mediator);
-}
-
-function hasOnlyRawFstatDescriptorOperand(
-  classDeclaration: ts.ClassDeclaration | undefined,
-  sourceFile: ts.SourceFile
-): boolean {
-  const calls = callExpressionsInClass(
-    classDeclaration,
-    sourceFile,
-    (call) => isIdentifierNamed(call.expression, "fstatSync")
-  );
-  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "record", "fd");
-}
-
-function hasOnlyRawCloseDescriptorOperand(
-  classDeclaration: ts.ClassDeclaration | undefined,
-  sourceFile: ts.SourceFile
-): boolean {
-  const calls = callExpressionsInClass(
-    classDeclaration,
-    sourceFile,
-    (call) => isIdentifierNamed(call.expression, "closeSync")
-  );
-  return calls.length === 1 && isPropertyAccessNamed(calls[0]!.arguments[0], "record", "fd");
-}
 
 function hasPrivateCollectionDeclaration(
   classDeclaration: ts.ClassDeclaration | undefined,
@@ -871,18 +699,7 @@ export function structuralDescriptorDenials(source: string): readonly Structural
   ) {
     denials.add("raw_descriptor_operation_shape");
   }
-  if (!hasOnlyRawReadDescriptorOperand(capabilities, sourceFile)) {
-    denials.add("raw_read_descriptor_not_handle");
-  }
-  if (!hasOnlyOpenAtParentOperand(capabilities, sourceFile)) {
-    denials.add("openat_parent_not_handle");
-  }
-  if (!hasOnlyRawFstatDescriptorOperand(capabilities, sourceFile)) {
-    denials.add("raw_fstat_descriptor_not_handle");
-  }
-  if (!hasOnlyRawCloseDescriptorOperand(capabilities, sourceFile)) {
-    denials.add("raw_close_descriptor_not_handle");
-  }
+  for (const denial of rawPrimitiveOwnershipDenials(source)) denials.add(denial);
   if (
     !hasPrivateCollectionDeclaration(capabilities, "registry", "WeakMap") ||
     !hasPrivateLookup(capabilities, sourceFile, "registry", (argument) => isIdentifierNamed(argument, "capability"))

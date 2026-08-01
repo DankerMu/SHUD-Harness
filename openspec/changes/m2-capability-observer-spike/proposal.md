@@ -60,7 +60,7 @@ The module has one shared state machine:
 | `inactive`, no installer | The owner invokes the raw primitive directly and preserves all prior #175 behavior. |
 | `inactive`, installed mediator | The owner opens one callback window and passes the canonical operation plus an ephemeral invocation closure. |
 | Callback window active | Every public `ContractCapabilities` entry—`sealAdmission`, both opens, `markRetained`, `stat`, `readRetained`, `close`, and `rejectForbidden`—rejects immediately with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY`. This happens before validation, denial emission, lifecycle work, or caller hooks. |
-| First synchronous `invoke()` | The owner starts at most one raw primitive, records its exact return or thrown error privately, and returns `undefined` to the mediator. Raw numeric fds, stats, byte counts, and every other raw result remain unavailable to mediator code. |
+| First synchronous `invoke()` | The owner starts at most one raw primitive, records its exact return or thrown error privately, and returns `undefined` to the mediator. Raw numeric fds, stats, byte counts, every other raw result, and every thrown object or metadata field remain unavailable to mediator code. |
 | A second synchronous `invoke()` | That invocation itself throws `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_REPEATED` and starts no extra raw primitive. It has the same inner error whether mediator code catches it or lets it escape. |
 | Callback returns after the first raw start | The captured raw result or raw error is authoritative for the original capability API. A mediator throw, thenable, or uncaught/caught repeated-call error after that start cannot replace the result, mask the raw error, skip issuance, or orphan the raw resource. |
 | No primitive started | A synchronous omission throws `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING`; a declared-async or ordinary thenable return throws `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ASYNC`; a closure used after return throws `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_EXPIRED`. All three paths make zero raw calls. A mediator's own pre-invocation throw remains its callback error, but `close` still restores retryability because no raw close began. |
@@ -91,10 +91,15 @@ retryable-close error classification distinguishes `no_raw_retryable` from a raw
 root and child rollback, verification cleanup, retained cleanup, and the
 checker path retry only the former, at most twice total. A one-time omission,
 throw, thenable, or deferred invocation therefore reaches one mediated raw
-close on retry; persistent refusal terminates after that fixed bound with the
-existing primary error winning over cleanup failure, or an explicit
-`CONTRACT_SCHEMA_INVALID` when cleanup is the only failure. No retry bypasses
-the mediator or performs an unmediated raw close.
+close on retry. After a second persistent no-raw refusal, the module-instance
+ingress boundary retains strong private capabilities/descriptor/owner pairs for
+every still-live unsettled close and becomes poisoned: the first failing chain
+finishes its finite cleanup, while every later direct or checker admission
+fails with the existing `CONTRACT_SCHEMA_INVALID` receipt before `openRoot` or
+any OS-fd allocation. The primary error still wins over cleanup failure, or
+the existing explicit cleanup failure is emitted when it is the only failure.
+No retry bypasses the mediator or performs an unmediated raw close, and poison
+prevents later admissions from growing the retained owner set.
 
 Denial, close-attempt, close-fault, authority-violation, `afterAdmission`,
 `observe`, and `beforeCleanup` callbacks enter only after the prior primitive
@@ -108,11 +113,11 @@ this proof; this does not broaden #176's ownership.
 | Surface | Invariant | Required regression evidence |
 |---|---|---|
 | Installer | Invalid → valid → valid ordering, frozen/non-constructible standard own and inherited surface, and no hidden control property | Process-isolated descriptor/prototype receipt plus AST mutations for `reset` and pre-freeze `setPrototypeOf` |
-| Primitive ownership | One sole top-level lexical helper owns the five callsites; every `BindingName` shadow and callable alias is rejected; resolved `openat` receives the exact parent fd, NUL child bytes, flags, and issued-result relation | Binding-aware AST mutations for destructuring, extra alias call, wrong argument, and wrong flag plus the process tuple receipt |
-| Raw calls | Every `openSync` is counted with its complete argument tuple; each canonical primitive runs once | Full retained-chain receipt and an extra non-root `openSync` source mutation |
+| Primitive ownership | One sole top-level lexical helper owns all five callsites; every noncanonical `BindingName`, alias, or projection is rejected; each resolved raw callable has the exact matching operation callback, operands, result relation, and lifecycle | Binding-aware copied-tree mutations for identifier/object/array destructuring, renamed property, property projection, assignment, bind, wrapper, and nested-function aliases across every primitive; wrong-argument/flag mutations; and four Node callback-escape mutations |
+| Raw calls | Each canonical `openSync`, resolved `openat`, `fstatSync`, `readSync`, and `closeSync` executes once only while its matching callback is active | Process-isolated five-operation raw-call receipts with exact counts, callback-active snapshots, arguments/results/lifecycle assertions, and structural callback-ancestry red mutations |
 | Reentry | Every public capability family rejects before observable work throughout each of the five outer primitive windows | Process-isolated five-window table with every public-entry reentry, zero denial/lifecycle/hook delta, and zero nested raw calls |
-| Outcome precedence | A raw return/error owns post-invoke throw, thenable, and repeated-call outcomes only when the raw invocation began before mediator return | Getter and Proxy-return matrix over all five primitives, with expired closure, reentry, async, and zero-raw assertions |
-| Close settlement | No raw close restores retryability; attempted raw close remains terminal; ingress retains owner through bounded retry | Omission/throw/thenable/deferred ingress matrix for root, child, verification, retained, and checker owners, plus persistent-refusal bound |
+| Outcome precedence | A raw return/error owns post-invoke throw, thenable, and repeated-call outcomes only when the raw invocation began before mediator return; raw thrown objects never cross into mediator code | Getter/Proxy-return matrix plus five mutable raw-error process receipts with mediator try/catch/mutation attempts, exact outer outcomes, and exactly-once callback-active raw calls |
+| Close settlement | No raw close restores retryability; attempted raw close remains terminal; ingress retains owner through bounded retry and permanently fail-stops persistent no-raw refusal | Omission/throw/thenable/deferred ingress matrix for root, child, verification, retained, and checker owners; persistent-refusal two-attempt/no-raw-fallback receipts plus Darwin `/dev/fd` and Linux `/proc/self/fd` post-poison non-growth |
 | Invalid inputs | Installed mediation emits exactly one frozen existing denial before mediator or raw work for each invalid row | Table-driven exact denial-event receipt with zero mediator invocations and zero raw calls |
 | Caller callbacks | Existing four `CapabilityHooks` plus ingress `afterAdmission`, `observe`, and `beforeCleanup` enter inactive; nested eligible work starts inactive | Process-isolated hook and real ingress/checker receipts |
 | Same-fd replacement | Old closed capability stays stale when a new generation reuses the same raw fd | Forced same-number close/reopen process fixture |
@@ -155,6 +160,8 @@ set +e
 npx --yes bun@1.2.19 test \
   spikes/git-status-capability/contracts/tests/authority-descriptor-structural.test.ts \
   spikes/git-status-capability/contracts/tests/authority-descriptor-mediation.test.ts \
+  spikes/git-status-capability/contracts/tests/authority-descriptor-outcome-round-3.test.ts \
+  spikes/git-status-capability/contracts/tests/authority-descriptor-ingress-round-3.test.ts \
   spikes/git-status-capability/contracts/tests/source-ingress.test.ts > "$RED_TRANSCRIPT" 2>&1
 red_status=$?
 set -e
