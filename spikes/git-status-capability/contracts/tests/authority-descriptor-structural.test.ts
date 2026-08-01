@@ -108,12 +108,15 @@ function exportedTypeAlias(sourceFile: ts.SourceFile, name: string): ts.TypeAlia
   return declarations[0]!;
 }
 
-function exportedFunction(sourceFile: ts.SourceFile, name: string): ts.FunctionDeclaration {
-  const declarations = sourceFile.statements.filter(
-    (statement): statement is ts.FunctionDeclaration =>
-      ts.isFunctionDeclaration(statement) && hasExportModifier(statement) && statement.name?.text === name
-  );
-  if (declarations.length !== 1) throw new Error(`expected one exported function named ${name}`);
+function exportedRuntimeVariable(sourceFile: ts.SourceFile, name: string): ts.VariableDeclaration {
+  const declarations: ts.VariableDeclaration[] = [];
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement) || !hasExportModifier(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.name.text === name) declarations.push(declaration);
+    }
+  }
+  if (declarations.length !== 1) throw new Error(`expected one exported runtime variable named ${name}`);
   return declarations[0]!;
 }
 
@@ -129,6 +132,90 @@ function isExactNamedParameter(parameter: ts.ParameterDeclaration, name: string,
       ts.isIdentifier(parameter.type.typeName) &&
       parameter.type.typeName.text === typeName
     );
+}
+
+type InstallerSurfaceDenial =
+  | "installer_not_nonconstructible"
+  | "installer_not_frozen"
+  | "installer_property_surface";
+
+function installerSurfaceDenials(source: string): readonly InstallerSurfaceDenial[] {
+  const sourceFile = ts.createSourceFile(
+    "capabilities.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  if (sourceFile.parseDiagnostics.length > 0) return ["installer_not_nonconstructible"];
+  const installer = exportedRuntimeVariable(sourceFile, "installDescriptorPrimitiveMediator");
+  const denials: InstallerSurfaceDenial[] = [];
+  if (!ts.isArrowFunction(installer.initializer)) denials.push("installer_not_nonconstructible");
+  const frozen = sourceFile.statements.some((statement) => {
+    if (!ts.isExpressionStatement(statement) || !ts.isCallExpression(statement.expression)) return false;
+    const call = statement.expression;
+    return ts.isPropertyAccessExpression(call.expression) &&
+      ts.isIdentifier(call.expression.expression) &&
+      call.expression.expression.text === "Object" &&
+      call.expression.name.text === "freeze" &&
+      call.arguments.length === 1 &&
+      ts.isIdentifier(call.arguments[0]) &&
+      call.arguments[0].text === "installDescriptorPrimitiveMediator";
+  });
+  if (!frozen) denials.push("installer_not_frozen");
+  let propertySurfaceMutation = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const receiver = node.expression.expression;
+      const method = node.expression.name.text;
+      if (
+        ts.isIdentifier(receiver) &&
+        ["Object", "Reflect"].includes(receiver.text) &&
+        ["assign", "defineProperty", "defineProperties", "set"].includes(method) &&
+        ts.isIdentifier(node.arguments[0]) &&
+        node.arguments[0].text === "installDescriptorPrimitiveMediator"
+      ) {
+        propertySurfaceMutation = true;
+      }
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      ts.isPropertyAccessExpression(node.left) &&
+      ts.isIdentifier(node.left.expression) &&
+      node.left.expression.text === "installDescriptorPrimitiveMediator"
+    ) {
+      propertySurfaceMutation = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  if (propertySurfaceMutation) denials.push("installer_property_surface");
+  return denials;
+}
+
+function rawOpenSyncDenials(source: string): readonly string[] {
+  const sourceFile = ts.createSourceFile(
+    "capabilities.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const calls: ts.CallExpression[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "openSync") {
+      calls.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  const onlyRootOpen = calls.length === 1 &&
+    calls[0]!.arguments.length === 2 &&
+    ts.isIdentifier(calls[0]!.arguments[0]) &&
+    calls[0]!.arguments[0].text === "root" &&
+    ts.isIdentifier(calls[0]!.arguments[1]) &&
+    calls[0]!.arguments[1].text === "DIRECTORY_OPEN_FLAGS";
+  return onlyRootOpen ? [] : ["open_sync_call_surface"];
 }
 
 describe("retained descriptor structural authority", () => {
@@ -172,11 +259,36 @@ describe("retained descriptor structural authority", () => {
     )).toBe(true);
     expect(mediatorAlias.type.type.kind).toBe(ts.SyntaxKind.UnknownKeyword);
 
-    const installer = exportedFunction(surface.sourceFile, "installDescriptorPrimitiveMediator");
-    expect(installer.typeParameters).toBeUndefined();
-    expect(installer.parameters).toHaveLength(1);
-    expect(isExactNamedParameter(installer.parameters[0]!, "mediator", "DescriptorPrimitiveMediator")).toBe(true);
-    expect(installer.type?.kind).toBe(ts.SyntaxKind.VoidKeyword);
+    const installer = exportedRuntimeVariable(surface.sourceFile, "installDescriptorPrimitiveMediator");
+    if (!ts.isArrowFunction(installer.initializer)) {
+      throw new Error("installDescriptorPrimitiveMediator must be a non-constructible arrow function");
+    }
+    expect(installer.initializer.typeParameters).toBeUndefined();
+    expect(installer.initializer.parameters).toHaveLength(1);
+    expect(isExactNamedParameter(installer.initializer.parameters[0]!, "mediator", "DescriptorPrimitiveMediator"))
+      .toBe(true);
+    expect(installer.initializer.type?.kind).toBe(ts.SyntaxKind.VoidKeyword);
+  });
+
+  test("installer source is frozen, non-constructible, and rejects hidden property mutation", async () => {
+    const source = await readFile(capabilitiesSourcePath, "utf8");
+    expect(installerSurfaceDenials(source)).toEqual([]);
+    const mutated = `${source}
+Object.defineProperty(installDescriptorPrimitiveMediator, "reset", { value: () => undefined });
+`;
+    expect(installerSurfaceDenials(mutated)).toEqual(["installer_property_surface"]);
+  });
+
+  test("every openSync call has the one exact root argument tuple, including a non-root mutation", async () => {
+    const source = await readFile(capabilitiesSourcePath, "utf8");
+    expect(rawOpenSyncDenials(source)).toEqual([]);
+    const mutated = replaceSourceAnchor(
+      source,
+      '    const descriptor = invokeDescriptorPrimitive("open_root", () => openSync(root, DIRECTORY_OPEN_FLAGS));',
+      '    openSync("/dev/null", FILE_OPEN_FLAGS);\n' +
+        '    const descriptor = invokeDescriptorPrimitive("open_root", () => openSync(root, DIRECTORY_OPEN_FLAGS));'
+    );
+    expect(rawOpenSyncDenials(mutated)).toEqual(["open_sync_call_surface"]);
   });
 
   test("structural-only oracle rejects the exact ambient mutations and every descriptor vocabulary bypass", async () => {
@@ -250,6 +362,36 @@ function localDescriptorDecoy(): void {
     expect(structuralDescriptorDenials(sourceWithDecoys)).toEqual([]);
   });
 
+  test("AST mediation ownership resolves lexical bindings and rejects local helper or conditional openat shadows", async () => {
+    const source = await readFile(capabilitiesSourcePath, "utf8");
+    const helperShadow = replaceSourceAnchor(
+      source,
+      "    const descriptor = invokeDescriptorPrimitive(\n" +
+        "      \"openat\",\n" +
+        "      () => openAtPrimitive(parentRecord.fd, childPath, flags)\n" +
+        "    );",
+      "    const invokeDescriptorPrimitive = <Result>(\n" +
+        "      _operation: DescriptorOperation,\n" +
+        "      primitive: () => Result\n" +
+        "    ): Result => primitive();\n" +
+        "    const descriptor = invokeDescriptorPrimitive(\n" +
+        "      \"openat\",\n" +
+        "      () => openAtPrimitive(parentRecord.fd, childPath, flags)\n" +
+        "    );"
+    );
+    expect(structuralDescriptorDenials(helperShadow)).toEqual(["openat_parent_not_handle"]);
+
+    const conditionalOpenAtShadow = replaceSourceAnchor(
+      source,
+      "    const openAtPrimitive = openAt();",
+      "    const openAt = childName === \"__unmediated__\"\n" +
+        "      ? () => (_parent: number, _path: Buffer, _flags: number): number => -1\n" +
+        "      : () => { throw new Error(\"conditional openat shadow\"); };\n" +
+        "    const openAtPrimitive = openAt();"
+    );
+    expect(structuralDescriptorDenials(conditionalOpenAtShadow)).toEqual(["openat_parent_not_handle"]);
+  });
+
   test("AST structural oracle does not let textual copies counterfeit required descriptor nodes", async () => {
     const source = await readFile(capabilitiesSourcePath, "utf8");
     let counterfeit = replaceSourceAnchor(
@@ -259,8 +401,10 @@ function localDescriptorDecoy(): void {
     );
     counterfeit = replaceSourceAnchor(
       counterfeit,
-      "    phase: CapabilityPhase\n  ): CapabilityDescriptor {\n    const requestedPhase =",
-      "    phase: string\n  ): CapabilityDescriptor {\n    const requestedPhase ="
+      "    phase: CapabilityPhase\n  ): CapabilityDescriptor {\n" +
+        "    assertDescriptorPrimitiveMediationInactive();\n    const requestedPhase =",
+      "    phase: string\n  ): CapabilityDescriptor {\n" +
+        "    assertDescriptorPrimitiveMediationInactive();\n    const requestedPhase ="
     );
     counterfeit = replaceSourceAnchor(counterfeit, "owner: CloseOwner", "owner: string");
     counterfeit = replaceSourceAnchor(
@@ -281,11 +425,7 @@ function localDescriptorDecoy(): void {
       "    const stats = invokeDescriptorPrimitive(\"fstat_sync\", () => fstatSync(record.fd, { bigint: true }));",
       "    throw new Error(\"counterfeit\");"
     );
-    counterfeit = replaceSourceAnchor(
-      counterfeit,
-      "      invokeDescriptorPrimitive(\"close_sync\", () => closeSync(record.fd));",
-      "      return;"
-    );
+    counterfeit = replaceSourceAnchor(counterfeit, "        closeSync(record.fd);", "        return;");
     counterfeit = counterfeit
       .replaceAll("#registry", "#registryUnchecked")
       .replaceAll("#currentGenerationByDescriptor", "#generationUnchecked")

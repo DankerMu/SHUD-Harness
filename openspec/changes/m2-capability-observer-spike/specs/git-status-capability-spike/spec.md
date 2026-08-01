@@ -305,10 +305,10 @@ primary-error/cleanup precedence, and zero target bytes.
 - **WHEN** either direct input kind uses only the exact lifecycle and flags
 - **THEN** its #171 receipt, four-SHA/capacity behavior, cleanup/error precedence, no-side-effect contract, and descriptor baseline remain unchanged on Darwin and Linux Bun 1.2.19
 
-### Requirement: Descriptor primitive mediation is exact and non-reentrant
-The descriptor capability owner SHALL expose exactly one new runtime export,
-the module-instance one-shot `installDescriptorPrimitiveMediator`, plus exactly
-two new type-only exports:
+### Requirement: Descriptor primitive mediation is exact, non-reentrant, and raw-outcome owned
+The descriptor capability owner SHALL expose exactly one new runtime export, the
+module-instance one-shot `installDescriptorPrimitiveMediator`, plus exactly two
+new type-only exports:
 `DescriptorPrimitiveInvocation = () => unknown` and
 `DescriptorPrimitiveMediator = (operation: DescriptorOperation, invoke:
 DescriptorPrimitiveInvocation) => unknown`. It MUST NOT expose the private
@@ -316,28 +316,82 @@ registry, raw descriptor records, `ContractCapabilities` internals, raw
 callables, an authority-enter function, or any getter/reset/uninstall/
 replacement path.
 
+The installer MUST validate its callable input before consuming the module latch.
+It MUST be frozen and non-constructible, with only its standard own `name` and
+`length` data properties. The first valid installer owns the module instance;
+later installation fails with
+`CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ALREADY_INSTALLED`; an invalid input
+fails with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVALID` and leaves the first
+valid installation available. The installer MUST NOT inspect callable
+`constructor`, `Symbol.toStringTag`, or `Object.prototype.toString` metadata
+before applying a mediator.
+
 The mediator MUST receive the exact `DescriptorOperation` and a synchronous,
 callback-scoped, exactly-once invocation closure only around `openSync`, an
 already-resolved FFI `openat` callable, `fstatSync`, `readSync`, or `closeSync`.
 Lazy loader and symbol resolution MUST complete outside the mediation callback.
-Omitted, repeated, or late invocation MUST fail closed. Validation, lifecycle
-transitions, denial callbacks, close-attempt hooks, injected close faults, and
-authority-violation hooks MUST enter with no active primitive invocation. Any
-eligible raw primitive started by a hook MUST enter its own exact mediation
-callback with inactive prior state. With no installed mediator, all existing
-descriptor behavior and public receipts MUST remain unchanged.
+The callback closure starts at most one raw primitive synchronously, saves its
+exact result or thrown error for the descriptor owner, and returns `undefined`
+to mediator code; raw numeric fds, stats, byte counts, and every other raw
+result MUST remain private.
 
-#### Scenario: Exact primitive calls are mediated once
+The module SHALL maintain one shared `inactive|callback` mediation state. While
+the mediator callback owns the `callback` state, every public
+`ContractCapabilities` entry—`sealAdmission`, `openRoot`, `openRelative`,
+`markRetained`, `stat`, `readRetained`, `close`, and `rejectForbidden`—MUST fail
+with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY` before validation, denial
+emission, lifecycle mutation, caller hook, or raw primitive work. Validation and
+all denial paths outside that state MUST remain before mediation and before raw
+calls.
+
+Once the first synchronous invocation starts, its saved raw result or raw error
+is authoritative for the original capability API. A mediator throw, thenable
+return, or caught or uncaught repeated invocation after that start MUST NOT
+replace the raw outcome, skip descriptor issuance, or orphan the raw resource.
+A second invocation itself MUST throw
+`CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_REPEATED` and execute no
+extra primitive. If no primitive starts, a synchronous omission MUST throw
+`CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING`; a declared-async or
+ordinary thenable return MUST throw
+`CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ASYNC`; and use after callback return
+MUST throw `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_EXPIRED`. Those
+paths make zero raw calls.
+
+For `close_sync`, the owner MUST restore the prior live descriptor state whenever
+no raw `closeSync` began, including omission, pre-invocation mediator throw,
+thenable return, or deferred use. Once the raw close begins, existing terminal
+invalidation and raw/error/cleanup precedence MUST hold.
+
+Denial, close-attempt, close-fault, authority-violation, `afterAdmission`,
+`observe`, and `beforeCleanup` callbacks MUST enter with no active primitive
+invocation. Any eligible raw primitive started by one of those callbacks MUST
+enter a distinct exact mediation callback with inactive prior state. With no
+installed mediator, all existing descriptor behavior and public receipts MUST
+remain unchanged.
+
+#### Scenario: Exact primitive calls are mediated once without raw-result capture
 - **WHEN** a process installs the mediator and exercises each valid descriptor operation
-- **THEN** it observes the exact operation order, invokes each matching raw primitive exactly once, and preserves its return value or thrown error
+- **THEN** it observes the exact operation order, invokes each matching raw primitive exactly once, sees `undefined` from every successful invocation closure, and the original capability API preserves the exact raw return value or thrown error
 
-#### Scenario: Installation and invocation cannot be replayed
-- **WHEN** a caller attempts a second installation or the mediator omits, repeats, stores, or invokes the primitive closure after callback return
-- **THEN** the attempt fails with its stable closed error before an extra raw primitive executes
+#### Scenario: Installation, function surface, and invocation cannot be replayed
+- **WHEN** a caller supplies invalid then valid then valid installers, attempts construction or hidden installer-property mutation, or the mediator omits, repeats, stores, or invokes the primitive closure after callback return
+- **THEN** only the first valid installer owns the module, the installer surface remains frozen/non-constructible, and every invocation attempt receives its exact stable error before an extra raw primitive executes
 
-#### Scenario: Caller hooks never inherit primitive authority
-- **WHEN** denial, close-attempt, injected close-fault, or authority-violation hooks run before or after a mediated operation, including a hook that starts descriptor work
-- **THEN** every hook enters with mediation inactive, and each eligible raw primitive it starts enters a distinct exact callback-scoped mediation window with inactive prior state
+#### Scenario: First raw outcome controls post-invocation behavior
+- **WHEN** the mediator invokes an opener, `fstatSync`, `readSync`, or `closeSync` and then throws, returns an ordinary thenable, or catches or leaks a repeated-call error
+- **THEN** the first raw return or raw error is the capability API outcome, the opener is issued and later settled through its opaque owner, and no raw fd or other raw result is exposed to mediator code
+
+#### Scenario: Reentry and invalid descriptor work fail before mediation
+- **WHEN** a mediator calls any public capability entry during its callback, or an installed mediator receives invalid root/phase, parent/flags, stat handle, read phase/range, or close owner inputs
+- **THEN** reentry fails only with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY`, while every invalid descriptor row invokes neither mediator nor raw primitive and preserves its existing denial
+
+#### Scenario: Close settles retryably only before raw close
+- **WHEN** a mediated close omits, throws before invocation, returns a thenable before invocation, or defers invocation
+- **THEN** it reports the existing close failure with zero raw closes and the same descriptor can retry; after an attempted raw close the descriptor remains terminal under the existing precedence rules
+
+#### Scenario: Caller hooks and ingress callbacks never inherit primitive authority
+- **WHEN** denial, close-attempt, injected close-fault, authority-violation, `afterAdmission`, `observe`, or `beforeCleanup` callbacks run before or after a mediated operation, including callback-started descriptor work
+- **THEN** every callback enters with mediation inactive, and each eligible raw primitive it starts enters a distinct exact callback-scoped mediation window with inactive prior state
 
 #### Scenario: Downstream handoff remains narrow
 - **WHEN** #176 imports from `contracts/lib/capabilities.ts`

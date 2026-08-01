@@ -1,7 +1,7 @@
 import { mock } from "bun:test";
 import * as originalFfi from "bun:ffi";
 import * as originalFs from "node:fs";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import type {
@@ -23,7 +23,8 @@ type FstatSyncProbe = (descriptor: number, options: { bigint: true }) => BigIntS
 type OpenAt = (parentDescriptor: number, path: Buffer, flags: number) => number;
 type OpenAtResolutionStep = "loader" | "symbol";
 type RawCallCounts = {
-  open_root: number;
+  open_sync: number;
+  open_sync_args: unknown[][];
   openat: number;
   fstat_sync: number;
   read_sync: number;
@@ -36,10 +37,21 @@ type Scenario =
   | "install"
   | "omitted"
   | "repeated"
+  | "caught_repeated"
   | "late"
   | "async"
+  | "ordinary_thenable"
+  | "deferred"
   | "primitive"
-  | "hooks";
+  | "post_invoke"
+  | "close_settlement"
+  | "reentry"
+  | "raw_capture"
+  | "proxy"
+  | "invalid"
+  | "same_fd"
+  | "hooks"
+  | "ingress_hooks";
 
 const FIXTURE_TEXT = "descriptor-mediation";
 const scenario = process.argv[2] as Scenario | undefined;
@@ -51,6 +63,15 @@ function errorMessage(action: () => unknown): string {
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
+}
+
+function resetRawCalls(rawCalls: RawCallCounts): void {
+  rawCalls.open_sync = 0;
+  rawCalls.open_sync_args.length = 0;
+  rawCalls.openat = 0;
+  rawCalls.fstat_sync = 0;
+  rawCalls.read_sync = 0;
+  rawCalls.close_sync = 0;
 }
 
 async function createFixture(): Promise<Fixture> {
@@ -95,7 +116,8 @@ function installRawSequenceProbe(
   mock.module("node:fs", () => ({
     ...originalFs,
     openSync(...args: Parameters<typeof originalOpenSync>) {
-      if (args[0] === "/") rawCalls.open_root += 1;
+      rawCalls.open_sync += 1;
+      rawCalls.open_sync_args.push([...args]);
       return originalOpenSync(...args);
     },
     fstatSync(...args: Parameters<typeof originalFstatSync>) {
@@ -180,7 +202,14 @@ async function runDefault(): Promise<unknown> {
 
 async function runSequence(): Promise<unknown> {
   const fixture = await createFixture();
-  const rawCalls: RawCallCounts = { open_root: 0, openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 0 };
+  const rawCalls: RawCallCounts = {
+    open_sync: 0,
+    open_sync_args: [],
+    openat: 0,
+    fstat_sync: 0,
+    read_sync: 0,
+    close_sync: 0
+  };
   const loaderObservations: string[] = [];
   let mediationActive = false;
   installRawSequenceProbe(rawCalls, (step) => loaderObservations.push(`${step}:${mediationActive}`));
@@ -202,7 +231,10 @@ async function runSequence(): Promise<unknown> {
       ...readFixture(module, fixture),
       operations,
       invocations,
-      rawCalls: { ...rawCalls },
+      rawCalls: {
+        ...rawCalls,
+        open_sync_args: rawCalls.open_sync_args.map((args) => [...args])
+      },
       segments: fixture.segments.length,
       loaderObservations: [...loaderObservations]
     };
@@ -213,11 +245,57 @@ async function runSequence(): Promise<unknown> {
 
 async function runInstall(): Promise<unknown> {
   const module = await import("../lib/capabilities");
-  module.installDescriptorPrimitiveMediator((_operation, invoke) => invoke());
+  const installer = module.installDescriptorPrimitiveMediator;
+  const ownProperties = Reflect.ownKeys(installer).map((key) => {
+    const descriptor = Object.getOwnPropertyDescriptor(installer, key);
+    if (!descriptor || !("value" in descriptor)) throw new Error("installer own property must be data-only");
+    return {
+      key: typeof key === "symbol" ? key.toString() : key,
+      value: descriptor.value,
+      writable: descriptor.writable,
+      enumerable: descriptor.enumerable,
+      configurable: descriptor.configurable
+    };
+  }).sort((left, right) => left.key.localeCompare(right.key));
+  let constructible = true;
+  try {
+    Reflect.construct(installer, [(_operation: DescriptorOperation, invoke: () => unknown) => invoke()]);
+  } catch {
+    constructible = false;
+  }
+  const mutationRejections = Object.fromEntries(
+    ([
+      ["reset", () => Object.defineProperty(installer, "reset", { value: () => undefined })],
+      ["getter", () => Object.defineProperty(installer, "getMediator", { get: () => undefined })],
+      ["uninstall", () => Reflect.defineProperty(installer, "uninstall", { value: () => undefined })],
+      ["replacement", () => Reflect.set(installer, "replaceMediator", () => undefined)],
+      ["raw_callable", () => Object.defineProperty(installer, "rawCallable", { value: () => undefined })]
+    ] as const).map(([name, attempt]) => {
+      try {
+        return [name, attempt() === false];
+      } catch {
+        return [name, true];
+      }
+    })
+  );
+  const invalidInstallation = errorMessage(() => {
+    (module.installDescriptorPrimitiveMediator as unknown as (candidate: unknown) => void)(null);
+  });
+  const firstInstallation = errorMessage(() => {
+    module.installDescriptorPrimitiveMediator((_operation, invoke) => invoke());
+  });
   return {
+    frozen: Object.isFrozen(installer),
+    constructible,
+    ownProperties,
+    mutationRejections,
+    invalidInstallation,
+    firstInstallation,
     secondInstallation: errorMessage(() => module.installDescriptorPrimitiveMediator((_operation, invoke) => invoke())),
     restrictedExports: [
       "descriptorPrimitiveMediator",
+      "descriptorPrimitiveMediatorInstalled",
+      "descriptorPrimitiveMediationState",
       "getDescriptorPrimitiveMediator",
       "resetDescriptorPrimitiveMediator",
       "uninstallDescriptorPrimitiveMediator"
@@ -226,12 +304,12 @@ async function runInstall(): Promise<unknown> {
 }
 
 async function runOmitted(): Promise<unknown> {
-  const rawCalls = { open_root: 0 };
+  const rawCalls = { open_sync: 0 };
   const originalOpenSync = originalFs.openSync;
   mock.module("node:fs", () => ({
     ...originalFs,
     openSync(...args: Parameters<typeof originalOpenSync>) {
-      if (args[0] === "/") rawCalls.open_root += 1;
+      rawCalls.open_sync += 1;
       return originalOpenSync(...args);
     }
   }));
@@ -243,6 +321,7 @@ async function runOmitted(): Promise<unknown> {
 
 async function runRepeated(): Promise<unknown> {
   let rawCalls = 0;
+  let repeatedError = "";
   const originalFstatSync = originalFs.fstatSync;
   installFstatProbe((...args) => {
     rawCalls += 1;
@@ -253,9 +332,41 @@ async function runRepeated(): Promise<unknown> {
   const root = capabilities.openRoot("/", "admission");
   module.installDescriptorPrimitiveMediator((_operation, invoke) => {
     invoke();
-    return invoke();
+    try {
+      return invoke();
+    } catch (error) {
+      repeatedError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
   });
-  return { error: errorMessage(() => capabilities.stat(root)), rawCalls };
+  const returned = capabilities.stat(root);
+  capabilities.close(root, "unretained");
+  return { returnedDirectory: returned.isDirectory(), repeatedError, rawCalls };
+}
+
+async function runCaughtRepeated(): Promise<unknown> {
+  let rawCalls = 0;
+  let repeatedError = "";
+  const originalFstatSync = originalFs.fstatSync;
+  installFstatProbe((...args) => {
+    rawCalls += 1;
+    return originalFstatSync(...args);
+  });
+  const module = await import("../lib/capabilities");
+  const capabilities = new module.ContractCapabilities();
+  const root = capabilities.openRoot("/", "admission");
+  module.installDescriptorPrimitiveMediator((_operation, invoke) => {
+    invoke();
+    try {
+      invoke();
+    } catch (error) {
+      repeatedError = error instanceof Error ? error.message : String(error);
+    }
+    return "MEDIATOR_REPLACED_RETURN";
+  });
+  const returned = capabilities.stat(root);
+  capabilities.close(root, "unretained");
+  return { returnedDirectory: returned.isDirectory(), repeatedError, rawCalls };
 }
 
 async function runLate(): Promise<unknown> {
@@ -269,14 +380,17 @@ async function runLate(): Promise<unknown> {
   const capabilities = new module.ContractCapabilities();
   const root = capabilities.openRoot("/", "admission");
   let stored: (() => unknown) | undefined;
-  module.installDescriptorPrimitiveMediator((_operation, invoke) => {
+  module.installDescriptorPrimitiveMediator((operation, invoke) => {
+    if (operation !== "fstat_sync") return invoke();
     stored = invoke;
+    return undefined;
   });
   const missing = errorMessage(() => capabilities.stat(root));
   const expired = errorMessage(() => {
     if (!stored) throw new Error("stored primitive invocation is absent");
     return stored();
   });
+  capabilities.close(root, "unretained");
   return { missing, expired, rawCalls };
 }
 
@@ -290,8 +404,56 @@ async function runAsync(): Promise<unknown> {
   const module = await import("../lib/capabilities");
   const capabilities = new module.ContractCapabilities();
   const root = capabilities.openRoot("/", "admission");
-  module.installDescriptorPrimitiveMediator(async (_operation, invoke) => invoke());
-  return { error: errorMessage(() => capabilities.stat(root)), rawCalls };
+  module.installDescriptorPrimitiveMediator(async (operation, invoke) =>
+    operation === "fstat_sync" ? undefined : invoke()
+  );
+  const error = errorMessage(() => capabilities.stat(root));
+  capabilities.close(root, "unretained");
+  return { error, rawCalls };
+}
+
+async function runOrdinaryThenable(): Promise<unknown> {
+  let rawCalls = 0;
+  const originalFstatSync = originalFs.fstatSync;
+  installFstatProbe((...args) => {
+    rawCalls += 1;
+    return originalFstatSync(...args);
+  });
+  const module = await import("../lib/capabilities");
+  const capabilities = new module.ContractCapabilities();
+  const root = capabilities.openRoot("/", "admission");
+  module.installDescriptorPrimitiveMediator((operation, invoke) =>
+    operation === "fstat_sync" ? { then: () => undefined } : invoke()
+  );
+  const error = errorMessage(() => capabilities.stat(root));
+  capabilities.close(root, "unretained");
+  return { error, rawCalls };
+}
+
+async function runDeferred(): Promise<unknown> {
+  let rawCalls = 0;
+  let deferredError = "";
+  let deferred: Promise<void> | undefined;
+  const originalFstatSync = originalFs.fstatSync;
+  installFstatProbe((...args) => {
+    rawCalls += 1;
+    return originalFstatSync(...args);
+  });
+  const module = await import("../lib/capabilities");
+  const capabilities = new module.ContractCapabilities();
+  const root = capabilities.openRoot("/", "admission");
+  module.installDescriptorPrimitiveMediator((operation, invoke) => {
+    if (operation !== "fstat_sync") return invoke();
+    deferred = Promise.resolve().then(() => {
+      deferredError = errorMessage(() => invoke());
+    });
+    return undefined;
+  });
+  const missing = errorMessage(() => capabilities.stat(root));
+  if (!deferred) throw new Error("deferred invocation was not scheduled");
+  await deferred;
+  capabilities.close(root, "unretained");
+  return { missing, deferredError, rawCalls };
 }
 
 async function runPrimitive(): Promise<unknown> {
@@ -317,11 +479,390 @@ async function runPrimitive(): Promise<unknown> {
     }
   });
   const returned = capabilities.stat(root);
+  const error = errorMessage(() => capabilities.stat(root));
+  capabilities.close(root, "unretained");
   return {
     returnedSame: returned === sentinel,
-    error: errorMessage(() => capabilities.stat(root)),
+    error,
     rawCalls,
     operations
+  };
+}
+
+async function runPostInvoke(): Promise<unknown> {
+  const fixture = await createFixture();
+  const rawCalls: RawCallCounts = {
+    open_sync: 0,
+    open_sync_args: [],
+    openat: 0,
+    fstat_sync: 0,
+    read_sync: 0,
+    close_sync: 0
+  };
+  const handledOperations: Partial<Record<DescriptorOperation, true>> = Object.create(null);
+  const outcomes: string[] = [];
+  const repeatedErrors: string[] = [];
+  installRawSequenceProbe(rawCalls, () => undefined);
+  try {
+    const module = await import("../lib/capabilities");
+    readFixture(module, fixture);
+    resetRawCalls(rawCalls);
+    const descriptorDirectory = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
+    const baseline = (await readdir(descriptorDirectory)).length;
+    module.installDescriptorPrimitiveMediator((operation, invoke) => {
+      invoke();
+      if (handledOperations[operation]) return undefined;
+      handledOperations[operation] = true;
+      if (operation === "open_root") {
+        outcomes.push("open_root:throw");
+        throw new Error("MEDIATOR_AFTER_INVOKE");
+      }
+      if (operation === "openat") {
+        outcomes.push("openat:thenable");
+        return { then: () => undefined };
+      }
+      if (operation === "fstat_sync") {
+        outcomes.push("fstat_sync:uncaught_repeat");
+        try {
+          invoke();
+        } catch (error) {
+          repeatedErrors.push(error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+      }
+      if (operation === "read_sync") {
+        outcomes.push("read_sync:caught_repeat");
+        try {
+          invoke();
+        } catch (error) {
+          repeatedErrors.push(error instanceof Error ? error.message : String(error));
+        }
+        return { then: () => undefined };
+      }
+      outcomes.push("close_sync:throw");
+      throw new Error("CLOSE_AFTER_INVOKE");
+    });
+    const result = readFixture(module, fixture);
+    const settled = (await readdir(descriptorDirectory)).length;
+    return {
+      ...result,
+      segments: fixture.segments.length,
+      outcomes,
+      repeatedErrors,
+      fdBaselineRestored: settled === baseline,
+      rawCalls: {
+        ...rawCalls,
+        open_sync_args: rawCalls.open_sync_args.map((args) => [...args])
+      }
+    };
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+}
+
+async function runCloseSettlement(): Promise<unknown> {
+  let rawCloseCalls = 0;
+  let mode: "allow" | "omitted" | "throw" | "thenable" = "allow";
+  const originalCloseSync = originalFs.closeSync;
+  mock.module("node:fs", () => ({
+    ...originalFs,
+    closeSync(...args: Parameters<typeof originalCloseSync>) {
+      rawCloseCalls += 1;
+      return originalCloseSync(...args);
+    }
+  }));
+  const module = await import("../lib/capabilities");
+  module.installDescriptorPrimitiveMediator((operation, invoke) => {
+    if (operation !== "close_sync" || mode === "allow") return invoke();
+    if (mode === "omitted") return undefined;
+    if (mode === "throw") throw new Error("CLOSE_BEFORE_INVOKE");
+    return { then: () => undefined };
+  });
+  const capabilities = new module.ContractCapabilities();
+  const settlements: Array<Readonly<{
+    mode: "omitted" | "throw" | "thenable";
+    firstError: string;
+    firstRawCalls: number;
+    retry: string;
+    retryRawCalls: number;
+  }>> = [];
+  for (const failedMode of ["omitted", "throw", "thenable"] as const) {
+    const root = capabilities.openRoot("/", "admission");
+    mode = failedMode;
+    const beforeFirst = rawCloseCalls;
+    const firstError = errorMessage(() => capabilities.close(root, "unretained"));
+    const firstRawCalls = rawCloseCalls - beforeFirst;
+    mode = "allow";
+    const beforeRetry = rawCloseCalls;
+    const retry = errorMessage(() => capabilities.close(root, "unretained"));
+    settlements.push(Object.freeze({
+      mode: failedMode,
+      firstError,
+      firstRawCalls,
+      retry,
+      retryRawCalls: rawCloseCalls - beforeRetry
+    }));
+  }
+  return { settlements, rawCloseCalls };
+}
+
+async function runReentry(): Promise<unknown> {
+  let rawCalls = 0;
+  const originalFstatSync = originalFs.fstatSync;
+  installFstatProbe((...args) => {
+    rawCalls += 1;
+    return originalFstatSync(...args);
+  });
+  const module = await import("../lib/capabilities");
+  const denials: string[] = [];
+  const capabilities = new module.ContractCapabilities({
+    onDescriptorAuthorityDenial() {
+      denials.push("denial");
+    }
+  });
+  const root = capabilities.openRoot("/", "admission");
+  const errors: Record<string, string> = Object.create(null);
+  module.installDescriptorPrimitiveMediator((operation, invoke) => {
+    if (operation === "fstat_sync") {
+      const reentries: Readonly<Record<string, () => unknown>> = {
+        sealAdmission: () => capabilities.sealAdmission(),
+        openRoot: () => capabilities.openRoot("not-root", "admission"),
+        openRelative: () => capabilities.openRelative(root, "payload", module.FILE_OPEN_FLAGS, "post_admission"),
+        markRetained: () => capabilities.markRetained(root, "directory"),
+        stat: () => capabilities.stat(root),
+        readRetained: () => capabilities.readRetained(root, Buffer.alloc(1), 0, 1, 0, "post_admission"),
+        close: () => capabilities.close(root, "retained"),
+        rejectForbidden: () => capabilities.rejectForbidden("file_write", "admission")
+      };
+      for (const [name, action] of Object.entries(reentries)) errors[name] = errorMessage(action);
+    }
+    return invoke();
+  });
+  const returned = capabilities.stat(root);
+  capabilities.close(root, "unretained");
+  return { errors, denials, returnedDirectory: returned.isDirectory(), rawCalls };
+}
+
+async function runRawCapture(): Promise<unknown> {
+  const fixture = await createFixture();
+  try {
+    const module = await import("../lib/capabilities");
+    const captures: Array<Readonly<{ operation: DescriptorOperation; type: string; undefined: boolean }>> = [];
+    module.installDescriptorPrimitiveMediator((operation, invoke) => {
+      const value = invoke();
+      captures.push(Object.freeze({ operation, type: typeof value, undefined: value === undefined }));
+      return value;
+    });
+    return { ...readFixture(module, fixture), segments: fixture.segments.length, captures };
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+}
+
+async function runProxy(): Promise<unknown> {
+  const module = await import("../lib/capabilities");
+  const operations: DescriptorOperation[] = [];
+  let tagReads = 0;
+  const mediator = new Proxy(
+    ((operation: DescriptorOperation, invoke: () => unknown) => {
+      operations.push(operation);
+      return invoke();
+    }) as DescriptorPrimitiveMediator,
+    {
+      get(target, key, receiver) {
+        if (key === Symbol.toStringTag) {
+          tagReads += 1;
+          throw new Error("PROXY_TAG_TRAP");
+        }
+        return Reflect.get(target, key, receiver);
+      }
+    }
+  );
+  module.installDescriptorPrimitiveMediator(mediator);
+  const capabilities = new module.ContractCapabilities();
+  const root = capabilities.openRoot("/", "admission");
+  capabilities.close(root, "unretained");
+  return { operations, tagReads, descriptorIsOpaque: typeof root === "object" && root !== null };
+}
+
+async function runInvalid(): Promise<unknown> {
+  const fixture = await createFixture();
+  const rawCalls: RawCallCounts = {
+    open_sync: 0,
+    open_sync_args: [],
+    openat: 0,
+    fstat_sync: 0,
+    read_sync: 0,
+    close_sync: 0
+  };
+  installRawSequenceProbe(rawCalls, () => undefined);
+  try {
+    const module = await import("../lib/capabilities");
+    const operations: DescriptorOperation[] = [];
+    module.installDescriptorPrimitiveMediator((operation, invoke) => {
+      operations.push(operation);
+      return invoke();
+    });
+    const capabilities = new module.ContractCapabilities();
+    let directory = capabilities.openRoot("/", "admission");
+    const descriptors: CapabilityDescriptor[] = [directory];
+    for (const segment of fixture.segments) {
+      if (!capabilities.stat(directory).isDirectory()) throw new Error("fixture directory is not a directory");
+      capabilities.markRetained(directory, "directory");
+      directory = capabilities.openRelative(directory, segment, module.DIRECTORY_OPEN_FLAGS, "admission");
+      descriptors.push(directory);
+    }
+    if (!capabilities.stat(directory).isDirectory()) throw new Error("fixture root is not a directory");
+    capabilities.markRetained(directory, "directory");
+    const file = capabilities.openRelative(directory, "payload", module.FILE_OPEN_FLAGS, "admission");
+    descriptors.push(file);
+    if (!capabilities.stat(file).isFile()) throw new Error("fixture payload is not a file");
+    capabilities.markRetained(file, "file");
+    capabilities.sealAdmission();
+    resetRawCalls(rawCalls);
+    operations.length = 0;
+    const rows = [
+      ["root", errorMessage(() => capabilities.openRoot("not-root", "admission"))],
+      ["phase", errorMessage(() => capabilities.openRoot("/", "admission"))],
+      [
+        "parent",
+        errorMessage(() =>
+          capabilities.openRelative(Object.freeze(Object.create(null)) as CapabilityDescriptor, "payload", module.FILE_OPEN_FLAGS, "post_admission")
+        )
+      ],
+      ["flags", errorMessage(() => capabilities.openRelative(directory, "payload", 0, "post_admission"))],
+      ["stat", errorMessage(() => capabilities.stat(0 as never))],
+      [
+        "read_phase",
+        errorMessage(() => capabilities.readRetained(file, Buffer.alloc(1), 0, 1, 0, "admission"))
+      ],
+      [
+        "read_range",
+        errorMessage(() => capabilities.readRetained(file, Buffer.alloc(1), 1, 1, 0, "post_admission"))
+      ],
+      ["close", errorMessage(() => capabilities.close(file, "verification"))]
+    ];
+    const snapshot = {
+      rows,
+      operations: [...operations],
+      rawCalls: {
+        ...rawCalls,
+        open_sync_args: rawCalls.open_sync_args.map((args) => [...args])
+      }
+    };
+    for (const descriptor of [...descriptors].reverse()) capabilities.close(descriptor, "retained");
+    return snapshot;
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+}
+
+async function runSameFd(): Promise<unknown> {
+  const sentinel = Object.freeze({ isDirectory: () => true, isFile: () => false }) as unknown as BigIntStats;
+  let openCalls = 0;
+  let statCalls = 0;
+  let closeCalls = 0;
+  mock.module("node:fs", () => ({
+    ...originalFs,
+    openSync() {
+      openCalls += 1;
+      return 73;
+    },
+    fstatSync() {
+      statCalls += 1;
+      return sentinel;
+    },
+    closeSync() {
+      closeCalls += 1;
+    }
+  }));
+  const module = await import("../lib/capabilities");
+  module.installDescriptorPrimitiveMediator((_operation, invoke) => invoke());
+  const capabilities = new module.ContractCapabilities();
+  const first = capabilities.openRoot("/", "admission");
+  capabilities.close(first, "unretained");
+  const replacement = capabilities.openRoot("/", "admission");
+  const replacementIsDirectory = capabilities.stat(replacement).isDirectory();
+  const stale = errorMessage(() => capabilities.stat(first));
+  capabilities.close(replacement, "unretained");
+  return { openCalls, statCalls, closeCalls, replacementIsDirectory, stale };
+}
+
+async function runIngressHooks(): Promise<unknown> {
+  const module = await import("../lib/capabilities");
+  const ingress = await import("../lib/ingress");
+  const checker = await import("../lib/checker");
+  const callbackEntries: string[] = [];
+  const nestedCallbacks: string[] = [];
+  let mediationActive = false;
+  let hookLabel: string | undefined;
+  module.installDescriptorPrimitiveMediator((operation, invoke) => {
+    if (hookLabel) nestedCallbacks.push(`${hookLabel}:${operation}:${mediationActive}`);
+    mediationActive = true;
+    try {
+      return invoke();
+    } finally {
+      mediationActive = false;
+    }
+  });
+  const startEligibleWork = (label: string): void => {
+    const priorLabel = hookLabel;
+    hookLabel = label;
+    try {
+      const capabilities = new module.ContractCapabilities();
+      const root = capabilities.openRoot("/", "admission");
+      capabilities.close(root, "unretained");
+    } finally {
+      hookLabel = priorLabel;
+    }
+  };
+  const input = join(import.meta.dir, "..", "fixtures", "valid", "source-input-record-paired-surrogate.json");
+  let observed = false;
+  const directHooks = {
+    afterAdmission() {
+      callbackEntries.push(`direct:afterAdmission:${mediationActive}`);
+      startEligibleWork("direct:afterAdmission");
+    },
+    observe() {
+      if (observed) return;
+      observed = true;
+      callbackEntries.push(`direct:observe:${mediationActive}`);
+      startEligibleWork("direct:observe");
+    }
+  };
+  const direct = await ingress.readBoundedFile(input, 64 * 1024, directHooks, () => {
+    callbackEntries.push(`direct:beforeCleanup:${mediationActive}`);
+    startEligibleWork("direct:beforeCleanup");
+  });
+  let checkerObserved = false;
+  let stdout = "";
+  let stderr = "";
+  const checkerExit = await checker.runCheckForTest(
+    ["--input", input, "--kind", "source_input_record"],
+    {
+      stdout: (text) => { stdout += text; },
+      stderr: (text) => { stderr += text; }
+    },
+    {
+      afterAdmission() {
+        callbackEntries.push(`checker:afterAdmission:${mediationActive}`);
+        startEligibleWork("checker:afterAdmission");
+      },
+      observe() {
+        if (checkerObserved) return;
+        checkerObserved = true;
+        callbackEntries.push(`checker:observe:${mediationActive}`);
+        startEligibleWork("checker:observe");
+      }
+    }
+  );
+  return {
+    directBytes: direct.byteLength,
+    callbackEntries,
+    nestedCallbacks,
+    checkerExit,
+    checkerStdout: stdout,
+    checkerStderr: stderr
   };
 }
 
@@ -381,30 +922,71 @@ async function runHooks(): Promise<unknown> {
 }
 
 try {
-  if (
-    scenario !== "default" && scenario !== "sequence" && scenario !== "install" && scenario !== "omitted" &&
-    scenario !== "repeated" && scenario !== "late" && scenario !== "async" && scenario !== "primitive" &&
-    scenario !== "hooks"
-  ) {
-    throw new Error("descriptor mediation child requires a scenario");
+  let result: unknown;
+  switch (scenario) {
+    case "default":
+      result = await runDefault();
+      break;
+    case "sequence":
+      result = await runSequence();
+      break;
+    case "install":
+      result = await runInstall();
+      break;
+    case "omitted":
+      result = await runOmitted();
+      break;
+    case "repeated":
+      result = await runRepeated();
+      break;
+    case "caught_repeated":
+      result = await runCaughtRepeated();
+      break;
+    case "late":
+      result = await runLate();
+      break;
+    case "async":
+      result = await runAsync();
+      break;
+    case "ordinary_thenable":
+      result = await runOrdinaryThenable();
+      break;
+    case "deferred":
+      result = await runDeferred();
+      break;
+    case "primitive":
+      result = await runPrimitive();
+      break;
+    case "post_invoke":
+      result = await runPostInvoke();
+      break;
+    case "close_settlement":
+      result = await runCloseSettlement();
+      break;
+    case "reentry":
+      result = await runReentry();
+      break;
+    case "raw_capture":
+      result = await runRawCapture();
+      break;
+    case "proxy":
+      result = await runProxy();
+      break;
+    case "invalid":
+      result = await runInvalid();
+      break;
+    case "same_fd":
+      result = await runSameFd();
+      break;
+    case "hooks":
+      result = await runHooks();
+      break;
+    case "ingress_hooks":
+      result = await runIngressHooks();
+      break;
+    default:
+      throw new Error("descriptor mediation child requires a scenario");
   }
-  const result = scenario === "default"
-    ? await runDefault()
-    : scenario === "sequence"
-    ? await runSequence()
-    : scenario === "install"
-    ? await runInstall()
-    : scenario === "omitted"
-    ? await runOmitted()
-    : scenario === "repeated"
-    ? await runRepeated()
-    : scenario === "late"
-    ? await runLate()
-    : scenario === "async"
-    ? await runAsync()
-    : scenario === "primitive"
-    ? await runPrimitive()
-    : await runHooks();
   console.log(JSON.stringify(result));
 } catch (error) {
   console.error(error);

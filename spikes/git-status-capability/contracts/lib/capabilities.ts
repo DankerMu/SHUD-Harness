@@ -139,24 +139,47 @@ const DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS = Object.freeze({
   alreadyInstalled: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ALREADY_INSTALLED",
   asyncMediator: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ASYNC",
   expiredInvocation: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_EXPIRED",
+  invalidMediator: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVALID",
   missingInvocation: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING",
+  reentry: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY",
   repeatedInvocation: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_REPEATED"
 });
 
+type DescriptorPrimitiveMediationState = "inactive" | "callback";
+
 let descriptorPrimitiveMediator: DescriptorPrimitiveMediator | undefined;
 let descriptorPrimitiveMediatorInstalled = false;
+let descriptorPrimitiveMediationState: DescriptorPrimitiveMediationState = "inactive";
 
-export function installDescriptorPrimitiveMediator(mediator: DescriptorPrimitiveMediator): void {
+function assertDescriptorPrimitiveMediationInactive(): void {
+  if (descriptorPrimitiveMediationState !== "inactive") {
+    throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.reentry);
+  }
+}
+
+export const installDescriptorPrimitiveMediator = (mediator: DescriptorPrimitiveMediator): void => {
   if (descriptorPrimitiveMediatorInstalled) {
     throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.alreadyInstalled);
   }
   if (typeof mediator !== "function") {
-    throw new Error("CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVALID");
+    throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.invalidMediator);
   }
   descriptorPrimitiveMediator = mediator;
   descriptorPrimitiveMediatorInstalled = true;
-}
+};
 
+Object.freeze(installDescriptorPrimitiveMediator);
+
+
+function mediatorReturnedThenable(value: unknown): boolean {
+  try {
+    return (typeof value === "object" || typeof value === "function") &&
+      value !== null &&
+      typeof (value as Readonly<{ then?: unknown }>).then === "function";
+  } catch {
+    return true;
+  }
+}
 
 function invokeDescriptorPrimitive<Result>(
   operation: DescriptorOperation,
@@ -164,9 +187,7 @@ function invokeDescriptorPrimitive<Result>(
 ): Result {
   const mediator = descriptorPrimitiveMediator;
   if (!mediator) return primitive();
-  if (Object.prototype.toString.call(mediator) === "[object AsyncFunction]") {
-    throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.asyncMediator);
-  }
+  assertDescriptorPrimitiveMediationInactive();
 
   let invocationActive = true;
   let invoked = false;
@@ -185,47 +206,38 @@ function invokeDescriptorPrimitive<Result>(
     invoked = true;
     try {
       primitiveResult = primitive();
-      return primitiveResult;
     } catch (error) {
       primitiveThrew = true;
       primitiveError = error;
       throw error;
     }
+    return undefined;
   };
 
   let mediatorThrew = false;
   let mediatorError: unknown;
   let mediatorReturnedAsync = false;
-  let mediatorResult: unknown = undefined;
+  descriptorPrimitiveMediationState = "callback";
   try {
-    mediatorResult = mediator(operation, invoke);
+    const mediatorResult = mediator(operation, invoke);
+    if (!invoked) mediatorReturnedAsync = mediatorReturnedThenable(mediatorResult);
   } catch (error) {
     mediatorThrew = true;
     mediatorError = error;
   } finally {
     invocationActive = false;
+    descriptorPrimitiveMediationState = "inactive";
   }
-  if (!mediatorThrew) {
-    try {
-      mediatorReturnedAsync = (typeof mediatorResult === "object" || typeof mediatorResult === "function") &&
-        mediatorResult !== null &&
-        typeof (mediatorResult as Readonly<{ then?: unknown }>).then === "function";
-    } catch (error) {
-      mediatorThrew = true;
-      mediatorError = error;
-    }
+
+  if (invoked) {
+    if (primitiveThrew) throw primitiveError;
+    return primitiveResult;
   }
   if (mediatorReturnedAsync) {
     throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.asyncMediator);
   }
-  if (repeatedError) throw repeatedError;
-  if (!invoked) {
-    if (mediatorThrew) throw mediatorError;
-    throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.missingInvocation);
-  }
-  if (primitiveThrew) throw primitiveError;
   if (mediatorThrew) throw mediatorError;
-  return primitiveResult;
+  throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.missingInvocation);
 }
 
 function openAt(): OpenAt {
@@ -280,10 +292,12 @@ export class ContractCapabilities {
   constructor(private readonly hooks: CapabilityHooks = {}) {}
 
   sealAdmission(): void {
+    assertDescriptorPrimitiveMediationInactive();
     this.#admissionSealed = true;
   }
 
   openRoot(root: string, phase: CapabilityPhase): CapabilityDescriptor {
+    assertDescriptorPrimitiveMediationInactive();
     if (!isCapabilityPhase(phase) || phase !== "admission" || this.#admissionSealed) {
       return this.#deny("open_root", "phase_invalid", null, null, null);
     }
@@ -298,6 +312,7 @@ export class ContractCapabilities {
     flags: number,
     phase: CapabilityPhase
   ): CapabilityDescriptor {
+    assertDescriptorPrimitiveMediationInactive();
     const requestedPhase = isCapabilityPhase(phase) ? phase : null;
     const parentRecord = this.#resolve(parent, "openat", requestedPhase, "unproven_parent");
     if (!requestedPhase) return this.#denyRecord("openat", "phase_invalid", parentRecord);
@@ -333,6 +348,7 @@ export class ContractCapabilities {
   }
 
   markRetained(descriptor: CapabilityDescriptor, kind: DescriptorKind): void {
+    assertDescriptorPrimitiveMediationInactive();
     const record = this.#resolve(descriptor, "mark_retained", null);
     if (this.#admissionSealed && record.state === "pending_retained") {
       return this.#denyRecord("mark_retained", "phase_invalid", record);
@@ -347,6 +363,7 @@ export class ContractCapabilities {
   }
 
   stat(descriptor: CapabilityDescriptor): BigIntStats {
+    assertDescriptorPrimitiveMediationInactive();
     const record = this.#resolve(descriptor, "fstat_sync", null);
     const stats = invokeDescriptorPrimitive("fstat_sync", () => fstatSync(record.fd, { bigint: true }));
     record.statValidated = true;
@@ -362,6 +379,7 @@ export class ContractCapabilities {
     position: number,
     phase: CapabilityPhase
   ): number {
+    assertDescriptorPrimitiveMediationInactive();
     const requestedPhase = isCapabilityPhase(phase) ? phase : null;
     const record = this.#resolve(descriptor, "read_sync", requestedPhase);
     if (requestedPhase !== "post_admission" || !this.#admissionSealed) {
@@ -377,10 +395,12 @@ export class ContractCapabilities {
   }
 
   close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
+    assertDescriptorPrimitiveMediationInactive();
     const record = this.#resolve(descriptor, "close_sync", null);
     const expectedOwner = CLOSE_OWNERS_BY_STATE[record.state as keyof typeof CLOSE_OWNERS_BY_STATE];
     if (owner !== expectedOwner) return this.#denyRecord("close_sync", "owner_mismatch", record);
 
+    const stateBeforeClose = record.state;
     record.state = "closed";
     const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
     let hookError: unknown;
@@ -390,8 +410,12 @@ export class ContractCapabilities {
       hookError = error;
     }
     let closeError: unknown;
+    let rawCloseAttempted = false;
     try {
-      invokeDescriptorPrimitive("close_sync", () => closeSync(record.fd));
+      invokeDescriptorPrimitive("close_sync", () => {
+        rawCloseAttempted = true;
+        closeSync(record.fd);
+      });
     } catch (error) {
       closeError = error;
     }
@@ -401,10 +425,12 @@ export class ContractCapabilities {
     } catch (error) {
       hookError = hookError ?? error;
     }
+    if (!rawCloseAttempted) record.state = stateBeforeClose;
     if (injectedFault || closeError || hookError) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
   }
 
   rejectForbidden(fault: ContractAuthorityFault, phase: CapabilityPhase): never {
+    assertDescriptorPrimitiveMediationInactive();
     if (phase !== "post_admission") throw new Error("CONTRACT_CAPABILITY_FAULT_PHASE_INVALID");
     this.hooks.onAuthorityViolation?.(fault);
     throw new Error(`CONTRACT_CAPABILITY_FORBIDDEN_${fault}`);
@@ -487,6 +513,7 @@ export class ContractCapabilities {
     generation: number | null,
     phase: CapabilityPhase | null
   ): never {
+    assertDescriptorPrimitiveMediationInactive();
     const denial = Object.freeze({
       schema_version: "shud.contract.descriptor-denial.v1" as const,
       operation,
