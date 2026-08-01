@@ -305,6 +305,38 @@ primary-error/cleanup precedence, and zero target bytes.
 - **WHEN** either direct input kind uses only the exact lifecycle and flags
 - **THEN** its #171 receipt, four-SHA/capacity behavior, cleanup/error precedence, no-side-effect contract, and descriptor baseline remain unchanged on Darwin and Linux Bun 1.2.19
 
+### Requirement: Descriptor primitive mediation is exact and non-reentrant
+The descriptor capability owner SHALL expose one module-instance, one-shot
+primitive-mediator installer for the downstream authority proof. It MUST NOT
+expose the private registry, raw descriptor records, `ContractCapabilities`,
+raw callables, an authority-enter function, or any getter/reset/uninstall/
+replacement path.
+
+The mediator MUST receive the exact `DescriptorOperation` and a synchronous,
+callback-scoped, exactly-once invocation closure only around `openSync`,
+`openat`, `fstatSync`, `readSync`, or `closeSync`. Omitted, repeated, or late
+invocation MUST fail closed. Validation, lifecycle transitions, denial
+callbacks, close-attempt hooks, injected close faults, and authority-violation
+hooks MUST execute outside the mediation window. With no installed mediator,
+all existing descriptor behavior and public receipts MUST remain unchanged.
+
+#### Scenario: Exact primitive calls are mediated once
+- **WHEN** a process installs the mediator and exercises each valid descriptor operation
+- **THEN** it observes the exact operation order, invokes each matching raw primitive exactly once, and preserves its return value or thrown error
+
+#### Scenario: Installation and invocation cannot be replayed
+- **WHEN** a caller attempts a second installation or the mediator omits, repeats, stores, or invokes the primitive closure after callback return
+- **THEN** the attempt fails with its stable closed error before an extra raw primitive executes
+
+#### Scenario: Caller hooks never inherit primitive authority
+- **WHEN** denial, close-attempt, injected close-fault, or authority-violation hooks run before or after a mediated operation
+- **THEN** the mediation window is inactive for the full hook body and any operation it starts
+
+#### Scenario: Downstream handoff remains narrow
+- **WHEN** #176 imports from `contracts/lib/capabilities.ts`
+- **THEN** only the prior opaque handle/state/operation/event/policy exports plus `installDescriptorPrimitiveMediator` and its erased signature types are permitted; the class, registry, raw callables, and lifecycle implementation remain private
+
+
 
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:

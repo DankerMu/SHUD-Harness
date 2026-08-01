@@ -1055,6 +1055,43 @@ Handoff to #176 from `contracts/lib/capabilities.ts`: only
 reusable. #176 may add delegate-topology rows but cannot change origins, flags,
 lifecycle, event fields, or public receipts.
 
+### Issue #183 descriptor primitive mediation fixture overlay
+
+PR #182's Round 3 depth diagnosis established that the five-export #175 handoff
+contains no runtime trust signal: four exports are erased types and the only
+runtime value is static policy data. Prewarming the module does not preserve raw
+bindings because Bun updates live imports after `mock.module`. Importing
+`ContractCapabilities` and masking complete public methods was rejected because
+it crosses ownership and lets caller hooks inherit authority.
+
+Issue #183 therefore adds one #175-owned installer,
+`installDescriptorPrimitiveMediator`. Installation is module-instance one-shot;
+there is no exported getter, reset, uninstall, replacement, registry view, raw
+callable, or general authority-enter operation. The installed mediator receives
+an exact `DescriptorOperation` and an ephemeral invocation closure at only these
+sites:
+
+| Operation | Mediated primitive | Outside the window |
+|---|---|---|
+| `open_root` | `openSync` | root/phase validation and descriptor issuance |
+| `openat` | lazy `dlopen`/`openat` call | parent/flags/child validation and issuance |
+| `fstat_sync` | `fstatSync` | resolution and stat-derived record updates |
+| `read_sync` | `readSync` | phase/state/kind/flag/range validation |
+| `close_sync` | `closeSync` | owner resolution, state invalidation, all hooks/faults, and error precedence |
+
+The invocation closure is synchronous, callback-scoped, and exactly-once.
+Omission, repetition, or use after mediator return fails closed. The default
+mediator invokes once and preserves existing #175 behavior. Primitive returns
+and throws retain their existing semantics; caller callbacks never execute
+inside the window.
+
+The #176 handoff expands by this installer and erased signature types only. #176
+uses it to scope its local guard around the exact primitive callback and must
+remove its class import, prototype descriptor changes, and broad global method
+depth. The private registry and `ContractCapabilities` implementation remain
+unavailable. Dependency order is #175 -> #183 -> #176 -> #177 -> #178.
+
+
 
 ## Invariant Matrix
 
