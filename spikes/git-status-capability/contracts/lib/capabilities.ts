@@ -1,5 +1,6 @@
 import { dlopen } from "bun:ffi";
 import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";
+import { isPromise } from "node:util/types";
 
 export type { BigIntStats };
 
@@ -180,6 +181,15 @@ export const installDescriptorPrimitiveMediator = (mediator: DescriptorPrimitive
 
 Object.freeze(installDescriptorPrimitiveMediator);
 
+const intrinsicPromiseThen = Promise.prototype.then;
+const discardPromiseRejection = () => undefined;
+
+function settleNativeMediatorPromise(value: unknown): boolean {
+  if (!isPromise(value)) return false;
+  intrinsicPromiseThen.call(value, undefined, discardPromiseRejection);
+  return true;
+}
+
 
 function mediatorReturnedThenable(value: unknown): boolean {
   try {
@@ -243,7 +253,10 @@ function invokeDescriptorPrimitive<Result>(
   const completedRawOutcome: DescriptorPrimitiveOutcome = rawOutcome.value;
   try {
     if (!mediatorThrew && completedRawOutcome === "uninvoked") {
-      mediatorReturnedAsync = mediatorReturnedThenable(mediatorResult);
+      mediatorReturnedAsync = settleNativeMediatorPromise(mediatorResult) ||
+        mediatorReturnedThenable(mediatorResult);
+    } else {
+      settleNativeMediatorPromise(mediatorResult);
     }
   } finally {
     descriptorPrimitiveMediationState = "inactive";

@@ -7,6 +7,7 @@ import {
   expectedRawOwnershipDenial,
   RAW_ALIAS_MUTATIONS,
   structuralDescriptorDenials,
+  structuralDescriptorGraphDenials,
   withCompiledProductionTree,
   type ProductionMutation
 } from "./authority-descriptor-vocabulary";
@@ -387,7 +388,7 @@ installDescriptorPrimitiveMediator.rawResult = undefined;
       [ProductionMutation, readonly string[]]
     >) {
       await withCompiledProductionTree(mutation, async (tree) => {
-        expect(structuralDescriptorDenials(await readFile(tree.capabilitiesPath, "utf8"))).toEqual(expected);
+        expect(await structuralDescriptorGraphDenials(tree)).toEqual(expected);
       });
     }
   });
@@ -395,7 +396,7 @@ installDescriptorPrimitiveMediator.rawResult = undefined;
   test("binding-aware raw ownership rejects every alias family and every escaped Node primitive callback", async () => {
     for (const mutation of [...RAW_ALIAS_MUTATIONS, ...CALLBACK_ESCAPE_MUTATIONS]) {
       await withCompiledProductionTree(mutation, async (tree) => {
-        const denials = structuralDescriptorDenials(await readFile(tree.capabilitiesPath, "utf8"));
+        const denials = await structuralDescriptorGraphDenials(tree);
         expect(denials).toContain(expectedRawOwnershipDenial(mutation));
       });
     }

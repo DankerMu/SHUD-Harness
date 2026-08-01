@@ -93,13 +93,15 @@ checker path retry only the former, at most twice total. A one-time omission,
 throw, thenable, or deferred invocation therefore reaches one mediated raw
 close on retry. After a second persistent no-raw refusal, the module-instance
 ingress boundary retains strong private capabilities/descriptor/owner pairs for
-every still-live unsettled close and becomes poisoned: the first failing chain
-finishes its finite cleanup, while every later direct or checker admission
-fails with the existing `CONTRACT_SCHEMA_INVALID` receipt before `openRoot` or
-any OS-fd allocation. The primary error still wins over cleanup failure, or
-the existing explicit cleanup failure is emitted when it is the only failure.
-No retry bypasses the mediator or performs an unmediated raw close, and poison
-prevents later admissions from growing the retained owner set.
+every still-live unsettled close and becomes poisoned. The first failing chain
+may finish only logical cleanup after poison; it MUST NOT begin a third close
+attempt or any raw close for a retained owner. Every later direct or checker
+admission fails with the existing `CONTRACT_SCHEMA_INVALID` receipt before
+`openRoot` or any OS-fd allocation. The primary error still wins over cleanup
+failure, or the existing explicit cleanup failure is emitted when it is the
+only failure. No retry bypasses the mediator or performs an unmediated raw
+close, and poison prevents later admissions from growing the retained owner
+set.
 
 Denial, close-attempt, close-fault, authority-violation, `afterAdmission`,
 `observe`, and `beforeCleanup` callbacks enter only after the prior primitive
@@ -113,7 +115,7 @@ this proof; this does not broaden #176's ownership.
 | Surface | Invariant | Required regression evidence |
 |---|---|---|
 | Installer | Invalid → valid → valid ordering, frozen/non-constructible standard own and inherited surface, and no hidden control property | Process-isolated descriptor/prototype receipt plus AST mutations for `reset` and pre-freeze `setPrototypeOf` |
-| Primitive ownership | One sole top-level lexical helper owns all five callsites; every noncanonical `BindingName`, alias, or projection is rejected; each resolved raw callable has the exact matching operation callback, operands, result relation, and lifecycle | Binding-aware copied-tree mutations for identifier/object/array destructuring, renamed property, property projection, assignment, bind, wrapper, and nested-function aliases across every primitive; wrong-argument/flag mutations; and four Node callback-escape mutations |
+| Primitive ownership | One sole top-level lexical helper owns all five callsites; every noncanonical `BindingName`, alias, projection, raw import, loader, cache, resolver, or cross-library helper is rejected; each resolved raw callable has the exact matching operation callback, operands, result relation, and lifecycle | Binding-aware copied-tree mutations for identifier/object/array destructuring, renamed property, property projection, assignment, bind, wrapper, and nested-function aliases across every primitive; renamed import, namespace, `require`, builtin, dynamic, cache/resolver, and cross-library raw-acquisition mutations; wrong-argument/flag mutations; and four Node callback-escape mutations |
 | Raw calls | Each canonical `openSync`, resolved `openat`, `fstatSync`, `readSync`, and `closeSync` executes once only while its matching callback is active | Process-isolated five-operation raw-call receipts with exact counts, callback-active snapshots, arguments/results/lifecycle assertions, and structural callback-ancestry red mutations |
 | Reentry | Every public capability family rejects before observable work throughout each of the five outer primitive windows | Process-isolated five-window table with every public-entry reentry, zero denial/lifecycle/hook delta, and zero nested raw calls |
 | Outcome precedence | A raw return/error owns post-invoke throw, thenable, and repeated-call outcomes only when the raw invocation began before mediator return; raw thrown objects never cross into mediator code | Getter/Proxy-return matrix plus five mutable raw-error process receipts with mediator try/catch/mutation attempts, exact outer outcomes, and exactly-once callback-active raw calls |
@@ -158,11 +160,7 @@ trap restore_source EXIT HUP INT TERM
 git show "${PRE_SEAM}:${SOURCE}" > "$SOURCE"
 set +e
 npx --yes bun@1.2.19 test \
-  spikes/git-status-capability/contracts/tests/authority-descriptor-structural.test.ts \
-  spikes/git-status-capability/contracts/tests/authority-descriptor-mediation.test.ts \
-  spikes/git-status-capability/contracts/tests/authority-descriptor-outcome-round-3.test.ts \
-  spikes/git-status-capability/contracts/tests/authority-descriptor-ingress-round-3.test.ts \
-  spikes/git-status-capability/contracts/tests/source-ingress.test.ts > "$RED_TRANSCRIPT" 2>&1
+  spikes/git-status-capability/contracts/tests/*.test.ts > "$RED_TRANSCRIPT" 2>&1
 red_status=$?
 set -e
 cat "$RED_TRANSCRIPT"

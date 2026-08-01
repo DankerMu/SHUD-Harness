@@ -2,7 +2,7 @@ import { mock } from "bun:test";
 import * as originalFfi from "bun:ffi";
 import * as originalFs from "node:fs";
 import { readdir } from "node:fs/promises";
-import { parse, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import type { BigIntStats, DescriptorPrimitiveMediator } from "../lib/capabilities";
 
 type CleanupSurface = "root" | "child" | "verification" | "retained";
@@ -45,13 +45,10 @@ const validInput = resolve(contractsRoot, "fixtures", "valid", "source-input-rec
 const descriptorDirectory = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
 const maximumBytes = 64 * 1024;
 const raw: RawCounts = { open_sync: 0, openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 0 };
+let targetMediatedCloseCalls = 0;
 let fstatCalls = 0;
-
-function descriptorComponents(path: string): number {
-  const absolute = resolve(path);
-  const root = parse(absolute).root;
-  return 1 + absolute.slice(root.length).split(sep).filter(Boolean).length;
-}
+let activeCloseOwner: string | undefined;
+let targetRawCloseCalls = 0;
 
 function nonDirectoryStats(): BigIntStats {
   return Object.freeze({
@@ -67,15 +64,11 @@ function rawOpenCount(): number {
   return raw.open_sync + raw.openat;
 }
 
-function expectedTargetAttempts(owner: CleanupSurface): number {
-  const components = descriptorComponents(validInput);
-  if (owner === "root" || owner === "child") return 2;
-  if (owner === "verification") return 4 * (components - 1);
-  return 2 * components;
+function targetCloseOwner(owner: CleanupSurface): string {
+  return owner === "root" || owner === "child" ? "unretained" : owner;
 }
 
-
-function installRawProbe(owner: CleanupSurface): void {
+function installRawProbe(owner: CleanupSurface, targetOwner: string): void {
   const originalOpenSync = originalFs.openSync;
   const originalFstatSync = originalFs.fstatSync;
   const originalReadSync = originalFs.readSync;
@@ -99,6 +92,7 @@ function installRawProbe(owner: CleanupSurface): void {
     },
     closeSync(...args: Parameters<typeof originalCloseSync>) {
       raw.close_sync += 1;
+      if (activeCloseOwner === targetOwner) targetRawCloseCalls += 1;
       return originalCloseSync(...args);
     }
   }));
@@ -179,9 +173,7 @@ async function descriptorCount(): Promise<number> {
 }
 
 function pairedAttemptOrdinals(attempts: readonly number[]): boolean {
-  return attempts.length > 0 && attempts.length % 2 === 0 && attempts.every(
-    (ordinal, index) => index % 2 === 0 || ordinal === attempts[index - 1]! + 1
-  );
+  return attempts.length === 2 && attempts[1] === attempts[0]! + 1;
 }
 
 try {
@@ -191,22 +183,26 @@ try {
   if (!entry || !["direct", "checker"].includes(entry)) {
     throw new Error("round-three ingress child requires an entry path");
   }
-  installRawProbe(surface);
+  const targetOwner = targetCloseOwner(surface);
+  installRawProbe(surface, targetOwner);
   const modules = await loadModules();
-  modules.capabilities.installDescriptorPrimitiveMediator((operation, invoke) =>
-    operation === "close_sync" ? undefined : invoke()
-  );
   const attempts: CloseAttempt[] = [];
   const hooks = Object.freeze({
-    onCloseAttempt: (attempt: CloseAttempt): void => { attempts.push(attempt); }
+    onCloseAttempt: (attempt: CloseAttempt): void => {
+      attempts.push(attempt);
+      activeCloseOwner = attempt.owner;
+    }
+  });
+  modules.capabilities.installDescriptorPrimitiveMediator((operation, invoke) => {
+    if (operation !== "close_sync" || activeCloseOwner !== targetOwner) return invoke();
+    targetMediatedCloseCalls += 1;
+    return undefined;
   });
   Bun.gc(true);
   const baseline = await descriptorCount();
   const first = await runEntry(entry, modules, hooks);
   const firstRawOpens = rawOpenCount();
-  const targetAttempts = attempts.filter(
-    (attempt) => attempt.owner === (surface === "root" || surface === "child" ? "unretained" : surface)
-  );
+  const targetAttempts = attempts.filter((attempt) => attempt.owner === targetOwner);
   Bun.gc(true);
   const afterFirst = await descriptorCount();
   const attemptsAfterFirst = attempts.length;
@@ -227,11 +223,13 @@ try {
     firstRawOpens,
     laterRawOpens: rawOpenCount() - rawOpensAfterFirst,
     rawCloseCalls: raw.close_sync,
+    targetRawCloseCalls,
+    targetMediatedCloseCalls,
     firstCloseAttemptCount: attemptsAfterFirst,
     laterCloseAttemptCount: attempts.length - attemptsAfterFirst,
     targetAttemptOrdinals: targetAttempts.map((attempt) => attempt.ordinal),
     targetAttemptsPaired: pairedAttemptOrdinals(targetAttempts.map((attempt) => attempt.ordinal)),
-    expectedTargetAttempts: expectedTargetAttempts(surface)
+    expectedTargetAttempts: 2
   }));
 } catch (error) {
   console.error(error);

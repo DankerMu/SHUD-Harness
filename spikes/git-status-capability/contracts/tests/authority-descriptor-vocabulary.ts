@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
+import { rawAcquisitionGraphDenials } from "./authority-descriptor-acquisition";
 import { rawPrimitiveOwnershipDenials } from "./authority-descriptor-ownership";
 
 export const contractsRoot = join(import.meta.dir, "..");
@@ -56,9 +57,11 @@ export type AuditIdentityMutation = "deny_record_zero" | "deny_record_fd_plus_on
 type CapabilityMutation = ProductionMutation | GuardOrderMutation | AuditIdentityMutation;
 export type MutatedProductionTree = Readonly<{
   root: string;
+  libraryRoot: string;
   checkPath: string;
   capabilitiesPath: string;
 }>;
+export type ProductionTreeTransform = (sourceName: string, source: string) => string;
 
 const STRUCTURAL_DENIAL_ORDER: readonly StructuralDenial[] = [
   "raw_open_root_not_handle",
@@ -441,21 +444,24 @@ function mutateCapabilitiesSource(source: string, mutation: CapabilityMutation |
   throw new Error(`unsupported descriptor mutation: ${mutation}`);
 }
 
-async function copyProductionSources(root: string, mutation: CapabilityMutation | undefined): Promise<MutatedProductionTree> {
+async function copyProductionSources(
+  root: string,
+  mutation: CapabilityMutation | undefined,
+  transform?: ProductionTreeTransform
+): Promise<MutatedProductionTree> {
   const libraryRoot = join(contractsRoot, "lib");
   const copiedLibraryRoot = join(root, "lib");
   await mkdir(copiedLibraryRoot, { recursive: true });
   const sourceNames = (await readdir(libraryRoot)).filter((name) => name.endsWith(".ts"));
   await Promise.all(sourceNames.map(async (name) => {
     const source = await readFile(join(libraryRoot, name), "utf8");
-    await writeFile(
-      join(copiedLibraryRoot, name),
-      name === "capabilities.ts" ? mutateCapabilitiesSource(source, mutation) : source
-    );
+    const mutated = name === "capabilities.ts" ? mutateCapabilitiesSource(source, mutation) : source;
+    await writeFile(join(copiedLibraryRoot, name), transform ? transform(name, mutated) : mutated);
   }));
   await writeFile(join(root, "check.ts"), await readFile(checkSourcePath, "utf8"));
   return Object.freeze({
     root,
+    libraryRoot: copiedLibraryRoot,
     checkPath: join(root, "check.ts"),
     capabilitiesPath: join(copiedLibraryRoot, "capabilities.ts")
   });
@@ -489,6 +495,27 @@ export async function withCompiledProductionTree(
     if (!build.success) throw new Error(`full production tree did not compile: ${build.logs.join("\n")}`);
     await action(tree);
   });
+}
+
+/** Compiles a complete copied production graph after an explicit source transform. */
+export async function withCompiledProductionTreeTransform(
+  transform: ProductionTreeTransform,
+  action: (tree: MutatedProductionTree) => Promise<void>
+): Promise<void> {
+  const root = await mkdtemp(join(tmpdir(), "shud-descriptor-production-"));
+  try {
+    const tree = await copyProductionSources(root, undefined, transform);
+    const build = await Bun.build({
+      entrypoints: [tree.checkPath],
+      outdir: join(tree.root, "compiled"),
+      target: "bun",
+      sourcemap: "none"
+    });
+    if (!build.success) throw new Error(`full production tree did not compile: ${build.logs.join("\n")}`);
+    await action(tree);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -700,6 +727,7 @@ export function structuralDescriptorDenials(source: string): readonly Structural
     denials.add("raw_descriptor_operation_shape");
   }
   for (const denial of rawPrimitiveOwnershipDenials(source)) denials.add(denial);
+  for (const denial of rawAcquisitionGraphDenials(new Map([["capabilities.ts", source]]))) denials.add(denial);
   if (
     !hasPrivateCollectionDeclaration(capabilities, "registry", "WeakMap") ||
     !hasPrivateLookup(capabilities, sourceFile, "registry", (argument) => isIdentifierNamed(argument, "capability"))
@@ -723,5 +751,26 @@ export function structuralDescriptorDenials(source: string): readonly Structural
   if (!hasNamedParameter(close, "owner", "CloseOwner") || !hasOwnerInequality(close, sourceFile)) {
     denials.add("owner_mismatch_shape");
   }
+  return STRUCTURAL_DENIAL_ORDER.filter((denial) => denials.has(denial));
+}
+
+async function copiedLibrarySources(tree: MutatedProductionTree): Promise<ReadonlyMap<string, string>> {
+  const names = (await readdir(tree.libraryRoot)).filter((name) => name.endsWith(".ts"));
+  const sources = await Promise.all(names.map(async (name) => [
+    name,
+    await readFile(join(tree.libraryRoot, name), "utf8")
+  ] as const));
+  return new Map(sources);
+}
+
+/** Combines the canonical call oracle with the closed copied `lib/**` acquisition graph. */
+export async function structuralDescriptorGraphDenials(
+  tree: MutatedProductionTree
+): Promise<readonly StructuralDenial[]> {
+  const sources = await copiedLibrarySources(tree);
+  const capabilities = sources.get("capabilities.ts");
+  const denials = new Set<StructuralDenial>();
+  for (const denial of structuralDescriptorDenials(capabilities ?? "")) denials.add(denial);
+  for (const denial of rawAcquisitionGraphDenials(sources)) denials.add(denial);
   return STRUCTURAL_DENIAL_ORDER.filter((denial) => denials.has(denial));
 }

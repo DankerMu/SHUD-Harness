@@ -2,7 +2,7 @@ import { mock } from "bun:test";
 import * as originalFfi from "bun:ffi";
 import * as originalFs from "node:fs";
 import { readdir } from "node:fs/promises";
-import { parse, resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import type { BigIntStats, DescriptorOperation, DescriptorPrimitiveMediator } from "../lib/capabilities";
 
 type Scenario = "transient" | "persistent";
@@ -19,6 +19,7 @@ type IngressModule = Readonly<{
     maximum: number,
     hooks?: Readonly<{
       onCloseAttempt?: (attempt: Readonly<{ owner: string; ordinal: number }>) => void;
+      afterAdmission?: () => void | Promise<void>;
     }>,
     beforeCleanup?: (bytes: Uint8Array) => void
   ) => Promise<Uint8Array>;
@@ -62,11 +63,6 @@ function errorMessage(action: () => unknown): string {
   }
 }
 
-function descriptorComponents(path: string): number {
-  const absolute = resolve(path);
-  const root = parse(absolute).root;
-  return 1 + absolute.slice(root.length).split(sep).filter(Boolean).length;
-}
 
 function fakeNonDirectoryStats(): BigIntStats {
   return Object.freeze({
@@ -258,13 +254,14 @@ async function runPersistent(): Promise<unknown> {
       persistentCallbacks += 1;
     }
   });
-  const components = descriptorComponents(validInput);
-  const expectedAttempts = 2 * (3 * components - 2);
+  const expectedAttempts = 2;
   const primaryError = await modules.ingress.readBoundedFile(
     validInput,
     maximumBytes,
-    hooks,
-    () => { throw new modules.ingress.ContractError("CONTRACT_JSON_MALFORMED"); }
+    Object.freeze({
+      ...hooks,
+      afterAdmission: () => { throw new modules.ingress.ContractError("CONTRACT_JSON_MALFORMED"); }
+    })
   ).then(() => "NO_ERROR", (error) => error instanceof Error ? error.message : String(error));
   const primaryAttempts = persistentCallbacks;
   persistentCallbacks = 0;

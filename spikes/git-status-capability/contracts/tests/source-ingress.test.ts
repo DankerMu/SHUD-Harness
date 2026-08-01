@@ -646,7 +646,7 @@ describe("descriptor-bound source ingress", () => {
 
   test("persistent close refusal has a fixed bound, preserves primary errors, and fail-stops later ingress without raw fallback", async () => {
     const receipt = await runIngressRoundTwo<RoundTwoPersistentReceipt>("persistent");
-    const expectedAttempts = 2 * (3 * componentCount(validSourcePath) - 2);
+    const expectedAttempts = 2;
     expect(receipt.expectedAttempts).toBe(expectedAttempts);
     expect(receipt.primaryError).toBe("CONTRACT_JSON_MALFORMED");
     expect(receipt.primaryAttempts).toBe(expectedAttempts);

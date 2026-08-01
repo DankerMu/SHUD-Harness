@@ -21,6 +21,8 @@ type PoisonReceipt = Readonly<{
   firstRawOpens: number;
   laterRawOpens: number;
   rawCloseCalls: number;
+  targetRawCloseCalls: number;
+  targetMediatedCloseCalls: number;
   firstCloseAttemptCount: number;
   laterCloseAttemptCount: number;
   targetAttemptOrdinals: readonly number[];
@@ -56,7 +58,8 @@ describe("persistent no-raw close fail-stop", () => {
         expect(receipt.targetAttemptOrdinals).toHaveLength(receipt.expectedTargetAttempts);
         expect(receipt.targetAttemptsPaired).toBe(true);
         expect(receipt.firstCloseAttemptCount).toBeGreaterThanOrEqual(receipt.expectedTargetAttempts);
-        expect(receipt.rawCloseCalls).toBe(0);
+        expect(receipt.targetRawCloseCalls).toBe(0);
+        expect(receipt.targetMediatedCloseCalls).toBe(receipt.expectedTargetAttempts);
         expect(receipt.afterFirst).toBeGreaterThan(receipt.baseline);
         expect(receipt.laterDirect).toEqual({
           code: "CONTRACT_SCHEMA_INVALID",

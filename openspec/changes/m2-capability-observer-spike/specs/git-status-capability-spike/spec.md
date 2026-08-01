@@ -381,8 +381,9 @@ transient omission, pre-invocation throw, thenable, or deferred use MUST settle
 once on retry without descriptor growth. After the second persistent no-raw
 refusal, the module instance MUST retain strong private
 capabilities/descriptor/owner pairs for every still-live unsettled close and
-poison ingress; the first chain may finish its finite cleanup, but every later
-`readBoundedFile` or checker admission MUST fail with the existing
+poison ingress. The first chain MAY finish logical cleanup, but once poisoned
+it MUST NOT begin a third attempt or any raw close for a retained owner; every
+later `readBoundedFile` or checker admission MUST fail with the existing
 `CONTRACT_SCHEMA_INVALID` receipt before `openRoot` or any OS-fd allocation.
 The retained owner set MUST NOT grow after poison. Persistent refusal therefore
 preserves any primary error and otherwise returns the existing explicit cleanup
