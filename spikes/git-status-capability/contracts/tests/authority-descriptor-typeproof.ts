@@ -1,6 +1,8 @@
 import {
   DESCRIPTOR_OPERATION_POLICY,
-  type DescriptorOperation
+  type DescriptorOperation,
+  type DescriptorPrimitiveInvocation,
+  type DescriptorPrimitiveMediator
 } from "../lib/capabilities";
 import type { DescriptorIngressOperation } from "../lib/ingress";
 
@@ -19,6 +21,11 @@ type DescriptorIngressVocabulary =
   | "open_relative"
   | "read_retained";
 type IngressOperation = DescriptorIngressOperation["operation"];
+type ExpectedDescriptorPrimitiveInvocation = () => unknown;
+type ExpectedDescriptorPrimitiveMediator = (
+  operation: DescriptorOperation,
+  invoke: DescriptorPrimitiveInvocation
+) => unknown;
 
 type CanonicalOperationIncludesEveryPolicyKey = Assert<
   CanonicalPolicyKey extends DescriptorOperation ? true : false
@@ -41,6 +48,16 @@ type IngressOperationIncludesEveryExpectation = Assert<
 type IngressVocabularyIsDistinctFromCanonical = Assert<
   DescriptorOperation extends IngressOperation ? false : IngressOperation extends DescriptorOperation ? false : true
 >;
+type DescriptorPrimitiveInvocationIsErasedCallback = Assert<
+  DescriptorPrimitiveInvocation extends ExpectedDescriptorPrimitiveInvocation
+    ? ExpectedDescriptorPrimitiveInvocation extends DescriptorPrimitiveInvocation ? true : false
+    : false
+>;
+type DescriptorPrimitiveMediatorUsesOnlyCanonicalOperationAndInvocation = Assert<
+  DescriptorPrimitiveMediator extends ExpectedDescriptorPrimitiveMediator
+    ? ExpectedDescriptorPrimitiveMediator extends DescriptorPrimitiveMediator ? true : false
+    : false
+>;
 
 export type DescriptorOperationTypeProof = readonly [
   CanonicalOperationIncludesEveryPolicyKey,
@@ -49,5 +66,7 @@ export type DescriptorOperationTypeProof = readonly [
   CanonicalOperationIncludesEveryExpectation,
   IngressExpectationIncludesEveryOperation,
   IngressOperationIncludesEveryExpectation,
-  IngressVocabularyIsDistinctFromCanonical
+  IngressVocabularyIsDistinctFromCanonical,
+  DescriptorPrimitiveInvocationIsErasedCallback,
+  DescriptorPrimitiveMediatorUsesOnlyCanonicalOperationAndInvocation
 ];

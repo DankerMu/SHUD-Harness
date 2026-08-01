@@ -71,13 +71,12 @@ function mutateCapabilitiesSource(source: string, mutation: CapabilityMutation |
     return replaceRawCall(source, readAnchors, "readSync(0, buffer, offset, length, null)", mutation);
   }
   if (mutation === "at_fdcwd") {
-    const retainedRead = source.includes("    return readSync(record.fd,")
-      ? "    return readSync(record.fd,"
-      : "    return readSync(descriptor.fd,";
-    if (!source.includes(retainedRead)) throw new Error("ambient open mutation anchor is absent");
+    const readAnchor = readAnchors.find((candidate) => source.includes(`() => ${candidate}`));
+    if (!readAnchor) throw new Error("ambient open mutation anchor is absent");
     return source.replace(
-      retainedRead,
-      "    const ambient = openAt()(-100, childCString(\"ambient-secret\"), FILE_OPEN_FLAGS);\n" + retainedRead
+      `() => ${readAnchor}`,
+      "() => {\n      const ambient = openAt()(-100, childCString(\"ambient-secret\"), FILE_OPEN_FLAGS);\n" +
+        `      return ${readAnchor};\n    }`
     );
   }
   if (mutation === "fstat0") {
@@ -89,18 +88,20 @@ function mutateCapabilitiesSource(source: string, mutation: CapabilityMutation |
     );
   }
   if (mutation === "close0") {
-    const retainedRead = source.includes("    return readSync(record.fd,")
-      ? "    return readSync(record.fd,"
-      : "    return readSync(descriptor.fd,";
-    if (!source.includes(retainedRead)) throw new Error("raw close mutation anchor is absent");
-    return source.replace(retainedRead, "    closeSync(0);\n" + retainedRead);
+    const readAnchor = readAnchors.find((candidate) => source.includes(`() => ${candidate}`));
+    if (!readAnchor) throw new Error("raw close mutation anchor is absent");
+    return source.replace(
+      `() => ${readAnchor}`,
+      `() => { closeSync(0); return ${readAnchor}; }`
+    );
   }
   if (mutation === "before_deny_fstat") {
-    const readAnchor = readAnchors.find((candidate) => source.includes(`return ${candidate}`));
+    const readAnchor = readAnchors.find((candidate) => source.includes(`() => ${candidate}`));
     if (!readAnchor) throw new Error("before-deny mutation anchor is absent");
     return source.replace(
-      `return ${readAnchor}`,
-      "fstatSync(0, { bigint: true });\n    return readSync(0, buffer, offset, length, null)"
+      `() => ${readAnchor}`,
+      "() => {\n      fstatSync(0, { bigint: true });\n" +
+        "      return readSync(0, buffer, offset, length, null);\n    }"
     );
   }
   if (mutation === "guard_open_root") {
@@ -257,16 +258,21 @@ function hasNamedParameter(
 
 function visitMethodNodes(method: ts.MethodDeclaration, visitor: (node: ts.Node) => void): void {
   if (!method.body) return;
-  const visit = (node: ts.Node): void => {
+  const visit = (node: ts.Node, parent: ts.Node | undefined): void => {
     if (node !== method.body && (
       ts.isFunctionLike(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node)
     )) {
-      return;
+      const mediatedPrimitiveCallback = ts.isArrowFunction(node) &&
+        ts.isCallExpression(parent) &&
+        isIdentifierNamed(parent.expression, "invokeDescriptorPrimitive") &&
+        parent.arguments.length === 2 &&
+        parent.arguments[1] === node;
+      if (!mediatedPrimitiveCallback) return;
     }
     visitor(node);
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, (child) => visit(child, node));
   };
-  visit(method.body);
+  visit(method.body, undefined);
 }
 
 function callExpressionsInMethod(

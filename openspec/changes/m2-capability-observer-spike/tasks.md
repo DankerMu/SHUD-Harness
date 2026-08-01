@@ -84,14 +84,14 @@ Fixture level is `expanded`; repair intensity is `high`. The minimal mergeable
 slice is one #175-owned, one-shot primitive mediation installer plus
 process-isolated contract tests; #176 remains out of this PR.
 
-- [ ] #183.A Add the exact primitive mediation seam.
+- [x] #183.A Add the exact primitive mediation seam.
   - In: `contracts/lib/capabilities.ts` and focused descriptor mediation tests only. Export `installDescriptorPrimitiveMediator` plus erased signature types; keep the registry, descriptor records, `ContractCapabilities`, raw callables, and any authority-enter/reset/getter path private.
   - The installer is module-instance one-shot. The mediator receives the exact `DescriptorOperation` plus a synchronous, callback-scoped, exactly-once invocation closure only around `openSync`, `openat`, `fstatSync`, `readSync`, or `closeSync`. Omitted, repeated, or late invocation fails closed with stable errors.
   - Validation, registry transitions, denial callbacks, close-attempt hooks, injected close faults, and authority-violation hooks remain outside the mediation window. Primitive return/error and existing cleanup precedence remain unchanged.
-- [ ] #183.B Prove the seam cannot grant ambient authority.
+- [x] #183.B Prove the seam cannot grant ambient authority.
   - Process-isolated tests cover default behavior, first/second installation, exact operation sequence, synchronous exactly-once use, late/double/omitted invocation, raw primitive return/error preservation, and every caller hook observing mediation inactive.
   - Existing descriptor structural/runtime/typeproof and both public direct receipts remain byte-identical.
-- [ ] #183.C Verify and hand off the prerequisite.
+- [x] #183.C Verify and hand off the prerequisite.
   - Verification: focused descriptor/mediation/direct tests, typecheck, full `check`, strict OpenSpec, diff/scope/untracked/submodule hygiene, and Darwin/Linux Bun 1.2.19.
   - Handoff: #176 may additionally import only `installDescriptorPrimitiveMediator` and its erased signature types. It must remove `ContractCapabilities` import/prototype rewriting and broad method-depth exemption; #176 still cannot access registry state or broaden descriptor origins, flags, lifecycle, events, or receipts.
   - Dependency: merged #175 -> #183 -> #176 -> #177 -> #178.
