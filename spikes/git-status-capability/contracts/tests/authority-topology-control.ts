@@ -16,6 +16,15 @@ function authorityControlSource(text: string): ts.SourceFile {
   return ts.createSourceFile("authority-control.ts", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 }
 
+function authorityControlParseDiagnostics(text: string): readonly ts.Diagnostic[] {
+  return ts.transpileModule(text, {
+    compilerOptions: { target: ts.ScriptTarget.Latest },
+    fileName: "authority-control.ts",
+    reportDiagnostics: true
+  }).diagnostics ?? [];
+}
+
+
 
 function awaitsNamedWithIdentifiers(
   statement: ts.Statement | undefined,
@@ -35,7 +44,7 @@ function awaitsNamedWithIdentifiers(
 }
 
 function returnsStringLiteral(statement: ts.Statement | undefined, value: string): boolean {
-  return statement !== undefined && ts.isReturnStatement(statement) &&
+  return statement !== undefined && ts.isReturnStatement(statement) && statement.expression !== undefined &&
     ts.isStringLiteral(statement.expression) && statement.expression.text === value;
 }
 
@@ -279,7 +288,7 @@ function sentinelCleanupPrecedesRoutePush(body: ts.Block): boolean {
   for (let index = 0; index < statements.length; index += 1) {
     const statement = statements[index];
     if (statement === undefined) return false;
-    if (callsNamedMemberWithIdentifierArgument(
+    if (ts.isExpressionStatement(statement) && callsNamedMemberWithIdentifierArgument(
       statement.expression,
       "staticNodeFs",
       "rmSync",
@@ -296,7 +305,9 @@ function sentinelCleanupPrecedesRoutePush(body: ts.Block): boolean {
 export function authorityControlLifecycleTopologyViolations(text: string): string[] {
   const source = authorityControlSource(text);
   const violations = new Set<string>();
-  if (source.parseDiagnostics.length > 0) violations.add("authority_control_parse_error");
+  if (authorityControlParseDiagnostics(text).length) {
+    violations.add("authority_control_parse_error");
+  }
 
   const globalClose = singlePreloadBody(
     topLevelFunctionBodies(source, "awaitGlobalWorkerClose"),

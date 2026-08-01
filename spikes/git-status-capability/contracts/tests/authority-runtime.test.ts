@@ -50,6 +50,10 @@ function expectFrozenAuthorityRegistry(): void {
 }
 
 type GuardedCommand = Readonly<{ exit: number; stdout: string; stderr: string }>;
+type GuardedCommandLaunch = Readonly<{
+  command: string[];
+  options: Readonly<{ stdout: "pipe"; stderr: "pipe"; env: Record<string, string | undefined> }>;
+}>;
 
 function normalizedAuthorityTarget(path: string): string {
   const absolute = resolve(path);
@@ -81,11 +85,16 @@ function denialTarget(
   }
 }
 
+function guardedCommandLaunch(args: readonly string[]): GuardedCommandLaunch {
+  return {
+    command: [process.execPath, "--preload", authorityPreloadPath, ...args],
+    options: { stdout: "pipe", stderr: "pipe", env: { ...process.env } }
+  };
+}
+
 async function guardedCommand(args: readonly string[]): Promise<GuardedCommand> {
-  const child = Bun.spawn(
-    [process.execPath, "--preload", authorityPreloadPath, ...args],
-    { stdout: "pipe", stderr: "pipe", env: { ...process.env } }
-  );
+  const launch = guardedCommandLaunch(args);
+  const child = Bun.spawn(launch.command, launch.options);
   const [exit, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -343,6 +352,336 @@ describe("source-ingress authority runtime proof", () => {
         expect((await readFile(validSourcePath)).equals(inputBytes)).toBe(row.sideEffects.inputUnchanged);
         expect((await readFile(replacement)).equals(replacementBytes)).toBe(row.sideEffects.replacementUnchanged);
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  test("freezes the guarded launcher inherited environment and absent stdin shape", async () => {
+    const arguments_ = ["--eval", "process.exit(0)"];
+    const launch = guardedCommandLaunch(arguments_);
+    expect(launch.command).toEqual([process.execPath, "--preload", authorityPreloadPath, ...arguments_]);
+    expect(launch.options).toEqual({ stdout: "pipe", stderr: "pipe", env: { ...process.env } });
+    expect(launch.options.env).not.toBe(process.env);
+    expect(Object.keys(launch.options).sort()).toEqual(["env", "stderr", "stdout"]);
+    expect("stdin" in launch.options).toBe(false);
+
+    const key = "SHUD_CONTRACT_AUTHORITY_ENV_SENTINEL";
+    const previous = process.env[key];
+    const sentinel = "authority-launcher-env-copy";
+    process.env[key] = sentinel;
+    try {
+      expect(await guardedCommand([
+        "--eval",
+        `process.stdout.write(JSON.stringify({ value: process.env[${JSON.stringify(key)}] }));`
+      ])).toEqual({
+        exit: 0,
+        stdout: JSON.stringify({ value: sentinel }),
+        stderr: ""
+      });
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+  });
+
+  test("fails closed for fd, stdin, Bun numeric fd, and every ordinary FFI operand after admission", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shud-authority-fail-closed-"));
+    const input = join(root, "input");
+    const unlinkSentinel = join(root, "unlink.sentinel");
+    const inputBytes = Buffer.from("authority-input-bytes");
+    const unlinkBytes = Buffer.from("must-not-unlink");
+    await writeFile(input, inputBytes);
+    await writeFile(unlinkSentinel, unlinkBytes);
+    const guardSymbol = "shud.contract.authorityGuard";
+    // This sole fd-0 probe supplies controlled stdin; the shared guarded launcher remains stdin-free.
+    async function guardedCommandWithControlledStdin(script: string): Promise<GuardedCommand> {
+      const child = Bun.spawn(
+        [process.execPath, "--preload", authorityPreloadPath, "--eval", script],
+        {
+          stdin: new Blob([inputBytes]),
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env }
+        }
+      );
+      const [exit, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text()
+      ]);
+      return { exit, stdout, stderr };
+    }
+    try {
+      const probes = [
+        {
+          script: `// Intentional child-loader probe: only a dynamic import resolves the mocked facade from --eval.
+const fs = await import("node:fs");
+const fd = fs.openSync(${JSON.stringify(input)}, "r");
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+state.phase = "post_admission";
+let denied = "";
+try { fs.readFileSync(fd); } catch (error) { denied = error instanceof Error ? error.message : String(error); }
+state.phase = "admission";
+const cursor = Buffer.alloc(1);
+const cursorBytes = fs.readSync(fd, cursor, 0, 1, null);
+fs.closeSync(fd);
+process.stdout.write(JSON.stringify({ denied, cursorBytes, cursor: cursor.subarray(0, cursorBytes).toString("utf8"), events: state.events, rawEvents: state.rawEvents }));`,
+          expected: {
+            denied: "CONTRACT_TEST_AUTHORITY_DENIED:node_fs_readFileSync",
+            cursorBytes: 1,
+            cursor: "a",
+            events: ["node_fs_readFileSync:"],
+            rawEvents: []
+          }
+        },
+        {
+          script: `// Intentional child-loader probe: only a dynamic import resolves the mocked facade from --eval.
+const fs = await import("node:fs");
+const fd = fs.openSync(${JSON.stringify(input)}, "r");
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+state.rawInversion = "node_fs_readFileSync";
+state.phase = "post_admission";
+let denied = "";
+try { fs.readFileSync(fd); } catch (error) { denied = error instanceof Error ? error.message : String(error); }
+state.phase = "admission";
+state.rawInversion = null;
+const cursor = Buffer.alloc(1);
+const cursorBytes = fs.readSync(fd, cursor, 0, 1, null);
+fs.closeSync(fd);
+process.stdout.write(JSON.stringify({ denied, cursorBytes, cursor: cursor.subarray(0, cursorBytes).toString("utf8"), events: state.events, rawEvents: state.rawEvents }));`,
+          expected: {
+            denied: "CONTRACT_TEST_AUTHORITY_DENIED:node_fs_readFileSync",
+            cursorBytes: 1,
+            cursor: "a",
+            events: ["node_fs_readFileSync:"],
+            rawEvents: []
+          }
+        },
+        {
+          script: `// Intentional child-loader probe: only a dynamic import resolves the mocked facade from --eval.
+const fs = await import("node:fs");
+const fd = fs.openSync(${JSON.stringify(input)}, "r");
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+state.phase = "post_admission";
+let denied = "";
+let text = "";
+try { text = await Bun.file(fd).text(); } catch (error) { denied = error instanceof Error ? error.message : String(error); }
+state.phase = "admission";
+fs.closeSync(fd);
+process.stdout.write(JSON.stringify({ denied, text, events: state.events, rawEvents: state.rawEvents }));`,
+          expected: {
+            denied: "CONTRACT_TEST_AUTHORITY_DENIED:bun_file",
+            text: "",
+            events: ["bun_file:"],
+            rawEvents: []
+          }
+        },
+        {
+          script: `// Intentional child-loader probe: only a dynamic import resolves the mocked facade from --eval.
+const ffi = await import("bun:ffi");
+const library = ffi.dlopen(${JSON.stringify(systemLibraryPath)}, { getpid: { args: [], returns: "i32" } });
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+state.phase = "post_admission";
+let denied = "";
+let result = null;
+try { result = library.symbols.getpid(); } catch (error) { denied = error instanceof Error ? error.message : String(error); }
+state.phase = "admission";
+library.close();
+process.stdout.write(JSON.stringify({ denied, result, events: state.events, rawEvents: state.rawEvents }));`,
+          expected: {
+            denied: "CONTRACT_TEST_AUTHORITY_DENIED:ffi_getpid",
+            result: null,
+            events: ["ffi_getpid:"],
+            rawEvents: []
+          }
+        },
+        {
+          script: `// Intentional child-loader probe: only a dynamic import resolves the mocked facade from --eval.
+const ffi = await import("bun:ffi");
+const library = ffi.dlopen(${JSON.stringify(systemLibraryPath)}, { open: { args: ["cstring", "i32"], returns: "i32" } });
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+state.phase = "post_admission";
+let denied = "";
+let descriptor = null;
+try { descriptor = library.symbols.open(Buffer.from("relative\\0"), 0); } catch (error) { denied = error instanceof Error ? error.message : String(error); }
+state.phase = "admission";
+library.close();
+process.stdout.write(JSON.stringify({ denied, descriptor, events: state.events, rawEvents: state.rawEvents }));`,
+          expected: {
+            denied: "CONTRACT_TEST_AUTHORITY_DENIED:ffi_open",
+            descriptor: null,
+            events: ["ffi_open:relative"],
+            rawEvents: []
+          }
+        },
+        {
+          script: `// Intentional child-loader probe: only a dynamic import resolves the mocked facade from --eval.
+const ffi = await import("bun:ffi");
+const library = ffi.dlopen(${JSON.stringify(systemLibraryPath)}, { unlink: { args: ["cstring"], returns: "i32" } });
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+state.phase = "post_admission";
+let denied = "";
+let result = null;
+try { result = library.symbols.unlink(Buffer.from(${JSON.stringify(`${unlinkSentinel}\0`)})); } catch (error) { denied = error instanceof Error ? error.message : String(error); }
+state.phase = "admission";
+library.close();
+process.stdout.write(JSON.stringify({ denied, result, events: state.events, rawEvents: state.rawEvents }));`,
+          expected: {
+            denied: "CONTRACT_TEST_AUTHORITY_DENIED:ffi_unlink",
+            result: null,
+            events: ["ffi_unlink:"],
+            rawEvents: []
+          }
+        }
+      ] as const;
+      for (const probe of probes) {
+        expect(await guardedCommand(["--eval", probe.script])).toEqual({
+          exit: 0,
+          stdout: JSON.stringify(probe.expected),
+          stderr: ""
+        });
+      }
+      const stdinProbe = `// Intentional child-loader probe: only a dynamic import resolves the mocked facade from --eval.
+const fs = await import("node:fs");
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+state.phase = "post_admission";
+let denied = "";
+try { fs.readFileSync(0); } catch (error) { denied = error instanceof Error ? error.message : String(error); }
+state.phase = "admission";
+const cursor = Buffer.alloc(1);
+const cursorBytes = fs.readSync(0, cursor, 0, 1, null);
+process.stdout.write(JSON.stringify({ denied, cursorBytes, cursor: cursor.subarray(0, cursorBytes).toString("utf8"), events: state.events, rawEvents: state.rawEvents }));`;
+      expect(await guardedCommandWithControlledStdin(stdinProbe)).toEqual({
+        exit: 0,
+        stdout: JSON.stringify({
+          denied: "CONTRACT_TEST_AUTHORITY_DENIED:node_fs_readFileSync",
+          cursorBytes: 1,
+          cursor: "a",
+          events: ["node_fs_readFileSync:"],
+          rawEvents: []
+        }),
+        stderr: ""
+      });
+      expect(await readFile(input)).toEqual(inputBytes);
+      expect(await readFile(unlinkSentinel)).toEqual(unlinkBytes);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps reflected Worker constructors and FFI close descriptors behind the guard", async () => {
+    const root = await mkdtemp(join(tmpdir(), "shud-authority-reflection-"));
+    const workerSentinel = join(root, "worker.sentinel");
+    const workerPath = join(root, "worker.ts");
+    await writeFile(workerPath, `await Bun.write(${JSON.stringify(workerSentinel)}, "worker-reflection");`);
+    const guardSymbol = "shud.contract.authorityGuard";
+    try {
+      const workerProbe = `// Intentional child-loader probe: only dynamic imports resolve the mocked Worker facades from --eval.
+const node = await import("node:worker_threads");
+const bare = await import("worker_threads");
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+const workerUrl = new URL(${JSON.stringify(`file://${workerPath}`)});
+const constructors = [globalThis.Worker, node.Worker, bare.Worker];
+const denials = [];
+const constructed = [];
+const routesGuarded = [];
+state.phase = "post_admission";
+for (const constructor of constructors) {
+  const routes = [
+    constructor.prototype.constructor,
+    Object.getOwnPropertyDescriptor(constructor.prototype, "constructor").value,
+    Reflect.getOwnPropertyDescriptor(constructor.prototype, "constructor").value,
+    Object.getOwnPropertyDescriptor(constructor, "prototype").value.constructor,
+    Reflect.getOwnPropertyDescriptor(constructor, "prototype").value.constructor
+  ];
+  routesGuarded.push(...routes.map((route) => route === constructor));
+  for (const route of routes) {
+    try {
+      const worker = new route(workerUrl);
+      constructed.push(true);
+      if (worker && typeof worker.terminate === "function") {
+        const completion = worker.terminate();
+        if (completion && typeof completion.then === "function") await completion;
+      }
+    } catch (error) {
+      denials.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+process.stdout.write(JSON.stringify({ denials, constructed, routesGuarded, events: state.events, rawEvents: state.rawEvents }));`;
+      expect(await guardedCommand(["--eval", workerProbe])).toEqual({
+        exit: 0,
+        stdout: JSON.stringify({
+          denials: [
+            "CONTRACT_TEST_AUTHORITY_DENIED:global_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:global_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:global_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:global_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:global_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker",
+            "CONTRACT_TEST_AUTHORITY_DENIED:node_worker"
+          ],
+          constructed: [],
+          routesGuarded: [
+            true, true, true, true, true,
+            true, true, true, true, true,
+            true, true, true, true, true
+          ],
+          events: [
+            "global_worker:", "global_worker:", "global_worker:", "global_worker:", "global_worker:",
+            "node_worker:", "node_worker:", "node_worker:", "node_worker:", "node_worker:",
+            "node_worker:", "node_worker:", "node_worker:", "node_worker:", "node_worker:"
+          ],
+          rawEvents: []
+        }),
+        stderr: ""
+      });
+      expect(await Bun.file(workerSentinel).exists()).toBe(false);
+
+      const closeProbe = `// Intentional child-loader probe: only a dynamic import resolves the mocked FFI facade from --eval.
+const ffi = await import("bun:ffi");
+const library = ffi.dlopen(${JSON.stringify(systemLibraryPath)}, { getpid: { args: [], returns: "i32" } });
+const state = globalThis[Symbol.for(${JSON.stringify(guardSymbol)})];
+const descriptor = Object.getOwnPropertyDescriptor(library, "close");
+const reflectedDescriptor = Reflect.getOwnPropertyDescriptor(library, "close");
+if (!descriptor || !reflectedDescriptor || typeof descriptor.value !== "function" || typeof reflectedDescriptor.value !== "function") {
+  throw new Error("AUTHORITY_FFI_CLOSE_DESCRIPTOR_MISSING");
+}
+const close = descriptor.value;
+const reflectedClose = reflectedDescriptor.value;
+const facade = Object.isFrozen(library) && Object.isFrozen(library.symbols) &&
+  !descriptor.configurable && !descriptor.writable &&
+  !reflectedDescriptor.configurable && !reflectedDescriptor.writable;
+const denials = [];
+state.phase = "post_admission";
+for (const operation of [close, reflectedClose]) {
+  try { operation(); } catch (error) { denials.push(error instanceof Error ? error.message : String(error)); }
+}
+state.phase = "admission";
+library.close();
+process.stdout.write(JSON.stringify({ sameClose: close === reflectedClose, facade, denials, events: state.events, rawEvents: state.rawEvents }));`;
+      expect(await guardedCommand(["--eval", closeProbe])).toEqual({
+        exit: 0,
+        stdout: JSON.stringify({
+          sameClose: true,
+          facade: true,
+          denials: [
+            "CONTRACT_TEST_AUTHORITY_DENIED:ffi_close",
+            "CONTRACT_TEST_AUTHORITY_DENIED:ffi_close"
+          ],
+          events: [`ffi_close:${systemLibraryPath}`, `ffi_close:${systemLibraryPath}`],
+          rawEvents: []
+        }),
+        stderr: ""
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

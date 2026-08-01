@@ -23,6 +23,9 @@ type BunAuthority = {
 
 const state: GuardState = { phase: "admission", events: [], rawEvents: [], rawInversion: null };
 (globalThis as Record<PropertyKey, unknown>)[Symbol.for("shud.contract.authorityGuard")] = state;
+// Initialize Bun's lazy stdio streams before Bun.file is guarded.
+void process.stdout.write;
+void process.stderr.write;
 
 function normalizedPathLike(value: unknown): string | undefined {
   let path: string | undefined;
@@ -102,9 +105,11 @@ function patchPathFunctions(module: MutableModule, operationPrefix: string): voi
       value: function guardedPathFunction(this: unknown, ...args: unknown[]) {
         const path = firstPathLike(args);
         const operation = `${operationPrefix}_${name}`;
-        if (state.phase === "post_admission" && path) {
-          if (state.rawInversion === operation) {
-            delegatePathFunction(original, this, args, operation, path);
+        if (state.phase === "post_admission") {
+          if (state.rawInversion === "node_fs_readFileSync" && operation === "node_fs_readFileSync") {
+            if (path !== undefined && args.length === 1) {
+              delegatePathFunction(original, this, args, operation, path);
+            }
           }
           deny(operation, path);
         }
@@ -134,11 +139,43 @@ function delegateWorkerConstruct(
   return Reflect.construct(target, argumentsList, newTarget);
 }
 
+function guardedWorkerPrototype(original: Function, guarded: Function): object {
+  const descriptor = Object.getOwnPropertyDescriptor(original, "prototype");
+  if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "object" ||
+      descriptor.value === null) {
+    throw new Error("MISSING_WORKER_PROTOTYPE");
+  }
+  const originalPrototype = descriptor.value;
+  const constructorDescriptor = Object.getOwnPropertyDescriptor(originalPrototype, "constructor");
+  if (!constructorDescriptor || !("value" in constructorDescriptor) ||
+      constructorDescriptor.value !== original ||
+      (!constructorDescriptor.configurable && !constructorDescriptor.writable)) {
+    throw new Error("MISSING_WORKER_PROTOTYPE_CONSTRUCTOR");
+  }
+  Object.defineProperty(originalPrototype, "constructor", {
+    ...constructorDescriptor,
+    value: guarded
+  });
+  return originalPrototype;
+}
+
 function patchConstructor(module: MutableModule, name: string, operation: string): Function {
   const descriptor = Object.getOwnPropertyDescriptor(module, name);
   if (!descriptor || typeof descriptor.value !== "function") throw new Error(`MISSING_CONSTRUCTOR:${name}`);
   const original = descriptor.value as Function;
+  let guardedPrototype: object = Object.create(null);
   const guarded = new Proxy(original, {
+    get(target, property, receiver) {
+      if (property === "prototype") return guardedPrototype;
+      return Reflect.get(target, property, receiver);
+    },
+    getOwnPropertyDescriptor(target, property) {
+      const propertyDescriptor = Reflect.getOwnPropertyDescriptor(target, property);
+      if (property === "prototype" && propertyDescriptor && "value" in propertyDescriptor) {
+        return { ...propertyDescriptor, value: guardedPrototype };
+      }
+      return propertyDescriptor;
+    },
     apply(target, thisArgument, argumentsList) {
       if (state.phase === "post_admission") deny(operation);
       return delegateWorkerApply(target, thisArgument, argumentsList, operation);
@@ -148,6 +185,7 @@ function patchConstructor(module: MutableModule, name: string, operation: string
       return delegateWorkerConstruct(target, argumentsList, newTarget, operation);
     }
   });
+  guardedPrototype = guardedWorkerPrototype(original, guarded);
   Object.defineProperty(module, name, { ...descriptor, value: guarded });
   return guarded;
 }
@@ -206,6 +244,23 @@ function delegateFfiSymbol(
   if (state.phase === "post_admission" && target?.startsWith("/")) rawOperation(operation, target);
   return symbol(...argumentsList);
 }
+function isRetainedDescriptorOpenAtLibrary(path: string, symbols: Record<string, unknown>): boolean {
+  if (state.phase !== "admission") return false;
+  const systemLibraryPath = process.platform === "darwin"
+    ? "/usr/lib/libSystem.B.dylib"
+    : process.platform === "linux"
+    ? "libc.so.6"
+    : undefined;
+  if (path !== systemLibraryPath || Object.keys(symbols).length !== 1) return false;
+  const specification = symbols.openat;
+  if (typeof specification !== "object" || specification === null) return false;
+  const descriptor = specification as { args?: unknown; returns?: unknown };
+  const args = descriptor.args;
+  return Array.isArray(args) && args.length === 3 &&
+    args[0] === "i32" && args[1] === "cstring" && args[2] === "i32" &&
+    descriptor.returns === "i32";
+}
+
 
 function guardedFfiClose(library: DynamicLibrary, path: string): void {
   if (state.phase === "post_admission") deny("ffi_close", path);
@@ -219,10 +274,7 @@ function guardedFfiSymbol(
   const operation = `ffi_${name}`;
   return (...args: unknown[]) => {
     const candidate = decodedCString(args[name === "open" ? 0 : 1]);
-    if (state.phase === "post_admission" && (name === "open" || name === "openat") &&
-        candidate?.startsWith("/")) {
-      deny(operation, candidate);
-    }
+    if (state.phase === "post_admission") deny(operation, candidate);
     return delegateFfiSymbol(symbol, args, operation, candidate);
   };
 }
@@ -240,17 +292,27 @@ function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicL
     deny("ffi_dlopen", path);
   }
   const library = delegateFfiDlopen(path, symbols);
+  const retainedDescriptorOpenAt = isRetainedDescriptorOpenAtLibrary(path, symbols);
   const guardedSymbols: Record<string, (...args: unknown[]) => unknown> = {};
   for (const [name, symbol] of Object.entries(library.symbols)) {
-    guardedSymbols[name] = guardedFfiSymbol(symbol, name);
+    const guardedSymbol = guardedFfiSymbol(symbol, name);
+    guardedSymbols[name] = retainedDescriptorOpenAt && name === "openat"
+      ? (...args: unknown[]) => {
+        if (state.phase !== "post_admission") return guardedSymbol(...args);
+        const phase = state.phase;
+        state.phase = "admission";
+        try {
+          return guardedSymbol(...args);
+        } finally {
+          state.phase = phase;
+        }
+      }
+      : guardedSymbol;
   }
-  return new Proxy(library, {
-    get(target, property, receiver) {
-      if (property === "symbols") return guardedSymbols;
-      if (property === "close") return () => guardedFfiClose(target, path);
-      return Reflect.get(target, property, receiver);
-    }
-  });
+  return Object.freeze({
+    symbols: Object.freeze(guardedSymbols),
+    close: () => guardedFfiClose(library, path)
+  }) as DynamicLibrary;
 }
 Object.defineProperty(guardedFfi, "dlopen", { ...ffiDescriptor, value: guardedDlopen });
 
@@ -309,7 +371,7 @@ function delegateBunSpawnSync(argumentsList: unknown[]): unknown {
 
 function guardedBunFile(path: unknown, ...args: unknown[]): unknown {
   const normalized = normalizedPathLike(path);
-  if (state.phase === "post_admission" && normalized) deny("bun_file", normalized);
+  if (state.phase === "post_admission") deny("bun_file", normalized);
   return delegateBunFile(path, args, normalized);
 }
 
