@@ -357,10 +357,29 @@ ordinary thenable return MUST throw
 MUST throw `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_EXPIRED`. Those
 paths make zero raw calls.
 
+On normal mediator return, the invocation closure MUST expire before any
+inspection of the untrusted return value, including a `then` getter or
+Proxy-controlled property access. The module MUST retain its callback/reentry
+state until that inspection has classified the return. A raw outcome is
+authoritative only if its invocation began before the mediator function
+returned; a getter-started invocation is expired and cannot become that first
+outcome.
+
 For `close_sync`, the owner MUST restore the prior live descriptor state whenever
 no raw `closeSync` began, including omission, pre-invocation mediator throw,
 thenable return, or deferred use. Once the raw close begins, existing terminal
 invalidation and raw/error/cleanup precedence MUST hold.
+
+Ingress-only close ownership MUST recognize a private, non-exported
+retryable-close error classification to distinguish `no raw close started` from raw-terminal outcomes. Root and child
+rollback, verification cleanup, retained final cleanup, and checker ingress MUST
+retry exactly the `no raw close started` outcome through the mediator, with a
+fixed bound of two total attempts. They MUST NOT retry a
+raw-terminal outcome, invoke an unmediated fallback, or loop indefinitely. A
+transient omission, pre-invocation throw, thenable, or deferred use MUST settle
+once on retry without descriptor growth; persistent refusal MUST terminate at
+the bound, preserving any primary error and otherwise returning the existing
+explicit cleanup failure.
 
 Denial, close-attempt, close-fault, authority-violation, `afterAdmission`,
 `observe`, and `beforeCleanup` callbacks MUST enter with no active primitive
@@ -374,20 +393,24 @@ remain unchanged.
 - **THEN** it observes the exact operation order, invokes each matching raw primitive exactly once, sees `undefined` from every successful invocation closure, and the original capability API preserves the exact raw return value or thrown error
 
 #### Scenario: Installation, function surface, and invocation cannot be replayed
-- **WHEN** a caller supplies invalid then valid then valid installers, attempts construction or hidden installer-property mutation, or the mediator omits, repeats, stores, or invokes the primitive closure after callback return
-- **THEN** only the first valid installer owns the module, the installer surface remains frozen/non-constructible, and every invocation attempt receives its exact stable error before an extra raw primitive executes
+- **WHEN** a caller supplies invalid then valid then valid installers, attempts construction, own-property mutation, or pre-freeze prototype mutation, and reflects constructor/tag/prototype/branding controls through a callable Proxy
+- **THEN** only the first valid installer owns the module, the installer keeps only its frozen standard surface, no mediation path triggers those reflections, and every invocation attempt receives its exact stable error before an extra raw primitive executes
+
+#### Scenario: Return-value inspection cannot consume a closure
+- **WHEN** each of the five mediators returns an object with a synchronous `then` getter or Proxy trap that records callback exit, invokes the captured closure, and attempts a public entry
+- **THEN** the getter sees callback exit, the closure fails only with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_EXPIRED`, the public entry fails only with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY`, the outer API fails with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ASYNC`, and every raw counter remains zero; `close_sync` then retries and settles exactly once
 
 #### Scenario: First raw outcome controls post-invocation behavior
-- **WHEN** the mediator invokes an opener, `fstatSync`, `readSync`, or `closeSync` and then throws, returns an ordinary thenable, or catches or leaks a repeated-call error
-- **THEN** the first raw return or raw error is the capability API outcome, the opener is issued and later settled through its opaque owner, and no raw fd or other raw result is exposed to mediator code
+- **WHEN** the mediator starts an opener, `fstatSync`, `readSync`, or `closeSync` before returning and then throws, returns an ordinary thenable, or catches or leaks a repeated-call error
+- **THEN** that pre-return raw return or raw error is the capability API outcome, the opener is issued and later settled through its opaque owner, and no raw fd or other raw result is exposed to mediator code
 
 #### Scenario: Reentry and invalid descriptor work fail before mediation
-- **WHEN** a mediator calls any public capability entry during its callback, or an installed mediator receives invalid root/phase, parent/flags, stat handle, read phase/range, or close owner inputs
-- **THEN** reentry fails only with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY`, while every invalid descriptor row invokes neither mediator nor raw primitive and preserves its existing denial
+- **WHEN** a mediator calls every public capability entry in each outer primitive window, or an installed mediator receives invalid root/phase, parent/flags, stat handle, read phase/range, or close owner inputs
+- **THEN** reentry fails only with `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY` before lifecycle, denial, hook, or raw work; every invalid row emits one exact frozen existing denial and invokes neither mediator nor raw primitive
 
 #### Scenario: Close settles retryably only before raw close
-- **WHEN** a mediated close omits, throws before invocation, returns a thenable before invocation, or defers invocation
-- **THEN** it reports the existing close failure with zero raw closes and the same descriptor can retry; after an attempted raw close the descriptor remains terminal under the existing precedence rules
+- **WHEN** root rollback, child rollback, verification cleanup, retained cleanup, or checker cleanup meets one omitted, throwing, thenable, or deferred mediated close
+- **THEN** that owner retries through mediation and settles exactly once without descriptor growth; persistent refusal stops after two attempts, never falls back to raw close, preserves a primary failure, and otherwise emits the cleanup failure
 
 #### Scenario: Caller hooks and ingress callbacks never inherit primitive authority
 - **WHEN** denial, close-attempt, injected close-fault, authority-violation, `afterAdmission`, `observe`, or `beforeCleanup` callbacks run before or after a mediated operation, including callback-started descriptor work
@@ -396,6 +419,29 @@ remain unchanged.
 #### Scenario: Downstream handoff remains narrow
 - **WHEN** #176 imports from `contracts/lib/capabilities.ts`
 - **THEN** its only new runtime import is `installDescriptorPrimitiveMediator`, its only new type imports are `DescriptorPrimitiveInvocation` and `DescriptorPrimitiveMediator` with the exact signatures above, and the class internals, registry, raw callables, and lifecycle implementation remain private
+
+
+### Requirement: Issue #183 verification is causal and reproducible
+
+On Darwin, the orchestrator MUST run the following in order:
+
+```sh
+npx --yes bun@1.2.19 install --frozen-lockfile
+npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests/*.test.ts
+npx --yes bun@1.2.19 x tsc -p spikes/git-status-capability/contracts/tsconfig.descriptor-authority.json
+```
+
+The final source-only red proof MUST retain the current focused tests while
+replacing only `contracts/lib/capabilities.ts` with
+`e70a0853ae6b1d6a3fd80ffe92ca98d7926eede8`'s pre-seam source. It MUST preserve
+the full red transcript, restore the exact fixed source immediately, prove a
+clean worktree before green, and then rerun the current focused suite and
+descriptor type proof. The procedure is specified in the proposal and task
+record; no status, assertion count, or receipt is implied until it executes.
+
+#### Scenario: Pre-seam source makes the current proof red
+- **WHEN** only the fixed descriptor owner is replaced by the named pre-seam source
+- **THEN** the current focused mediation suite fails behaviorally, restoration leaves no source or test mutation, and the restored current suite is eligible for its green receipt
 
 
 

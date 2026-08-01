@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { DIRECTORY_OPEN_FLAGS } from "../lib/capabilities";
+import { DIRECTORY_OPEN_FLAGS, FILE_OPEN_FLAGS } from "../lib/capabilities";
 
 type Scenario =
   | "default"
@@ -136,7 +136,104 @@ type IngressHookReceipt = Readonly<{
   checkerStderr: string;
 }>;
 
+type RoundTwoScenario =
+  | "thenable_matrix"
+  | "installer_surface"
+  | "proxy_reflection"
+  | "invocation_surface"
+  | "invalid_denials"
+  | "reentry_windows"
+  | "openat_tuple";
+type RoundRawCounts = Readonly<{
+  open_sync: number;
+  openat: number;
+  fstat_sync: number;
+  read_sync: number;
+  close_sync: number;
+}>;
+type ThenableMatrixReceipt = Readonly<{
+  rows: readonly Readonly<{
+    operation: string;
+    shape: string;
+    outer: string;
+    callbackExited: boolean;
+    getterRan: boolean;
+    getterSawCallbackExited: boolean;
+    expired: string;
+    reentry: string;
+    denials: readonly string[];
+    raw: RoundRawCounts;
+    retry: string;
+    retryRaw: RoundRawCounts;
+  }>[];
+}>;
+type InvocationSurfaceReceipt = Readonly<{
+  bytes: number;
+  captures: readonly Readonly<{
+    operation: string;
+    returnedUndefined: boolean;
+    before: unknown;
+    after: unknown;
+    mutations: Readonly<Record<string, boolean>>;
+  }>[];
+}>;
+type InvalidDenialsReceipt = Readonly<{
+  rows: readonly Readonly<{
+    name: string;
+    error: string;
+    events: readonly Readonly<{ event: unknown; frozen: boolean }>[];
+  }>[];
+  operations: readonly string[];
+  raw: RoundRawCounts;
+}>;
+type ReentryWindowsReceipt = Readonly<{
+  rows: readonly Readonly<{
+    operation: string;
+    errors: Readonly<Record<string, string>>;
+    during: Readonly<{
+      denials: number;
+      closeAttempts: number;
+      authorityViolations: number;
+      raw: RoundRawCounts;
+    }>;
+    pendingStable: boolean;
+    admissionStable: boolean | null;
+    outerRaw: RoundRawCounts;
+  }>[];
+}>;
+type OpenAtTupleReceipt = Readonly<{
+  operations: readonly string[];
+  openAt: readonly Readonly<{ parent: number; path: readonly number[]; flags: number; result: number }>[];
+  closeDescriptors: readonly number[];
+  raw: RoundRawCounts;
+}>;
+type InstallerSurfaceReceipt = Readonly<{
+  surface: unknown;
+  forbiddenSurface: readonly unknown[];
+  setPrototypeRejected: boolean;
+  definePropertyRejected: boolean;
+  invalidInstallation: string;
+  firstInstallation: string;
+  secondInstallation: string;
+}>;
+type ProxyReflectionReceipt = Readonly<{
+  operations: readonly string[];
+  raw: RoundRawCounts;
+  beforeControls: Readonly<Record<string, number>>;
+  controls: Readonly<Record<string, string>>;
+  afterControls: Readonly<Record<string, number>>;
+}>;
+
+const ROUND_TWO_ZERO_RAW: RoundRawCounts = Object.freeze({
+  open_sync: 0,
+  openat: 0,
+  fstat_sync: 0,
+  read_sync: 0,
+  close_sync: 0
+});
+
 const mediationChildPath = join(import.meta.dir, "authority-descriptor-mediation-child.ts");
+const roundTwoMediationChildPath = join(import.meta.dir, "authority-descriptor-mediation-round-2-child.ts");
 const FIXTURE_TEXT = "descriptor-mediation";
 const MEDIATION_ERRORS = Object.freeze({
   alreadyInstalled: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ALREADY_INSTALLED",
@@ -148,8 +245,11 @@ const MEDIATION_ERRORS = Object.freeze({
   repeatedInvocation: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_REPEATED"
 });
 
-async function runScenario<Receipt>(scenario: Scenario): Promise<Receipt> {
-  const child = Bun.spawn([process.execPath, mediationChildPath, scenario], { stdout: "pipe", stderr: "pipe" });
+async function runScenario<Receipt>(
+  scenario: Scenario | RoundTwoScenario,
+  childPath = mediationChildPath
+): Promise<Receipt> {
+  const child = Bun.spawn([process.execPath, childPath, scenario], { stdout: "pipe", stderr: "pipe" });
   const [exit, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -470,5 +570,214 @@ describe("descriptor primitive mediation", () => {
     expect(receipt.checkerExit).toBe(0);
     expect(receipt.checkerStderr).toBe("");
     expect(receipt.checkerStdout).toContain('"status":"ok"');
+  });
+  test("return-value getters and Proxy traps expire all five primitive closures before inspection", async () => {
+    const receipt = await runScenario<ThenableMatrixReceipt>("thenable_matrix", roundTwoMediationChildPath);
+    expect(receipt.rows).toHaveLength(10);
+    for (const row of receipt.rows) {
+      expect(row.outer).toBe(
+        row.operation === "close_sync" ? "CONTRACT_CAPABILITY_CLOSE_FAILED" : MEDIATION_ERRORS.asyncMediator
+      );
+      expect(row.callbackExited).toBe(true);
+      expect(row.getterRan).toBe(true);
+      expect(row.getterSawCallbackExited).toBe(true);
+      expect(row.expired).toBe(MEDIATION_ERRORS.expiredInvocation);
+      expect(row.reentry).toBe(MEDIATION_ERRORS.reentry);
+      expect(row.denials).toEqual([]);
+      expect(row.raw).toEqual(ROUND_TWO_ZERO_RAW);
+      if (row.operation === "close_sync") {
+        expect(row.retry).toBe("NO_ERROR");
+        expect(row.retryRaw).toEqual({
+          open_sync: 0,
+          openat: 0,
+          fstat_sync: 0,
+          read_sync: 0,
+          close_sync: 1
+        });
+      } else {
+        expect(row.retry).toBe("NOT_APPLICABLE");
+      }
+    }
+    expect(receipt.rows.map((row) => `${row.operation}:${row.shape}`)).toEqual([
+      "open_root:getter", "open_root:proxy",
+      "openat:getter", "openat:proxy",
+      "fstat_sync:getter", "fstat_sync:proxy",
+      "read_sync:getter", "read_sync:proxy",
+      "close_sync:getter", "close_sync:proxy"
+    ]);
+  });
+
+  test("installer has only the standard frozen Function surface and no inherited controls", async () => {
+    const receipt = await runScenario<InstallerSurfaceReceipt>("installer_surface", roundTwoMediationChildPath);
+    expect(receipt.surface).toEqual({
+      frozen: true,
+      prototypeIsFunctionPrototype: true,
+      keys: ["length", "name"],
+      descriptors: [
+        { key: "length", value: 1, writable: false, enumerable: false, configurable: false },
+        {
+          key: "name",
+          value: "installDescriptorPrimitiveMediator",
+          writable: false,
+          enumerable: false,
+          configurable: false
+        }
+      ]
+    });
+    expect(receipt.forbiddenSurface).toEqual([
+      { name: "reset", reachable: false, type: "undefined", callable: false },
+      { name: "getMediator", reachable: false, type: "undefined", callable: false },
+      { name: "uninstall", reachable: false, type: "undefined", callable: false },
+      { name: "replaceMediator", reachable: false, type: "undefined", callable: false },
+      { name: "rawCallable", reachable: false, type: "undefined", callable: false },
+      { name: "rawResult", reachable: false, type: "undefined", callable: false }
+    ]);
+    expect(receipt.setPrototypeRejected).toBe(true);
+    expect(receipt.definePropertyRejected).toBe(true);
+    expect(receipt.invalidInstallation).toBe(MEDIATION_ERRORS.invalidMediator);
+    expect(receipt.firstInstallation).toBe("NO_ERROR");
+    expect(receipt.secondInstallation).toBe(MEDIATION_ERRORS.alreadyInstalled);
+  });
+
+  test("callable Proxy mediation performs no constructor, tag, prototype, or branding reflection", async () => {
+    const receipt = await runScenario<ProxyReflectionReceipt>("proxy_reflection", roundTwoMediationChildPath);
+    expect(receipt.operations).toEqual(["open_root", "close_sync"]);
+    expect(receipt.raw).toEqual({
+      open_sync: 1,
+      openat: 0,
+      fstat_sync: 0,
+      read_sync: 0,
+      close_sync: 1
+    });
+    expect(receipt.beforeControls).toEqual({ constructor: 0, tag: 0, prototype: 0, branding: 0 });
+    expect(receipt.controls).toEqual({
+      constructorControl: "PROXY_CONSTRUCTOR_REFLECTION",
+      tagControl: "PROXY_TAG_REFLECTION",
+      prototypeControl: "PROXY_PROTOTYPE_REFLECTION",
+      brandingControl: "PROXY_TAG_REFLECTION"
+    });
+    expect(receipt.afterControls).toEqual({ constructor: 1, tag: 1, prototype: 1, branding: 1 });
+  });
+
+  test("every invocation closure is frozen before all five raw-result kinds execute", async () => {
+    const receipt = await runScenario<InvocationSurfaceReceipt>("invocation_surface", roundTwoMediationChildPath);
+    const expectedSurface = {
+      frozen: true,
+      prototypeIsFunctionPrototype: true,
+      keys: ["length", "name"],
+      descriptors: [
+        { key: "length", writable: false, enumerable: false, configurable: false },
+        { key: "name", writable: false, enumerable: false, configurable: false }
+      ],
+      rawResultReachable: false,
+      rawResultDescriptor: false,
+      forbiddenSymbolReachable: false,
+      forbiddenSymbolDescriptor: false,
+      symbols: []
+    };
+    expect(receipt.bytes).toBe(1);
+    expect([...new Set(receipt.captures.map((capture) => capture.operation))].sort()).toEqual([
+      "close_sync", "fstat_sync", "open_root", "openat", "read_sync"
+    ]);
+    for (const capture of receipt.captures) {
+      expect(capture.returnedUndefined).toBe(true);
+      expect(capture.before).toEqual(expectedSurface);
+      expect(capture.after).toEqual(expectedSurface);
+      expect(capture.mutations).toEqual({
+        rawResult: true,
+        getter: true,
+        symbol: true,
+        tagSymbol: true,
+        prototype: true
+      });
+    }
+  });
+
+  test("installed invalid rows emit one exact frozen denial event before mediation or raw work", async () => {
+    const receipt = await runScenario<InvalidDenialsReceipt>("invalid_denials", roundTwoMediationChildPath);
+    const expectedEvents = [
+      ["root", { schema_version: "shud.contract.descriptor-denial.v1", operation: "open_root", reason: "root_invalid", descriptor: null, generation: null, phase: "admission" }],
+      ["phase", { schema_version: "shud.contract.descriptor-denial.v1", operation: "open_root", reason: "phase_invalid", descriptor: null, generation: null, phase: null }],
+      ["parent", { schema_version: "shud.contract.descriptor-denial.v1", operation: "openat", reason: "unproven_parent", descriptor: null, generation: null, phase: "post_admission" }],
+      ["flags", { schema_version: "shud.contract.descriptor-denial.v1", operation: "openat", reason: "flags_invalid", descriptor: 40, generation: 1, phase: "admission" }],
+      ["stat", { schema_version: "shud.contract.descriptor-denial.v1", operation: "fstat_sync", reason: "unproven_descriptor", descriptor: 0, generation: null, phase: null }],
+      ["read_phase", { schema_version: "shud.contract.descriptor-denial.v1", operation: "read_sync", reason: "phase_invalid", descriptor: 41, generation: 2, phase: "admission" }],
+      ["read_range", { schema_version: "shud.contract.descriptor-denial.v1", operation: "read_sync", reason: "range_invalid", descriptor: 41, generation: 2, phase: "admission" }],
+      ["close", { schema_version: "shud.contract.descriptor-denial.v1", operation: "close_sync", reason: "owner_mismatch", descriptor: 41, generation: 2, phase: "admission" }]
+    ] as const;
+    expect(receipt.rows.map((row) => row.name)).toEqual(expectedEvents.map(([name]) => name));
+    for (const [index, [, event]] of expectedEvents.entries()) {
+      const row = receipt.rows[index]!;
+      expect(row.error).toBe("CONTRACT_CAPABILITY_DESCRIPTOR_DENIED");
+      expect(row.events).toEqual([{ event, frozen: true }]);
+    }
+    expect(receipt.operations).toEqual([]);
+    expect(receipt.raw).toEqual(ROUND_TWO_ZERO_RAW);
+  });
+
+  test("every public entry fails before observable work in each outer primitive window", async () => {
+    const receipt = await runScenario<ReentryWindowsReceipt>("reentry_windows", roundTwoMediationChildPath);
+    const expectedErrors = {
+      sealAdmission: MEDIATION_ERRORS.reentry,
+      openRoot: MEDIATION_ERRORS.reentry,
+      openRelative: MEDIATION_ERRORS.reentry,
+      markRetained: MEDIATION_ERRORS.reentry,
+      stat: MEDIATION_ERRORS.reentry,
+      readRetained: MEDIATION_ERRORS.reentry,
+      close: MEDIATION_ERRORS.reentry,
+      rejectForbidden: MEDIATION_ERRORS.reentry
+    };
+    const outerCounts: Readonly<Record<string, RoundRawCounts>> = {
+      open_root: { open_sync: 1, openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 0 },
+      openat: { open_sync: 0, openat: 1, fstat_sync: 0, read_sync: 0, close_sync: 0 },
+      fstat_sync: { open_sync: 0, openat: 0, fstat_sync: 1, read_sync: 0, close_sync: 0 },
+      read_sync: { open_sync: 0, openat: 0, fstat_sync: 0, read_sync: 1, close_sync: 0 },
+      close_sync: { open_sync: 0, openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 1 }
+    };
+    expect(receipt.rows.map((row) => row.operation)).toEqual([
+      "open_root", "openat", "fstat_sync", "read_sync", "close_sync"
+    ]);
+    for (const row of receipt.rows) {
+      expect(row.errors).toEqual(expectedErrors);
+      expect(row.during).toEqual({
+        denials: 0,
+        closeAttempts: 0,
+        authorityViolations: 0,
+        raw: ROUND_TWO_ZERO_RAW
+      });
+      expect(row.pendingStable).toBe(true);
+      expect(row.admissionStable).toBe(row.operation === "read_sync" ? null : true);
+      expect(row.outerRaw).toEqual(outerCounts[row.operation]!);
+    }
+  });
+
+  test("the sole openat callable receives the exact validated parent, NUL child bytes, flags, and result lifecycle", async () => {
+    const receipt = await runScenario<OpenAtTupleReceipt>("openat_tuple", roundTwoMediationChildPath);
+    expect(receipt.operations).toEqual([
+      "open_root", "fstat_sync", "openat", "fstat_sync", "openat", "fstat_sync",
+      "close_sync", "close_sync", "close_sync"
+    ]);
+    expect(receipt.openAt).toEqual([
+      {
+        parent: 40,
+        path: [95, 95, 117, 110, 109, 101, 100, 105, 97, 116, 101, 100, 95, 95, 0],
+        flags: DIRECTORY_OPEN_FLAGS,
+        result: 41
+      },
+      {
+        parent: 41,
+        path: [112, 97, 121, 108, 111, 97, 100, 0],
+        flags: FILE_OPEN_FLAGS,
+        result: 42
+      }
+    ]);
+    expect(receipt.closeDescriptors).toEqual([42, 41, 40]);
+    expect(receipt.raw).toEqual({
+      open_sync: 1,
+      openat: 2,
+      fstat_sync: 3,
+      read_sync: 0,
+      close_sync: 3
+    });
   });
 });

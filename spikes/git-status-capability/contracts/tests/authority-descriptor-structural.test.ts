@@ -18,7 +18,11 @@ const EXPECTED_STRUCTURAL_DENIAL: Readonly<Record<ProductionMutation, readonly s
   foreign_descriptor: ["foreign_descriptor_shape"],
   stale_descriptor: ["stale_descriptor_shape"],
   invalid_flags: ["flags_invalid_shape"],
-  invalid_owner: ["owner_mismatch_shape"]
+  invalid_owner: ["owner_mismatch_shape"],
+  destructured_helper_shadow: ["openat_parent_not_handle"],
+  aliased_openat_call: ["openat_parent_not_handle"],
+  wrong_openat_argument: ["openat_parent_not_handle"],
+  wrong_openat_flags: ["openat_parent_not_handle"]
 });
 
 const FROZEN_PRE183_RUNTIME_EXPORTS = [
@@ -137,7 +141,8 @@ function isExactNamedParameter(parameter: ts.ParameterDeclaration, name: string,
 type InstallerSurfaceDenial =
   | "installer_not_nonconstructible"
   | "installer_not_frozen"
-  | "installer_property_surface";
+  | "installer_property_surface"
+  | "installer_prototype_surface";
 
 function installerSurfaceDenials(source: string): readonly InstallerSurfaceDenial[] {
   const sourceFile = ts.createSourceFile(
@@ -164,16 +169,19 @@ function installerSurfaceDenials(source: string): readonly InstallerSurfaceDenia
   });
   if (!frozen) denials.push("installer_not_frozen");
   let propertySurfaceMutation = false;
+  let prototypeSurfaceMutation = false;
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
       const receiver = node.expression.expression;
       const method = node.expression.name.text;
-      if (
-        ts.isIdentifier(receiver) &&
+      const mutatesInstaller = ts.isIdentifier(receiver) &&
         ["Object", "Reflect"].includes(receiver.text) &&
-        ["assign", "defineProperty", "defineProperties", "set"].includes(method) &&
         ts.isIdentifier(node.arguments[0]) &&
-        node.arguments[0].text === "installDescriptorPrimitiveMediator"
+        node.arguments[0].text === "installDescriptorPrimitiveMediator";
+      if (mutatesInstaller && method === "setPrototypeOf") prototypeSurfaceMutation = true;
+      if (
+        mutatesInstaller &&
+        ["assign", "defineProperty", "defineProperties", "set"].includes(method)
       ) {
         propertySurfaceMutation = true;
       }
@@ -190,6 +198,7 @@ function installerSurfaceDenials(source: string): readonly InstallerSurfaceDenia
   };
   visit(sourceFile);
   if (propertySurfaceMutation) denials.push("installer_property_surface");
+  if (prototypeSurfaceMutation) denials.push("installer_prototype_surface");
   return denials;
 }
 
@@ -216,6 +225,85 @@ function rawOpenSyncDenials(source: string): readonly string[] {
     ts.isIdentifier(calls[0]!.arguments[1]) &&
     calls[0]!.arguments[1].text === "DIRECTORY_OPEN_FLAGS";
   return onlyRootOpen ? [] : ["open_sync_call_surface"];
+}
+
+type InvocationSurfaceDenial = "invocation_not_frozen" | "invocation_property_surface";
+
+function invocationSurfaceDenials(source: string): readonly InvocationSurfaceDenial[] {
+  const sourceFile = ts.createSourceFile(
+    "capabilities.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const helper = sourceFile.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === "invokeDescriptorPrimitive"
+  );
+  if (!helper?.body) return ["invocation_not_frozen"];
+  const declarations: ts.VariableDeclaration[] = [];
+  const mediatorCalls: ts.CallExpression[] = [];
+  const freezeCalls: ts.CallExpression[] = [];
+  let propertySurfaceMutation = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "invoke" &&
+      node.initializer &&
+      ts.isArrowFunction(node.initializer)
+    ) {
+      declarations.push(node);
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "mediator") {
+      mediatorCalls.push(node);
+    }
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "Object" &&
+      node.expression.name.text === "freeze" &&
+      node.arguments.length === 1 &&
+      ts.isIdentifier(node.arguments[0]) &&
+      node.arguments[0].text === "invoke"
+    ) {
+      freezeCalls.push(node);
+    }
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      ["Object", "Reflect"].includes(node.expression.expression.text) &&
+      ["assign", "defineProperty", "defineProperties", "set", "setPrototypeOf"].includes(node.expression.name.text) &&
+      ts.isIdentifier(node.arguments[0]) &&
+      node.arguments[0].text === "invoke"
+    ) {
+      propertySurfaceMutation = true;
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      ts.isPropertyAccessExpression(node.left) &&
+      ts.isIdentifier(node.left.expression) &&
+      node.left.expression.text === "invoke"
+    ) {
+      propertySurfaceMutation = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(helper.body);
+  const denials: InvocationSurfaceDenial[] = [];
+  const invoke = declarations[0];
+  const mediatorCall = mediatorCalls[0];
+  const frozen = Boolean(
+    invoke &&
+    mediatorCall &&
+    freezeCalls.filter((call) => invoke.end <= call.pos && call.end <= mediatorCall.pos).length === 1
+  );
+  if (!frozen) denials.push("invocation_not_frozen");
+  if (propertySurfaceMutation) denials.push("invocation_property_surface");
+  return denials;
 }
 
 describe("retained descriptor structural authority", () => {
@@ -270,13 +358,37 @@ describe("retained descriptor structural authority", () => {
     expect(installer.initializer.type?.kind).toBe(ts.SyntaxKind.VoidKeyword);
   });
 
-  test("installer source is frozen, non-constructible, and rejects hidden property mutation", async () => {
+  test("installer source is frozen, non-constructible, and rejects property or pre-freeze prototype mutation", async () => {
     const source = await readFile(capabilitiesSourcePath, "utf8");
     expect(installerSurfaceDenials(source)).toEqual([]);
-    const mutated = `${source}
+    const propertyMutation = `${source}
 Object.defineProperty(installDescriptorPrimitiveMediator, "reset", { value: () => undefined });
 `;
-    expect(installerSurfaceDenials(mutated)).toEqual(["installer_property_surface"]);
+    expect(installerSurfaceDenials(propertyMutation)).toEqual(["installer_property_surface"]);
+    const assignmentMutation = `${source}
+installDescriptorPrimitiveMediator.rawResult = undefined;
+`;
+    expect(installerSurfaceDenials(assignmentMutation)).toEqual(["installer_property_surface"]);
+    const prototypeMutation = replaceSourceAnchor(
+      source,
+      "Object.freeze(installDescriptorPrimitiveMediator);",
+      "Object.setPrototypeOf(installDescriptorPrimitiveMediator, { reset: () => undefined });\n" +
+        "Object.freeze(installDescriptorPrimitiveMediator);"
+    );
+    expect(installerSurfaceDenials(prototypeMutation)).toEqual(["installer_prototype_surface"]);
+  });
+
+  test("the invocation closure freezes its property and prototype surface before mediator execution", async () => {
+    const source = await readFile(capabilitiesSourcePath, "utf8");
+    expect(invocationSurfaceDenials(source)).toEqual([]);
+    const rawResultMutation = replaceSourceAnchor(
+      source,
+      "      primitiveResult = primitive();",
+      '      primitiveResult = primitive();\n      Object.defineProperty(invoke, "rawResult", { value: primitiveResult });'
+    );
+    expect(invocationSurfaceDenials(rawResultMutation)).toEqual(["invocation_property_surface"]);
+    const missingFreezeMutation = replaceSourceAnchor(source, "  Object.freeze(invoke);", "");
+    expect(invocationSurfaceDenials(missingFreezeMutation)).toEqual(["invocation_not_frozen"]);
   });
 
   test("every openSync call has the one exact root argument tuple, including a non-root mutation", async () => {
@@ -380,6 +492,70 @@ function localDescriptorDecoy(): void {
         "    );"
     );
     expect(structuralDescriptorDenials(helperShadow)).toEqual(["openat_parent_not_handle"]);
+
+    const destructuredHelperShadow = replaceSourceAnchor(
+      source,
+      "    const descriptor = invokeDescriptorPrimitive(\n" +
+        "      \"openat\",\n" +
+        "      () => openAtPrimitive(parentRecord.fd, childPath, flags)\n" +
+        "    );",
+      "    const approvedInvoke = invokeDescriptorPrimitive;\n" +
+        '    const { invokeDescriptorPrimitive } = childName === "__unmediated__"\n' +
+        "      ? { invokeDescriptorPrimitive: <Result>(_: DescriptorOperation, primitive: () => Result): Result => primitive() }\n" +
+        "      : { invokeDescriptorPrimitive: approvedInvoke };\n" +
+        "    const descriptor = invokeDescriptorPrimitive(\n" +
+        "      \"openat\",\n" +
+        "      () => openAtPrimitive(parentRecord.fd, childPath, flags)\n" +
+        "    );"
+    );
+    expect(structuralDescriptorDenials(destructuredHelperShadow)).toEqual(["openat_parent_not_handle"]);
+
+    const destructuredHelperAliasShadow = replaceSourceAnchor(
+      source,
+      "    const descriptor = invokeDescriptorPrimitive(\n" +
+        "      \"openat\",\n" +
+        "      () => openAtPrimitive(parentRecord.fd, childPath, flags)\n" +
+        "    );",
+      "    const approvedInvoke = invokeDescriptorPrimitive;\n" +
+        '    const { approved: invokeDescriptorPrimitive } = childName === "__unmediated__"\n' +
+        "      ? { approved: <Result>(_: DescriptorOperation, primitive: () => Result): Result => primitive() }\n" +
+        "      : { approved: approvedInvoke };\n" +
+        "    const descriptor = invokeDescriptorPrimitive(\n" +
+        "      \"openat\",\n" +
+        "      () => openAtPrimitive(parentRecord.fd, childPath, flags)\n" +
+        "    );"
+    );
+    expect(structuralDescriptorDenials(destructuredHelperAliasShadow)).toEqual(["openat_parent_not_handle"]);
+
+    const aliasedOpenAtCall = replaceSourceAnchor(
+      source,
+      "    const openAtPrimitive = openAt();",
+      "    const openAtPrimitive = openAt();\n" +
+        "    const extraOpenAt = openAtPrimitive;\n" +
+        '    if (childName === "__unmediated__") extraOpenAt(parentRecord.fd, childPath, flags);'
+    );
+    expect(structuralDescriptorDenials(aliasedOpenAtCall)).toEqual(["openat_parent_not_handle"]);
+
+    const wrongOpenAtArgument = replaceSourceAnchor(
+      source,
+      "openAtPrimitive(parentRecord.fd, childPath, flags)",
+      "openAtPrimitive(parentRecord.fd, Buffer.from(\"wrong\"), flags)"
+    );
+    expect(structuralDescriptorDenials(wrongOpenAtArgument)).toEqual(["openat_parent_not_handle"]);
+
+    const wrongOpenAtArity = replaceSourceAnchor(
+      source,
+      "openAtPrimitive(parentRecord.fd, childPath, flags)",
+      "openAtPrimitive(parentRecord.fd, childPath)"
+    );
+    expect(structuralDescriptorDenials(wrongOpenAtArity)).toEqual(["openat_parent_not_handle"]);
+
+    const wrongOpenAtFlags = replaceSourceAnchor(
+      source,
+      "openAtPrimitive(parentRecord.fd, childPath, flags)",
+      "openAtPrimitive(parentRecord.fd, childPath, FILE_OPEN_FLAGS)"
+    );
+    expect(structuralDescriptorDenials(wrongOpenAtFlags)).toEqual(["openat_parent_not_handle"]);
 
     const conditionalOpenAtShadow = replaceSourceAnchor(
       source,

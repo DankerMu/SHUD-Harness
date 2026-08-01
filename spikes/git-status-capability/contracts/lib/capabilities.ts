@@ -68,6 +68,7 @@ export type CapabilityHooks = Readonly<{
   onDescriptorAuthorityDenial?: (denial: DescriptorAuthorityDenial) => void;
 }>;
 
+
 const OPTIONAL_FS_CONSTANTS = constants as typeof constants & Readonly<{ O_CLOEXEC?: number }>;
 export const FILE_OPEN_FLAGS = constants.O_RDONLY | (OPTIONAL_FS_CONSTANTS.O_CLOEXEC ?? 0) |
   (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
@@ -144,6 +145,15 @@ const DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS = Object.freeze({
   reentry: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY",
   repeatedInvocation: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_REPEATED"
 });
+const RETRYABLE_NO_RAW_CLOSE_ERROR_NAME = "ContractCapabilityNoRawCloseError";
+
+class RetryableNoRawCloseError extends Error {
+  constructor() {
+    super("CONTRACT_CAPABILITY_CLOSE_FAILED");
+    this.name = RETRYABLE_NO_RAW_CLOSE_ERROR_NAME;
+  }
+}
+
 
 type DescriptorPrimitiveMediationState = "inactive" | "callback";
 
@@ -213,19 +223,25 @@ function invokeDescriptorPrimitive<Result>(
     }
     return undefined;
   };
+  Object.freeze(invoke);
 
   let mediatorThrew = false;
   let mediatorError: unknown;
+  let mediatorResult: unknown;
   let mediatorReturnedAsync = false;
   descriptorPrimitiveMediationState = "callback";
   try {
-    const mediatorResult = mediator(operation, invoke);
-    if (!invoked) mediatorReturnedAsync = mediatorReturnedThenable(mediatorResult);
+    mediatorResult = mediator(operation, invoke);
   } catch (error) {
     mediatorThrew = true;
     mediatorError = error;
   } finally {
     invocationActive = false;
+  }
+
+  try {
+    if (!mediatorThrew && !invoked) mediatorReturnedAsync = mediatorReturnedThenable(mediatorResult);
+  } finally {
     descriptorPrimitiveMediationState = "inactive";
   }
 
@@ -425,7 +441,10 @@ export class ContractCapabilities {
     } catch (error) {
       hookError = hookError ?? error;
     }
-    if (!rawCloseAttempted) record.state = stateBeforeClose;
+    if (!rawCloseAttempted) {
+      record.state = stateBeforeClose;
+      throw new RetryableNoRawCloseError();
+    }
     if (injectedFault || closeError || hookError) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
   }
 

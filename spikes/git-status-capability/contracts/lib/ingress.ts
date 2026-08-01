@@ -7,6 +7,7 @@ import {
   type BigIntStats,
   type CapabilityDescriptor,
   type CapabilityHooks,
+  type CloseOwner,
   type ContractAuthorityFault
 } from "./capabilities";
 
@@ -40,6 +41,35 @@ export type DescriptorIngressHooks = Readonly<{
   observe?: DescriptorOperationObserver;
   authorityFault?: ContractAuthorityFault;
 }> & CapabilityHooks;
+
+const RETRYABLE_NO_RAW_CLOSE_ERROR_NAME = "ContractCapabilityNoRawCloseError";
+const NO_RAW_CLOSE_RETRY_LIMIT = 2;
+
+function createIngressCapabilities(hooks: DescriptorIngressHooks): ContractCapabilities {
+  return new ContractCapabilities(hooks);
+}
+
+function isRetryableNoRawClose(error: unknown): boolean {
+  return error instanceof Error &&
+    error.name === RETRYABLE_NO_RAW_CLOSE_ERROR_NAME &&
+    error.message === "CONTRACT_CAPABILITY_CLOSE_FAILED";
+}
+
+function closeWithRetry(
+  capabilities: ContractCapabilities,
+  descriptor: CapabilityDescriptor,
+  owner: CloseOwner
+): boolean {
+  for (let attempt = 0; attempt < NO_RAW_CLOSE_RETRY_LIMIT; attempt += 1) {
+    try {
+      capabilities.close(descriptor, owner);
+      return false;
+    } catch (error) {
+      if (!isRetryableNoRawClose(error)) return true;
+    }
+  }
+  return true;
+}
 
 function sameEntry(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
@@ -75,12 +105,13 @@ type DescriptorAdmission = Readonly<{
   components: readonly RetainedComponent[];
 }>;
 
-function closeAll(capabilities: ContractCapabilities, components: readonly RetainedComponent[]): boolean {
+function closeAll(
+  capabilities: ContractCapabilities,
+  components: readonly RetainedComponent[]
+): boolean {
   let failed = false;
   for (let index = components.length - 1; index >= 0; index -= 1) {
-    try {
-      capabilities.close(components[index]!.descriptor, "retained");
-    } catch {
+    if (closeWithRetry(capabilities, components[index]!.descriptor, "retained")) {
       failed = true;
     }
   }
@@ -111,11 +142,7 @@ function openDescriptorBoundPath(
       capabilities.markRetained(rootDescriptor, "directory");
       components.push({ descriptor: rootDescriptor, stats: rootStats, final: false });
     } catch (error) {
-      try {
-        capabilities.close(rootDescriptor, "unretained");
-      } catch {
-        throw new ContractError("CONTRACT_SCHEMA_INVALID");
-      }
+      closeWithRetry(capabilities, rootDescriptor, "unretained");
       throw error;
     }
 
@@ -140,11 +167,7 @@ function openDescriptorBoundPath(
         capabilities.markRetained(descriptor, final ? "file" : "directory");
         components.push({ descriptor, childName, stats, final });
       } catch (error) {
-        try {
-          capabilities.close(descriptor, "unretained");
-        } catch {
-          throw new ContractError("CONTRACT_SCHEMA_INVALID");
-        }
+        closeWithRetry(capabilities, descriptor, "unretained");
         throw error;
       }
     }
@@ -190,9 +213,7 @@ function verifyRetainedChain(
     } catch (error) {
       verificationPrimary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
     } finally {
-      try {
-        capabilities.close(verificationDescriptor, "verification");
-      } catch {
+      if (closeWithRetry(capabilities, verificationDescriptor, "verification")) {
         if (!verificationPrimary) {
           if (deferCleanup) {
             cleanupFailed = true;
@@ -370,7 +391,7 @@ export async function readBoundedFile(
   hooks: DescriptorIngressHooks = {},
   beforeCleanup?: (bytes: Uint8Array) => void
 ): Promise<Uint8Array> {
-  const capabilities = new ContractCapabilities(hooks);
+  const capabilities = createIngressCapabilities(hooks);
   let admission: DescriptorAdmission | undefined;
   let primary: ContractError | undefined;
   let result: Uint8Array | undefined;
@@ -404,7 +425,12 @@ export async function readBoundedFile(
       }
       if (length <= maximum) result = buffer.subarray(0, length);
     }
-    verificationCleanupFailed = verifyRetainedChain(admission, capabilities, hooks.observe, true) || verificationCleanupFailed;
+    verificationCleanupFailed = verifyRetainedChain(
+      admission,
+      capabilities,
+      hooks.observe,
+      true
+    ) || verificationCleanupFailed;
     if (!result) throw new ContractError("CONTRACT_BYTES_LIMIT");
     beforeCleanup?.(result);
   } catch (error) {

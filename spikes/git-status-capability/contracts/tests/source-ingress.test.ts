@@ -109,6 +109,54 @@ async function exerciseFailure(kind: Kind, fixturePath: string, scenario: Failur
   }
 }
 
+type RoundTwoTransientRun = Readonly<{
+  mode: "omitted" | "throw" | "thenable" | "deferred";
+  owner: "root" | "child" | "verification" | "retained";
+  entry: "readBoundedFile" | "runCheckForTest";
+  result: Readonly<{ error: string }> | Readonly<{ exit: number; stdout: string; stderr: string }>;
+  selected: boolean;
+  targetAttemptOrdinals: readonly number[];
+  targetRawCloseCalls: number;
+  closeCallbacks: number;
+  rawCloseCalls: number;
+  deferredErrors: readonly string[];
+}>;
+type RoundTwoTransientReceipt = Readonly<{
+  rows: readonly Readonly<{
+    owner: RoundTwoTransientRun["owner"];
+    mode: RoundTwoTransientRun["mode"];
+    entry: RoundTwoTransientRun["entry"];
+    runs: readonly RoundTwoTransientRun[];
+    baselineRestored: boolean;
+  }>[];
+}>;
+type RoundTwoPersistentReceipt = Readonly<{
+  expectedAttempts: number;
+  primaryError: string;
+  primaryAttempts: number;
+  cleanupOnlyError: string;
+  cleanupOnlyAttempts: number;
+  checkerExit: number;
+  checkerStdout: string;
+  checkerStderr: string;
+  checkerAttempts: number;
+  rawCloseCalls: number;
+}>;
+
+const ingressRoundTwoChildPath = join(import.meta.dir, "authority-descriptor-ingress-round-2-child.ts");
+
+async function runIngressRoundTwo<Receipt>(scenario: "transient" | "persistent"): Promise<Receipt> {
+  const child = Bun.spawn([process.execPath, ingressRoundTwoChildPath, scenario], { stdout: "pipe", stderr: "pipe" });
+  const [exit, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text()
+  ]);
+  expect(exit).toBe(0);
+  expect(stderr).toBe("");
+  return JSON.parse(stdout) as Receipt;
+}
+
 describe("descriptor-bound source ingress", () => {
   test("source record direct command emits the exact LF-terminated public receipt", async () => {
     const result = await directCommand(["--input", validSourcePath, "--kind", "source_input_record"]);
@@ -566,6 +614,49 @@ describe("descriptor-bound source ingress", () => {
 
     Bun.gc(true);
     expect(await descriptorCount()).toBe(baseline);
+  });
+  test("every ingress owner retries one no-raw close exactly once without descriptor growth", async () => {
+    const receipt = await runIngressRoundTwo<RoundTwoTransientReceipt>("transient");
+    expect(receipt.rows).toHaveLength(32);
+    for (const row of receipt.rows) {
+      expect(row.baselineRestored).toBe(true);
+      expect(row.runs).toHaveLength(3);
+      for (const run of row.runs) {
+        expect(run.selected).toBe(true);
+        expect(run.targetAttemptOrdinals).toHaveLength(2);
+        expect(run.targetAttemptOrdinals[1]).toBe(run.targetAttemptOrdinals[0]! + 1);
+        expect(run.targetRawCloseCalls).toBe(1);
+        expect(run.rawCloseCalls).toBe(run.closeCallbacks - 1);
+        expect(run.deferredErrors).toEqual(
+          run.mode === "deferred"
+            ? ["CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_EXPIRED"]
+            : []
+        );
+        const admissionFailure = run.owner === "root" || run.owner === "child";
+        if ("error" in run.result) {
+          expect(run.result.error).toBe(admissionFailure ? "CONTRACT_SCHEMA_INVALID" : "NO_ERROR");
+        } else {
+          expect(run.result.exit).toBe(admissionFailure ? 2 : 0);
+          expect(run.result.stdout).toBe(admissionFailure ? "" : success("source_input_record"));
+          expect(run.result.stderr).toBe(admissionFailure ? failure("CONTRACT_SCHEMA_INVALID") : "");
+        }
+      }
+    }
+  });
+
+  test("persistent close refusal has a fixed bound, preserves primary errors, and never falls back to raw close", async () => {
+    const receipt = await runIngressRoundTwo<RoundTwoPersistentReceipt>("persistent");
+    const expectedAttempts = 2 * (3 * componentCount(validSourcePath) - 2);
+    expect(receipt.expectedAttempts).toBe(expectedAttempts);
+    expect(receipt.primaryError).toBe("CONTRACT_JSON_MALFORMED");
+    expect(receipt.primaryAttempts).toBe(expectedAttempts);
+    expect(receipt.cleanupOnlyError).toBe("CONTRACT_SCHEMA_INVALID");
+    expect(receipt.cleanupOnlyAttempts).toBe(expectedAttempts);
+    expect(receipt.checkerExit).toBe(2);
+    expect(receipt.checkerStdout).toBe("");
+    expect(receipt.checkerStderr).toBe(failure("CONTRACT_SCHEMA_INVALID"));
+    expect(receipt.checkerAttempts).toBe(expectedAttempts);
+    expect(receipt.rawCloseCalls).toBe(0);
   });
 });
 

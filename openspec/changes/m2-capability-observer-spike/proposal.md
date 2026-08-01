@@ -64,6 +64,7 @@ The module has one shared state machine:
 | A second synchronous `invoke()` | That invocation itself throws `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_REPEATED` and starts no extra raw primitive. It has the same inner error whether mediator code catches it or lets it escape. |
 | Callback returns after the first raw start | The captured raw result or raw error is authoritative for the original capability API. A mediator throw, thenable, or uncaught/caught repeated-call error after that start cannot replace the result, mask the raw error, skip issuance, or orphan the raw resource. |
 | No primitive started | A synchronous omission throws `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING`; a declared-async or ordinary thenable return throws `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ASYNC`; a closure used after return throws `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_EXPIRED`. All three paths make zero raw calls. A mediator's own pre-invocation throw remains its callback error, but `close` still restores retryability because no raw close began. |
+| Callback return before untrusted result inspection | The owner expires the invocation closure immediately after normal mediator return and before reading `then` or any Proxy-controlled return-value property. The shared callback/reentry state remains active through that classification, so getter-started public entries still reject as reentry; a raw outcome remains authoritative only when its invocation began before return. |
 
 The owner MUST NOT inspect callable `constructor`, `Symbol.toStringTag`, or
 `Object.prototype.toString` metadata before applying an installed mediator. A
@@ -85,6 +86,16 @@ retry. Once raw close begins, the descriptor remains terminal exactly as #175
 requires, including raw-close failure, injected close fault, and primary versus
 cleanup error precedence.
 
+Ingress retains each close owner until settlement. A private, non-exported
+retryable-close error classification distinguishes `no_raw_retryable` from a raw-terminal close:
+root and child rollback, verification cleanup, retained cleanup, and the
+checker path retry only the former, at most twice total. A one-time omission,
+throw, thenable, or deferred invocation therefore reaches one mediated raw
+close on retry; persistent refusal terminates after that fixed bound with the
+existing primary error winning over cleanup failure, or an explicit
+`CONTRACT_SCHEMA_INVALID` when cleanup is the only failure. No retry bypasses
+the mediator or performs an unmediated raw close.
+
 Denial, close-attempt, close-fault, authority-violation, `afterAdmission`,
 `observe`, and `beforeCleanup` callbacks enter only after the prior primitive
 window is inactive. Eligible descriptor work started by any such callback opens
@@ -96,13 +107,13 @@ this proof; this does not broaden #176's ownership.
 
 | Surface | Invariant | Required regression evidence |
 |---|---|---|
-| Installer | Invalid → valid → valid ordering, frozen/non-constructible own surface, and no hidden control property | Process-isolated receipt plus AST source mutation that adds `reset` |
-| Primitive ownership | One private lexical helper owns the five callsites; same-name local helper or conditional `openAt` shadows are not accepted | Binding-aware AST mutation proof |
+| Installer | Invalid → valid → valid ordering, frozen/non-constructible standard own and inherited surface, and no hidden control property | Process-isolated descriptor/prototype receipt plus AST mutations for `reset` and pre-freeze `setPrototypeOf` |
+| Primitive ownership | One sole top-level lexical helper owns the five callsites; every `BindingName` shadow and callable alias is rejected; resolved `openat` receives the exact parent fd, NUL child bytes, flags, and issued-result relation | Binding-aware AST mutations for destructuring, extra alias call, wrong argument, and wrong flag plus the process tuple receipt |
 | Raw calls | Every `openSync` is counted with its complete argument tuple; each canonical primitive runs once | Full retained-chain receipt and an extra non-root `openSync` source mutation |
-| Reentry | All public capability families and denial paths reject with the stable reentry error before observable work | Process-isolated reentry table with zero nested raw calls |
-| Outcome precedence | Raw return/error owns post-invoke throw, thenable, and repeated-call outcomes | Open/openat fd-baseline receipt; sentinel return/error; caught and uncaught repeat receipts |
-| Close settlement | No raw close restores retryability; attempted raw close remains terminal | Omitted, pre-invoke throw, and ordinary-thenable close retries |
-| Invalid inputs | Installed mediation sees no invalid root/phase, parent/flags, stat handle, read phase/range, or close owner | Table-driven zero-mediator/zero-raw receipt |
+| Reentry | Every public capability family rejects before observable work throughout each of the five outer primitive windows | Process-isolated five-window table with every public-entry reentry, zero denial/lifecycle/hook delta, and zero nested raw calls |
+| Outcome precedence | A raw return/error owns post-invoke throw, thenable, and repeated-call outcomes only when the raw invocation began before mediator return | Getter and Proxy-return matrix over all five primitives, with expired closure, reentry, async, and zero-raw assertions |
+| Close settlement | No raw close restores retryability; attempted raw close remains terminal; ingress retains owner through bounded retry | Omission/throw/thenable/deferred ingress matrix for root, child, verification, retained, and checker owners, plus persistent-refusal bound |
+| Invalid inputs | Installed mediation emits exactly one frozen existing denial before mediator or raw work for each invalid row | Table-driven exact denial-event receipt with zero mediator invocations and zero raw calls |
 | Caller callbacks | Existing four `CapabilityHooks` plus ingress `afterAdmission`, `observe`, and `beforeCleanup` enter inactive; nested eligible work starts inactive | Process-isolated hook and real ingress/checker receipts |
 | Same-fd replacement | Old closed capability stays stale when a new generation reuses the same raw fd | Forced same-number close/reopen process fixture |
 
@@ -111,13 +122,62 @@ two erased types above. It may not import the registry, raw records, raw
 callables, lifecycle implementation, or `ContractCapabilities` for prototype
 rewriting. Dependency order remains #175 → #183 → #176 → #177 → #178.
 
-### Expected focused Linux evidence command
+### Required Darwin preparation, causal red proof, and green receipt
 
-The source worktree is mounted read-only at `/repo`; dependencies are mounted
-as the sibling `/node_modules`, not nested under `/repo/node_modules`. This
-avoids Docker trying to create a nested mountpoint beneath the read-only source
-mount. The following is the expected parameterized command for the
-orchestrator to run from a Linux host after source/test review:
+These are required commands for the orchestrator at the fixed clean head, not
+claimed receipts. On Darwin, prepare dependencies from the frozen lockfile
+before any test or type proof:
+
+```sh
+npx --yes bun@1.2.19 install --frozen-lockfile
+```
+
+The final causal red proof replaces only the descriptor owner with its pre-seam
+base (`e70a0853ae6b1d6a3fd80ffe92ca98d7926eede8`), retains every current focused
+test, preserves the raw red transcript outside the repository, restores the
+exact fixed source even on failure, proves a clean worktree, and only then runs
+green:
+
+```sh
+set -eu
+SOURCE=spikes/git-status-capability/contracts/lib/capabilities.ts
+PRE_SEAM=e70a0853ae6b1d6a3fd80ffe92ca98d7926eede8
+FIXED_SOURCE="$(mktemp -t issue183-capabilities.XXXXXX)"
+RED_TRANSCRIPT="${TMPDIR:-/tmp}/issue-183-pre-seam-red.$$.log"
+cp "$SOURCE" "$FIXED_SOURCE"
+restore_source() {
+  cp "$FIXED_SOURCE" "$SOURCE"
+  rm -f "$FIXED_SOURCE"
+}
+trap restore_source EXIT HUP INT TERM
+git show "${PRE_SEAM}:${SOURCE}" > "$SOURCE"
+set +e
+npx --yes bun@1.2.19 test \
+  spikes/git-status-capability/contracts/tests/authority-descriptor-structural.test.ts \
+  spikes/git-status-capability/contracts/tests/authority-descriptor-mediation.test.ts \
+  spikes/git-status-capability/contracts/tests/source-ingress.test.ts > "$RED_TRANSCRIPT" 2>&1
+red_status=$?
+set -e
+cat "$RED_TRANSCRIPT"
+test "$red_status" -ne 0
+restore_source
+trap - EXIT HUP INT TERM
+git diff --exit-code -- "$SOURCE"
+test -z "$(git status --porcelain)"
+npx --yes bun@1.2.19 test spikes/git-status-capability/contracts/tests/*.test.ts
+npx --yes bun@1.2.19 x tsc -p spikes/git-status-capability/contracts/tsconfig.descriptor-authority.json
+```
+
+The transcript must show the current focused assertions failing against only
+the pre-seam owner; neither the command nor this proposal invents a status,
+count, or receipt.
+
+### Required Linux read-only evidence command
+
+Prepare `DEPS` with the same frozen-lockfile command in a disposable writable
+checkout of this exact source, then mount that resulting dependency directory
+as the sibling `/node_modules`. The source worktree is mounted read-only at
+`/repo`, never with dependencies nested at `/repo/node_modules`:
 
 ```sh
 REPO=/absolute/path/to/SHUD-Harness-issue-183
@@ -129,17 +189,29 @@ docker run --rm \
   --env NODE_PATH=/node_modules \
   oven/bun:1.2.19 \
   sh -lc '
-    bun test \
-      spikes/git-status-capability/contracts/tests/authority-descriptor-structural.test.ts \
-      spikes/git-status-capability/contracts/tests/authority-descriptor-mediation.test.ts \
-      spikes/git-status-capability/contracts/tests/source-ingress.test.ts &&
+    bun test spikes/git-status-capability/contracts/tests/*.test.ts &&
     bun /node_modules/typescript/bin/tsc \
       -p spikes/git-status-capability/contracts/tsconfig.descriptor-authority.json
   '
 ```
 
-This proposal records the runnable command only. It does not claim a Linux
-receipt until the orchestrator executes it from the frozen source mount.
+This proposal records runnable procedures only. The orchestrator records their
+actual Darwin/Linux red and green receipts after execution.
+
+### Required OpenSpec and hygiene checks
+
+After the restored green receipt, the orchestrator runs:
+
+```sh
+npx --yes openspec validate m2-capability-observer-spike --strict --no-interactive
+git diff --check
+git diff --exit-code origin/main -- openspec/changes/m2-capability-observer-spike/design.md
+git -C zero diff --quiet
+test -z "$(git status --porcelain)"
+test -z "$(git stash list | grep red-proof || true)"
+```
+
+These checks also remain procedures, not claimed results.
 
 
 ## Capabilities
