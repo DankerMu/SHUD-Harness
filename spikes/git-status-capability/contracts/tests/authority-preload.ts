@@ -21,8 +21,49 @@ type BunAuthority = {
   spawnSync: (...args: unknown[]) => unknown;
 };
 
+const authorityGuardSymbol = Symbol.for("shud.contract.authorityGuard");
+const selectedControl = Bun.argv.slice(2)[2];
+const selectedRawInversion: RawInversionMode | null = selectedControl === "raw_read_inversion_canary"
+  ? "node_fs_readFileSync"
+  : selectedControl === "raw_ffi_inversion_canary"
+  ? "ffi_dlopen"
+  : null;
 const state: GuardState = { phase: "admission", events: [], rawEvents: [], rawInversion: null };
-(globalThis as Record<PropertyKey, unknown>)[Symbol.for("shud.contract.authorityGuard")] = state;
+const observedState = Object.create(null) as GuardState;
+Object.defineProperties(observedState, {
+  phase: {
+    enumerable: true,
+    get: (): GuardState["phase"] => state.phase,
+    set: (value: unknown): void => {
+      if (value === "post_admission") state.phase = "post_admission";
+    }
+  },
+  events: { enumerable: true, get: (): string[] => state.events },
+  rawEvents: { enumerable: true, get: (): string[] => state.rawEvents },
+  rawInversion: {
+    enumerable: true,
+    get: (): RawInversionMode | null => state.rawInversion,
+    set: (value: unknown): void => {
+      if (value === selectedRawInversion) {
+        state.rawInversion = selectedRawInversion;
+      } else if (value === null && state.rawInversion === selectedRawInversion) {
+        state.rawInversion = null;
+      }
+    }
+  }
+});
+Object.freeze(observedState);
+Object.defineProperty(globalThis, authorityGuardSymbol, {
+  value: observedState,
+  writable: false,
+  configurable: false,
+  enumerable: false
+});
+let capabilityOperationDepth = 0;
+
+function isPublicPostAdmission(): boolean {
+  return state.phase === "post_admission" && capabilityOperationDepth === 0;
+}
 // Initialize Bun's lazy stdio streams before Bun.file is guarded.
 void process.stdout.write;
 void process.stderr.write;
@@ -77,11 +118,52 @@ function builtinModule(name: string): MutableModule {
   return value as MutableModule;
 }
 
-const RETAINED_DESCRIPTOR_OPERATIONS: Readonly<Record<string, true>> = {
+const RAW_DESCRIPTOR_OPERATIONS: Readonly<Record<string, true>> = {
   closeSync: true,
   fstatSync: true,
   readSync: true
 };
+const FILE_HANDLE_CONSUMER_METHODS: Readonly<Record<string, true>> = {
+  appendFile: true,
+  chmod: true,
+  chown: true,
+  close: true,
+  createReadStream: true,
+  createWriteStream: true,
+  datasync: true,
+  read: true,
+  readFile: true,
+  readLines: true,
+  readableWebStream: true,
+  readv: true,
+  stat: true,
+  sync: true,
+  truncate: true,
+  utimes: true,
+  write: true,
+  writeFile: true,
+  writev: true
+};
+
+function guardedFileHandle(handle: unknown): unknown {
+  if (handle === null || typeof handle !== "object" && typeof handle !== "function") return handle;
+  return new Proxy(handle, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && FILE_HANDLE_CONSUMER_METHODS[property] &&
+          isPublicPostAdmission()) {
+        deny("node_fs_filehandle_read");
+      }
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function" || typeof property !== "string" || !FILE_HANDLE_CONSUMER_METHODS[property]) {
+        return value;
+      }
+      return function guardedFileHandleConsumer(this: unknown, ...argumentsList: unknown[]) {
+        if (isPublicPostAdmission()) deny("node_fs_filehandle_read");
+        return Reflect.apply(value, target, argumentsList);
+      };
+    }
+  });
+}
 
 function delegatePathFunction(
   original: (...args: unknown[]) => unknown,
@@ -90,30 +172,34 @@ function delegatePathFunction(
   operation: string,
   path: string | undefined
 ): unknown {
-  if (state.phase === "post_admission" && path) rawOperation(operation, path);
+  if (isPublicPostAdmission() && path) rawOperation(operation, path);
   return original.apply(thisArgument, argumentsList);
 }
 
 function patchPathFunctions(module: MutableModule, operationPrefix: string): void {
   for (const name of Object.getOwnPropertyNames(module)) {
-    if (RETAINED_DESCRIPTOR_OPERATIONS[name]) continue;
     const descriptor = Object.getOwnPropertyDescriptor(module, name);
     if (!descriptor || typeof descriptor.value !== "function") continue;
     const original = descriptor.value as (...args: unknown[]) => unknown;
     Object.defineProperty(module, name, {
       ...descriptor,
       value: function guardedPathFunction(this: unknown, ...args: unknown[]) {
-        const path = firstPathLike(args);
+        const descriptorOperation = RAW_DESCRIPTOR_OPERATIONS[name] === true;
+        const path = descriptorOperation ? undefined : firstPathLike(args);
         const operation = `${operationPrefix}_${name}`;
-        if (state.phase === "post_admission") {
-          if (state.rawInversion === "node_fs_readFileSync" && operation === "node_fs_readFileSync") {
+        if (isPublicPostAdmission()) {
+          if (!descriptorOperation && state.rawInversion === "node_fs_readFileSync" &&
+              operation === "node_fs_readFileSync") {
             if (path !== undefined && args.length === 1) {
               delegatePathFunction(original, this, args, operation, path);
             }
           }
           deny(operation, path);
         }
-        return delegatePathFunction(original, this, args, operation, path);
+        const result = delegatePathFunction(original, this, args, operation, path);
+        return operationPrefix === "node_fs_promises" && name === "open"
+          ? Promise.resolve(result).then((fileHandle) => guardedFileHandle(fileHandle))
+          : result;
       }
     });
   }
@@ -125,7 +211,7 @@ function delegateWorkerApply(
   argumentsList: unknown[],
   operation: string
 ): unknown {
-  if (state.phase === "post_admission") rawOperation(operation);
+  if (isPublicPostAdmission()) rawOperation(operation);
   return Reflect.apply(target, thisArgument, argumentsList);
 }
 
@@ -135,7 +221,7 @@ function delegateWorkerConstruct(
   newTarget: Function,
   operation: string
 ): object {
-  if (state.phase === "post_admission") rawOperation(operation);
+  if (isPublicPostAdmission()) rawOperation(operation);
   return Reflect.construct(target, argumentsList, newTarget);
 }
 
@@ -177,11 +263,11 @@ function patchConstructor(module: MutableModule, name: string, operation: string
       return propertyDescriptor;
     },
     apply(target, thisArgument, argumentsList) {
-      if (state.phase === "post_admission") deny(operation);
+      if (isPublicPostAdmission()) deny(operation);
       return delegateWorkerApply(target, thisArgument, argumentsList, operation);
     },
     construct(target, argumentsList, newTarget) {
-      if (state.phase === "post_admission") deny(operation);
+      if (isPublicPostAdmission()) deny(operation);
       return delegateWorkerConstruct(target, argumentsList, newTarget, operation);
     }
   });
@@ -201,7 +287,7 @@ function delegateChildProcess(
   argumentsList: unknown[],
   operation: string
 ): unknown {
-  if (state.phase === "post_admission") rawOperation(operation);
+  if (isPublicPostAdmission()) rawOperation(operation);
   return original.apply(thisArgument, argumentsList);
 }
 
@@ -214,7 +300,7 @@ for (const name of ["exec", "execFile", "execFileSync", "execSync", "fork", "spa
     ...descriptor,
     value: function guardedProcessCreation(this: unknown, ...args: unknown[]) {
       const operation = `node_child_process_${name}`;
-      if (state.phase === "post_admission") deny(operation);
+      if (isPublicPostAdmission()) deny(operation);
       return delegateChildProcess(original, this, args, operation);
     }
   });
@@ -226,12 +312,12 @@ if (!ffiDescriptor || typeof ffiDescriptor.value !== "function") throw new Error
 const originalDlopen = ffiDescriptor.value as (path: string, symbols: Record<string, unknown>) => DynamicLibrary;
 
 function delegateFfiDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {
-  if (state.phase === "post_admission") rawOperation("ffi_dlopen", path);
+  if (isPublicPostAdmission()) rawOperation("ffi_dlopen", path);
   return originalDlopen(path, symbols);
 }
 
 function delegateFfiClose(library: DynamicLibrary, path: string): void {
-  if (state.phase === "post_admission") rawOperation("ffi_close", path);
+  if (isPublicPostAdmission()) rawOperation("ffi_close", path);
   library.close();
 }
 
@@ -241,29 +327,11 @@ function delegateFfiSymbol(
   operation: string,
   target: string | undefined
 ): unknown {
-  if (state.phase === "post_admission" && target?.startsWith("/")) rawOperation(operation, target);
+  if (isPublicPostAdmission() && target?.startsWith("/")) rawOperation(operation, target);
   return symbol(...argumentsList);
 }
-function isRetainedDescriptorOpenAtLibrary(path: string, symbols: Record<string, unknown>): boolean {
-  if (state.phase !== "admission") return false;
-  const systemLibraryPath = process.platform === "darwin"
-    ? "/usr/lib/libSystem.B.dylib"
-    : process.platform === "linux"
-    ? "libc.so.6"
-    : undefined;
-  if (path !== systemLibraryPath || Object.keys(symbols).length !== 1) return false;
-  const specification = symbols.openat;
-  if (typeof specification !== "object" || specification === null) return false;
-  const descriptor = specification as { args?: unknown; returns?: unknown };
-  const args = descriptor.args;
-  return Array.isArray(args) && args.length === 3 &&
-    args[0] === "i32" && args[1] === "cstring" && args[2] === "i32" &&
-    descriptor.returns === "i32";
-}
-
-
 function guardedFfiClose(library: DynamicLibrary, path: string): void {
-  if (state.phase === "post_admission") deny("ffi_close", path);
+  if (isPublicPostAdmission()) deny("ffi_close", path);
   return delegateFfiClose(library, path);
 }
 
@@ -274,13 +342,13 @@ function guardedFfiSymbol(
   const operation = `ffi_${name}`;
   return (...args: unknown[]) => {
     const candidate = decodedCString(args[name === "open" ? 0 : 1]);
-    if (state.phase === "post_admission") deny(operation, candidate);
+    if (isPublicPostAdmission()) deny(operation, candidate);
     return delegateFfiSymbol(symbol, args, operation, candidate);
   };
 }
 
 function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {
-  if (state.phase === "post_admission") {
+  if (isPublicPostAdmission()) {
     if (state.rawInversion === "ffi_dlopen") {
       const library = delegateFfiDlopen(path, symbols);
       try {
@@ -292,22 +360,9 @@ function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicL
     deny("ffi_dlopen", path);
   }
   const library = delegateFfiDlopen(path, symbols);
-  const retainedDescriptorOpenAt = isRetainedDescriptorOpenAtLibrary(path, symbols);
   const guardedSymbols: Record<string, (...args: unknown[]) => unknown> = {};
   for (const [name, symbol] of Object.entries(library.symbols)) {
-    const guardedSymbol = guardedFfiSymbol(symbol, name);
-    guardedSymbols[name] = retainedDescriptorOpenAt && name === "openat"
-      ? (...args: unknown[]) => {
-        if (state.phase !== "post_admission") return guardedSymbol(...args);
-        const phase = state.phase;
-        state.phase = "admission";
-        try {
-          return guardedSymbol(...args);
-        } finally {
-          state.phase = phase;
-        }
-      }
-      : guardedSymbol;
+    guardedSymbols[name] = guardedFfiSymbol(symbol, name);
   }
   return Object.freeze({
     symbols: Object.freeze(guardedSymbols),
@@ -343,51 +398,133 @@ mock.module("worker_threads", () => ({
   default: guardedNodeWorkerThreads
 }));
 
+type CapabilityMethod = (this: unknown, ...argumentsList: unknown[]) => unknown;
+const CAPABILITY_METHOD_NAMES = ["close", "openRelative", "readRetained", "stat"] as const;
+
+async function installCapabilityMediation(): Promise<void> {
+  const { ContractCapabilities } = await import("../lib/capabilities");
+  for (const name of CAPABILITY_METHOD_NAMES) {
+    const descriptor = Object.getOwnPropertyDescriptor(ContractCapabilities.prototype, name);
+    if (!descriptor || typeof descriptor.value !== "function" || !descriptor.writable || !descriptor.configurable) {
+      throw new Error(`MISSING_CAPABILITY_METHOD:${name}`);
+    }
+    const original = descriptor.value as CapabilityMethod;
+    Object.defineProperty(ContractCapabilities.prototype, name, {
+      ...descriptor,
+      configurable: false,
+      writable: false,
+      value: function guardedCapabilityOperation(this: unknown, ...argumentsList: unknown[]) {
+        capabilityOperationDepth += 1;
+        try {
+          return original.apply(this, argumentsList);
+        } finally {
+          capabilityOperationDepth -= 1;
+        }
+      }
+    });
+  }
+}
+await installCapabilityMediation();
+
 const guardedBun = Bun as unknown as BunAuthority;
 const originalBunFile = guardedBun.file.bind(Bun);
 const originalBunWrite = guardedBun.write.bind(Bun);
 const originalBunSpawn = guardedBun.spawn.bind(Bun);
 const originalBunSpawnSync = guardedBun.spawnSync.bind(Bun);
 
+const BUN_FILE_CONSUMER_PROPERTIES: Readonly<Record<string, true>> = {
+  arrayBuffer: true,
+  bytes: true,
+  delete: true,
+  exists: true,
+  formData: true,
+  json: true,
+  lastModified: true,
+  size: true,
+  stat: true,
+  slice: true,
+  stream: true,
+  text: true,
+  type: true,
+  unlink: true,
+  write: true,
+  writer: true
+};
+
+function guardedBunFileStream(stream: unknown, normalized: string | undefined): unknown {
+  if (stream === null || typeof stream !== "object" && typeof stream !== "function") return stream;
+  return new Proxy(stream, {
+    get(target, property, receiver) {
+      const consumes = property === Symbol.asyncIterator || property === "getReader" ||
+        property === "pipeTo" || property === "tee";
+      if (consumes && isPublicPostAdmission()) deny("bun_file", normalized);
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function" || !consumes) return value;
+      return function guardedBunFileStreamConsumer(this: unknown, ...argumentsList: unknown[]) {
+        if (isPublicPostAdmission()) deny("bun_file", normalized);
+        return Reflect.apply(value, target, argumentsList);
+      };
+    }
+  });
+}
+
+function guardedBunFileValue(file: unknown, normalized: string | undefined): unknown {
+  if (file === null || typeof file !== "object" && typeof file !== "function") return file;
+  return new Proxy(file, {
+    get(target, property, receiver) {
+      const consumes = typeof property === "string" && BUN_FILE_CONSUMER_PROPERTIES[property];
+      if (consumes && isPublicPostAdmission()) deny("bun_file", normalized);
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function" || !consumes) return value;
+      return function guardedBunFileConsumer(this: unknown, ...argumentsList: unknown[]) {
+        if (isPublicPostAdmission()) deny("bun_file", normalized);
+        const result = Reflect.apply(value, target, argumentsList);
+        if (property === "slice") return guardedBunFileValue(result, normalized);
+        return property === "stream" ? guardedBunFileStream(result, normalized) : result;
+      };
+    }
+  });
+}
+
 function delegateBunFile(path: unknown, argumentsList: unknown[], normalized: string | undefined): unknown {
-  if (state.phase === "post_admission" && normalized) rawOperation("bun_file", normalized);
+  if (isPublicPostAdmission() && normalized) rawOperation("bun_file", normalized);
   return originalBunFile(path, ...argumentsList);
 }
 
 function delegateBunWrite(path: unknown, argumentsList: unknown[], normalized: string | undefined): unknown {
-  if (state.phase === "post_admission") rawOperation("bun_write", normalized);
+  if (isPublicPostAdmission()) rawOperation("bun_write", normalized);
   return originalBunWrite(path, ...argumentsList);
 }
 
 function delegateBunSpawn(argumentsList: unknown[]): unknown {
-  if (state.phase === "post_admission") rawOperation("bun_spawn");
+  if (isPublicPostAdmission()) rawOperation("bun_spawn");
   return originalBunSpawn(...argumentsList);
 }
 
 function delegateBunSpawnSync(argumentsList: unknown[]): unknown {
-  if (state.phase === "post_admission") rawOperation("bun_spawn_sync");
+  if (isPublicPostAdmission()) rawOperation("bun_spawn_sync");
   return originalBunSpawnSync(...argumentsList);
 }
 
 function guardedBunFile(path: unknown, ...args: unknown[]): unknown {
   const normalized = normalizedPathLike(path);
-  if (state.phase === "post_admission") deny("bun_file", normalized);
-  return delegateBunFile(path, args, normalized);
+  if (isPublicPostAdmission()) deny("bun_file", normalized);
+  return guardedBunFileValue(delegateBunFile(path, args, normalized), normalized);
 }
 
 function guardedBunWrite(path: unknown, ...args: unknown[]): unknown {
   const normalized = normalizedPathLike(path);
-  if (state.phase === "post_admission") deny("bun_write", normalized);
+  if (isPublicPostAdmission()) deny("bun_write", normalized);
   return delegateBunWrite(path, args, normalized);
 }
 
 function guardedBunSpawn(...args: unknown[]): unknown {
-  if (state.phase === "post_admission") deny("bun_spawn");
+  if (isPublicPostAdmission()) deny("bun_spawn");
   return delegateBunSpawn(args);
 }
 
 function guardedBunSpawnSync(...args: unknown[]): unknown {
-  if (state.phase === "post_admission") deny("bun_spawn_sync");
+  if (isPublicPostAdmission()) deny("bun_spawn_sync");
   return delegateBunSpawnSync(args);
 }
 

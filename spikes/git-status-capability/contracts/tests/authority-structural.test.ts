@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
@@ -13,6 +13,10 @@ import {
   globalCloseResolveBypassSource
 } from "./authority-topology";
 import { authorityRoundOneMutationRows } from "./authority-topology-round-one";
+import {
+  EXPECTED_BASE_TOPOLOGY_MUTATION_SHA256,
+  EXPECTED_ROUND_ONE_TOPOLOGY_MUTATION_SHA256
+} from "./authority-topology-digests";
 
 const contractsRoot = join(import.meta.dir, "..");
 const productionCheckPath = join(contractsRoot, "check.ts");
@@ -123,7 +127,7 @@ const EXPECTED_ROUND_ONE_TOPOLOGY_PROJECTION = Object.freeze([
   { id: "r1_ffi_symbol_escape", family: "delegate_owner", violation: "delegate_owner:ffi_symbol", anchor: "const topologyLeak = library.symbols;" },
   { id: "r1_ffi_close_facade", family: "delegate_owner", violation: "delegate_owner:ffi_close", anchor: "close: library.close" },
   { id: "r1_worker_receiver_forwarding", family: "delegate_owner", violation: "delegate_owner:worker_apply", anchor: "delegateWorkerApply(target, undefined, argumentsList, operation);" },
-  { id: "r1_bun_argument_forwarding", family: "delegate_owner", violation: "delegate_owner:originalBunFile", anchor: "delegateBunFile(path, [], normalized);" },
+  { id: "r1_bun_argument_forwarding", family: "delegate_owner", violation: "delegate_owner:originalBunFile", anchor: "delegateBunFile(path, [], normalized)" },
   { id: "r1_bun_raw_operation", family: "delegate_order", violation: "delegate_order:delegateBunFile", anchor: "rawOperation(\"bun_write\", normalized);" },
   { id: "r1_extra_node_inversion_delegate", family: "deny_order", violation: "deny_order:guardedPathFunction", anchor: "delegatePathFunction(original, this, args, operation, path);\n            delegateBunSpawn(args);" },
   { id: "r1_extra_ffi_inversion_delegate", family: "deny_order", violation: "deny_order:guardedDlopen", anchor: "const library = delegateFfiDlopen(path, symbols);\n      delegateFfiDlopen(path, symbols);" },
@@ -132,7 +136,7 @@ const EXPECTED_ROUND_ONE_TOPOLOGY_PROJECTION = Object.freeze([
   { id: "r1_silent_path_inversion_delegate", family: "deny_order", violation: "deny_order:guardedPathFunction", anchor: "void path;" },
   { id: "r1_foreign_ffi_inversion_delegate", family: "deny_order", violation: "deny_order:guardedDlopen", anchor: "delegateBunSpawn([]);" },
   { id: "r1_silent_ffi_inversion_delegate", family: "deny_order", violation: "deny_order:guardedDlopen", anchor: "const library = { symbols: {}, close: () => undefined } as DynamicLibrary;" },
-  { id: "r1_forged_bun_inversion_delegate", family: "deny_order", violation: "deny_order:guardedBunFile", anchor: "if (state.rawInversion === \"ffi_dlopen\") delegateBunFile(path, args, normalized);" },
+  { id: "r1_forged_bun_inversion_delegate", family: "delegate_order", violation: "delegate_order:delegateBunFile", anchor: "if (state.rawInversion === \"ffi_dlopen\") delegateBunFile(path, args, normalized);" },
 ] satisfies readonly AuthorityTopologyProjection[]);
 
 function authorityRegistryProjection(): string {
@@ -417,7 +421,10 @@ async function compileProductionMutation(row: AuthorityProofRow, source: string)
 async function compilePreloadMutation(id: string, source: string): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "shud-authority-preload-"));
   try {
-    const entrypoint = join(root, "authority-preload.ts");
+    const tests = join(root, "tests");
+    await mkdir(tests);
+    const entrypoint = join(tests, "authority-preload.ts");
+    await symlink(productionLibPath, join(root, "lib"), "dir");
     await writeFile(entrypoint, source);
     const result = await Bun.build({
       entrypoints: [entrypoint],
@@ -460,15 +467,24 @@ async function productionSources(): Promise<Readonly<Record<string, string>>> {
 }
 function expectFrozenTopologyProjection(
   mutations: readonly Readonly<{ id: string; family: string; violation: string; source: string }>[],
-  expected: readonly AuthorityTopologyProjection[]
+  expected: readonly AuthorityTopologyProjection[],
+  expectedDigests: Readonly<Record<string, string>>,
+  requireCompleteDigestOracle = false
 ): void {
   expect(mutations).toHaveLength(expected.length);
   expect(mutations.map(({ id, family, violation }) => ({ id, family, violation }))).toEqual(
     expected.map(({ id, family, violation }) => ({ id, family, violation }))
   );
+  if (requireCompleteDigestOracle) {
+    expect(Object.keys(expectedDigests).sort()).toEqual(mutations.map((mutation) => mutation.id).sort());
+  }
   expect(new Set(mutations.map((mutation) => mutation.id)).size).toBe(mutations.length);
+  expect(new Set(mutations.map((mutation) => createHash("sha256").update(mutation.source).digest("hex"))).size)
+    .toBe(mutations.length);
   for (const [index, projection] of expected.entries()) {
-    expect(mutations[index]!.source).toContain(projection.anchor);
+    const mutation = mutations[index]!;
+    expect(mutation.source).toContain(projection.anchor);
+    expect(createHash("sha256").update(mutation.source).digest("hex")).toBe(expectedDigests[mutation.id]);
   }
 }
 
@@ -499,7 +515,12 @@ describe("source-ingress authority structural proof", () => {
     for (const mutation of mutations) {
       familyCounts[mutation.family] = (familyCounts[mutation.family] ?? 0) + 1;
     }
-    expectFrozenTopologyProjection(mutations, EXPECTED_BASE_TOPOLOGY_PROJECTION);
+    expectFrozenTopologyProjection(
+      mutations,
+      EXPECTED_BASE_TOPOLOGY_PROJECTION,
+      EXPECTED_BASE_TOPOLOGY_MUTATION_SHA256,
+      true
+    );
     expect(familyCounts).toEqual({
       alias: 2,
       binding_shadow: 14,
@@ -521,7 +542,12 @@ describe("source-ingress authority structural proof", () => {
   test("freezes and rejects every Round 1 authority topology mutation before source-only compile proof", async () => {
     const preloadSource = await readFile(authorityPreloadPath, "utf8");
     const mutations = authorityRoundOneMutationRows(preloadSource);
-    expectFrozenTopologyProjection(mutations, EXPECTED_ROUND_ONE_TOPOLOGY_PROJECTION);
+    expectFrozenTopologyProjection(
+      mutations,
+      EXPECTED_ROUND_ONE_TOPOLOGY_PROJECTION,
+      EXPECTED_ROUND_ONE_TOPOLOGY_MUTATION_SHA256,
+      true
+    );
     for (const mutation of mutations) {
       await compilePreloadMutation(mutation.id, mutation.source);
       expect(authorityPreloadTopologyViolations(mutation.source)).toEqual([mutation.violation]);
@@ -549,5 +575,339 @@ describe("source-ingress authority structural proof", () => {
       await compileProductionMutation(row, mutatedSource);
       expect(structuralAuthorityViolations("check.ts", mutatedSource)).toContain(row.structuralViolation);
     }
+  });
+
+  test("rejects every non-canonical ambient callable acquisition", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    const insertBeforeNormalized = (
+      source: string,
+      prefix: string
+    ): string => source.replace(
+      "function guardedBunWrite(path: unknown, ...args: unknown[]): unknown {\n  const normalized",
+      `function guardedBunWrite(path: unknown, ...args: unknown[]): unknown {
+  ${prefix}
+  const normalized`
+    );
+    const mutations = [
+      {
+        id: "r2_early_builtin_capture",
+        source: insertBeforeNormalized(
+          preloadSource,
+          'const rawFs = process.getBuiltinModule("node:fs") as { readFileSync: (value: unknown) => unknown };\n  rawFs.readFileSync(path);'
+        ),
+        violation: "delegate_owner:node_fs"
+      },
+      {
+        id: "r2_static_import_capture",
+        source: insertBeforeNormalized(
+          `import { readFileSync as prepatchRead } from "node:fs";\n${preloadSource}`,
+          'prepatchRead("/etc/hosts");'
+        ),
+        violation: "delegate_owner:node_fs"
+      },
+      {
+        id: "r2_require_capture",
+        source: insertBeforeNormalized(
+          preloadSource,
+          'const prepatchFs = import.meta.require("node:fs") as { readFileSync: (path: string) => unknown };\n  prepatchFs.readFileSync("/etc/hosts");'
+        ),
+        violation: "delegate_owner:node_fs"
+      },
+      {
+        id: "r2_global_capture",
+        source: insertBeforeNormalized(preloadSource, "const prepatchWorker = globalThis.Worker;\n  void prepatchWorker;"),
+        violation: "delegate_owner:worker_construct"
+      },
+      {
+        id: "r2_descriptor_capture",
+        source: insertBeforeNormalized(
+          preloadSource,
+          'const prepatchWorker = Object.getOwnPropertyDescriptor(globalThis, "Worker");\n  void prepatchWorker;'
+        ),
+        violation: "delegate_owner:worker_construct"
+      },
+      {
+        id: "r2_bun_destructure_capture",
+        source: insertBeforeNormalized(
+          preloadSource,
+          "const { spawnSync: prepatchSpawnSync } = Bun;\n  prepatchSpawnSync([]);"
+        ),
+        violation: "delegate_owner:originalBunSpawnSync"
+      },
+      {
+        id: "r2_reflect_capture",
+        source: insertBeforeNormalized(
+          preloadSource,
+          'const prepatchWorker = Reflect.get(globalThis, "Worker");\n  void prepatchWorker;'
+        ),
+        violation: "delegate_owner:worker_construct"
+      },
+      {
+        id: "r2_fs_destructure_capture",
+        source: preloadSource.replace(
+          'patchPathFunctions(guardedFsPromises, "node_fs_promises");',
+          'const { readFileSync: prepatchRead } = guardedFs as { readFileSync: (path: string) => unknown };\nvoid prepatchRead("/etc/hosts");\npatchPathFunctions(guardedFsPromises, "node_fs_promises");'
+        ),
+        violation: "delegate_owner:node_fs"
+      },
+      {
+        id: "r2_child_destructure_capture",
+        source: preloadSource.replace(
+          'for (const name of ["exec",',
+          'const { exec: prepatchExec } = guardedChildProcess as { exec: (command: string) => unknown };\nvoid prepatchExec("echo unsafe");\nfor (const name of ["exec",'
+        ),
+        violation: "delegate_owner:child_process"
+      },
+      {
+        id: "r2_ffi_destructure_capture",
+        source: preloadSource.replace(
+          "const ffiDescriptor =",
+          'const { dlopen: prepatchDlopen } = guardedFfi as { dlopen: (path: string, symbols: Record<string, unknown>) => unknown };\nvoid prepatchDlopen("/fixture", {});\nconst ffiDescriptor ='
+        ),
+        violation: "delegate_owner:ffi_dlopen"
+      },
+      {
+        id: "r2_fs_alias_destructure_capture",
+        source: preloadSource.replace(
+          'patchPathFunctions(guardedFsPromises, "node_fs_promises");',
+          'const prepatchFsAlias = guardedFs;\nconst { readFileSync: prepatchRead } = prepatchFsAlias as { readFileSync: (path: string) => unknown };\nvoid prepatchRead("/etc/hosts");\npatchPathFunctions(guardedFsPromises, "node_fs_promises");'
+        ),
+        violation: "delegate_owner:node_fs"
+      },
+      {
+        id: "r2_fs_member_alias_capture",
+        source: preloadSource.replace(
+          'patchPathFunctions(guardedFsPromises, "node_fs_promises");',
+          'const prepatchFsAlias = guardedFs;\nvoid (prepatchFsAlias as { readFileSync: (path: string) => unknown }).readFileSync("/etc/hosts");\npatchPathFunctions(guardedFsPromises, "node_fs_promises");'
+        ),
+        violation: "delegate_owner:node_fs"
+      },
+      {
+        id: "r2_ffi_descriptor_alias_capture",
+        source: preloadSource.replace(
+          "const originalDlopen = ffiDescriptor.value as (path: string, symbols: Record<string, unknown>) => DynamicLibrary;",
+          'const prepatchDescriptor = ffiDescriptor;\nconst prepatchDlopen = prepatchDescriptor.value as (path: string, symbols: Record<string, unknown>) => DynamicLibrary;\nvoid prepatchDlopen("/fixture", {});\nconst originalDlopen = ffiDescriptor.value as (path: string, symbols: Record<string, unknown>) => DynamicLibrary;'
+        ),
+        violation: "delegate_owner:ffi_dlopen"
+      },
+    ] as const;
+    for (const mutation of mutations) {
+      await compilePreloadMutation(mutation.id, mutation.source);
+      expect(authorityPreloadTopologyViolations(mutation.source)).toEqual([mutation.violation]);
+    }
+  });
+
+  test("rejects completion escapes around an otherwise present denial", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    const mutated = preloadSource.replace(
+      `function guardedBunSpawnSync(...args: unknown[]): unknown {
+  if (isPublicPostAdmission()) deny("bun_spawn_sync");
+  return delegateBunSpawnSync(args);
+}`,
+      `function guardedBunSpawnSync(...args: unknown[]): unknown {
+  try {
+    if (isPublicPostAdmission()) deny("bun_spawn_sync");
+  } finally {
+    return delegateBunSpawnSync(args);
+  }
+}`
+    );
+    await compilePreloadMutation("r2_finally_return", mutated);
+    expect(authorityPreloadTopologyViolations(mutated)).toEqual(["deny_order:guardedBunSpawnSync"]);
+    const catchSwallow = preloadSource.replace(
+      `function guardedBunSpawnSync(...args: unknown[]): unknown {
+  if (isPublicPostAdmission()) deny("bun_spawn_sync");
+  return delegateBunSpawnSync(args);
+}`,
+      `function guardedBunSpawnSync(...args: unknown[]): unknown {
+  try {
+    if (isPublicPostAdmission()) deny("bun_spawn_sync");
+  } catch {}
+  return delegateBunSpawnSync(args);
+}`
+    );
+    const deferred = preloadSource.replace(
+      `function guardedBunSpawnSync(...args: unknown[]): unknown {
+  if (isPublicPostAdmission()) deny("bun_spawn_sync");
+  return delegateBunSpawnSync(args);
+}`,
+      `function guardedBunSpawnSync(...args: unknown[]): unknown {
+  if (isPublicPostAdmission()) queueMicrotask(() => deny("bun_spawn_sync"));
+  return delegateBunSpawnSync(args);
+}`
+    );
+    await compilePreloadMutation("r2_catch_swallow", catchSwallow);
+    expect(authorityPreloadTopologyViolations(catchSwallow)).toEqual(["deny_order:guardedBunSpawnSync"]);
+    await compilePreloadMutation("r2_deferred_deny", deferred);
+    expect(authorityPreloadTopologyViolations(deferred)).toEqual(["deny_order:guardedBunSpawnSync"]);
+  });
+
+  test("rejects raw Worker and FFI facade target escapes", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    const workerMutation = preloadSource.replace(
+      `if (property === "prototype") return guardedPrototype;
+      return Reflect.get(target, property, receiver);`,
+      `if (property === "prototype") return guardedPrototype;
+      if (property === "rawTarget") return target;
+      return Reflect.get(target, property, receiver);`
+    );
+    const workerOwnKeysMutation = preloadSource.replace(
+      `    construct(target, argumentsList, newTarget) {
+      if (isPublicPostAdmission()) deny(operation);
+      return delegateWorkerConstruct(target, argumentsList, newTarget, operation);
+    }
+  });`,
+      `    construct(target, argumentsList, newTarget) {
+      if (isPublicPostAdmission()) deny(operation);
+      return delegateWorkerConstruct(target, argumentsList, newTarget, operation);
+    },
+    ownKeys(target) {
+      return Reflect.ownKeys(target);
+    }
+  });`
+    );
+    const ffiMutation = preloadSource.replace(
+      "return Object.freeze({\n    symbols: Object.freeze(guardedSymbols),",
+      `const rawSymbolsDescriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(library), "symbols");
+  if (rawSymbolsDescriptor && typeof rawSymbolsDescriptor.get === "function") {
+    guardedSymbols.raw = rawSymbolsDescriptor.get.call(library) as (...args: unknown[]) => unknown;
+  }
+  return Object.freeze({
+    symbols: Object.freeze(guardedSymbols),`
+    );
+    await compilePreloadMutation("r2_worker_target_escape", workerMutation);
+    expect(authorityPreloadTopologyViolations(workerMutation)).toEqual(["delegate_owner:worker_construct"]);
+    await compilePreloadMutation("r2_worker_own_keys_escape", workerOwnKeysMutation);
+    expect(authorityPreloadTopologyViolations(workerOwnKeysMutation)).toEqual(["delegate_owner:worker_construct"]);
+    await compilePreloadMutation("r2_ffi_descriptor_escape", ffiMutation);
+    expect(authorityPreloadTopologyViolations(ffiMutation)).toEqual(["delegate_owner:ffi_symbol"]);
+  });
+
+  test("models var hoisting and recursive assignment writes", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    const varMutation = preloadSource.replace(
+      "value: function guardedPathFunction(this: unknown, ...args: unknown[]) {\n        const descriptorOperation = RAW_DESCRIPTOR_OPERATIONS[name] === true;\n        const path",
+      `value: function guardedPathFunction(this: unknown, ...args: unknown[]) {
+        const descriptorOperation = RAW_DESCRIPTOR_OPERATIONS[name] === true;
+        {
+          var original = (() => undefined) as unknown as (...arguments_: unknown[]) => unknown;
+        }
+        const path`
+    );
+    const destructuringMutation = preloadSource.replace(
+      "function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {\n  if",
+      `function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {
+  ({ path } = { path: "/other" });
+  if`
+    );
+    const compoundMutation = preloadSource.replace(
+      "function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {\n  if",
+      `function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {
+  path += "/other";
+  if`
+    );
+    const loopMutation = preloadSource.replace(
+      "function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {\n  if",
+      `function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {
+  for ({ path } of [{ path: "/other" }]) {}
+  if`
+    );
+    const nestedDestructuringMutation = preloadSource.replace(
+      "function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {\n  if",
+      `function guardedDlopen(path: string, symbols: Record<string, unknown>): DynamicLibrary {
+  ({ nested: { path } } = { nested: { path: "/other" } });
+  if`
+    );
+    await compilePreloadMutation("r2_var_shadow", varMutation);
+    expect(authorityPreloadTopologyViolations(varMutation)).toEqual(["delegate_owner:node_fs"]);
+    await compilePreloadMutation("r2_destructured_path_write", destructuringMutation);
+    expect(authorityPreloadTopologyViolations(destructuringMutation)).toEqual(["deny_arguments:guardedDlopen"]);
+    await compilePreloadMutation("r2_compound_path_write", compoundMutation);
+    expect(authorityPreloadTopologyViolations(compoundMutation)).toEqual(["deny_arguments:guardedDlopen"]);
+    await compilePreloadMutation("r2_loop_destructured_path_write", loopMutation);
+    expect(authorityPreloadTopologyViolations(loopMutation)).toEqual(["deny_arguments:guardedDlopen"]);
+    await compilePreloadMutation("r2_nested_destructured_path_write", nestedDestructuringMutation);
+    expect(authorityPreloadTopologyViolations(nestedDestructuringMutation)).toEqual(["deny_arguments:guardedDlopen"]);
+  });
+
+  test("freezes the exact raw inversion predicates", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    const pathMutation = preloadSource.replace(
+      "if (path !== undefined && args.length === 1)",
+      "if (true)"
+    );
+    const ffiMutation = preloadSource.replace(
+      'if (state.rawInversion === "ffi_dlopen")',
+      "if (true)"
+    );
+    await compilePreloadMutation("r2_path_inversion_true", pathMutation);
+    expect(authorityPreloadTopologyViolations(pathMutation)).toEqual(["deny_order:guardedPathFunction"]);
+    await compilePreloadMutation("r2_ffi_inversion_true", ffiMutation);
+    expect(authorityPreloadTopologyViolations(ffiMutation)).toEqual(["deny_order:guardedDlopen"]);
+  });
+
+  test("freezes the one-way phase setter and startup-bound inversion privilege", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    const phaseMutation = preloadSource.replace(
+      `set: (value: unknown): void => {
+      if (value === "post_admission") state.phase = "post_admission";
+    }`,
+      `set: (value: unknown): void => {
+      if (value === "admission") state.phase = "admission";
+      if (value === "post_admission") state.phase = "post_admission";
+    }`
+    );
+    const inversionMutation = preloadSource.replace(
+      `      } else if (value === null && state.rawInversion === selectedRawInversion) {`,
+      `      } else if (value === "ffi_dlopen") {
+        state.rawInversion = "ffi_dlopen";
+      } else if (value === null && state.rawInversion === selectedRawInversion) {`
+    );
+    await compilePreloadMutation("r2_phase_reopen_setter", phaseMutation);
+    expect(authorityPreloadTopologyViolations(phaseMutation)).toEqual(["deny_order:guardedPathFunction"]);
+    await compilePreloadMutation("r2_raw_inversion_extra_privilege", inversionMutation);
+    expect(authorityPreloadTopologyViolations(inversionMutation)).toEqual(["deny_order:guardedPathFunction"]);
+  });
+
+  test("rejects distinct-comment compound rows before topology comparison", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    const rows = authorityRoundOneMutationRows(preloadSource);
+    const compound = `${preloadSource}
+originalBunFile.call(Bun, "fixture");
+originalBunFile["apply"](Bun, ["fixture"]);
+Reflect["apply"](originalBunFile, Bun, ["fixture"]);
+originalBunFile.bind(Bun)("fixture");
+`;
+    const expected = EXPECTED_ROUND_ONE_TOPOLOGY_PROJECTION.filter((projection) =>
+      ["r1_call", "r1_computed_apply", "r1_reflect_computed_apply", "r1_bind"].includes(projection.id)
+    );
+    const collapsed = rows.filter((row) => expected.some((projection) => projection.id === row.id))
+      .map((row, index) => ({ ...row, source: `${compound}// distinct-${index}\n` }));
+    expect(() => expectFrozenTopologyProjection(
+      collapsed,
+      expected,
+      EXPECTED_ROUND_ONE_TOPOLOGY_MUTATION_SHA256
+    )).toThrow();
+  });
+
+  test("rejects a shared compound source before topology comparison", async () => {
+    const preloadSource = await readFile(authorityPreloadPath, "utf8");
+    const rows = authorityRoundOneMutationRows(preloadSource);
+    const compound = `${preloadSource}
+originalBunFile.call(Bun, "fixture");
+originalBunFile["apply"](Bun, ["fixture"]);
+Reflect["apply"](originalBunFile, Bun, ["fixture"]);
+originalBunFile.bind(Bun)("fixture");
+`;
+    const expected = EXPECTED_ROUND_ONE_TOPOLOGY_PROJECTION.filter((projection) =>
+      ["r1_call", "r1_computed_apply", "r1_reflect_computed_apply", "r1_bind"].includes(projection.id)
+    );
+    const collapsed = rows.filter((row) => expected.some((projection) => projection.id === row.id))
+      .map((row) => ({ ...row, source: compound }));
+    expect(() => expectFrozenTopologyProjection(
+      collapsed,
+      expected,
+      EXPECTED_ROUND_ONE_TOPOLOGY_MUTATION_SHA256
+    )).toThrow();
   });
 });

@@ -83,12 +83,12 @@ export function authorityRoundOneMutationRows(text: string): readonly AuthorityT
   addMutation(rows, "r1_ffi_dlopen_origin", "delegate_owner", "delegate_owner:ffi_dlopen",
     text.replace("const originalDlopen = ffiDescriptor.value as", "const originalDlopen = (() => undefined) as"));
   addMutation(rows, "r1_ffi_symbol_origin", "delegate_owner", "delegate_owner:ffi_symbol",
-    text.replace("const guardedSymbol = guardedFfiSymbol(symbol, name);", "const guardedSymbol = guardedFfiSymbol(() => undefined, name);"));
+    text.replace("guardedSymbols[name] = guardedFfiSymbol(symbol, name);", "guardedSymbols[name] = guardedFfiSymbol(() => undefined, name);"));
 
   addMutation(rows, "r1_worker_descriptor_facade", "delegate_owner", "delegate_owner:worker_construct",
     text.replace("value: guardedPrototype", "value: original.prototype"));
   addMutation(rows, "r1_ffi_normal_library_forwarding", "deny_order", "deny_order:guardedDlopen",
-    text.replace("const library = delegateFfiDlopen(path, symbols);\n  const retainedDescriptorOpenAt", "const library = delegateFfiDlopen(path, symbols);\n  delegateFfiDlopen(path, symbols);\n  const retainedDescriptorOpenAt"));
+    text.replace("const library = delegateFfiDlopen(path, symbols);\n  const guardedSymbols", "const library = delegateFfiDlopen(path, symbols);\n  delegateFfiDlopen(path, symbols);\n  const guardedSymbols"));
   addMutation(rows, "r1_ffi_symbol_escape", "delegate_owner", "delegate_owner:ffi_symbol",
     text.replace("return Object.freeze({", "const topologyLeak = library.symbols;\n  return Object.freeze({"));
   addMutation(rows, "r1_ffi_close_facade", "delegate_owner", "delegate_owner:ffi_close",
@@ -96,7 +96,7 @@ export function authorityRoundOneMutationRows(text: string): readonly AuthorityT
   addMutation(rows, "r1_worker_receiver_forwarding", "delegate_owner", "delegate_owner:worker_apply",
     text.replace("delegateWorkerApply(target, thisArgument, argumentsList, operation);", "delegateWorkerApply(target, undefined, argumentsList, operation);"));
   addMutation(rows, "r1_bun_argument_forwarding", "delegate_owner", "delegate_owner:originalBunFile",
-    text.replace("delegateBunFile(path, args, normalized);", "delegateBunFile(path, [], normalized);"));
+    text.replace("guardedBunFileValue(delegateBunFile(path, args, normalized), normalized)", "guardedBunFileValue(delegateBunFile(path, [], normalized), normalized)"));
   addMutation(rows, "r1_bun_raw_operation", "delegate_order", "delegate_order:delegateBunFile",
     text.replace('rawOperation("bun_file", normalized);', 'rawOperation("bun_write", normalized);'));
 
@@ -114,8 +114,7 @@ export function authorityRoundOneMutationRows(text: string): readonly AuthorityT
     text.replace("const library = delegateFfiDlopen(path, symbols);\n      try {", "const library = delegateFfiDlopen(path, symbols);\n      delegateBunSpawn([]);\n      try {"));
   addMutation(rows, "r1_silent_ffi_inversion_delegate", "deny_order", "deny_order:guardedDlopen",
     text.replace("const library = delegateFfiDlopen(path, symbols);\n      try {", "const library = { symbols: {}, close: () => undefined } as DynamicLibrary;\n      try {"));
-  addMutation(rows, "r1_forged_bun_inversion_delegate", "deny_order", "deny_order:guardedBunFile",
-    text.replace('if (state.phase === "post_admission") deny("bun_file", normalized);', 'if (state.phase === "post_admission") { if (state.rawInversion === "ffi_dlopen") delegateBunFile(path, args, normalized); deny("bun_file", normalized); }')
-      .replace("return delegateBunFile(path, args, normalized);", "return undefined;"));
+  addMutation(rows, "r1_forged_bun_inversion_delegate", "delegate_order", "delegate_order:delegateBunFile",
+    text.replace('if (isPublicPostAdmission()) deny("bun_file", normalized);', 'if (isPublicPostAdmission()) { if (state.rawInversion === "ffi_dlopen") delegateBunFile(path, args, normalized); deny("bun_file", normalized); }'));
   return rows;
 }

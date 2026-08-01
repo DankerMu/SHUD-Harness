@@ -1,9 +1,11 @@
 import ts from "typescript";
+import {
+  LexicalBindings,
+  declarationName,
+  isDeclarationName,
+  stableBinding
+} from "./authority-topology-bindings";
 
-type Scope = {
-  readonly parent: Scope | undefined;
-  readonly declarations: Map<string, ts.Declaration>;
-};
 type CapturedBinding =
   | "node_fs"
   | "worker_apply"
@@ -41,129 +43,9 @@ const HELPER_SPECS: readonly HelperSpec[] = [
 
 const HELPER_BY_BINDING = new Map(HELPER_SPECS.map((spec) => [spec.binding, spec.name] as const));
 
-class LexicalBindings {
-  readonly #scopeByNode = new WeakMap<ts.Node, Scope>();
-  readonly #allDeclarations: ts.Declaration[] = [];
-  readonly #seenDeclarations = new Set<ts.Declaration>();
-
-  constructor(source: ts.SourceFile) {
-    const scope: Scope = { parent: undefined, declarations: new Map() };
-    this.#scopeByNode.set(source, scope);
-    this.#predeclareStatements(source.statements, scope);
-    for (const statement of source.statements) this.#visit(statement, scope);
-  }
-
-  declarations(): readonly ts.Declaration[] {
-    return this.#allDeclarations;
-  }
-
-  resolve(identifier: ts.Identifier): ts.Declaration | undefined {
-    let scope = this.#scopeByNode.get(identifier);
-    for (; scope; scope = scope.parent) {
-      const declaration = scope.declarations.get(identifier.text);
-      if (declaration) return declaration;
-    }
-    return undefined;
-  }
-
-  #declare(scope: Scope, declaration: ts.Declaration): void {
-    for (const { name, declaration: binding } of bindingLeafDeclarations(declaration)) {
-      scope.declarations.set(name, binding);
-      if (!this.#seenDeclarations.has(binding)) {
-        this.#seenDeclarations.add(binding);
-        this.#allDeclarations.push(binding);
-      }
-    }
-  }
-
-  #predeclareStatements(statements: readonly ts.Statement[], scope: Scope): void {
-    for (const statement of statements) {
-      if (ts.isFunctionDeclaration(statement)) {
-        this.#declare(scope, statement);
-      } else if (ts.isVariableStatement(statement)) {
-        for (const declaration of statement.declarationList.declarations) this.#declare(scope, declaration);
-      } else if (ts.isClassDeclaration(statement) || ts.isEnumDeclaration(statement)) {
-        this.#declare(scope, statement);
-      }
-    }
-  }
-
-  #visit(node: ts.Node, scope: Scope): void {
-    this.#scopeByNode.set(node, scope);
-    if (isFunctionLike(node)) {
-      const functionScope: Scope = { parent: scope, declarations: new Map() };
-      this.#scopeByNode.set(node, functionScope);
-      if (ts.isFunctionExpression(node) && node.name) this.#declare(functionScope, node);
-      for (const parameter of node.parameters) this.#declare(functionScope, parameter);
-      for (const parameter of node.parameters) this.#visit(parameter, functionScope);
-      if (node.body && ts.isBlock(node.body)) {
-        this.#scopeByNode.set(node.body, functionScope);
-        this.#predeclareStatements(node.body.statements, functionScope);
-        for (const statement of node.body.statements) this.#visit(statement, functionScope);
-      } else if (node.body) {
-        this.#visit(node.body, functionScope);
-      }
-      return;
-    }
-    if (ts.isBlock(node)) {
-      const blockScope: Scope = { parent: scope, declarations: new Map() };
-      this.#scopeByNode.set(node, blockScope);
-      this.#predeclareStatements(node.statements, blockScope);
-      for (const statement of node.statements) this.#visit(statement, blockScope);
-      return;
-    }
-    if (ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node)) {
-      const loopScope: Scope = { parent: scope, declarations: new Map() };
-      this.#scopeByNode.set(node, loopScope);
-      const initializer = node.initializer;
-      if (initializer && ts.isVariableDeclarationList(initializer)) {
-        for (const declaration of initializer.declarations) this.#declare(loopScope, declaration);
-      }
-      ts.forEachChild(node, (child) => this.#visit(child, loopScope));
-      return;
-    }
-    if (ts.isCatchClause(node)) {
-      const catchScope: Scope = { parent: scope, declarations: new Map() };
-      this.#scopeByNode.set(node, catchScope);
-      if (node.variableDeclaration) {
-        this.#declare(catchScope, node.variableDeclaration);
-        this.#visit(node.variableDeclaration, catchScope);
-      }
-      this.#visit(node.block, catchScope);
-      return;
-    }
-    ts.forEachChild(node, (child) => this.#visit(child, scope));
-  }
-}
-
 function isFunctionLike(node: ts.Node): node is ts.FunctionLikeDeclaration {
   return ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node) ||
     ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node);
-}
-
-function declarationName(declaration: ts.Node | undefined): string | undefined {
-  const named = declaration as (ts.Node & { name?: ts.BindingName }) | undefined;
-  return named?.name && ts.isIdentifier(named.name) ? named.name.text : undefined;
-}
-
-function bindingLeafDeclarations(
-  declaration: ts.Declaration
-): readonly Readonly<{ name: string; declaration: ts.Declaration }>[] {
-  const named = declaration as ts.Declaration & { name?: ts.BindingName };
-  if (!named.name) return [];
-  const leaves: Readonly<{ name: string; declaration: ts.Declaration }>[] = [];
-  const visit = (name: ts.BindingName, owner: ts.Declaration): void => {
-    if (ts.isIdentifier(name)) {
-      leaves.push({ name: name.text, declaration: owner });
-      return;
-    }
-    for (const element of name.elements) {
-      if (!ts.isBindingElement(element)) continue;
-      visit(element.name, element as unknown as ts.Declaration);
-    }
-  };
-  visit(named.name, declaration);
-  return leaves;
 }
 
 function authorityPreloadSource(text: string): ts.SourceFile {
@@ -513,10 +395,20 @@ function rawOperationCall(
 function postAdmissionCondition(
   expression: ts.Expression,
   bindings: LexicalBindings,
-  state: ts.Declaration | undefined
+  state: ts.Declaration | undefined,
+  modules: ReadonlyMap<string, ts.Declaration>
 ): boolean {
+  if (ts.isCallExpression(expression) && expression.arguments.length === 0 &&
+      ts.isIdentifier(expression.expression) &&
+      bindings.resolve(expression.expression) === modules.get("isPublicPostAdmission")) {
+    return true;
+  }
   let found = false;
   const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.arguments.length === 0 && ts.isIdentifier(node.expression) &&
+        bindings.resolve(node.expression) === modules.get("isPublicPostAdmission")) {
+      found = true;
+    }
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
         ts.isPropertyAccessExpression(node.left) && node.left.name.text === "phase" &&
         ts.isIdentifier(node.left.expression) && bindings.resolve(node.left.expression) === state &&
@@ -563,7 +455,7 @@ function helperHasExactTopology(
   if (!body || body.statements.length !== 2) return false;
   const raw = rawOperationCall(body.statements[0], bindings, rawOperation);
   if (!raw || !ts.isIfStatement(body.statements[0]) ||
-      !postAdmissionCondition(body.statements[0].expression, bindings, state) ||
+      !postAdmissionCondition(body.statements[0].expression, bindings, state, modules) ||
       !rawArgumentsMatch(raw, spec, helper, bindings)) {
     return false;
   }
@@ -602,20 +494,28 @@ function rawInversionBranch(node: ts.Node, bindings: LexicalBindings, state: ts.
       ts.isIdentifier(expression.left.expression) && bindings.resolve(expression.left.expression) === state &&
       ts.isStringLiteral(expression.right) && expression.right.text === mode;
   };
+  const flattenedAnd = (expression: ts.Expression): readonly ts.Expression[] => {
+    if (!ts.isBinaryExpression(expression) || expression.operatorToken.kind !== ts.SyntaxKind.AmpersandAmpersandToken) {
+      return [expression];
+    }
+    return [...flattenedAnd(expression.left), ...flattenedAnd(expression.right)];
+  };
+  const isNodeFsInversion = (expression: ts.Expression): boolean => {
+    const terms = flattenedAnd(expression);
+    return terms.length === 3 && ts.isPrefixUnaryExpression(terms[0]!) &&
+      terms[0]!.operator === ts.SyntaxKind.ExclamationToken && ts.isIdentifier(terms[0]!.operand) &&
+      terms[0]!.operand.text === "descriptorOperation" &&
+      rawInversionEquals(terms[1]!, "node_fs_readFileSync") &&
+      ts.isBinaryExpression(terms[2]!) && terms[2]!.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+      ts.isIdentifier(terms[2]!.left) && terms[2]!.left.text === "operation" &&
+      ts.isStringLiteral(terms[2]!.right) && terms[2]!.right.text === "node_fs_readFileSync";
+  };
   for (let current: ts.Node | undefined = node.parent; current; current = current.parent) {
     if (!ts.isIfStatement(current)) continue;
     if (namedFunctionOwner(current) === "guardedDlopen" && rawInversionEquals(current.expression, "ffi_dlopen")) {
       return true;
     }
-    if (namedFunctionOwner(current) === "guardedPathFunction" &&
-        ts.isBinaryExpression(current.expression) &&
-        current.expression.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
-        rawInversionEquals(current.expression.left, "node_fs_readFileSync") &&
-        ts.isBinaryExpression(current.expression.right) &&
-        current.expression.right.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
-        ts.isIdentifier(current.expression.right.left) && current.expression.right.left.text === "operation" &&
-        ts.isStringLiteral(current.expression.right.right) &&
-        current.expression.right.right.text === "node_fs_readFileSync") {
+    if (namedFunctionOwner(current) === "guardedPathFunction" && isNodeFsInversion(current.expression)) {
       return true;
     }
   }
@@ -655,34 +555,6 @@ function denialHasForbiddenSyntax(
   return forbidden;
 }
 
-function declarationIsConst(declaration: ts.Declaration): boolean {
-  return ts.isVariableDeclaration(declaration) && ts.isVariableDeclarationList(declaration.parent) &&
-    (declaration.parent.flags & ts.NodeFlags.Const) !== 0;
-}
-
-function bindingHasWrite(declaration: ts.Declaration, bindings: LexicalBindings): boolean {
-  let written = false;
-  const visit = (node: ts.Node): void => {
-    if (ts.isIdentifier(node) && bindings.resolve(node) === declaration) {
-      const parent = node.parent;
-      if (ts.isBinaryExpression(parent) && parent.left === node &&
-          parent.operatorToken.kind >= ts.SyntaxKind.EqualsToken &&
-          parent.operatorToken.kind <= ts.SyntaxKind.QuestionQuestionEqualsToken ||
-          ts.isPrefixUnaryExpression(parent) && parent.operand === node &&
-          (parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken) ||
-          ts.isPostfixUnaryExpression(parent) && parent.operand === node) {
-        written = true;
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(declaration.getSourceFile());
-  return written;
-}
-
-function stableBinding(declaration: ts.Declaration, bindings: LexicalBindings): boolean {
-  return (declarationIsConst(declaration) || ts.isParameter(declaration)) && !bindingHasWrite(declaration, bindings);
-}
 
 function isStringLiteralLoopBinding(declaration: ts.Declaration): boolean {
   for (let current: ts.Node | undefined = declaration.parent; current; current = current.parent) {
@@ -744,11 +616,19 @@ function targetBindingIsSafe(
   if (!ts.isIdentifier(value)) return false;
   const declaration = bindings.resolve(value);
   if (!declaration || !stableBinding(declaration, bindings)) return false;
-  if (ts.isParameter(declaration)) return declarationName(declaration) === "path" &&
-    (namedFunctionOwner(declaration) === "guardedDlopen" || namedFunctionOwner(declaration) === "guardedFfiClose");
+  if (ts.isParameter(declaration)) {
+    const owner = namedFunctionOwner(declaration);
+    return declarationName(declaration) === "path" &&
+      (owner === "guardedDlopen" || owner === "guardedFfiClose") ||
+      declarationName(declaration) === "normalized" &&
+      (owner === "guardedBunFileValue" || owner === "guardedBunFileStream");
+  }
   if (!ts.isVariableDeclaration(declaration) || !declaration.initializer) return false;
   if (declarationName(declaration) === "path") {
-    return callsResolvedNamed(declaration.initializer, "firstPathLike", bindings, modules);
+    if (callsResolvedNamed(declaration.initializer, "firstPathLike", bindings, modules)) return true;
+    return ts.isConditionalExpression(declaration.initializer) &&
+      ts.isIdentifier(declaration.initializer.whenTrue) && declaration.initializer.whenTrue.text === "undefined" &&
+      callsResolvedNamed(declaration.initializer.whenFalse, "firstPathLike", bindings, modules);
   }
   if (declarationName(declaration) === "normalized") {
     return callsResolvedNamed(declaration.initializer, "normalizedPathLike", bindings, modules);
@@ -908,6 +788,7 @@ export {
   insertAfterNode,
   insertBeforeStatement,
   isHelperOwner,
+  isDeclarationName,
   isInsideDenyCall,
   memberInvocationBinding,
   moduleDeclarations,
@@ -922,6 +803,7 @@ export {
   requiredPreloadBody,
   singlePreloadBody,
   sourceWithFunctionBodyOrderMoved,
+  stableBinding,
   topLevelFunctionBodies,
   variableStatementFor,
   workerProxyTargets,
