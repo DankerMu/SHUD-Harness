@@ -1091,6 +1091,35 @@ remove its class import, prototype descriptor changes, and broad global method
 depth. The private registry and `ContractCapabilities` implementation remain
 unavailable. Dependency order is #175 -> #183 -> #176 -> #177 -> #178.
 
+Issue #183 invariant matrix:
+
+| Surface / state | Required invariant | Regression evidence |
+|---|---|---|
+| No installer | The five raw primitives execute directly and all #175 results, errors, cleanup precedence, and public receipts are unchanged. | Default process-isolated chain, existing descriptor runtime/structural/type proofs, and both direct receipt commands. |
+| First / later installation | Exactly the first valid installer owns the module instance; no read, reset, uninstall, or replacement path exists. | First install succeeds, second install returns the stable closed error, and runtime export/instance denylist checks remain empty. |
+| Each valid descriptor operation | The mediator receives the exact canonical operation and one callback-scoped invocation; the raw primitive runs once and its exact result or thrown error wins. | Full retained chain freezes operation order and raw-call counts; sentinel-return and sentinel-error probes prevent mediator substitution. |
+| Omitted, repeated, late, or asynchronous invocation | The attempt returns its stable closed error before any missing or extra raw primitive executes. | Process-isolated zero/one-call counters for omission, repetition, retained invocation, and async mediation. |
+| Invalid descriptor, phase, flags, kind, owner, or range | Existing validation rejects before mediation and before the raw primitive. | Existing descriptor denial and guard-order matrix remains green. |
+| Denial, close-attempt, close-fault, and authority-violation hooks | Caller code never inherits an active primitive invocation; hook-started descriptor work enters a distinct exact mediation callback. | Hook probe records inactive entry at every caller hook and inactive prior state at the nested operation callback, including cleanup failure. |
+| #176 consumer boundary | Only the named installer and erased signature types are added to the frozen handoff; registry state, raw callables, class rewriting, and broad method-depth authority remain unavailable. | Exact module export/restricted-name checks plus the OpenSpec dependency and handoff clauses. |
+
+Issue #183 boundary-surface checklist:
+
+- Shared helper root and raw read surfaces: one private mediation helper owns only
+  the five named primitive callsites; descriptor validation and registry
+  transitions remain in their existing methods.
+- Public entrypoint and stale-state surfaces: the installer is named,
+  module-instance one-shot, and has no getter, reset, uninstall, replacement,
+  registry view, or general authority-enter sibling.
+- Error and cleanup surfaces: missing/repeated/expired/async invocation errors
+  are stable; primitive errors, state invalidation, hook order, and primary
+  versus cleanup precedence remain unchanged.
+- Unchanged consumers: direct source-input and source-identity commands,
+  descriptor structural/runtime/type proofs, and the no-installer path retain
+  their prior receipts and vocabulary.
+- Downstream boundary: #176 preload/topology/resource/analyzer work is excluded;
+  it may consume only the installer and erased signature types added here.
+
 
 
 ## Invariant Matrix
