@@ -1,5 +1,6 @@
 import { dlopen } from "bun:ffi";
 import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";
+import { allowsIngressRawClose } from "./ingress";
 
 export type { BigIntStats };
 
@@ -190,7 +191,9 @@ function invokeDescriptorPrimitive<Result>(
 
   let invocationActive = true;
   const rawOutcome = { value: "uninvoked" as DescriptorPrimitiveOutcome };
-  let primitiveResult!: Result;
+  let rawPrimitive: (() => Result) | undefined = primitive;
+  primitive = undefined as never;
+  let primitiveResult: Result | undefined;
   let primitiveError: unknown;
   let repeatedError: Error | undefined;
   const invoke: DescriptorPrimitiveInvocation = () => {
@@ -203,7 +206,7 @@ function invokeDescriptorPrimitive<Result>(
     }
     rawOutcome.value = "invoking";
     try {
-      primitiveResult = primitive();
+      primitiveResult = rawPrimitive!();
       rawOutcome.value = "returned";
     } catch (error) {
       primitiveError = error;
@@ -228,8 +231,13 @@ function invokeDescriptorPrimitive<Result>(
   }
 
   const completedRawOutcome: DescriptorPrimitiveOutcome = rawOutcome.value;
-  if (completedRawOutcome === "returned") return primitiveResult;
-  if (completedRawOutcome === "threw") throw primitiveError;
+  const completedPrimitiveResult = primitiveResult;
+  const completedPrimitiveError = primitiveError;
+  rawPrimitive = undefined;
+  primitiveResult = undefined;
+  primitiveError = undefined;
+  if (completedRawOutcome === "returned") return completedPrimitiveResult as Result;
+  if (completedRawOutcome === "threw") throw completedPrimitiveError;
   if (mediatorResult !== undefined) {
     throw new Error(DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS.asyncMediator);
   }
@@ -391,11 +399,7 @@ export class ContractCapabilities {
     return invokeDescriptorPrimitive("read_sync", () => readSync(record.fd, buffer, offset, length, position));
   }
 
-  close(
-    descriptor: CapabilityDescriptor,
-    owner: CloseOwner,
-    beforeRawClose?: () => boolean
-  ): void {
+  close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
     assertDescriptorPrimitiveMediationInactive();
     const record = this.#resolve(descriptor, "close_sync", null);
     const expectedOwner = CLOSE_OWNERS_BY_STATE[record.state as keyof typeof CLOSE_OWNERS_BY_STATE];
@@ -410,14 +414,7 @@ export class ContractCapabilities {
     } catch (error) {
       hookError = error;
     }
-    let rawCloseAllowed = true;
-    try {
-      rawCloseAllowed = beforeRawClose?.() ?? true;
-    } catch (error) {
-      hookError = hookError ?? error;
-      rawCloseAllowed = false;
-    }
-    if (!rawCloseAllowed) {
+    if (!allowsIngressRawClose(this)) {
       record.state = stateBeforeClose;
       throw new RetryableNoRawCloseError();
     }

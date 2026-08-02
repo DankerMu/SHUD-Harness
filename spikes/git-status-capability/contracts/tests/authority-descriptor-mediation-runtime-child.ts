@@ -15,8 +15,8 @@ import type {
 type Target = "open_root" | "openat" | "fstat_sync" | "read_sync" | "close_sync";
 type RawMode = "returned" | "threw" | "pre";
 type PromiseResponse = "ordinary" | "constructor" | "species" | "sink";
-type ResponseMode = PromiseResponse | "value" | "throw" | "thenable" | "proxy";
-type Scenario = "installer" | "default" | "control" | "matrix" | "ingress";
+type ResponseMode = PromiseResponse | "value" | "throw" | "sentinel" | "thenable" | "proxy";
+type Scenario = "installer" | "default" | "control" | "matrix" | "ingress" | "third_arg" | "close_retry" | "gc" | "reuse";
 type OpenAt = (parentDescriptor: number, path: Buffer, flags: number) => number;
 type Fixture = Readonly<{ root: string; payload: Buffer; segments: readonly string[] }>;
 type CapabilitiesModule = Readonly<{
@@ -37,6 +37,7 @@ const target = targetArgument ?? "open_root";
 const rawMode = rawModeArgument ?? "returned";
 const responseMode = responseModeArgument ?? "ordinary";
 const rawError = Object.assign(new Error("MEDIATOR_RAW_SENTINEL"), { marker: "raw-private" });
+const mediatorThrownSentinel = new Error("MEDIATOR_THROWN_SENTINEL");
 const rawCounts: Record<Target, number> = {
   open_root: 0,
   openat: 0,
@@ -44,17 +45,37 @@ const rawCounts: Record<Target, number> = {
   read_sync: 0,
   close_sync: 0
 };
+const rawThrows: Record<Target, number> = {
+  open_root: 0,
+  openat: 0,
+  fstat_sync: 0,
+  read_sync: 0,
+  close_sync: 0
+};
 const operations: DescriptorOperation[] = [];
+const rawOperations: Target[] = [];
 let callbackReturnedUndefined = false;
 let thenGetterReads = 0;
 let proxyTrapReads = 0;
+const mediatorThrownProxy = new Proxy(Object.create(null), {
+  get(): never {
+    proxyTrapReads += 1;
+    throw new Error("MEDIATOR_THROWN_PROXY_GET");
+  },
+  getPrototypeOf(): never {
+    proxyTrapReads += 1;
+    throw new Error("MEDIATOR_THROWN_PROXY_PROTOTYPE");
+  }
+});
 let nativeHostilityReads = 0;
-
 function errorMessage(action: () => unknown): Readonly<{ message: string; exactRaw: boolean }> {
   try {
     action();
     return Object.freeze({ message: "NO_ERROR", exactRaw: false });
   } catch (error) {
+    if (error === mediatorThrownProxy) {
+      return Object.freeze({ message: "MEDIATOR_THROWN_PROXY", exactRaw: false });
+    }
     return Object.freeze({
       message: error instanceof Error ? error.message : String(error),
       exactRaw: error === rawError
@@ -62,15 +83,19 @@ function errorMessage(action: () => unknown): Readonly<{ message: string; exactR
   }
 }
 
-function installRawProbe(selectedTarget: Target, shouldThrow: boolean): void {
+function installRawProbe(selectedTarget: Target, shouldThrow: boolean, throwOnlyOnce = false): void {
   const originalOpenSync = originalFs.openSync;
   const originalFstatSync = originalFs.fstatSync;
   const originalReadSync = originalFs.readSync;
   const originalCloseSync = originalFs.closeSync;
+  let thrown = false;
   const failSelected = (operation: Target, close?: () => void): void => {
+    rawOperations.push(operation);
     if (operation !== selectedTarget) return;
     rawCounts[operation] += 1;
-    if (!shouldThrow) return;
+    if (!shouldThrow || (throwOnlyOnce && thrown)) return;
+    thrown = true;
+    rawThrows[operation] += 1;
     close?.();
     throw rawError;
   };
@@ -296,6 +321,7 @@ function mediatorValue(kind: ResponseMode): unknown {
     });
   }
   if (kind === "throw") return undefined;
+  if (kind === "sentinel") return mediatorThrownSentinel;
   return nativePromise(kind);
 }
 
@@ -311,7 +337,11 @@ function installMediator(
       invoke();
       return undefined;
     }
-    if (selectedRawMode === "pre") return mediatorValue(selectedResponseMode) as undefined;
+    if (selectedRawMode === "pre") {
+      if (selectedResponseMode === "throw") throw mediatorThrownProxy;
+      if (selectedResponseMode === "sentinel") throw mediatorThrownSentinel;
+      return mediatorValue(selectedResponseMode) as undefined;
+    }
     const invocationResult = invoke();
     callbackReturnedUndefined = invocationResult === undefined;
     if (selectedResponseMode === "throw") throw new Error("MEDIATOR_POST_THROW");
@@ -352,6 +382,7 @@ async function runMatrix(): Promise<unknown> {
     outcome: outcome!,
     rawCalls: rawCounts[target],
     operations,
+    rawOperations,
     callbackReturnedUndefined,
     thenGetterReads,
     proxyTrapReads,
@@ -362,9 +393,9 @@ async function runMatrix(): Promise<unknown> {
 }
 
 async function runIngress(): Promise<unknown> {
-  installRawProbe("open_root", false);
+  installRawProbe(target, rawMode === "threw", target === "close_sync");
   const module = await loadCapabilities();
-  installMediator(module, "open_root", rawMode, responseMode);
+  installMediator(module, target, rawMode, responseMode);
   const input = join(import.meta.dir, "../fixtures/valid/source-input-record-paired-surrogate.json");
   let outcome: string;
   let stdout = "";
@@ -387,7 +418,19 @@ async function runIngress(): Promise<unknown> {
       const bytes = await ingress.readBoundedFile(input, 8_192);
       outcome = `BYTES:${bytes.byteLength}`;
     } catch (error) {
-      outcome = error instanceof Error ? error.message : String(error);
+      outcome = error === mediatorThrownProxy
+        ? "MEDIATOR_THROWN_PROXY"
+        : error instanceof Error ? error.message : String(error);
+    }
+  }
+  let laterOutcome: string | null = null;
+  if (target === "close_sync" && rawMode === "threw") {
+    const ingress = await import("../lib/ingress");
+    try {
+      const bytes = await ingress.readBoundedFile(input, 8_192);
+      laterOutcome = `BYTES:${bytes.byteLength}`;
+    } catch (error) {
+      laterOutcome = error instanceof Error ? error.message : String(error);
     }
   }
   await eventLoopTurn();
@@ -398,31 +441,42 @@ async function runIngress(): Promise<unknown> {
     outcome,
     stdout,
     stderr,
-    rawCalls: rawCounts.open_root,
+    rawCalls: rawCounts[target],
+    rawThrows: rawThrows[target],
+    laterOutcome,
+    thenGetterReads,
+    proxyTrapReads,
     nativeHostilityReads
   };
 }
 
+function rejectionListenerSnapshot(): Readonly<{ unhandledRejection: number; rejectionHandled: number }> {
+  return Object.freeze({
+    unhandledRejection: process.listenerCount("unhandledRejection"),
+    rejectionHandled: process.listenerCount("rejectionHandled")
+  });
+}
+
 async function runDefault(): Promise<unknown> {
+  const rejectionListenersBefore = rejectionListenerSnapshot();
   const module = await loadCapabilities();
+  const rejectionListenersAfter = rejectionListenerSnapshot();
   const capabilities = new module.ContractCapabilities();
   const descriptor = capabilities.openRoot("/", "admission");
   const directory = capabilities.stat(descriptor).isDirectory();
   capabilities.close(descriptor, "unretained");
   return {
     directory,
-    hiddenExports: [
-      "descriptorPrimitiveMediator",
-      "getDescriptorPrimitiveMediator",
-      "invokeDescriptorPrimitive",
-      "resetDescriptorPrimitiveMediator",
-      "uninstallDescriptorPrimitiveMediator"
-    ].filter((name) => name in module)
+    moduleExports: Object.keys(module).sort(),
+    rejectionListenersBefore,
+    rejectionListenersAfter
   };
 }
 
 async function runInstaller(): Promise<unknown> {
+  const rejectionListenersBefore = rejectionListenerSnapshot();
   const module = await loadCapabilities();
+  const rejectionListenersAfterImport = rejectionListenerSnapshot();
   const installer = module.installDescriptorPrimitiveMediator;
   const invalid = errorMessage(() => { installer({} as DescriptorPrimitiveMediator); });
   const validMediator: DescriptorPrimitiveMediator = (_operation, _invoke) => undefined;
@@ -451,7 +505,10 @@ async function runInstaller(): Promise<unknown> {
       "reset",
       "uninstall",
       "registry"
-    ].filter((name) => name in installer)
+    ].filter((name) => name in installer),
+    rejectionListenersBefore,
+    rejectionListenersAfterImport,
+    rejectionListenersAfterInstall: rejectionListenerSnapshot()
   };
 }
 
@@ -478,6 +535,7 @@ async function runControl(): Promise<unknown> {
     const result = invoke();
     callbackReturnedUndefined = result === undefined;
     repeated = errorMessage(() => invoke()).message;
+    if (responseMode === "throw") throw mediatorThrownProxy;
     return undefined;
   });
   let descriptor: CapabilityDescriptor | undefined;
@@ -499,6 +557,128 @@ async function runControl(): Promise<unknown> {
   };
 }
 
+async function runThirdArg(): Promise<unknown> {
+  installRawProbe("close_sync", false);
+  const module = await loadCapabilities();
+  const capabilities = new module.ContractCapabilities();
+  const descriptor = capabilities.openRoot("/", "admission");
+  (capabilities.close as unknown as (
+    descriptor: CapabilityDescriptor,
+    owner: "unretained",
+    suppressRawClose: () => boolean
+  ) => void)(descriptor, "unretained", () => false);
+  return { rawCalls: rawCounts.close_sync };
+}
+
+async function runCloseRetry(): Promise<unknown> {
+  installRawProbe("close_sync", false);
+  const module = await loadCapabilities();
+  let skippedCloseCalls = 0;
+  module.installDescriptorPrimitiveMediator((operation, invoke): undefined => {
+    if (operation === "close_sync" && skippedCloseCalls === 0) {
+      skippedCloseCalls += 1;
+      return undefined;
+    }
+    invoke();
+    return undefined;
+  });
+  let hookCalls = 0;
+  const hooks = Object.freeze({
+    onCloseAttempt: () => {
+      hookCalls += 1;
+      if (hookCalls === 1) throw new Error("FIRST_CLOSE_HOOK_FAILURE");
+    }
+  });
+  const input = join(import.meta.dir, "../fixtures/valid/source-input-record-paired-surrogate.json");
+  let outcome: string;
+  let stdout = "";
+  let stderr = "";
+  if (entryArgument === "checker") {
+    const checker = await import("../lib/checker");
+    const exit = await checker.runCheckForTest(
+      ["--input", input, "--kind", "source_input_record"],
+      { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      hooks
+    );
+    outcome = `CHECK:${exit}`;
+  } else {
+    const ingress = await import("../lib/ingress");
+    try {
+      await ingress.readBoundedFile(input, 8_192, hooks);
+      outcome = "NO_ERROR";
+    } catch (error) {
+      outcome = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return {
+    entry: entryArgument ?? "direct",
+    outcome,
+    stdout,
+    stderr,
+    skippedCloseCalls,
+    hookCalls,
+    rawCalls: rawCounts.close_sync
+  };
+}
+
+function issueRetainedRead(
+  capabilities: ContractCapabilities,
+  descriptor: CapabilityDescriptor,
+  bytes: number
+): WeakRef<Buffer> {
+  const buffer = Buffer.alloc(bytes);
+  const reference = new WeakRef(buffer);
+  capabilities.readRetained(descriptor, buffer, 0, bytes, 0, "post_admission");
+  return reference;
+}
+
+async function runGc(): Promise<unknown> {
+  const fixture = await createFixture();
+  try {
+    const module = await loadCapabilities();
+    let retainedInvoke: (() => unknown) | undefined;
+    module.installDescriptorPrimitiveMediator((operation, invoke): undefined => {
+      if (operation === "read_sync") retainedInvoke = invoke;
+      invoke();
+      return undefined;
+    });
+    const retained = openFixtureFile(module, fixture);
+    const reference = issueRetainedRead(retained.capabilities, retained.file, fixture.payload.byteLength);
+    const expired = retainedInvoke ? errorMessage(retainedInvoke).message : "NO_RETAINED_INVOKE";
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      Bun.gc(true);
+      await eventLoopTurn();
+    }
+    closeRetained(retained.capabilities, retained.descriptors);
+    return { expired, collected: reference.deref() === undefined };
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+}
+
+async function runReuse(): Promise<unknown> {
+  installRawProbe("close_sync", true, true);
+  const module = await loadCapabilities();
+  const denials: string[] = [];
+  const capabilities = new module.ContractCapabilities({
+    onDescriptorAuthorityDenial: (denial) => { denials.push(denial.reason); }
+  });
+  const oldDescriptor = capabilities.openRoot("/", "admission");
+  const closeOutcome = errorMessage(() => { capabilities.close(oldDescriptor, "unretained"); });
+  const currentDescriptor = capabilities.openRoot("/", "admission");
+  const currentUsable = capabilities.stat(currentDescriptor).isDirectory();
+  const oldOutcome = errorMessage(() => { capabilities.stat(oldDescriptor); });
+  const rawCallsBeforeCurrentCleanup = rawCounts.close_sync;
+  closeQuietly(capabilities, currentDescriptor, "unretained");
+  return {
+    closeOutcome: closeOutcome.message,
+    oldOutcome: oldOutcome.message,
+    currentUsable,
+    denials,
+    rawCalls: rawCallsBeforeCurrentCleanup
+  };
+}
+
 const receipt = scenario === "installer"
   ? await runInstaller()
   : scenario === "default"
@@ -507,5 +687,13 @@ const receipt = scenario === "installer"
   ? await runControl()
   : scenario === "ingress"
   ? await runIngress()
+  : scenario === "third_arg"
+  ? await runThirdArg()
+  : scenario === "close_retry"
+  ? await runCloseRetry()
+  : scenario === "gc"
+  ? await runGc()
+  : scenario === "reuse"
+  ? await runReuse()
   : await runMatrix();
 process.stdout.write(`${JSON.stringify(receipt)}\n`);

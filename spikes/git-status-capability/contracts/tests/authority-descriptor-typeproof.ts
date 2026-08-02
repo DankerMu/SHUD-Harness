@@ -1,5 +1,9 @@
 import {
+  type ContractCapabilities,
   DESCRIPTOR_OPERATION_POLICY,
+  installDescriptorPrimitiveMediator,
+  type CapabilityDescriptor,
+  type CloseOwner,
   type DescriptorOperation,
   type DescriptorPrimitiveInvocation,
   type DescriptorPrimitiveMediator
@@ -58,6 +62,29 @@ type DescriptorPrimitiveMediatorUsesOnlyCanonicalOperationAndInvocation = Assert
     ? ExpectedDescriptorPrimitiveMediator extends DescriptorPrimitiveMediator ? true : false
     : false
 >;
+type ExpectedDescriptorPrimitiveInstaller = (mediator: ExpectedDescriptorPrimitiveMediator) => void;
+type DescriptorPrimitiveInstallerUsesExactMediator = Assert<
+  typeof installDescriptorPrimitiveMediator extends ExpectedDescriptorPrimitiveInstaller
+    ? ExpectedDescriptorPrimitiveInstaller extends typeof installDescriptorPrimitiveMediator ? true : false
+    : false
+>;
+type PublicCloseParameters = Parameters<ContractCapabilities["close"]>;
+type PublicCloseHasOnlyDescriptorAndOwner = Assert<
+  PublicCloseParameters extends [CapabilityDescriptor, CloseOwner]
+    ? [CapabilityDescriptor, CloseOwner] extends PublicCloseParameters ? true : false
+    : false
+>;
+
+if (false) {
+  // @ts-expect-error Descriptor mediation cannot return a Promise.
+  installDescriptorPrimitiveMediator(async (_operation, _invoke) => undefined);
+}
+
+if (false) {
+  const capabilities = null as unknown as ContractCapabilities;
+  // @ts-expect-error Public close accepts only an opaque descriptor and owner.
+  capabilities.close({} as CapabilityDescriptor, "unretained", () => false);
+}
 
 export type DescriptorOperationTypeProof = readonly [
   CanonicalOperationIncludesEveryPolicyKey,
@@ -68,5 +95,7 @@ export type DescriptorOperationTypeProof = readonly [
   IngressOperationIncludesEveryExpectation,
   IngressVocabularyIsDistinctFromCanonical,
   DescriptorPrimitiveInvocationIsErasedCallback,
-  DescriptorPrimitiveMediatorUsesOnlyCanonicalOperationAndInvocation
+  DescriptorPrimitiveMediatorUsesOnlyCanonicalOperationAndInvocation,
+  DescriptorPrimitiveInstallerUsesExactMediator,
+  PublicCloseHasOnlyDescriptorAndOwner
 ];

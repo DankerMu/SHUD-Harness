@@ -16,7 +16,9 @@ type TypeProofMutation =
   | "ingress_missing"
   | "primitive_invocation_result"
   | "primitive_mediator_operation"
-  | "primitive_mediator_result";
+  | "primitive_mediator_result"
+  | "primitive_mediator_promise_result"
+  | "close_extra_argument";
 
 function compilerOptions(): ts.CompilerOptions {
   const parsed = ts.getParsedCommandLineOfConfigFile(typeConfigPath, {}, ts.sys);
@@ -52,6 +54,18 @@ function mutateVocabularySource(
     return source.replace(
       "  operation: DescriptorOperation,\n  invoke: DescriptorPrimitiveInvocation\n) => undefined;",
       "  operation: DescriptorOperation,\n  invoke: DescriptorPrimitiveInvocation\n) => string;"
+    );
+  }
+  if (mutation === "primitive_mediator_promise_result") {
+    return source.replace(
+      "  invoke: DescriptorPrimitiveInvocation\n) => undefined;",
+      "  invoke: DescriptorPrimitiveInvocation\n) => undefined | Promise<undefined>;"
+    );
+  }
+  if (mutation === "close_extra_argument") {
+    return source.replace(
+      "  close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {",
+      "  close(descriptor: CapabilityDescriptor, owner: CloseOwner, ignored?: () => boolean): void {"
     );
   }
   if (mutation === "descriptor_extra") {
@@ -115,7 +129,9 @@ describe("descriptor operation type proof", () => {
       "ingress_missing",
       "primitive_invocation_result",
       "primitive_mediator_operation",
-      "primitive_mediator_result"
+      "primitive_mediator_result",
+      "primitive_mediator_promise_result",
+      "close_extra_argument"
     ] as const) {
       const diagnostics = await compileMutatedProof(mutation);
       expect(diagnostics.length).toBeGreaterThan(0);

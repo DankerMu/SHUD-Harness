@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import ts from "typescript";
 
 type Entry = "direct" | "checker";
 type RawCounts = Readonly<{
@@ -32,8 +34,38 @@ type PoisonReceipt = Readonly<{
 }>;
 
 const childPath = join(import.meta.dir, "authority-descriptor-ingress-poison-child.ts");
+const ingressSourcePath = join(import.meta.dir, "../lib/ingress.ts");
 const ERROR_RECEIPT = "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_SCHEMA_INVALID\"}\n";
 const ZERO_RAW: RawCounts = Object.freeze({ open_sync: 0, openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 0 });
+const EVERY_OWNER_RETENTION = `    for (const owner of context.liveOwners.values()) {
+      retainedPoisonedIngressOwners.set(owner.descriptor, owner);
+    }`;
+
+function poisonRetainsEveryActiveOwner(source: string): boolean {
+  const tree = ts.createSourceFile("ingress.ts", source, ts.ScriptTarget.ES2022, true);
+  let retainsEveryOwner = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isFunctionDeclaration(node) &&
+      node.name?.text === "poisonIngressAndRetainActiveOwners" &&
+      node.body
+    ) {
+      retainsEveryOwner = node.body.getText(tree).includes(EVERY_OWNER_RETENTION);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  return retainsEveryOwner;
+}
+
+function replaceEveryOwnerRetentionWithFirstOwnerOnly(source: string): string {
+  if (!source.includes(EVERY_OWNER_RETENTION)) throw new Error("owner-retention loop anchor is absent");
+  return source.replace(
+    EVERY_OWNER_RETENTION,
+    `    const owner = context.liveOwners.values().next().value;
+    if (owner) retainedPoisonedIngressOwners.set(owner.descriptor, owner);`
+  );
+}
 
 async function runPoisonProbe(outerEntry: Entry, nestedEntry: Entry): Promise<PoisonReceipt> {
   const child = Bun.spawn([process.execPath, childPath, outerEntry, nestedEntry], { stdout: "pipe", stderr: "pipe" });
@@ -81,5 +113,13 @@ describe("ingress terminal close poison", () => {
       expect(receipt.fdAfterPoison).toBeGreaterThan(receipt.fdBaseline);
       expect(receipt.fdAfterLater).toBe(receipt.fdAfterPoison);
     }
+  });
+
+  test("test-local source mutation rejects retaining only the first poisoned owner", async () => {
+    const source = await readFile(ingressSourcePath, "utf8");
+    expect(poisonRetainsEveryActiveOwner(source)).toBe(true);
+    expect(poisonRetainsEveryActiveOwner(
+      replaceEveryOwnerRetentionWithFirstOwnerOnly(source)
+    )).toBe(false);
   });
 });

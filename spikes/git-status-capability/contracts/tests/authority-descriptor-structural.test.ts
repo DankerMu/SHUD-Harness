@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import ts from "typescript";
 import {
   capabilitiesSourcePath,
   structuralDescriptorDenials,
@@ -25,6 +26,48 @@ function replaceSourceAnchor(source: string, anchor: string, replacement: string
   return source.replace(anchor, replacement);
 }
 
+const FORBIDDEN_MEDIATOR_RUNTIME_PATTERNS = Object.freeze([
+  /process\.on\(\s*["']unhandledRejection["']/,
+  /process\.on\(\s*["']rejectionHandled["']/,
+  /Bun\.peek\(/,
+  /\.constructor\s*=/,
+  /Symbol\.species\s*=|\[\s*Symbol\.species\s*\]\s*=/
+] as const);
+
+function forbiddenMediatorRuntimeUses(source: string): readonly number[] {
+  return FORBIDDEN_MEDIATOR_RUNTIME_PATTERNS
+    .map((pattern, index) => pattern.test(source) ? index : -1)
+    .filter((index) => index >= 0);
+}
+
+function markRetainedHasRawFstat(source: string): boolean {
+  const tree = ts.createSourceFile("capabilities.ts", source, ts.ScriptTarget.ES2022, true);
+  let hasRawFstat = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isMethodDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "markRetained" &&
+      node.body
+    ) {
+      const findRawFstat = (candidate: ts.Node): void => {
+        if (
+          ts.isCallExpression(candidate) &&
+          ts.isIdentifier(candidate.expression) &&
+          candidate.expression.text === "fstatSync"
+        ) {
+          hasRawFstat = true;
+        }
+        ts.forEachChild(candidate, findRawFstat);
+      };
+      ts.forEachChild(node.body, findRawFstat);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  return hasRawFstat;
+}
+
 describe("retained descriptor structural authority", () => {
   test("the complete real production tree compiles with only opaque descriptor operands", async () => {
     await withCompiledProductionTree(undefined, async (tree) => {
@@ -40,6 +83,28 @@ describe("retained descriptor structural authority", () => {
         expect(structuralDescriptorDenials(await readFile(tree.capabilitiesPath, "utf8"))).toEqual(expected);
       });
     }
+  });
+
+  test("mediation cannot install rejection listeners or rewrite Promise identity", async () => {
+    const source = await readFile(capabilitiesSourcePath, "utf8");
+    expect(forbiddenMediatorRuntimeUses(source)).toEqual([]);
+    expect(forbiddenMediatorRuntimeUses(`${source}
+process.on("unhandledRejection", () => undefined);
+process.on("rejectionHandled", () => undefined);
+Bun.peek(Promise.resolve());
+Promise.prototype.constructor = Promise;
+Promise[Symbol.species] = Promise;
+`)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  test("the ordered mediation trace cannot hide a raw fstat wrapper in markRetained", async () => {
+    const source = await readFile(capabilitiesSourcePath, "utf8");
+    expect(markRetainedHasRawFstat(source)).toBe(false);
+    expect(markRetainedHasRawFstat(replaceSourceAnchor(
+      source,
+      '    record.state = "retained";',
+      '    fstatSync(record.fd, { bigint: true });\n    record.state = "retained";'
+    ))).toBe(true);
   });
 
   test("AST structural oracle ignores formatting, comments, strings, and local descriptor decoys", async () => {

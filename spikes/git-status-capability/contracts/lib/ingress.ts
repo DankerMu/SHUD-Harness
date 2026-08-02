@@ -11,6 +11,18 @@ import {
   type ContractAuthorityFault
 } from "./capabilities";
 
+const contractErrors = new WeakSet<object>();
+
+const ingressCloseBarriers = new WeakMap<ContractCapabilities, () => boolean>();
+
+function registerIngressCloseBarrier(capabilities: ContractCapabilities, barrier: () => boolean): void {
+  ingressCloseBarriers.set(capabilities, barrier);
+}
+
+export function allowsIngressRawClose(capabilities: ContractCapabilities): boolean {
+  return ingressCloseBarriers.get(capabilities)?.() ?? true;
+}
+
 export type ContractErrorCode =
   | "CONTRACT_BYTES_LIMIT"
   | "CONTRACT_UTF8_INVALID"
@@ -20,12 +32,16 @@ export type ContractErrorCode =
   | "CONTRACT_JSON_NODE_LIMIT"
   | "CONTRACT_JSON_ITEM_LIMIT"
   | "CONTRACT_SCHEMA_INVALID";
-
 export class ContractError extends Error {
   constructor(public readonly code: ContractErrorCode) {
     super(code);
     this.name = "ContractError";
+    contractErrors.add(this);
   }
+}
+
+function isContractError(error: unknown): error is ContractError {
+  return typeof error === "object" && error !== null && contractErrors.has(error);
 }
 
 export type IngressProfile = Readonly<{ bytes: number; depth: number; nodes: number; items: number }>;
@@ -44,7 +60,6 @@ export type DescriptorIngressHooks = Readonly<{
 
 const RETRYABLE_NO_RAW_CLOSE_ERROR_NAME = "ContractCapabilityNoRawCloseError";
 const NO_RAW_CLOSE_RETRY_LIMIT = 2;
-
 type LiveIngressOwner = Readonly<{
   capabilities: ContractCapabilities;
   descriptor: CapabilityDescriptor;
@@ -53,6 +68,8 @@ type LiveIngressOwner = Readonly<{
 type ActiveIngressContext = {
   readonly capabilities: ContractCapabilities;
   readonly liveOwners: Map<CapabilityDescriptor, LiveIngressOwner>;
+  readonly closingDescriptors: CapabilityDescriptor[];
+  readonly hookFailedDescriptors: Set<CapabilityDescriptor>;
 };
 
 const activeIngressContexts = new Set<ActiveIngressContext>();
@@ -62,17 +79,28 @@ let descriptorIngressPoisoned = false;
 function assertIngressWorkAvailable(): void {
   if (descriptorIngressPoisoned) throw new ContractError("CONTRACT_SCHEMA_INVALID");
 }
-
-function allowIngressRawClose(): boolean {
-  return !descriptorIngressPoisoned;
-}
-
 function registerIngressContext(hooks: DescriptorIngressHooks): ActiveIngressContext {
   assertIngressWorkAvailable();
-  const context: ActiveIngressContext = {
-    capabilities: new ContractCapabilities(hooks),
-    liveOwners: new Map<CapabilityDescriptor, LiveIngressOwner>()
+  let context!: ActiveIngressContext;
+  const guardedHooks: DescriptorIngressHooks = Object.freeze({
+    ...hooks,
+    onCloseAttempt: (attempt) => {
+      try {
+        hooks.onCloseAttempt?.(attempt);
+      } catch (error) {
+        const descriptor = context.closingDescriptors.at(-1);
+        if (descriptor) context.hookFailedDescriptors.add(descriptor);
+        throw error;
+      }
+    }
+  });
+  context = {
+    capabilities: new ContractCapabilities(guardedHooks),
+    liveOwners: new Map<CapabilityDescriptor, LiveIngressOwner>(),
+    closingDescriptors: [],
+    hookFailedDescriptors: new Set<CapabilityDescriptor>()
   };
+  registerIngressCloseBarrier(context.capabilities, () => !descriptorIngressPoisoned);
   activeIngressContexts.add(context);
   return context;
 }
@@ -130,17 +158,23 @@ function closeWithRetry(
   owner: CloseOwner
 ): boolean {
   if (descriptorIngressPoisoned) return true;
+  let hookFailed = false;
   for (let attempt = 0; attempt < NO_RAW_CLOSE_RETRY_LIMIT; attempt += 1) {
+    context.closingDescriptors.push(descriptor);
     try {
-      context.capabilities.close(descriptor, owner, allowIngressRawClose);
+      context.capabilities.close(descriptor, owner);
+      hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
       releaseLiveIngressOwner(context, descriptor);
-      return false;
+      return hookFailed;
     } catch (error) {
+      hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
       if (!isRetryableNoRawClose(error)) {
         releaseLiveIngressOwner(context, descriptor);
         return true;
       }
       if (descriptorIngressPoisoned) return true;
+    } finally {
+      context.closingDescriptors.pop();
     }
   }
   poisonIngressAndRetainActiveOwners();
@@ -261,7 +295,7 @@ function openDescriptorBoundPath(
     return { logicalAbsolutePath: resolve(path), components: Object.freeze(components) };
   } catch (error) {
     closeAll(context, components);
-    if (error instanceof ContractError) throw error;
+    if (isContractError(error)) throw error;
     throw new ContractError("CONTRACT_SCHEMA_INVALID");
   }
 }
@@ -303,7 +337,7 @@ function verifyRetainedChain(
       assertExpectedType(verificationStats, retained.final);
       if (!sameEntry(retained.stats, verificationStats)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     } catch (error) {
-      verificationPrimary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
+      verificationPrimary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
     } finally {
       if (closeWithRetry(context, verificationDescriptor, "verification")) {
         if (!verificationPrimary) {
@@ -414,7 +448,7 @@ class StrictJsonParser {
           if (!hasOnlyUnicodeScalars(decoded)) this.fail("CONTRACT_JSON_MALFORMED");
           return decoded;
         } catch (error) {
-          if (error instanceof ContractError) throw error;
+          if (isContractError(error)) throw error;
           this.fail("CONTRACT_JSON_MALFORMED");
         }
       }
@@ -533,7 +567,7 @@ export async function readBoundedFile(
     if (!result) throw new ContractError("CONTRACT_BYTES_LIMIT");
     beforeCleanup?.(result);
   } catch (error) {
-    primary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
+    primary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
   } finally {
     const cleanupFailed = admission ? closeAll(context, admission.components) : false;
     activeIngressContexts.delete(context);
