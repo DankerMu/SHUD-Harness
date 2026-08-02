@@ -74,7 +74,7 @@ descriptor-provenance allowlist plus the fd-0 and Linux `AT_FDCWD` mutations.
   - Active-only: disable structural scanning; fd-0 runs on Darwin/Linux with FIFO stdin whose connected writer remains open but sends no bytes, and completes in <=1 second; `AT_FDCWD` runs on Linux with an unread cwd sentinel. Each returns exit 2, empty stdout, the exact schema-invalid stderr receipt, exactly one named raw-denial event, zero target bytes, and zero open/read side effects.
 - [x] #175.C Verify and hand off the bounded slice.
   - Verification: focused structural/runtime/direct tests plus the spike-local no-emit vocabulary proof, both public direct commands, typecheck, full `check`, strict OpenSpec, diff/scope/untracked/submodule hygiene, and Darwin/Linux Bun 1.2.19 receipts are green.
-  - Handoff: #176 may consume only `CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and immutable `DESCRIPTOR_OPERATION_POLICY` from `contracts/lib/capabilities.ts`; the registry stays private, `DescriptorIngressOperation` remains ingress-only, and #176 cannot broaden descriptor origin, flags, lifecycle, event fields, or public receipts.
+  - Handoff: these five exports are only the pre-runtime vocabulary and do not authorize #176 implementation. #176 remains blocked until #188/#189/#190 and #186 complete; its final allowlist is exactly these five symbols plus `installDescriptorPrimitiveMediator`, `DescriptorPrimitiveInvocation`, and `DescriptorPrimitiveMediator`. The registry stays private, `DescriptorIngressOperation` remains ingress-only, and #176 cannot broaden descriptor origin, flags, lifecycle, event fields, or public receipts.
 
 ### Issue #185 descriptor mediation runtime replacement
 
@@ -101,8 +101,37 @@ terminal-close corrections and their causal process proof.
   - Darwin and read-only Linux Bun 1.2.19 focused contracts and descriptor type proof pass; both public direct commands emit exact LF-terminated receipts; full `check`, strict OpenSpec, and diff/scope/submodule hygiene pass.
   - Execute a non-persisted source mutation of only the #185 runtime owner against only the focused #185 runtime rows, restore exact source immediately, and record red exit plus restoration/green receipts in orchestrator evidence. #185 MUST NOT add or own a reusable causal-red command/script, complete transcript, manifest, or durable receipt; those artifacts belong exclusively to #186.
   - Append exactly one PR #184 `ceiling-split` accountability line naming children #185/#186 to `docs/review-loop-log.jsonl`; the scope oracle permits only that canonical-doc path and rejects every other `docs/**` delta.
-  - Handoff: #186 may add only proof/analyzer/test/evidence artifacts over this runtime seam. #176 remains blocked until #186 completes. Its eventual allowlist is the union of #175's five existing exports (`CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, `DESCRIPTOR_OPERATION_POLICY`) and #185's three additions (`installDescriptorPrimitiveMediator`, `DescriptorPrimitiveInvocation`, `DescriptorPrimitiveMediator`); no other import/export is allowed.
+  - Historical handoff superseded by the #188/#189/#190 gate split below: #186 still owns complete proof/evidence closure, but #176 cannot start until all four replacement children complete. The final allowlist remains #175's five exports plus #185's installer and two erased types; no other import/export is allowed.
   - Out: reusable/full causal-red procedure and durable transcript/receipt, complete acquisition graph, suspended `afterAdmission`, and all-`observe` proof (#186); #176/#177/#178 implementation; production packages/workflows; network security; locks; submodules; `design.md`.
+
+### Issue #185 gate-split replacements
+
+PR #187 exhausted the Round 2 breadth-retro budget when Round 3 confirmed ten
+independent P1 findings. Issue #185 remains the parent tracker and is replaced
+by dependency-ordered Issues #188, #189, and #190. No further repair or review
+round is allowed on PR #187.
+
+- [ ] #188.A Close the descriptor close state machine.
+  - Preserve #185's one-shot five-primitive mediation runtime and public/type surface.
+  - Treat omission, non-`undefined`/async output, thenable/Proxy, sentinel throw, and hostile throw uniformly as no-raw close outcomes: restore direct retryability, issue only ingress-private retry authority, retry at most once, and poison on a second refusal without a third attempt or raw work.
+  - After raw start, check poison on every `closeFault` completion path—normal false, injected-fault true, or thrown sentinel—before any success- or catch-settlement release. Nested poison MUST terminate the active outer ingress, preserve every poison snapshot, retain raw-start terminality without a second raw close, and remain a cleanup failure that never replaces an already selected primary result/error.
+- [ ] #188.B Prove no-raw classification and reentrant poison settlement.
+  - Direct and ingress rows cover every no-raw class. First no-raw then raw performs exactly one raw close. Persistent refusal preserves the owner identity/cardinality anchored before the first close through both mediation attempts, zero raw calls, poison, and active-context deletion; same-module later direct/checker admissions fail before mediation/raw work with the attempt count fixed at two.
+  - A copied-source mutation that preserves canonical omission restoration/ticket behavior while withholding them only from non-omission classes leaves omission direct/ingress rows green and makes every non-omission row red. A first-ticket owner-release mutation and a missing per-class poison-transition mutation are also red.
+  - Direct/direct, direct/checker, and checker/direct rows select the final retained/root owner by identity/ordinal, observe exactly one target raw `close_sync` before its post-raw `closeFault`, then synchronously produce nested poison for false, true, and thrown-sentinel hook exits. With no prior primary, the outer result is exact schema-invalid/exit-2; with a prior primary, that exact primary remains authoritative. Every row performs no second raw close or later OS work and preserves the pre-close owner set after context deletion. Removing the common post-close poison check makes these rows red.
+- [ ] #188.C Verify and hand off the prerequisite runtime child.
+  - Darwin and read-only Linux Bun 1.2.19 focused contracts and descriptor type proof pass; both public direct commands, full `check`, strict OpenSpec, and diff/scope/submodule hygiene pass.
+  - Verify read-only that the unique PR #187 terminal-accountability and Issue #185 sizing-retro records already name children #188/#189/#190; #188 MUST NOT append duplicate records or otherwise modify either canonical log or `.review-gate-issues.json`.
+  - Handoff: #189 and #190 may proceed independently after #188. #186 and #176 remain blocked until all three replacement children complete.
+
+- [ ] #189 Close focused descriptor mediation causal-proof gaps.
+  - Own hostile thrown-hook normalization, all-trap mediator values, inherited-only hook forwarding, aliased/transient rejection-sink absence, every-public-entry callback reentry, and exact mediated `read_sync` return proof.
+  - Keep every mutation process-local/test-local. Do not add #186's complete acquisition scanner, all-`observe` matrix, reusable procedure, transcript, manifest, or durable receipt.
+
+- [ ] #190 Freeze the installer and erased invocation type boundary.
+  - Prove JavaScript surplus installer arguments are inert even when a copied implementation preserves the declared one-parameter type and function length.
+  - Explicitly reject `any` as `DescriptorPrimitiveInvocation`'s return type and prove consumers cannot use the exact `unknown` result without narrowing.
+  - Preserve the exact runtime/type export allowlist and all one-shot installer behavior.
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.

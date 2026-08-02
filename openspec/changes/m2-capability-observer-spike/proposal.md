@@ -10,9 +10,9 @@ Issue #132 cannot safely finish its cross-platform dirty-state observer with the
 - Persist a bounded, reviewable, content-addressed raw evidence bundle and a separately normalized decision projection. `accepted` requires every mandatory row on both platforms plus every decision-bearing supply, reproducibility, repository, and governance gate; a technical row failure records `rejected` and forbids pathname, Linux-only, or weakened-contract fallback.
 - Keep the spike outside production packages and public StackLock seams. It does not restore PR #133, change Issue #132 runtime behavior, add a production Rust toolchain, or alter the StackLock schema.
 - The current Issue #175 delivery is the first #172 replacement child: it binds only post-admission `openat`/`fstatSync`/`readSync`/`closeSync` operations to retained or verification descriptor provenance and proves fd `0` and Linux `AT_FDCWD` mutations fail before side effects; delegate topology, Worker lifecycle, and final evidence remain dependency-ordered follow-ups.
-- Human-selected ceiling split Issue #185 replaces only PR #184's runtime half: a #175-owned, module-instance one-shot synchronous descriptor-primitive mediator plus closed raw-outcome and ingress terminal-close semantics. Issue #186 depends on #185 and owns the complete acquisition/interleaving/callback/durable-evidence proof.
+- Human-selected ceiling split Issue #185 originally replaced PR #184's runtime half. PR #187's second ordinary-loop gate then split that runtime family again: prerequisite #188 owns close-state/no-raw semantics, #189 owns focused runtime causal proof, and #190 owns the installer/type boundary. #189 and #190 depend on #188; Issue #186 remains blocked until all three complete and still owns complete acquisition/interleaving/callback/durable-evidence proof.
 
-## Issue #185 descriptor mediation runtime contract
+## Issue #185 descriptor mediation replacement-family contract
 
 PR #184 proved that the #175 handoff needs a private runtime trust signal, but
 its fifth review round confirmed defects in mediator result handling and
@@ -60,17 +60,21 @@ Promise values. This does not weaken raw authority: once `invoke` starts, the
 saved raw outcome, issuance, and terminal settlement still complete without
 reading the mediator's later value.
 
-For `close_sync`, no raw start restores retryability; a raw start is terminal.
-Ingress retries only the private no-raw classification, at most twice total,
-while strongly retaining each unsettled live owner. A second persistent
-refusal atomically poisons the module-instance ingress boundary and snapshots
-all live owners. Before any ingress-owned raw close starts, the owner rechecks
-that terminal state after every untrusted pre-raw callback, including
-`onCloseAttempt`. If nested work poisoned ingress, the outer close starts no
-raw `closeSync`, performs no third attempt or snapshot release, and leaves the
-owner strongly retained. All later direct/checker admissions fail with the
-existing schema-invalid receipt before fd allocation. Existing primary versus
-cleanup error precedence remains exact.
+For `close_sync`, every no-raw outcome restores direct retryability; a raw start
+is terminal. Ingress alone consumes the private no-raw classification, at most
+twice total, while strongly retaining the owner set anchored before the first
+close. A second persistent refusal atomically poisons the module-instance
+ingress boundary and snapshots every unsettled live owner; all later
+direct/checker admissions fail before mediation, raw work, or fd allocation.
+Before any ingress-owned raw close starts, the owner rechecks terminal poison
+after every untrusted pre-raw callback, including `onCloseAttempt`. If nested
+work poisons ingress after a final retained/root raw close starts, every
+`closeFault` completion—normal false, injected-fault true, or throw—must
+observe poison before success- or catch-settlement can release the owner. The
+outer ingress terminates, performs no second raw close or later OS work, and
+preserves every poison snapshot after active-context deletion. This poison is
+a cleanup failure: schema-invalid is selected only without an earlier primary;
+an existing primary result/error remains authoritative.
 
 The runtime proof is process-isolated: all five primitives cover raw
 return/throw followed by a pre-handled rejected Promise, ordinary thenable,
@@ -79,12 +83,15 @@ property inspection; a pre-invocation non-`undefined` row proves stable ASYNC
 with zero raw calls. Direct/checker receipts cover
 representative paths; direct/direct, direct/checker, and checker/direct nested
 close interleavings prove zero post-poison raw operations and fixed owner/fd
-cardinality. #185 runs only a non-persisted focused runtime mutation and owns no
-reusable causal-red script, complete transcript, manifest, or durable receipt.
-Issue #186 exclusively owns those artifacts plus the complete copied-tree
-acquisition scanner, suspended `afterAdmission` matrix, and all-`observe`
-callback proof. After #186, #176's exact allowlist is the union of #175's five
-existing exports and #185's installer plus two erased types; no prior handoff
+cardinality. The gate-split replacements keep every mutation process-local:
+#188 owns exact no-raw classification plus post-raw nested-poison settlement,
+#189 owns the remaining focused runtime causal-proof matrix, and #190 owns
+installer runtime-arity and erased-type exactness. None owns a reusable causal-red
+script, complete transcript, manifest, or durable receipt. Issue #186
+exclusively owns those artifacts plus the complete copied-tree acquisition
+scanner, suspended `afterAdmission` matrix, and all-`observe` callback proof.
+After #188/#189/#190 and #186, #176's exact allowlist is the union of #175's
+five existing exports and the installer plus two erased types; no prior handoff
 entry is removed.
 
 ## Capabilities

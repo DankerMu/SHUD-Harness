@@ -5,13 +5,14 @@ The repository SHALL implement the Git status capability observer only under the
 spike ownership boundary. The spike MUST NOT be imported, invoked, packaged, or
 shipped by a production package; MUST NOT change StackLock schema/runtime behavior;
 MUST NOT change production manifests, lockfiles, imports, generated schemas,
-release assembly, existing workflows, canonical docs other than the single
-`docs/review-loop-log.jsonl` PR #184 terminal-accountability append, or the four
-read-only submodules; and MUST NOT close Issue #132 or restore PR #133 behavior.
+release assembly, existing workflows, canonical docs other than the append-only
+`docs/review-loop-log.jsonl` and `docs/stage-pipeline-log.jsonl` terminal
+governance records, or the four read-only submodules; and MUST NOT close Issue
+#132 or restore PR #133 behavior.
 
 #### Scenario: Spike executes without production integration
-- **WHEN** the spike runner, native prototype, fixtures, validator, evidence, isolated CI entry, and Issue #185 governance append are added
-- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, the Phase-0.5-only `openspec/project-profile.md` update, and `docs/review-loop-log.jsonl`; that log contains exactly one `pr:184`, `outcome:"ceiling-split"`, `children:[185,186]` record and no other canonical-doc delta is allowed
+- **WHEN** the spike runner, native prototype, fixtures, validator, evidence, isolated CI entry, and replacement-family governance appends are added
+- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, the Phase-0.5-only `openspec/project-profile.md` update, `docs/review-loop-log.jsonl`, `docs/stage-pipeline-log.jsonl`, and `.review-gate-issues.json`; terminal records bind PR #184 to children #185/#186 and PR #187/Issue #185 to children #188/#189/#190, and no other canonical-doc delta is allowed
 
 #### Scenario: Accepted evidence is produced
 - **WHEN** a valid complete run yields terminal decision `accepted`
@@ -358,30 +359,40 @@ handled state.
 - **THEN** the owner installs no global rejection listener, performs no constructor/species rewrite or `Bun.peek` sink, and promises no handled-state mutation; compile-time typeproof rejects a conforming mediator declaration with that return type
 
 ### Requirement: Ingress terminal close is atomic across untrusted callbacks
-
 Ingress SHALL retain every live unsettled close owner strongly and retry only
-the private no-raw close classification, at most twice total. A second
-persistent refusal MUST atomically snapshot all live owners and poison every
-active and later ingress. Before an ingress-owned raw `closeSync` starts, the
-owner MUST recheck poison after each untrusted pre-raw callback, including
-`onCloseAttempt`.
+the private no-raw close classification, at most twice total. Omission,
+non-`undefined`/async output, thenable/Proxy, sentinel throw, and hostile throw
+are all no-raw outcomes; their first refusal MUST preserve the owner set
+anchored before close. A second persistent refusal MUST atomically snapshot
+that entire set and poison every active and later ingress. Before an
+ingress-owned raw `closeSync` starts, the owner MUST recheck poison after each
+untrusted pre-raw callback, including `onCloseAttempt`.
 
-If nested work poisons ingress, the outer operation MUST perform no raw close,
-third attempt, snapshot release, later OS operation, or retained-owner/fd
-growth. The owner remains strongly retained. Existing primary-versus-cleanup
-error precedence and later direct/checker schema-invalid receipt MUST remain
-exact. Direct `ContractCapabilities.close` behavior outside ingress MUST remain
+If nested work poisons ingress before raw start, the outer operation performs
+no raw close. If it poisons ingress from a post-raw `closeFault`, every normal,
+injected-fault, and thrown completion MUST observe poison before any
+success- or catch-settlement release. Both paths forbid a third attempt,
+snapshot release, later OS operation, or retained-owner/fd growth. Every owner
+anchored before close remains strongly retained after active-context deletion,
+and later direct/checker admissions fail before mediation or raw work. Poison
+is a cleanup failure: without an earlier primary it yields the existing
+schema-invalid result; an already selected primary result/error remains exact.
+Direct `ContractCapabilities.close` behavior outside ingress remains
 compatible.
 
 #### Scenario: Nested refusal poisons before outer raw close
 - **WHEN** direct/direct, direct/checker, or checker/direct `onCloseAttempt` reentry causes the second no-raw refusal while an outer ingress close is between its callback and raw primitive
 - **THEN** poison is observed before raw start, every post-poison raw-operation count including `closeSync` is zero, no third attempt occurs, owner/fd cardinality is fixed, and all snapshotted owners remain strongly retained
 
-#### Scenario: Raw-start and no-raw close outcomes remain distinct
-- **WHEN** close mediation omits, throws, returns async output, invokes raw close successfully, or invokes raw close that fails
-- **THEN** only no-raw outcomes are retryable, any raw start is terminal, no retry bypasses mediation, and existing cleanup/primary result precedence is preserved
+#### Scenario: Post-raw nested poison terminates the active outer ingress
+- **WHEN** each direct/direct, direct/checker, and checker/direct pairing selects the final retained/root owner by identity and ordinal, observes exactly one target raw `close_sync`, and its post-raw `closeFault` synchronously causes a nested second no-raw refusal before returning false, returning true, or throwing a sentinel
+- **THEN** every completion observes poison before releasing the outer owner, performs no second raw close or later OS work, preserves the pre-close owner set after active-context deletion, emits schema-invalid only when no primary exists, and otherwise preserves the exact earlier primary result/error
 
-### Requirement: Issue #185 runtime verification is causal
+#### Scenario: Raw-start and no-raw close outcomes remain distinct
+- **WHEN** close mediation omits, returns non-`undefined`/async/thenable/Proxy output, throws a sentinel/hostile value before invocation, invokes raw close successfully, or invokes raw close that fails
+- **THEN** every no-raw outcome restores direct retryability and gives ingress only one private retry; first refusal retains the pre-close owner set, second refusal poisons the module with no third attempt, later direct/checker admissions fail before mediation/raw work, any raw start is terminal, and existing cleanup/primary result precedence is preserved
+
+### Requirement: Issue #185 replacement-family runtime verification is causal
 
 The delivered proof MUST run process-isolated five-primitive Promise matrices,
 representative direct/checker receipt rows, and all three nested close
@@ -389,9 +400,9 @@ interleavings on Darwin and read-only Linux Bun 1.2.19. It MUST retain current
 descriptor structural/runtime/typeproof tests, both public direct receipts,
 full repository `check`, strict OpenSpec, and scope/submodule hygiene.
 
-#### Scenario: Runtime replacement handoff is narrow
-- **WHEN** Issue #185 completes and Issue #186 later hands off to #176
-- **THEN** the installer and two erased types are the only additions to #175's existing allowed set (`CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and `DESCRIPTOR_OPERATION_POLICY`); no other runtime/type export is allowed, Issue #186 owns the complete acquisition/interleaving/callback/durable-evidence proof, and #176 remains blocked until #186 completes
+#### Scenario: Runtime replacement-family handoff is narrow
+- **WHEN** Issues #188, #189, and #190 complete and Issue #186 later hands off to #176
+- **THEN** the installer and two erased types are the only additions to #175's existing allowed set (`CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and `DESCRIPTOR_OPERATION_POLICY`); no other runtime/type export is allowed, #188 owns close-state/no-raw semantics, #189 owns focused runtime causal proof, #190 owns installer/type exactness, Issue #186 owns complete acquisition/interleaving/callback/durable-evidence proof, and #176 remains blocked until every replacement child completes
 
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:
