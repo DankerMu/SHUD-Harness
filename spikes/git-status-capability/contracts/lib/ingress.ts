@@ -15,12 +15,22 @@ const contractErrors = new WeakSet<object>();
 
 const ingressCloseBarriers = new WeakMap<ContractCapabilities, () => boolean>();
 
+const ingressNoRawCloseTickets = new WeakMap<ContractCapabilities, boolean>();
+
 function registerIngressCloseBarrier(capabilities: ContractCapabilities, barrier: () => boolean): void {
   ingressCloseBarriers.set(capabilities, barrier);
 }
 
 export function allowsIngressRawClose(capabilities: ContractCapabilities): boolean {
-  return ingressCloseBarriers.get(capabilities)?.() ?? true;
+  const barrier = ingressCloseBarriers.get(capabilities);
+  if (!barrier) return true;
+  // ContractCapabilities queries once before raw work and again only when it never starts.
+  if (ingressNoRawCloseTickets.has(capabilities)) {
+    ingressNoRawCloseTickets.set(capabilities, true);
+  } else {
+    ingressNoRawCloseTickets.set(capabilities, false);
+  }
+  return barrier();
 }
 
 export type ContractErrorCode =
@@ -58,7 +68,7 @@ export type DescriptorIngressHooks = Readonly<{
   authorityFault?: ContractAuthorityFault;
 }> & CapabilityHooks;
 
-const RETRYABLE_NO_RAW_CLOSE_ERROR_NAME = "ContractCapabilityNoRawCloseError";
+type IngressNoRawCloseRetry = Readonly<{ outcome: unknown }>;
 const NO_RAW_CLOSE_RETRY_LIMIT = 2;
 type LiveIngressOwner = Readonly<{
   capabilities: ContractCapabilities;
@@ -82,8 +92,8 @@ function assertIngressWorkAvailable(): void {
 function registerIngressContext(hooks: DescriptorIngressHooks): ActiveIngressContext {
   assertIngressWorkAvailable();
   let context!: ActiveIngressContext;
-  const guardedHooks: DescriptorIngressHooks = Object.freeze({
-    ...hooks,
+  const guardedHooks: CapabilityHooks = Object.freeze({
+    closeFault: (attempt) => hooks.closeFault?.(attempt) ?? false,
     onCloseAttempt: (attempt) => {
       try {
         hooks.onCloseAttempt?.(attempt);
@@ -92,6 +102,12 @@ function registerIngressContext(hooks: DescriptorIngressHooks): ActiveIngressCon
         if (descriptor) context.hookFailedDescriptors.add(descriptor);
         throw error;
       }
+    },
+    onAuthorityViolation: (fault) => {
+      hooks.onAuthorityViolation?.(fault);
+    },
+    onDescriptorAuthorityDenial: (denial) => {
+      hooks.onDescriptorAuthorityDenial?.(denial);
     }
   });
   context = {
@@ -145,11 +161,17 @@ function poisonIngressAndRetainActiveOwners(): void {
     }
   }
 }
+function clearIngressCloseTicket(capabilities: ContractCapabilities): void {
+  ingressNoRawCloseTickets.delete(capabilities);
+}
 
-function isRetryableNoRawClose(error: unknown): boolean {
-  return error instanceof Error &&
-    error.name === RETRYABLE_NO_RAW_CLOSE_ERROR_NAME &&
-    error.message === "CONTRACT_CAPABILITY_CLOSE_FAILED";
+function takeIngressNoRawCloseTicket(
+  capabilities: ContractCapabilities,
+  outcome: unknown
+): IngressNoRawCloseRetry | undefined {
+  const noRaw = ingressNoRawCloseTickets.get(capabilities) === true;
+  ingressNoRawCloseTickets.delete(capabilities);
+  return noRaw ? Object.freeze({ outcome }) : undefined;
 }
 
 function closeWithRetry(
@@ -163,21 +185,26 @@ function closeWithRetry(
     context.closingDescriptors.push(descriptor);
     try {
       context.capabilities.close(descriptor, owner);
+      clearIngressCloseTicket(context.capabilities);
       hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
       releaseLiveIngressOwner(context, descriptor);
       return hookFailed;
     } catch (error) {
       hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
-      if (!isRetryableNoRawClose(error)) {
+      const retry = takeIngressNoRawCloseTicket(context.capabilities, error);
+      if (!retry) {
         releaseLiveIngressOwner(context, descriptor);
         return true;
       }
       if (descriptorIngressPoisoned) return true;
+      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
+        poisonIngressAndRetainActiveOwners();
+        throw retry.outcome;
+      }
     } finally {
       context.closingDescriptors.pop();
     }
   }
-  poisonIngressAndRetainActiveOwners();
   return true;
 }
 
@@ -221,7 +248,11 @@ function closeAll(
 ): boolean {
   let failed = false;
   for (let index = components.length - 1; index >= 0; index -= 1) {
-    if (closeWithRetry(context, components[index]!.descriptor, "retained")) {
+    try {
+      if (closeWithRetry(context, components[index]!.descriptor, "retained")) {
+        failed = true;
+      }
+    } catch {
       failed = true;
     }
   }
@@ -258,7 +289,11 @@ function openDescriptorBoundPath(
       updateLiveIngressOwner(context, rootDescriptor, "retained");
       components.push({ descriptor: rootDescriptor, stats: rootStats, final: false });
     } catch (error) {
-      closeWithRetry(context, rootDescriptor, "unretained");
+      try {
+        closeWithRetry(context, rootDescriptor, "unretained");
+      } catch {
+        // The admission failure remains primary over a retry refusal during cleanup.
+      }
       throw error;
     }
 
@@ -288,7 +323,11 @@ function openDescriptorBoundPath(
         updateLiveIngressOwner(context, descriptor, "retained");
         components.push({ descriptor, childName, stats, final });
       } catch (error) {
-        closeWithRetry(context, descriptor, "unretained");
+        try {
+          closeWithRetry(context, descriptor, "unretained");
+        } catch {
+          // The admission failure remains primary over a retry refusal during cleanup.
+        }
         throw error;
       }
     }
@@ -339,13 +378,17 @@ function verifyRetainedChain(
     } catch (error) {
       verificationPrimary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
     } finally {
-      if (closeWithRetry(context, verificationDescriptor, "verification")) {
-        if (!verificationPrimary) {
-          if (deferCleanup) {
-            cleanupFailed = true;
-          } else {
-            verificationPrimary = new ContractError("CONTRACT_SCHEMA_INVALID");
-          }
+      let closeFailed = false;
+      try {
+        closeFailed = closeWithRetry(context, verificationDescriptor, "verification");
+      } catch {
+        closeFailed = true;
+      }
+      if (closeFailed && !verificationPrimary) {
+        if (deferCleanup) {
+          cleanupFailed = true;
+        } else {
+          verificationPrimary = new ContractError("CONTRACT_SCHEMA_INVALID");
         }
       }
     }

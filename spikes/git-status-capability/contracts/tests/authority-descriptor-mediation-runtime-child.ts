@@ -1,12 +1,15 @@
 import { mock } from "bun:test";
 import * as originalFfi from "bun:ffi";
 import * as originalFs from "node:fs";
-import { mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import type {
   CapabilityDescriptor,
   CapabilityHooks,
+  CloseAttempt,
+  ContractAuthorityFault,
   ContractCapabilities,
   DescriptorPrimitiveMediator,
   DescriptorOperation
@@ -16,9 +19,30 @@ type Target = "open_root" | "openat" | "fstat_sync" | "read_sync" | "close_sync"
 type RawMode = "returned" | "threw" | "pre";
 type PromiseResponse = "ordinary" | "constructor" | "species" | "sink";
 type ResponseMode = PromiseResponse | "value" | "throw" | "sentinel" | "thenable" | "proxy";
-type Scenario = "installer" | "default" | "control" | "matrix" | "ingress" | "third_arg" | "close_retry" | "gc" | "reuse";
+type Scenario =
+  | "installer"
+  | "default"
+  | "control"
+  | "matrix"
+  | "ingress"
+  | "third_arg"
+  | "close_retry"
+  | "direct_close"
+  | "hook_forwarding"
+  | "hostile_hooks"
+  | "gc"
+  | "reuse";
 type OpenAt = (parentDescriptor: number, path: Buffer, flags: number) => number;
 type Fixture = Readonly<{ root: string; payload: Buffer; segments: readonly string[] }>;
+const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
+const productionRoot = process.env[PRODUCTION_ROOT_ENV];
+// Causal mutation rows select a copied production tree only after child startup.
+
+function libraryModuleSpecifier(name: "capabilities" | "checker" | "ingress"): string {
+  if (!productionRoot) return `../lib/${name}`;
+  return pathToFileURL(join(productionRoot, "lib", `${name}.ts`)).href;
+}
+
 type CapabilitiesModule = Readonly<{
   ContractCapabilities: new (hooks?: CapabilityHooks) => ContractCapabilities;
   DIRECTORY_OPEN_FLAGS: number;
@@ -65,6 +89,14 @@ const mediatorThrownProxy = new Proxy(Object.create(null), {
   getPrototypeOf(): never {
     proxyTrapReads += 1;
     throw new Error("MEDIATOR_THROWN_PROXY_PROTOTYPE");
+  },
+  getOwnPropertyDescriptor(): never {
+    proxyTrapReads += 1;
+    throw new Error("MEDIATOR_THROWN_PROXY_DESCRIPTOR");
+  },
+  ownKeys(): never {
+    proxyTrapReads += 1;
+    throw new Error("MEDIATOR_THROWN_PROXY_OWN_KEYS");
   }
 });
 let nativeHostilityReads = 0;
@@ -141,7 +173,7 @@ function installRawProbe(selectedTarget: Target, shouldThrow: boolean, throwOnly
 
 async function loadCapabilities(): Promise<CapabilitiesModule> {
   // The child must install Bun's raw syscall mocks before this module binds its imports.
-  return await import("../lib/capabilities") as CapabilitiesModule;
+  return await import(libraryModuleSpecifier("capabilities")) as CapabilitiesModule;
 }
 
 async function createFixture(): Promise<Fixture> {
@@ -344,7 +376,7 @@ function installMediator(
     }
     const invocationResult = invoke();
     callbackReturnedUndefined = invocationResult === undefined;
-    if (selectedResponseMode === "throw") throw new Error("MEDIATOR_POST_THROW");
+    if (selectedResponseMode === "throw") throw mediatorThrownProxy;
     return mediatorValue(selectedResponseMode) as undefined;
   });
 }
@@ -364,11 +396,13 @@ async function descriptorCount(): Promise<number | null> {
 async function runMatrix(): Promise<unknown> {
   const fixture = await createFixture();
   const fdBefore = await descriptorCount();
+  let rejectionListenersBeforeOperation = rejectionListenerSnapshot();
   let outcome: Readonly<{ message: string; exactRaw: boolean }>;
   try {
     installRawProbe(target, rawMode === "threw");
     const module = await loadCapabilities();
     installMediator(module, target, rawMode, responseMode);
+    rejectionListenersBeforeOperation = rejectionListenerSnapshot();
     outcome = targetOutcome(module, fixture, target);
     await eventLoopTurn();
   } finally {
@@ -387,6 +421,8 @@ async function runMatrix(): Promise<unknown> {
     thenGetterReads,
     proxyTrapReads,
     nativeHostilityReads,
+    rejectionListenersBeforeOperation,
+    rejectionListenersAfterOperation: rejectionListenerSnapshot(),
     fdBefore,
     fdAfter
   };
@@ -402,7 +438,7 @@ async function runIngress(): Promise<unknown> {
   let stderr = "";
   if (entryArgument === "checker") {
     // This import must follow the mock-bound capability module so ingress shares that instance.
-    const checker = await import("../lib/checker");
+    const checker = await import(libraryModuleSpecifier("checker"));
     const exit = await checker.runCheck(
       ["--input", input, "--kind", "source_input_record"],
       {
@@ -413,7 +449,7 @@ async function runIngress(): Promise<unknown> {
     outcome = `CHECK:${exit}`;
   } else {
     // This import must also follow the mock-bound capability module for the same reason.
-    const ingress = await import("../lib/ingress");
+    const ingress = await import(libraryModuleSpecifier("ingress"));
     try {
       const bytes = await ingress.readBoundedFile(input, 8_192);
       outcome = `BYTES:${bytes.byteLength}`;
@@ -425,7 +461,7 @@ async function runIngress(): Promise<unknown> {
   }
   let laterOutcome: string | null = null;
   if (target === "close_sync" && rawMode === "threw") {
-    const ingress = await import("../lib/ingress");
+    const ingress = await import(libraryModuleSpecifier("ingress"));
     try {
       const bytes = await ingress.readBoundedFile(input, 8_192);
       laterOutcome = `BYTES:${bytes.byteLength}`;
@@ -562,12 +598,18 @@ async function runThirdArg(): Promise<unknown> {
   const module = await loadCapabilities();
   const capabilities = new module.ContractCapabilities();
   const descriptor = capabilities.openRoot("/", "admission");
-  (capabilities.close as unknown as (
-    descriptor: CapabilityDescriptor,
-    owner: "unretained",
-    suppressRawClose: () => boolean
-  ) => void)(descriptor, "unretained", () => false);
-  return { rawCalls: rawCounts.close_sync };
+  let thirdArgumentCalls = 0;
+  const outcome = errorMessage(() => {
+    (capabilities.close as unknown as (
+      descriptor: CapabilityDescriptor,
+      owner: "unretained",
+      ignored: () => boolean
+    ) => void)(descriptor, "unretained", () => {
+      thirdArgumentCalls += 1;
+      throw new Error("THIRD_RUNTIME_CLOSE_ARGUMENT_EXECUTED");
+    });
+  });
+  return { rawCalls: rawCounts.close_sync, thirdArgumentCalls, outcome: outcome.message };
 }
 
 async function runCloseRetry(): Promise<unknown> {
@@ -583,28 +625,56 @@ async function runCloseRetry(): Promise<unknown> {
     return undefined;
   });
   let hookCalls = 0;
+  let closeFaultCalls = 0;
+  let rawCallsWhenFirstCloseFault: number | null = null;
   const hooks = Object.freeze({
     onCloseAttempt: () => {
       hookCalls += 1;
-      if (hookCalls === 1) throw new Error("FIRST_CLOSE_HOOK_FAILURE");
+      if (responseMode === "ordinary" && hookCalls === 1) {
+        throw new Error("FIRST_CLOSE_HOOK_FAILURE");
+      }
+    },
+    closeFault: () => {
+      closeFaultCalls += 1;
+      rawCallsWhenFirstCloseFault ??= rawCounts.close_sync;
+      if (closeFaultCalls !== 1) return false;
+      if (responseMode === "throw") throw new Error("FIRST_CLOSE_FAULT_FAILURE");
+      return responseMode === "value" || responseMode === "sentinel";
     }
   });
   const input = join(import.meta.dir, "../fixtures/valid/source-input-record-paired-surrogate.json");
+  const maximum = responseMode === "sentinel" ? 0 : 8_192;
   let outcome: string;
   let stdout = "";
   let stderr = "";
   if (entryArgument === "checker") {
-    const checker = await import("../lib/checker");
-    const exit = await checker.runCheckForTest(
-      ["--input", input, "--kind", "source_input_record"],
-      { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
-      hooks
-    );
-    outcome = `CHECK:${exit}`;
-  } else {
-    const ingress = await import("../lib/ingress");
+    const checkerFixtureRoot = responseMode === "sentinel"
+      ? await mkdtemp(join(tmpdir(), "shud-close-retry-"))
+      : undefined;
     try {
-      await ingress.readBoundedFile(input, 8_192, hooks);
+      let checkerInput = input;
+      if (checkerFixtureRoot) {
+        checkerInput = join(checkerFixtureRoot, "source-input-record-over-limit.json");
+        // Trailing JSON whitespace keeps the fixture valid while exceeding SOURCE_PROFILE.bytes.
+        await writeFile(checkerInput, Buffer.concat([
+          await readFile(input),
+          Buffer.alloc(65_536, 0x20)
+        ]));
+      }
+      const checker = await import(libraryModuleSpecifier("checker"));
+      const exit = await checker.runCheckForTest(
+        ["--input", checkerInput, "--kind", "source_input_record"],
+        { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+        hooks
+      );
+      outcome = `CHECK:${exit}`;
+    } finally {
+      if (checkerFixtureRoot) await rm(checkerFixtureRoot, { recursive: true, force: true });
+    }
+  } else {
+    const ingress = await import(libraryModuleSpecifier("ingress"));
+    try {
+      await ingress.readBoundedFile(input, maximum, hooks);
       outcome = "NO_ERROR";
     } catch (error) {
       outcome = error instanceof Error ? error.message : String(error);
@@ -617,7 +687,178 @@ async function runCloseRetry(): Promise<unknown> {
     stderr,
     skippedCloseCalls,
     hookCalls,
+    closeFaultCalls,
+    rawCallsWhenFirstCloseFault,
     rawCalls: rawCounts.close_sync
+  };
+}
+
+async function runDirectClose(): Promise<unknown> {
+  installRawProbe("close_sync", false);
+  const module = await loadCapabilities();
+  module.installDescriptorPrimitiveMediator((operation, invoke): undefined => {
+    if (operation !== "close_sync") {
+      invoke();
+      return undefined;
+    }
+    if (responseMode === "ordinary") return undefined;
+    if (responseMode === "value") return 1 as undefined;
+    if (responseMode === "throw") throw mediatorThrownProxy;
+    throw mediatorThrownSentinel;
+  });
+  const capabilities = new module.ContractCapabilities();
+  const descriptor = capabilities.openRoot("/", "admission");
+  let caught: unknown;
+  const outcome = errorMessage(() => {
+    try {
+      capabilities.close(descriptor, "unretained");
+    } catch (error) {
+      caught = error;
+      throw error;
+    }
+  });
+  return {
+    responseMode,
+    outcome,
+    rawCalls: rawCounts.close_sync,
+    proxyTrapReads,
+    exactPreInvocationOutcome: responseMode === "throw"
+      ? caught === mediatorThrownProxy
+      : responseMode === "sentinel"
+      ? caught === mediatorThrownSentinel
+      : null
+  };
+}
+
+async function runHookForwarding(): Promise<unknown> {
+  const input = join(import.meta.dir, "../fixtures/valid/source-input-record-paired-surrogate.json");
+  const ingress = await import(libraryModuleSpecifier("ingress"));
+  let expectedReceiver: unknown;
+  class PrototypeHooks {
+    authorityFault: ContractAuthorityFault | undefined;
+    closeFaultGetterReads = 0;
+    closeFaultGetterReadsAtAdmission = -1;
+    closeFaultCalls = 0;
+    closeFaultReceiverMatches = false;
+    closeAttemptCalls = 0;
+    closeAttemptReceiverMatches = false;
+    authorityCalls = 0;
+    authorityReceiverMatches = false;
+
+    get closeFault(): (attempt: CloseAttempt) => boolean {
+      this.closeFaultGetterReads += 1;
+      return (_attempt) => {
+        this.closeFaultCalls += 1;
+        return true;
+      };
+    }
+
+    onCloseAttempt(_attempt: CloseAttempt): void {
+      this.closeAttemptCalls += 1;
+      this.closeAttemptReceiverMatches ||= this === expectedReceiver;
+    }
+
+    onAuthorityViolation(_fault: ContractAuthorityFault): void {
+      this.authorityCalls += 1;
+      this.authorityReceiverMatches ||= this === expectedReceiver;
+    }
+
+    afterAdmission(): void {
+      this.closeFaultGetterReadsAtAdmission = this.closeFaultGetterReads;
+    }
+  }
+  const cleanupHooks = new PrototypeHooks();
+  Object.defineProperty(cleanupHooks, "closeFault", {
+    enumerable: true,
+    get(): (attempt: CloseAttempt) => boolean {
+      cleanupHooks.closeFaultGetterReads += 1;
+      return function (this: PrototypeHooks, _attempt: CloseAttempt): boolean {
+        this.closeFaultCalls += 1;
+        this.closeFaultReceiverMatches ||= this === expectedReceiver;
+        return true;
+      };
+    }
+  });
+  expectedReceiver = cleanupHooks;
+  const cleanupOutcome = await (async (): Promise<string> => {
+    try {
+      await ingress.readBoundedFile(input, 8_192, cleanupHooks);
+      return "NO_ERROR";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  })();
+
+  const authorityHooks = new PrototypeHooks();
+  authorityHooks.authorityFault = "file_write";
+  expectedReceiver = authorityHooks;
+  const authorityOutcome = await (async (): Promise<string> => {
+    try {
+      await ingress.readBoundedFile(input, 8_192, authorityHooks);
+      return "NO_ERROR";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  })();
+  return {
+    cleanupOutcome,
+    closeFaultGetterReadsAtAdmission: cleanupHooks.closeFaultGetterReadsAtAdmission,
+    closeFaultGetterReads: cleanupHooks.closeFaultGetterReads,
+    closeFaultCalls: cleanupHooks.closeFaultCalls,
+    closeFaultReceiverMatches: cleanupHooks.closeFaultReceiverMatches,
+    closeAttemptCalls: cleanupHooks.closeAttemptCalls,
+    closeAttemptReceiverMatches: cleanupHooks.closeAttemptReceiverMatches,
+    authorityOutcome,
+    authorityCalls: authorityHooks.authorityCalls,
+    authorityReceiverMatches: authorityHooks.authorityReceiverMatches
+  };
+}
+
+async function runHostileHooks(): Promise<unknown> {
+  const input = join(import.meta.dir, "../fixtures/valid/source-input-record-paired-surrogate.json");
+  let ownKeysReads = 0;
+  let getReads = 0;
+  let getPrototypeReads = 0;
+  const hostileHooks = new Proxy(Object.create(null), {
+    ownKeys(): never {
+      ownKeysReads += 1;
+      throw new Error("HOSTILE_HOOK_OWN_KEYS");
+    },
+    get(_target, property): unknown {
+      getReads += 1;
+      if (property === "onCloseAttempt") throw new Error("HOSTILE_HOOK_GET");
+      return undefined;
+    },
+    getPrototypeOf(): never {
+      getPrototypeReads += 1;
+      throw new Error("HOSTILE_HOOK_PROTOTYPE");
+    }
+  });
+  const ingress = await import(libraryModuleSpecifier("ingress"));
+  const directOutcome = await (async (): Promise<string> => {
+    try {
+      await ingress.readBoundedFile(input, 8_192, hostileHooks);
+      return "NO_ERROR";
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  })();
+  const checker = await import(libraryModuleSpecifier("checker"));
+  let stdout = "";
+  let stderr = "";
+  const checkerExit = await checker.runCheckForTest(
+    ["--input", input, "--kind", "source_input_record"],
+    { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+    hostileHooks
+  );
+  return {
+    directOutcome,
+    checkerExit,
+    stdout,
+    stderr,
+    ownKeysReads,
+    getReads,
+    getPrototypeReads
   };
 }
 
@@ -691,6 +932,12 @@ const receipt = scenario === "installer"
   ? await runThirdArg()
   : scenario === "close_retry"
   ? await runCloseRetry()
+  : scenario === "direct_close"
+  ? await runDirectClose()
+  : scenario === "hook_forwarding"
+  ? await runHookForwarding()
+  : scenario === "hostile_hooks"
+  ? await runHostileHooks()
   : scenario === "gc"
   ? await runGc()
   : scenario === "reuse"

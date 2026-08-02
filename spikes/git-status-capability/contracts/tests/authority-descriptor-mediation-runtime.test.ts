@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { withProductionTree } from "./authority-descriptor-vocabulary";
 
 type Target = "open_root" | "openat" | "fstat_sync" | "read_sync" | "close_sync";
 type RawMode = "returned" | "threw" | "pre";
 type PromiseResponse = "ordinary" | "constructor" | "species" | "sink";
 type ResponseMode = PromiseResponse | "value" | "throw" | "sentinel" | "thenable" | "proxy";
 type ChildResult = Readonly<{ exit: number; stdout: string; stderr: string }>;
+type RejectionListenerSnapshot = Readonly<{ unhandledRejection: number; rejectionHandled: number }>;
 type MatrixReceipt = Readonly<{
   target: Target;
   rawMode: RawMode;
@@ -18,6 +21,8 @@ type MatrixReceipt = Readonly<{
   thenGetterReads: number;
   proxyTrapReads: number;
   nativeHostilityReads: number;
+  rejectionListenersBeforeOperation: RejectionListenerSnapshot;
+  rejectionListenersAfterOperation: RejectionListenerSnapshot;
   fdBefore: number | null;
   fdAfter: number | null;
 }>;
@@ -48,6 +53,36 @@ type ControlReceipt = Readonly<{
   nativeHostilityReads: number;
 }>;
 
+type DirectCloseReceipt = Readonly<{
+  responseMode: ResponseMode;
+  outcome: Readonly<{ message: string; exactRaw: boolean }>;
+  rawCalls: number;
+  proxyTrapReads: number;
+  exactPreInvocationOutcome: boolean | null;
+}>;
+type HookForwardingReceipt = Readonly<{
+  cleanupOutcome: string;
+  closeFaultGetterReadsAtAdmission: number;
+  closeFaultGetterReads: number;
+  closeFaultCalls: number;
+  closeFaultReceiverMatches: boolean;
+  closeAttemptCalls: number;
+  closeAttemptReceiverMatches: boolean;
+  authorityOutcome: string;
+  authorityCalls: number;
+  authorityReceiverMatches: boolean;
+}>;
+type HostileHooksReceipt = Readonly<{
+  directOutcome: string;
+  checkerExit: number;
+  stdout: string;
+  stderr: string;
+  ownKeysReads: number;
+  getReads: number;
+  getPrototypeReads: number;
+}>;
+
+
 const childPath = join(import.meta.dir, "authority-descriptor-mediation-runtime-child.ts");
 const TARGETS = ["open_root", "openat", "fstat_sync", "read_sync", "close_sync"] as const;
 const PROMISE_RESPONSES = ["ordinary", "constructor", "species", "sink"] as const;
@@ -59,9 +94,18 @@ const REPEATED_ERROR = "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_REPEAT
 const REENTRY_ERROR = "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY";
 const INVALID_INSTALLER_ERROR = "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVALID";
 const REPEATED_INSTALLER_ERROR = "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ALREADY_INSTALLED";
+const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
 
-async function runChild(args: readonly string[]): Promise<ChildResult> {
-  const child = Bun.spawn([process.execPath, childPath, ...args], { stdout: "pipe", stderr: "pipe" });
+
+async function runChild(
+  args: readonly string[],
+  productionRoot?: string
+): Promise<ChildResult> {
+  const child = Bun.spawn([process.execPath, childPath, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    ...(productionRoot ? { env: { ...process.env, [PRODUCTION_ROOT_ENV]: productionRoot } } : {})
+  });
   const [exit, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -70,8 +114,8 @@ async function runChild(args: readonly string[]): Promise<ChildResult> {
   return Object.freeze({ exit, stdout, stderr });
 }
 
-async function receipt<T>(args: readonly string[]): Promise<T> {
-  const result = await runChild(args);
+async function receipt<T>(args: readonly string[], productionRoot?: string): Promise<T> {
+  const result = await runChild(args, productionRoot);
   expect(result.exit).toBe(0);
   expect(result.stderr).toBe("");
   return JSON.parse(result.stdout) as T;
@@ -93,7 +137,53 @@ function expectNoMediatorInspection(receipt: Readonly<{
   expect(receipt.nativeHostilityReads).toBe(0);
 }
 
+function expectNoOperationTimeRejectionListenerDelta(receipt: MatrixReceipt): void {
+  expect(receipt.rejectionListenersAfterOperation).toEqual(receipt.rejectionListenersBeforeOperation);
+}
+
+function injectOperationTimeRejectionListener(source: string): string {
+  const anchor = '  descriptorPrimitiveMediationState = "callback";';
+  if (!source.includes(anchor)) throw new Error("operation-time listener mutation anchor is absent");
+  return source.replace(
+    anchor,
+    '  process["once"]("unhandledRejection", () => undefined);\n' + anchor
+  );
+}
+
+function injectExecutedThirdCloseArgument(source: string): string {
+  const anchor = '    if (injectedFault || closeError || hookError) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");';
+  if (!source.includes(anchor)) throw new Error("third-close-argument mutation anchor is absent");
+  return source.replace(
+    anchor,
+    "    const runtimeThirdArgument = arguments[2] as unknown as (() => void) | undefined;\n" +
+      "    runtimeThirdArgument?.();\n" +
+      anchor
+  );
+}
+
+
+function injectPostRawProxyInspection(source: string): string {
+  const anchor = "  primitiveError = undefined;";
+  if (!source.includes(anchor)) throw new Error("post-raw Proxy mutation anchor is absent");
+  return source.replace(
+    anchor,
+    `${anchor}\n  if (mediatorThrew) Reflect.ownKeys(mediatorError as object);`
+  );
+}
+
+function injectPrematureCloseFault(source: string): string {
+  const anchor = "    if (!rawCloseAttempted) {";
+  if (!source.includes(anchor)) throw new Error("premature closeFault mutation anchor is absent");
+  return source.replace(anchor, "    this.hooks.closeFault?.(attempt);\n" + anchor);
+}
+
+function injectGenericNoRawCloseRewrite(source: string): string {
+  const anchor = "      throw closeError;";
+  if (!source.includes(anchor)) throw new Error("generic no-raw close mutation anchor is absent");
+  return source.replace(anchor, '      throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");');
+}
 describe("descriptor primitive mediation runtime", () => {
+
   test("installer validates before latching and exposes only a frozen non-constructible callable", async () => {
     const installed = await receipt<Readonly<{
       invalid: string;
@@ -143,31 +233,165 @@ describe("descriptor primitive mediation runtime", () => {
   });
 
 
-  test("a third runtime close argument cannot suppress a direct terminal raw close", async () => {
-    expect(await receipt<Readonly<{ rawCalls: number }>>(["third_arg"])).toEqual({ rawCalls: 1 });
+  test("a third runtime close argument cannot execute during a direct terminal raw close", async () => {
+    expect(await receipt<Readonly<{
+      rawCalls: number;
+      thirdArgumentCalls: number;
+      outcome: string;
+    }>>(["third_arg"])).toEqual({
+      rawCalls: 1,
+      thirdArgumentCalls: 0,
+      outcome: "NO_ERROR"
+    });
   });
 
-  test("a retryable no-raw close preserves the first close-hook failure after a later raw close", async () => {
+  test("the third-argument runtime oracle kills an executed-arguments mutation", async () => {
+    await withProductionTree(undefined, async (tree) => {
+      const source = await readFile(tree.capabilitiesPath, "utf8");
+      await writeFile(tree.capabilitiesPath, injectExecutedThirdCloseArgument(source));
+      expect(await receipt<Readonly<{
+        rawCalls: number;
+        thirdArgumentCalls: number;
+        outcome: string;
+      }>>(["third_arg"], tree.root)).toEqual({
+        rawCalls: 1,
+        thirdArgumentCalls: 1,
+        outcome: "THIRD_RUNTIME_CLOSE_ARGUMENT_EXECUTED"
+      });
+    });
+  });
+
+  test("ingress retries only its private no-raw signal and preserves post-raw cleanup faults", async () => {
+    for (const response of ["ordinary", "value", "throw"] as const) {
+      for (const entry of ["direct", "checker"] as const) {
+        const retry = await receipt<Readonly<{
+          entry: "direct" | "checker";
+          outcome: string;
+          stdout: string;
+          stderr: string;
+          skippedCloseCalls: number;
+          hookCalls: number;
+          closeFaultCalls: number;
+          rawCallsWhenFirstCloseFault: number | null;
+          rawCalls: number;
+        }>>(["close_retry", "open_root", "returned", response, entry]);
+        expect(retry.entry).toBe(entry);
+        expect(retry.outcome).toBe(entry === "direct" ? "CONTRACT_SCHEMA_INVALID" : "CHECK:2");
+        expect(retry.stdout).toBe("");
+        expect(retry.stderr).toBe(entry === "direct"
+          ? ""
+          : "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_SCHEMA_INVALID\"}\n");
+        expect(retry.skippedCloseCalls).toBe(1);
+        expect(retry.closeFaultCalls).toBeGreaterThan(0);
+        expect(retry.rawCallsWhenFirstCloseFault).toBeGreaterThan(0);
+        expect(retry.rawCalls).toBeGreaterThan(0);
+      }
+    }
+
     for (const entry of ["direct", "checker"] as const) {
-      const retry = await receipt<Readonly<{
+      const primary = await receipt<Readonly<{
         entry: "direct" | "checker";
         outcome: string;
         stdout: string;
         stderr: string;
         skippedCloseCalls: number;
-        hookCalls: number;
-        rawCalls: number;
-      }>>(["close_retry", "open_root", "returned", "ordinary", entry]);
-      expect(retry.entry).toBe(entry);
-      expect(retry.outcome).toBe(entry === "direct" ? "CONTRACT_SCHEMA_INVALID" : "CHECK:2");
-      expect(retry.stdout).toBe("");
-      expect(retry.stderr).toBe(entry === "direct"
+        rawCallsWhenFirstCloseFault: number | null;
+      }>>(["close_retry", "open_root", "returned", "sentinel", entry]);
+      expect(primary.entry).toBe(entry);
+      expect(primary.outcome).toBe(entry === "direct" ? "CONTRACT_BYTES_LIMIT" : "CHECK:2");
+      expect(primary.stdout).toBe("");
+      expect(primary.stderr).toBe(entry === "direct"
         ? ""
-        : "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_SCHEMA_INVALID\"}\n");
-      expect(retry.skippedCloseCalls).toBe(1);
-      expect(retry.hookCalls).toBeGreaterThan(1);
-      expect(retry.rawCalls).toBeGreaterThan(0);
+        : "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_BYTES_LIMIT\"}\n");
+      expect(primary.skippedCloseCalls).toBe(1);
+      expect(primary.rawCallsWhenFirstCloseFault).toBeGreaterThan(0);
     }
+  });
+
+  test("direct close preserves exact no-raw mediator outcomes without ingress retry authority", async () => {
+    for (const [responseMode, message] of [
+
+      ["ordinary", MISSING_ERROR],
+      ["value", ASYNC_ERROR],
+      ["throw", "MEDIATOR_THROWN_PROXY"],
+      ["sentinel", "MEDIATOR_THROWN_SENTINEL"]
+    ] as const) {
+      const direct = await receipt<DirectCloseReceipt>([
+        "direct_close",
+        "close_sync",
+        "pre",
+        responseMode
+      ]);
+      expect(direct.responseMode).toBe(responseMode);
+      expect(direct.outcome).toEqual({ message, exactRaw: false });
+      expect(direct.exactPreInvocationOutcome).toBe(
+        responseMode === "throw" || responseMode === "sentinel" ? true : null
+      );
+      expect(direct.rawCalls).toBe(0);
+      expect(direct.proxyTrapReads).toBe(0);
+    }
+  });
+
+  test("the direct-close receipt kills generic rewriting of a no-raw mediator error", async () => {
+    await withProductionTree(undefined, async (tree) => {
+      const source = await readFile(tree.capabilitiesPath, "utf8");
+      await writeFile(tree.capabilitiesPath, injectGenericNoRawCloseRewrite(source));
+      const direct = await receipt<DirectCloseReceipt>([
+        "direct_close",
+        "close_sync",
+        "pre",
+        "throw"
+      ], tree.root);
+      expect(direct.outcome).toEqual({
+        message: CLOSE_ERROR,
+        exactRaw: false
+      });
+      expect(direct.exactPreInvocationOutcome).toBe(false);
+      expect(direct.rawCalls).toBe(0);
+    });
+  });
+
+  test("the closeFault receipt kills a pre-raw cleanup mutation", async () => {
+    await withProductionTree(undefined, async (tree) => {
+      const source = await readFile(tree.capabilitiesPath, "utf8");
+      await writeFile(tree.capabilitiesPath, injectPrematureCloseFault(source));
+      const mutated = await receipt<Readonly<{
+        outcome: string;
+        rawCallsWhenFirstCloseFault: number | null;
+      }>>(["close_retry", "open_root", "returned", "value", "direct"], tree.root);
+      expect(mutated).toMatchObject({
+        outcome: "NO_ERROR",
+        rawCallsWhenFirstCloseFault: 0
+      });
+    });
+  });
+
+  test("ingress forwards prototype hooks lazily on the original receiver and normalizes hostile hook objects", async () => {
+    const forwarding = await receipt<HookForwardingReceipt>(["hook_forwarding"]);
+    expect(forwarding).toMatchObject({
+      cleanupOutcome: "CONTRACT_SCHEMA_INVALID",
+      closeFaultGetterReadsAtAdmission: 0,
+      closeFaultReceiverMatches: true,
+      closeAttemptReceiverMatches: true,
+      authorityOutcome: "CONTRACT_SCHEMA_INVALID",
+      authorityCalls: 1,
+      authorityReceiverMatches: true
+    });
+    expect(forwarding.closeFaultGetterReads).toBeGreaterThan(0);
+    expect(forwarding.closeFaultCalls).toBeGreaterThan(0);
+    expect(forwarding.closeAttemptCalls).toBeGreaterThan(0);
+
+    const hostile = await receipt<HostileHooksReceipt>(["hostile_hooks"]);
+    expect(hostile).toEqual({
+      directOutcome: "CONTRACT_SCHEMA_INVALID",
+      checkerExit: 2,
+      stdout: "",
+      stderr: "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_SCHEMA_INVALID\"}\n",
+      ownKeysReads: 0,
+      getReads: expect.any(Number),
+      getPrototypeReads: 0
+    });
+    expect(hostile.getReads).toBeGreaterThan(0);
   });
 
   test("retained invoke closures expire without retaining a completed raw read buffer", async () => {
@@ -234,7 +458,7 @@ describe("descriptor primitive mediation runtime", () => {
     });
   });
 
-  test("all five primitives preserve a started raw return or throw over invalid synchronous returns", async () => {
+  test("all five primitives preserve raw return or throw over hostile post-raw mediator values", async () => {
     for (const target of TARGETS) {
       for (const rawMode of ["returned", "threw"] as const) {
         for (const responseMode of [...PROMISE_RESPONSES, "value", "throw"] as const) {
@@ -249,10 +473,42 @@ describe("descriptor primitive mediation runtime", () => {
           expect(row.callbackReturnedUndefined).toBe(true);
           expect(row.outcome).toEqual(expectedRawOutcome(target, rawMode));
           expectNoMediatorInspection(row);
+          expectNoOperationTimeRejectionListenerDelta(row);
           if (row.fdBefore !== null && row.fdAfter !== null) expect(row.fdAfter).toBe(row.fdBefore);
         }
       }
     }
+  });
+
+  test("the post-raw hostile Proxy matrix kills reflective inspection across every primitive outcome", async () => {
+    await withProductionTree(undefined, async (tree) => {
+      const source = await readFile(tree.capabilitiesPath, "utf8");
+      await writeFile(tree.capabilitiesPath, injectPostRawProxyInspection(source));
+      for (const target of TARGETS) {
+        for (const rawMode of ["returned", "threw"] as const) {
+          const row = await receipt<MatrixReceipt>(["matrix", target, rawMode, "throw"], tree.root);
+          expect(row.proxyTrapReads).toBeGreaterThan(0);
+        }
+      }
+    });
+  });
+
+  test("the operation-time listener receipt kills a computed alternate listener mutation", async () => {
+    await withProductionTree(undefined, async (tree) => {
+
+      const source = await readFile(tree.capabilitiesPath, "utf8");
+      await writeFile(tree.capabilitiesPath, injectOperationTimeRejectionListener(source));
+      const row = await receipt<MatrixReceipt>(
+        ["matrix", "open_root", "returned", "ordinary"],
+        tree.root
+      );
+      expect(row.rejectionListenersAfterOperation.unhandledRejection).toBeGreaterThan(
+        row.rejectionListenersBeforeOperation.unhandledRejection
+      );
+      expect(row.rejectionListenersAfterOperation.rejectionHandled).toBe(
+        row.rejectionListenersBeforeOperation.rejectionHandled
+      );
+    });
   });
 
   test("pre-invocation non-undefined returns fail closed without property access or selected raw work", async () => {
@@ -262,10 +518,11 @@ describe("descriptor primitive mediation runtime", () => {
         expect(row.rawCalls).toBe(0);
         expect(row.callbackReturnedUndefined).toBe(false);
         expect(row.outcome).toEqual({
-          message: target === "close_sync" ? CLOSE_ERROR : ASYNC_ERROR,
+          message: ASYNC_ERROR,
           exactRaw: false
         });
         expectNoMediatorInspection(row);
+        expectNoOperationTimeRejectionListenerDelta(row);
       }
     }
   });
@@ -277,12 +534,11 @@ describe("descriptor primitive mediation runtime", () => {
         expect(row.rawCalls).toBe(0);
         expect(row.callbackReturnedUndefined).toBe(false);
         expect(row.outcome).toEqual({
-          message: target === "close_sync"
-            ? CLOSE_ERROR
-            : responseMode === "throw" ? "MEDIATOR_THROWN_PROXY" : "MEDIATOR_THROWN_SENTINEL",
+          message: responseMode === "throw" ? "MEDIATOR_THROWN_PROXY" : "MEDIATOR_THROWN_SENTINEL",
           exactRaw: false
         });
         expectNoMediatorInspection(row);
+        expectNoOperationTimeRejectionListenerDelta(row);
       }
     }
   });
@@ -292,14 +548,16 @@ describe("descriptor primitive mediation runtime", () => {
       for (const responseMode of ["thenable", "proxy"] as const) {
         const before = await receipt<MatrixReceipt>(["matrix", target, "pre", responseMode]);
         expect(before.rawCalls).toBe(0);
-        expect(before.outcome.message).toBe(target === "close_sync" ? CLOSE_ERROR : ASYNC_ERROR);
+        expect(before.outcome.message).toBe(ASYNC_ERROR);
         expectNoMediatorInspection(before);
+        expectNoOperationTimeRejectionListenerDelta(before);
 
         for (const rawMode of ["returned", "threw"] as const) {
           const after = await receipt<MatrixReceipt>(["matrix", target, rawMode, responseMode]);
           expect(after.rawCalls).toBe(1);
           expect(after.outcome).toEqual(expectedRawOutcome(target, rawMode));
           expectNoMediatorInspection(after);
+          expectNoOperationTimeRejectionListenerDelta(after);
         }
       }
     }

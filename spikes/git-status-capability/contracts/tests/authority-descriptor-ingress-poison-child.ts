@@ -3,6 +3,7 @@ import * as originalFfi from "bun:ffi";
 import * as originalFs from "node:fs";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { BigIntStats, DescriptorPrimitiveMediator } from "../lib/capabilities";
 
 type Entry = "direct" | "checker";
@@ -20,6 +21,7 @@ type IngressModule = Readonly<{
     maximum: number,
     hooks?: Readonly<{ onCloseAttempt?: (attempt: CloseAttempt) => void }>
   ) => Promise<Uint8Array>;
+  __poisonRetainedOwnerCount?: () => number;
 }>;
 type CheckerModule = Readonly<{
   runCheckForTest: (
@@ -28,6 +30,54 @@ type CheckerModule = Readonly<{
     hooks: Readonly<{ onCloseAttempt?: (attempt: CloseAttempt) => void }>
   ) => Promise<number>;
 }>;
+
+type ObservedLiveIngressOwner = Readonly<{
+  capabilities: object;
+  descriptor: object;
+  owner: unknown;
+}>;
+const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
+const productionRoot = process.env[PRODUCTION_ROOT_ENV];
+const observedLiveOwnerMaps = new Set<Map<unknown, unknown>>();
+
+// Causal mutation rows select a copied production tree only after child startup.
+function libraryModuleSpecifier(name: "capabilities" | "checker" | "ingress"): string {
+  if (!productionRoot) return `../lib/${name}`;
+  return pathToFileURL(resolve(productionRoot, "lib", `${name}.ts`)).href;
+}
+
+function isObservedLiveIngressOwner(value: unknown): value is ObservedLiveIngressOwner {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Readonly<Record<string, unknown>>;
+  return typeof candidate.capabilities === "object" &&
+    candidate.capabilities !== null &&
+    typeof candidate.descriptor === "object" &&
+    candidate.descriptor !== null &&
+    typeof candidate.owner === "string";
+}
+
+function installLiveOwnerProbe(): void {
+  const originalMapSet = Map.prototype.set;
+  Map.prototype.set = (function (
+    this: Map<unknown, unknown>,
+    key: unknown,
+    value: unknown
+  ): Map<unknown, unknown> {
+    if (isObservedLiveIngressOwner(value)) observedLiveOwnerMaps.add(this);
+    return Reflect.apply(originalMapSet, this, [key, value]) as Map<unknown, unknown>;
+  }) as typeof Map.prototype.set;
+}
+
+function snapshotLiveOwnerCount(): number {
+  const owners = new Set<ObservedLiveIngressOwner>();
+  for (const ownerMap of observedLiveOwnerMaps) {
+    for (const value of ownerMap.values()) {
+      if (isObservedLiveIngressOwner(value)) owners.add(value);
+    }
+  }
+  return owners.size;
+}
+
 
 const [outerEntryArgument, nestedEntryArgument] = process.argv.slice(2) as [Entry | undefined, Entry | undefined];
 const outerEntry = outerEntryArgument ?? "direct";
@@ -44,6 +94,7 @@ let outerCloseAttempts = 0;
 const nestedCloseAttempts: CloseAttempt[] = [];
 let nestedResult: Promise<EntryOutcome> | undefined;
 let rawAtPoison: RawCounts | undefined;
+let liveOwnerCountAtPoison = 0;
 
 function nonDirectoryStats(): BigIntStats {
   return Object.freeze({
@@ -106,10 +157,11 @@ async function loadModules(): Promise<Readonly<{
   checker: CheckerModule;
 }>> {
   // These modules bind raw imports at evaluation, so the test must load them after its probes.
+  // The copied production tree is selected by the process-isolated mutation receipt.
   const [capabilities, ingress, checker] = await Promise.all([
-    import("../lib/capabilities"),
-    import("../lib/ingress"),
-    import("../lib/checker")
+    import(libraryModuleSpecifier("capabilities")),
+    import(libraryModuleSpecifier("ingress")),
+    import(libraryModuleSpecifier("checker"))
   ]);
   return Object.freeze({
     capabilities: capabilities as CapabilitiesModule,
@@ -164,7 +216,9 @@ try {
     throw new Error("ingress poison child requires a direct or checker nested entry");
   }
   installRawProbe();
+  installLiveOwnerProbe();
   const modules = await loadModules();
+  const fdBaseline = await descriptorCount();
   let hooks: Readonly<{ onCloseAttempt?: (attempt: CloseAttempt) => void }>;
   hooks = Object.freeze({
     onCloseAttempt: (attempt: CloseAttempt): void => {
@@ -182,6 +236,7 @@ try {
       nestedResult = runEntry(nestedEntry, modules, hooks);
       nestedAdmission = false;
       rawAtPoison = { ...raw };
+      liveOwnerCountAtPoison = snapshotLiveOwnerCount();
     }
   });
   modules.capabilities.installDescriptorPrimitiveMediator((operation, invoke) => {
@@ -193,17 +248,16 @@ try {
     return undefined;
   });
 
-  Bun.gc(true);
-  const fdBaseline = await descriptorCount();
   const outer = await runEntry(outerEntry, modules, hooks);
   const nested = await nestedResult!;
+  nestedResult = undefined;
+  const retainedOwnerCountAfterContextDeletion =
+    modules.ingress.__poisonRetainedOwnerCount?.() ?? null;
   const rawAfterOuter = { ...raw };
-  Bun.gc(true);
   const fdAfterPoison = await descriptorCount();
   const laterDirect = await runEntry("direct", modules, hooks);
   const laterChecker = await runEntry("checker", modules, hooks);
   const rawAfterLater = { ...raw };
-  Bun.gc(true);
   const fdAfterLater = await descriptorCount();
   const poisonSnapshot = rawAtPoison ?? { ...raw };
   process.stdout.write(`${JSON.stringify({
@@ -236,7 +290,9 @@ try {
     },
     fdBaseline,
     fdAfterPoison,
-    fdAfterLater
+    fdAfterLater,
+    liveOwnerCountAtPoison,
+    retainedOwnerCountAfterContextDeletion
   })}\n`);
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);

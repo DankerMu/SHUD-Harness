@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import ts from "typescript";
-
+import { withProductionTree } from "./authority-descriptor-vocabulary";
 type Entry = "direct" | "checker";
 type RawCounts = Readonly<{
   open_sync: number;
@@ -31,32 +30,17 @@ type PoisonReceipt = Readonly<{
   fdBaseline: number;
   fdAfterPoison: number;
   fdAfterLater: number;
+  liveOwnerCountAtPoison: number;
+  retainedOwnerCountAfterContextDeletion: number | null;
 }>;
 
 const childPath = join(import.meta.dir, "authority-descriptor-ingress-poison-child.ts");
-const ingressSourcePath = join(import.meta.dir, "../lib/ingress.ts");
 const ERROR_RECEIPT = "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_SCHEMA_INVALID\"}\n";
 const ZERO_RAW: RawCounts = Object.freeze({ open_sync: 0, openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 0 });
+const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
 const EVERY_OWNER_RETENTION = `    for (const owner of context.liveOwners.values()) {
       retainedPoisonedIngressOwners.set(owner.descriptor, owner);
     }`;
-
-function poisonRetainsEveryActiveOwner(source: string): boolean {
-  const tree = ts.createSourceFile("ingress.ts", source, ts.ScriptTarget.ES2022, true);
-  let retainsEveryOwner = false;
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isFunctionDeclaration(node) &&
-      node.name?.text === "poisonIngressAndRetainActiveOwners" &&
-      node.body
-    ) {
-      retainsEveryOwner = node.body.getText(tree).includes(EVERY_OWNER_RETENTION);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(tree);
-  return retainsEveryOwner;
-}
 
 function replaceEveryOwnerRetentionWithFirstOwnerOnly(source: string): string {
   if (!source.includes(EVERY_OWNER_RETENTION)) throw new Error("owner-retention loop anchor is absent");
@@ -67,8 +51,39 @@ function replaceEveryOwnerRetentionWithFirstOwnerOnly(source: string): string {
   );
 }
 
-async function runPoisonProbe(outerEntry: Entry, nestedEntry: Entry): Promise<PoisonReceipt> {
-  const child = Bun.spawn([process.execPath, childPath, outerEntry, nestedEntry], { stdout: "pipe", stderr: "pipe" });
+function injectPoisonRetentionCount(source: string): string {
+  return `${source}\nexport const __poisonRetainedOwnerCount = (): number => retainedPoisonedIngressOwners.size;\n`;
+}
+
+async function runCopiedPoisonProof(
+  outerEntry: Entry,
+  nestedEntry: Entry,
+  firstOwnerOnly: boolean
+): Promise<PoisonReceipt> {
+  let receipt: PoisonReceipt | undefined;
+  await withProductionTree(undefined, async (tree) => {
+    const ingressPath = join(tree.root, "lib", "ingress.ts");
+    const source = await readFile(ingressPath, "utf8");
+    await writeFile(
+      ingressPath,
+      injectPoisonRetentionCount(firstOwnerOnly ? replaceEveryOwnerRetentionWithFirstOwnerOnly(source) : source)
+    );
+    receipt = await runPoisonProbe(outerEntry, nestedEntry, tree.root);
+  });
+  if (!receipt) throw new Error("copied poison proof did not produce a receipt");
+  return receipt;
+}
+
+async function runPoisonProbe(
+  outerEntry: Entry,
+  nestedEntry: Entry,
+  productionRoot?: string
+): Promise<PoisonReceipt> {
+  const child = Bun.spawn([process.execPath, childPath, outerEntry, nestedEntry], {
+    stdout: "pipe",
+    stderr: "pipe",
+    ...(productionRoot ? { env: { ...process.env, [PRODUCTION_ROOT_ENV]: productionRoot } } : {})
+  });
   const [exit, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -112,14 +127,24 @@ describe("ingress terminal close poison", () => {
       expect(receipt.laterChecker).toEqual(expectedEntry("checker"));
       expect(receipt.fdAfterPoison).toBeGreaterThan(receipt.fdBaseline);
       expect(receipt.fdAfterLater).toBe(receipt.fdAfterPoison);
+      expect(receipt.liveOwnerCountAtPoison).toBeGreaterThan(1);
+      expect(receipt.retainedOwnerCountAfterContextDeletion).toBeNull();
     }
   });
 
-  test("test-local source mutation rejects retaining only the first poisoned owner", async () => {
-    const source = await readFile(ingressSourcePath, "utf8");
-    expect(poisonRetainsEveryActiveOwner(source)).toBe(true);
-    expect(poisonRetainsEveryActiveOwner(
-      replaceEveryOwnerRetentionWithFirstOwnerOnly(source)
-    )).toBe(false);
+  test("copied-source cardinality receipts kill first-owner-only poison retention", async () => {
+    for (const [outerEntry, nestedEntry] of [
+      ["direct", "direct"],
+      ["direct", "checker"],
+      ["checker", "direct"]
+    ] as const) {
+      const baseline = await runCopiedPoisonProof(outerEntry, nestedEntry, false);
+      expect(baseline.liveOwnerCountAtPoison).toBeGreaterThan(1);
+      expect(baseline.retainedOwnerCountAfterContextDeletion).toBe(baseline.liveOwnerCountAtPoison);
+
+      const mutated = await runCopiedPoisonProof(outerEntry, nestedEntry, true);
+      expect(mutated.liveOwnerCountAtPoison).toBe(baseline.liveOwnerCountAtPoison);
+      expect(mutated.retainedOwnerCountAfterContextDeletion).toBeLessThan(mutated.liveOwnerCountAtPoison);
+    }
   });
 });

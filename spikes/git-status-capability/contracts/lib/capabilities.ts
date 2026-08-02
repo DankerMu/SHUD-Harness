@@ -145,14 +145,6 @@ const DESCRIPTOR_PRIMITIVE_MEDIATION_ERRORS = Object.freeze({
   reentry: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY",
   repeatedInvocation: "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_REPEATED"
 });
-const RETRYABLE_NO_RAW_CLOSE_ERROR_NAME = "ContractCapabilityNoRawCloseError";
-
-class RetryableNoRawCloseError extends Error {
-  constructor() {
-    super("CONTRACT_CAPABILITY_CLOSE_FAILED");
-    this.name = RETRYABLE_NO_RAW_CLOSE_ERROR_NAME;
-  }
-}
 
 type DescriptorPrimitiveMediationState = "inactive" | "callback";
 
@@ -416,7 +408,9 @@ export class ContractCapabilities {
     }
     if (!allowsIngressRawClose(this)) {
       record.state = stateBeforeClose;
-      throw new RetryableNoRawCloseError();
+      // A second ingress query acknowledges that this close never started raw work.
+      allowsIngressRawClose(this);
+      throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
     }
     let closeError: unknown;
     let rawCloseAttempted = false;
@@ -428,15 +422,17 @@ export class ContractCapabilities {
     } catch (error) {
       closeError = error;
     }
+    if (!rawCloseAttempted) {
+      record.state = stateBeforeClose;
+      // A second ingress query acknowledges that this close never started raw work.
+      allowsIngressRawClose(this);
+      throw closeError;
+    }
     let injectedFault = false;
     try {
       injectedFault = this.hooks.closeFault?.(attempt) ?? false;
     } catch (error) {
       hookError = hookError ?? error;
-    }
-    if (!rawCloseAttempted) {
-      record.state = stateBeforeClose;
-      throw new RetryableNoRawCloseError();
     }
     if (injectedFault || closeError || hookError) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
   }

@@ -12,6 +12,9 @@ import type { DescriptorIngressOperation } from "../lib/ingress";
 
 type Assert<Condition extends true> = Condition;
 
+type ExactTuple<Actual extends readonly unknown[], Expected extends readonly unknown[]> =
+  [Actual] extends [Expected] ? [Expected] extends [Actual] ? true : false : false;
+
 type ExpectedCanonicalDescriptorOperation =
   | "open_root"
   | "openat"
@@ -57,10 +60,19 @@ type DescriptorPrimitiveInvocationIsErasedCallback = Assert<
     ? ExpectedDescriptorPrimitiveInvocation extends DescriptorPrimitiveInvocation ? true : false
     : false
 >;
+type DescriptorPrimitiveInvocationParametersAreExact = Assert<
+  ExactTuple<Parameters<DescriptorPrimitiveInvocation>, []>
+>;
 type DescriptorPrimitiveMediatorUsesOnlyCanonicalOperationAndInvocation = Assert<
   DescriptorPrimitiveMediator extends ExpectedDescriptorPrimitiveMediator
     ? ExpectedDescriptorPrimitiveMediator extends DescriptorPrimitiveMediator ? true : false
     : false
+>;
+type DescriptorPrimitiveMediatorParametersAreExact = Assert<
+  ExactTuple<
+    Parameters<DescriptorPrimitiveMediator>,
+    [operation: DescriptorOperation, invoke: DescriptorPrimitiveInvocation]
+  >
 >;
 type ExpectedDescriptorPrimitiveInstaller = (mediator: ExpectedDescriptorPrimitiveMediator) => void;
 type DescriptorPrimitiveInstallerUsesExactMediator = Assert<
@@ -68,11 +80,12 @@ type DescriptorPrimitiveInstallerUsesExactMediator = Assert<
     ? ExpectedDescriptorPrimitiveInstaller extends typeof installDescriptorPrimitiveMediator ? true : false
     : false
 >;
+type DescriptorPrimitiveInstallerParametersAreExact = Assert<
+  ExactTuple<Parameters<typeof installDescriptorPrimitiveMediator>, [mediator: ExpectedDescriptorPrimitiveMediator]>
+>;
 type PublicCloseParameters = Parameters<ContractCapabilities["close"]>;
 type PublicCloseHasOnlyDescriptorAndOwner = Assert<
-  PublicCloseParameters extends [CapabilityDescriptor, CloseOwner]
-    ? [CapabilityDescriptor, CloseOwner] extends PublicCloseParameters ? true : false
-    : false
+  ExactTuple<PublicCloseParameters, [descriptor: CapabilityDescriptor, owner: CloseOwner]>
 >;
 
 if (false) {
@@ -86,6 +99,17 @@ if (false) {
   capabilities.close({} as CapabilityDescriptor, "unretained", () => false);
 }
 
+if (false) {
+  const invocation = null as unknown as DescriptorPrimitiveInvocation;
+  const mediator = null as unknown as DescriptorPrimitiveMediator;
+  // @ts-expect-error Primitive invocation has no control parameters.
+  invocation(() => undefined);
+  // @ts-expect-error Primitive mediation has only operation and invocation parameters.
+  mediator("open_root", invocation, () => undefined);
+  // @ts-expect-error The installer has only one mediator parameter.
+  installDescriptorPrimitiveMediator(mediator, () => undefined);
+}
+
 export type DescriptorOperationTypeProof = readonly [
   CanonicalOperationIncludesEveryPolicyKey,
   CanonicalPolicyIncludesEveryOperation,
@@ -95,7 +119,10 @@ export type DescriptorOperationTypeProof = readonly [
   IngressOperationIncludesEveryExpectation,
   IngressVocabularyIsDistinctFromCanonical,
   DescriptorPrimitiveInvocationIsErasedCallback,
+  DescriptorPrimitiveInvocationParametersAreExact,
   DescriptorPrimitiveMediatorUsesOnlyCanonicalOperationAndInvocation,
+  DescriptorPrimitiveMediatorParametersAreExact,
   DescriptorPrimitiveInstallerUsesExactMediator,
+  DescriptorPrimitiveInstallerParametersAreExact,
   PublicCloseHasOnlyDescriptorAndOwner
 ];
