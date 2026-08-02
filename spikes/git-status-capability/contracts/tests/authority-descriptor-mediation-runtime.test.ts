@@ -22,6 +22,24 @@ type DirectCloseReceipt = Readonly<{
   exactPreInvocationOutcome: boolean | null;
 }>;
 
+type Entry = "direct" | "checker";
+type EntryReceipt = Readonly<{ outcome: string; stdout: string; stderr: string }>;
+type IngressTerminalReceipt = Readonly<{
+  entry: Entry;
+  fault: "raw_throw" | "close_fault_true" | "close_fault_throw";
+  first: EntryReceipt;
+  laterDirect: EntryReceipt;
+  laterChecker: EntryReceipt;
+  target: Readonly<{ owner: string; ordinal: number }> | null;
+  targetMediatedCloseCalls: number;
+  targetRawCloseCalls: number;
+  closedDescriptorDenials: number;
+  capturedCapability: boolean;
+  oldHelperOutcome: string;
+  oldHelperAttempts: number;
+  ingressExports: readonly string[];
+}>;
+
 const childPath = join(import.meta.dir, "authority-descriptor-mediation-runtime-child.ts");
 const ASYNC_ERROR = "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ASYNC";
 const CLOSE_ERROR = "CONTRACT_CAPABILITY_CLOSE_FAILED";
@@ -37,6 +55,13 @@ const NO_RAW_DIRECT_OUTCOMES: Readonly<Record<NoRawCloseMode, string>> = Object.
   hostile: "MEDIATOR_THROWN_PROXY"
 });
 const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
+const CHECK_FAILURE = "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_SCHEMA_INVALID\"}\n";
+const CHECK_SUCCESS = "{\"schema_version\":\"shud.git-status-capability.contract-check-receipt.v1\",\"status\":\"ok\",\"input_kind\":\"source_input_record\"}\n";
+const INGRESS_RUNTIME_EXPORTS = ["ContractError", "parseBoundedJson", "readBoundedFile"] as const;
+const FAILURE_BY_ENTRY: Readonly<Record<Entry, EntryReceipt>> = Object.freeze({
+  direct: Object.freeze({ outcome: "CONTRACT_SCHEMA_INVALID", stdout: "", stderr: "" }),
+  checker: Object.freeze({ outcome: "CHECK:2", stdout: "", stderr: CHECK_FAILURE })
+});
 
 async function runChild(
   args: readonly string[],
@@ -77,8 +102,7 @@ function injectGenericNoRawCloseRewrite(source: string): string {
 function injectOmissionOnlyNoRawRestore(source: string): string {
   const anchor = `    if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      // A second ingress query acknowledges that this close never started raw work.
-      allowsIngressRawClose(this);
+      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }`;
   if (!source.includes(anchor)) throw new Error("selective no-raw restoration mutation anchor is absent");
@@ -86,11 +110,41 @@ function injectOmissionOnlyNoRawRestore(source: string): string {
       if (closeError instanceof Error &&
           closeError.message === "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING") {
         record.state = stateBeforeClose;
-        // A second ingress query acknowledges that this close never started raw work.
-        allowsIngressRawClose(this);
+        ingressCloseControl?.(descriptor, "no_raw");
       }
       throw closeError;
     }`);
+}
+
+function injectMissingNoRawTicketAsRetry(source: string): string {
+  const anchor = "const retry = takeIngressNoRawCloseTicket(context, descriptor, error);";
+  if (!source.includes(anchor)) throw new Error("missing no-raw ticket mutation anchor is absent");
+  return source.replace(
+    anchor,
+    "const retry = takeIngressNoRawCloseTicket(context, descriptor, error) ?? Object.freeze({ outcome: error });"
+  );
+}
+
+
+function assertIngressTerminalReceipt(
+  receipt: IngressTerminalReceipt,
+  entry: Entry,
+  fault: IngressTerminalReceipt["fault"],
+  capturesCapability: boolean
+): void {
+  expect(receipt.entry).toBe(entry);
+  expect(receipt.fault).toBe(fault);
+  expect(receipt.first).toEqual(FAILURE_BY_ENTRY[entry]);
+  expect(receipt.laterDirect).toEqual({ outcome: "NO_ERROR", stdout: "", stderr: "" });
+  expect(receipt.laterChecker).toEqual({ outcome: "CHECK:0", stdout: CHECK_SUCCESS, stderr: "" });
+  expect(receipt.target).not.toBeNull();
+  expect(receipt.targetMediatedCloseCalls).toBe(1);
+  expect(receipt.targetRawCloseCalls).toBe(1);
+  expect(receipt.closedDescriptorDenials).toBe(0);
+  expect(receipt.capturedCapability).toBe(capturesCapability);
+  expect(receipt.oldHelperAttempts).toBe(capturesCapability ? 1 : 0);
+  expect(receipt.oldHelperOutcome).toBe(capturesCapability ? "ABSENT" : "NOT_ATTEMPTED");
+  expect(receipt.ingressExports).toEqual(INGRESS_RUNTIME_EXPORTS);
 }
 
 describe("descriptor primitive mediation runtime", () => {
@@ -236,4 +290,49 @@ describe("descriptor primitive mediation runtime", () => {
       rawCalls: 1
     });
   });
+  test("an ingress raw close throw is terminal and leaves later direct and checker admission usable", async () => {
+    for (const entry of ["direct", "checker"] as const) {
+      assertIngressTerminalReceipt(
+        await receipt<IngressTerminalReceipt>(["ingress_raw_throw", "ordinary", entry]),
+        entry,
+        "raw_throw",
+        false
+      );
+    }
+
+    await withProductionTree(undefined, async (tree) => {
+      const ingressPath = join(tree.root, "lib", "ingress.ts");
+      await writeFile(ingressPath, injectMissingNoRawTicketAsRetry(await readFile(ingressPath, "utf8")));
+      for (const entry of ["direct", "checker"] as const) {
+        const mutated = await receipt<IngressTerminalReceipt>(
+          ["ingress_raw_throw", "ordinary", entry],
+          tree.root
+        );
+        expect(mutated.first).toEqual(FAILURE_BY_ENTRY[entry]);
+        expect(mutated.laterDirect).toEqual(FAILURE_BY_ENTRY.direct);
+        expect(mutated.laterChecker).toEqual(FAILURE_BY_ENTRY.checker);
+        expect(mutated.closedDescriptorDenials).toBe(1);
+        expect(() => {
+          assertIngressTerminalReceipt(mutated, entry, "raw_throw", false);
+        }).toThrow();
+      }
+    });
+  });
+
+  test("a callback that captures an ingress capability cannot restore raw-start retry authority", async () => {
+    for (const [mode, fault] of [
+      ["true", "close_fault_true"],
+      ["throw", "close_fault_throw"]
+    ] as const) {
+      for (const entry of ["direct", "checker"] as const) {
+        assertIngressTerminalReceipt(
+          await receipt<IngressTerminalReceipt>(["capture_abuse", mode, entry]),
+          entry,
+          fault,
+          true
+        );
+      }
+    }
+  });
+
 });

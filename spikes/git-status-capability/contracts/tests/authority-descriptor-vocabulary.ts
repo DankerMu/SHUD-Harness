@@ -6,6 +6,7 @@ import ts from "typescript";
 export const contractsRoot = join(import.meta.dir, "..");
 export const capabilitiesSourcePath = join(contractsRoot, "lib", "capabilities.ts");
 export const checkSourcePath = join(contractsRoot, "check.ts");
+export const ingressSourcePath = join(contractsRoot, "lib", "ingress.ts");
 
 type StructuralDenial =
   | "raw_read_descriptor_not_handle"
@@ -17,6 +18,10 @@ type StructuralDenial =
   | "stale_descriptor_shape"
   | "flags_invalid_shape"
   | "owner_mismatch_shape";
+
+type PrivateIngressControlDenial =
+  | "capabilities_imports_ingress"
+  | "ingress_exports_close_control";
 export type ProductionMutation =
   | "fd0"
   | "at_fdcwd"
@@ -416,6 +421,102 @@ function hasOwnerInequality(method: ts.MethodDeclaration | undefined): boolean {
     comparisons[0]!.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken &&
     isIdentifierNamed(comparisons[0]!.left, "owner") &&
     isIdentifierNamed(comparisons[0]!.right, "expectedOwner");
+}
+
+function hasExportModifier(node: {
+  readonly modifiers?: ts.NodeArray<ts.ModifierLike>;
+}): boolean {
+  return node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+}
+
+function isIngressControlName(name: string): boolean {
+  return /(?:barrier|ticket|raw_?close|close_?control)/i.test(name);
+}
+
+function ingressExportsControl(sourceFile: ts.SourceFile): boolean {
+  for (const statement of sourceFile.statements) {
+    if (ts.isExportDeclaration(statement)) {
+      if (!statement.exportClause || !ts.isNamedExports(statement.exportClause)) continue;
+      if (statement.exportClause.elements.some((specifier) =>
+        isIngressControlName(specifier.name.text) ||
+        (specifier.propertyName ? isIngressControlName(specifier.propertyName.text) : false)
+      )) {
+        return true;
+      }
+      continue;
+    }
+    if (ts.isVariableStatement(statement)) {
+      if (hasExportModifier(statement) && statement.declarationList.declarations.some((declaration) =>
+        ts.isIdentifier(declaration.name) && isIngressControlName(declaration.name.text)
+      )) {
+        return true;
+      }
+      continue;
+    }
+    if (
+      (ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement) ||
+        ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement) ||
+        ts.isEnumDeclaration(statement)) &&
+      hasExportModifier(statement) &&
+      statement.name &&
+      isIngressControlName(statement.name.text)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function capabilitiesImportIngress(sourceFile: ts.SourceFile): boolean {
+  return sourceFile.statements.some((statement) =>
+    ts.isImportDeclaration(statement) &&
+    ts.isStringLiteral(statement.moduleSpecifier) &&
+    statement.moduleSpecifier.text === "./ingress"
+  );
+}
+
+export function privateIngressControlDenials(
+  capabilitiesSource: string,
+  ingressSource: string
+): readonly PrivateIngressControlDenial[] {
+  const capabilities = ts.createSourceFile(
+    "capabilities.ts",
+    capabilitiesSource,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS
+  );
+  const ingress = ts.createSourceFile(
+    "ingress.ts",
+    ingressSource,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS
+  );
+  const denials: PrivateIngressControlDenial[] = [];
+  if (capabilitiesImportIngress(capabilities)) denials.push("capabilities_imports_ingress");
+  if (ingressExportsControl(ingress)) denials.push("ingress_exports_close_control");
+  return denials;
+}
+
+export function mediatedRawPrimitiveOperations(source: string): readonly string[] {
+  const sourceFile = ts.createSourceFile(
+    "capabilities.ts",
+    source,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS
+  );
+  const operations: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && isIdentifierNamed(node.expression, "invokeDescriptorPrimitive")) {
+      const operation = node.arguments[0];
+      if (operation && ts.isStringLiteral(operation)) operations.push(operation.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return operations;
 }
 
 export function structuralDescriptorDenials(source: string): readonly StructuralDenial[] {

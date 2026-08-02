@@ -143,14 +143,14 @@ function moveRawCloseBeforeCloseAttempt(source: string): string {
     } catch (error) {
       hookError = error;
     }
-    if (!allowsIngressRawClose(this)) {
+    let rawCloseAttempted = false;
+    const ingressCloseControl = this.#ingressCloseControl;
+    if (ingressCloseControl?.(descriptor, "before_raw") === false) {
       record.state = stateBeforeClose;
-      // A second ingress query acknowledges that this close never started raw work.
-      allowsIngressRawClose(this);
+      ingressCloseControl(descriptor, "no_raw");
       throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
     }
     let closeError: unknown;
-    let rawCloseAttempted = false;
     try {
       invokeDescriptorPrimitive("close_sync", () => {
         rawCloseAttempted = true;
@@ -161,8 +161,7 @@ function moveRawCloseBeforeCloseAttempt(source: string): string {
     }
     if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      // A second ingress query acknowledges that this close never started raw work.
-      allowsIngressRawClose(this);
+      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }`;
   if (!source.includes(anchor)) throw new Error("pre-hook raw close mutation anchor is absent");
@@ -185,16 +184,15 @@ function moveRawCloseBeforeCloseAttempt(source: string): string {
     } catch (error) {
       hookError = error;
     }
-    if (!allowsIngressRawClose(this)) {
+    const ingressCloseControl = this.#ingressCloseControl;
+    if (ingressCloseControl?.(descriptor, "before_raw") === false) {
       record.state = stateBeforeClose;
-      // A second ingress query acknowledges that this close never started raw work.
-      allowsIngressRawClose(this);
+      ingressCloseControl(descriptor, "no_raw");
       throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
     }
     if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      // A second ingress query acknowledges that this close never started raw work.
-      allowsIngressRawClose(this);
+      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }`);
 }
@@ -269,8 +267,7 @@ function expectedEntry(entry: Entry): EntryOutcome {
 function injectOmissionOnlyNoRawRestore(source: string): string {
   const anchor = `    if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      // A second ingress query acknowledges that this close never started raw work.
-      allowsIngressRawClose(this);
+      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }`;
   if (!source.includes(anchor)) throw new Error("selective no-raw restoration mutation anchor is absent");
@@ -278,8 +275,7 @@ function injectOmissionOnlyNoRawRestore(source: string): string {
       if (closeError instanceof Error &&
           closeError.message === "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING") {
         record.state = stateBeforeClose;
-        // A second ingress query acknowledges that this close never started raw work.
-        allowsIngressRawClose(this);
+        ingressCloseControl?.(descriptor, "no_raw");
       }
       throw closeError;
     }`);

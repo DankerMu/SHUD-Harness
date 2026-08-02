@@ -1,6 +1,5 @@
 import { dlopen } from "bun:ffi";
 import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";
-import { allowsIngressRawClose } from "./ingress";
 
 export type { BigIntStats };
 
@@ -68,6 +67,11 @@ export type CapabilityHooks = Readonly<{
   onAuthorityViolation?: (fault: ContractAuthorityFault) => void;
   onDescriptorAuthorityDenial?: (denial: DescriptorAuthorityDenial) => void;
 }>;
+
+type IngressCloseControl = (
+  descriptor: CapabilityDescriptor,
+  stage: "before_raw" | "no_raw"
+) => boolean | void;
 
 const OPTIONAL_FS_CONSTANTS = constants as typeof constants & Readonly<{ O_CLOEXEC?: number }>;
 export const FILE_OPEN_FLAGS = constants.O_RDONLY | (OPTIONAL_FS_CONSTANTS.O_CLOEXEC ?? 0) |
@@ -285,8 +289,14 @@ export class ContractCapabilities {
   #nextGeneration = 0;
   #closeOrdinal = 0;
   #admissionSealed = false;
+  readonly #ingressCloseControl: IngressCloseControl | undefined;
+  private readonly hooks: CapabilityHooks;
 
-  constructor(private readonly hooks: CapabilityHooks = {}) {}
+  constructor(hooks?: CapabilityHooks);
+  constructor(hooks: CapabilityHooks = {}, ingressCloseControl?: IngressCloseControl) {
+    this.hooks = hooks;
+    this.#ingressCloseControl = ingressCloseControl;
+  }
 
   sealAdmission(): void {
     assertDescriptorPrimitiveMediationInactive();
@@ -406,14 +416,14 @@ export class ContractCapabilities {
     } catch (error) {
       hookError = error;
     }
-    if (!allowsIngressRawClose(this)) {
+    let rawCloseAttempted = false;
+    const ingressCloseControl = this.#ingressCloseControl;
+    if (ingressCloseControl?.(descriptor, "before_raw") === false) {
       record.state = stateBeforeClose;
-      // A second ingress query acknowledges that this close never started raw work.
-      allowsIngressRawClose(this);
+      ingressCloseControl(descriptor, "no_raw");
       throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
     }
     let closeError: unknown;
-    let rawCloseAttempted = false;
     try {
       invokeDescriptorPrimitive("close_sync", () => {
         rawCloseAttempted = true;
@@ -424,8 +434,7 @@ export class ContractCapabilities {
     }
     if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      // A second ingress query acknowledges that this close never started raw work.
-      allowsIngressRawClose(this);
+      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }
     let injectedFault = false;

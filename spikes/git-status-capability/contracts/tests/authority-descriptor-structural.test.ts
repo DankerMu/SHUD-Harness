@@ -3,6 +3,9 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import {
   capabilitiesSourcePath,
+  ingressSourcePath,
+  mediatedRawPrimitiveOperations,
+  privateIngressControlDenials,
   structuralDescriptorDenials,
   withCompiledProductionTree,
   type ProductionMutation
@@ -209,6 +212,31 @@ const structuralDescriptorCounterfeit = [
       "flags_invalid_shape",
       "owner_mismatch_shape"
     ]);
+  });
+
+  test("ingress close control is private and raw mediation remains a five-primitive seam", async () => {
+    const [capabilitiesSource, ingressSource] = await Promise.all([
+      readFile(capabilitiesSourcePath, "utf8"),
+      readFile(ingressSourcePath, "utf8")
+    ]);
+    expect(privateIngressControlDenials(capabilitiesSource, ingressSource)).toEqual([]);
+    expect(mediatedRawPrimitiveOperations(capabilitiesSource)).toEqual([
+      "open_root",
+      "openat",
+      "fstat_sync",
+      "read_sync",
+      "close_sync"
+    ]);
+
+    expect(privateIngressControlDenials(
+      capabilitiesSource,
+      `${ingressSource}\nexport const allowsIngressRawClose = (): boolean => true;\n` +
+        "export const takeIngressNoRawCloseTicket = (): undefined => undefined;\n"
+    )).toEqual(["ingress_exports_close_control"]);
+    expect(privateIngressControlDenials(
+      `import "./ingress";\n${capabilitiesSource}`,
+      ingressSource
+    )).toEqual(["capabilities_imports_ingress"]);
   });
 
   test("the checked-in source keeps only private retained-descriptor operands and mediated raw primitives", async () => {

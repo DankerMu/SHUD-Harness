@@ -7,13 +7,20 @@ import { pathToFileURL } from "node:url";
 import type {
   CapabilityDescriptor,
   CapabilityHooks,
+  CloseAttempt,
   ContractCapabilities,
   DescriptorPrimitiveMediator
 } from "../lib/capabilities";
 
 type ResponseMode = "ordinary" | "value" | "throw" | "sentinel" | "thenable" | "proxy";
 type NoRawCloseMode = "omission" | "value" | "async" | "thenable" | "proxy" | "sentinel" | "hostile";
-type Scenario = "close_retry" | "direct_close" | "direct_no_raw_retry" | "reuse";
+type Scenario =
+  | "close_retry"
+  | "direct_close"
+  | "direct_no_raw_retry"
+  | "reuse"
+  | "ingress_raw_throw"
+  | "capture_abuse";
 
 const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
 const productionRoot = process.env[PRODUCTION_ROOT_ENV];
@@ -28,6 +35,24 @@ type CapabilitiesModule = Readonly<{
   ContractCapabilities: new (hooks?: CapabilityHooks) => ContractCapabilities;
   installDescriptorPrimitiveMediator: (mediator: DescriptorPrimitiveMediator) => void;
 }>;
+
+type Entry = "direct" | "checker";
+type EntryReceipt = Readonly<{ outcome: string; stdout: string; stderr: string }>;
+type IngressModule = Readonly<{
+  readBoundedFile: (
+    path: string,
+    maximum: number,
+    hooks?: CapabilityHooks
+  ) => Promise<Uint8Array>;
+}>;
+type CheckerModule = Readonly<{
+  runCheckForTest: (
+    args: readonly string[],
+    io: Readonly<{ stdout: (text: string) => void; stderr: (text: string) => void }>,
+    hooks: CapabilityHooks
+  ) => Promise<number>;
+}>;
+type IngressRuntimeModules = Readonly<{ ingress: IngressModule; checker: CheckerModule }>;
 
 const [scenario, responseModeArgument, entryArgument] = process.argv.slice(2) as [
   Scenario | undefined,
@@ -74,13 +99,18 @@ function errorMessage(action: () => unknown): Readonly<{ message: string; exactR
   }
 }
 
-function installCloseProbe(shouldThrow: boolean, throwOnlyOnce = false): void {
+function installCloseProbe(
+  shouldThrow: boolean,
+  throwOnlyOnce = false,
+  onRawClose?: () => void
+): void {
   const originalCloseSync = originalFs.closeSync;
   let thrown = false;
   mock.module("node:fs", () => ({
     ...originalFs,
     closeSync(...args: Parameters<typeof originalCloseSync>) {
       rawCloseCalls += 1;
+      onRawClose?.();
       if (!shouldThrow || (throwOnlyOnce && thrown)) return originalCloseSync(...args);
       thrown = true;
       originalCloseSync(...args);
@@ -92,6 +122,68 @@ function installCloseProbe(shouldThrow: boolean, throwOnlyOnce = false): void {
 async function loadCapabilities(): Promise<CapabilitiesModule> {
   // The child must install Bun's raw syscall mocks before this module binds its imports.
   return await import(libraryModuleSpecifier("capabilities")) as CapabilitiesModule;
+}
+
+async function loadIngressRuntimeModules(): Promise<IngressRuntimeModules> {
+  const [ingress, checker] = await Promise.all([
+    import(libraryModuleSpecifier("ingress")),
+    import(libraryModuleSpecifier("checker"))
+  ]);
+  return Object.freeze({
+    ingress: ingress as IngressModule,
+    checker: checker as CheckerModule
+  });
+}
+
+async function runIngressEntry(
+  entry: Entry,
+  modules: IngressRuntimeModules,
+  hooks: CapabilityHooks
+): Promise<EntryReceipt> {
+  const input = join(import.meta.dir, "../fixtures/valid/source-input-record-paired-surrogate.json");
+  if (entry === "checker") {
+    let stdout = "";
+    let stderr = "";
+    const exit = await modules.checker.runCheckForTest(
+      ["--input", input, "--kind", "source_input_record"],
+      { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      hooks
+    );
+    return Object.freeze({ outcome: `CHECK:${exit}`, stdout, stderr });
+  }
+  try {
+    await modules.ingress.readBoundedFile(input, 8_192, hooks);
+    return Object.freeze({ outcome: "NO_ERROR", stdout: "", stderr: "" });
+  } catch (error) {
+    return Object.freeze({
+      outcome: error instanceof Error ? error.message : String(error),
+      stdout: "",
+      stderr: ""
+    });
+  }
+}
+
+type CapturedIngressOwner = Readonly<{ capabilities: ContractCapabilities }>;
+let capturedIngressCapabilities: ContractCapabilities | undefined;
+
+function isCapturedIngressOwner(value: unknown): value is CapturedIngressOwner {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Readonly<Record<string, unknown>>;
+  return typeof candidate.capabilities === "object" && candidate.capabilities !== null;
+}
+
+function installCapabilityCapture(): void {
+  const originalMapSet = Map.prototype.set;
+  Map.prototype.set = (function (
+    this: Map<unknown, unknown>,
+    key: unknown,
+    value: unknown
+  ): Map<unknown, unknown> {
+    if (!capturedIngressCapabilities && isCapturedIngressOwner(value)) {
+      capturedIngressCapabilities = value.capabilities;
+    }
+    return Reflect.apply(originalMapSet, this, [key, value]) as Map<unknown, unknown>;
+  }) as typeof Map.prototype.set;
 }
 
 function closeQuietly(
@@ -296,6 +388,106 @@ async function runReuse(): Promise<unknown> {
   };
 }
 
+type IngressTerminalFault = "raw_throw" | "close_fault_true" | "close_fault_throw";
+
+async function runIngressTerminalFailure(
+  fault: IngressTerminalFault,
+  captureCapability: boolean
+): Promise<unknown> {
+  const entry = entryArgument;
+  if (!entry) throw new Error("ingress terminal child requires a direct or checker entry");
+
+  let targetAttempt: CloseAttempt | undefined;
+  let activeTargetAttempt: CloseAttempt | undefined;
+  let targetMediatedCloseCalls = 0;
+  let targetRawCloseCalls = 0;
+  let closedDescriptorDenials = 0;
+  let targetPhase = true;
+  let oldHelperOutcome = "NOT_ATTEMPTED";
+  let oldHelperAttempts = 0;
+
+  installCloseProbe(fault === "raw_throw", true, () => {
+    if (activeTargetAttempt?.ordinal === targetAttempt?.ordinal) targetRawCloseCalls += 1;
+  });
+  if (captureCapability) installCapabilityCapture();
+
+  const [capabilities, modules] = await Promise.all([
+    loadCapabilities(),
+    loadIngressRuntimeModules()
+  ]);
+  const hooks: CapabilityHooks = Object.freeze({
+    onCloseAttempt: (attempt) => {
+      if (!targetPhase) {
+        activeTargetAttempt = undefined;
+        return;
+      }
+      activeTargetAttempt = attempt;
+      targetAttempt ??= attempt;
+      if (!captureCapability || oldHelperAttempts !== 0) return;
+      oldHelperAttempts += 1;
+      if (!capturedIngressCapabilities) {
+        oldHelperOutcome = "CAPTURE_MISSING";
+        return;
+      }
+      const oldHelper = (modules.ingress as unknown as Readonly<Record<string, unknown>>)
+        .allowsIngressRawClose;
+      if (typeof oldHelper !== "function") {
+        oldHelperOutcome = "ABSENT";
+        return;
+      }
+      try {
+        (oldHelper as (capabilities: ContractCapabilities) => unknown)(capturedIngressCapabilities);
+        oldHelperOutcome = "CALLED";
+      } catch (error) {
+        oldHelperOutcome = error instanceof Error ? `THREW:${error.message}` : "THREW";
+      }
+    },
+    closeFault: (attempt) => {
+      if (fault === "raw_throw" || attempt.ordinal !== targetAttempt?.ordinal || !targetPhase) return false;
+      if (fault === "close_fault_throw") throw new Error("POST_RAW_CLOSE_FAULT_SENTINEL");
+      return true;
+    },
+    onDescriptorAuthorityDenial: (denial) => {
+      if (denial.operation === "close_sync" && denial.reason === "closed_descriptor") {
+        closedDescriptorDenials += 1;
+      }
+    }
+  });
+  capabilities.installDescriptorPrimitiveMediator((operation, invoke): undefined => {
+    if (operation === "close_sync" && activeTargetAttempt?.ordinal === targetAttempt?.ordinal) {
+      targetMediatedCloseCalls += 1;
+    }
+    invoke();
+    return undefined;
+  });
+
+  const first = await runIngressEntry(entry, modules, hooks);
+  targetPhase = false;
+  activeTargetAttempt = undefined;
+  const laterDirect = await runIngressEntry("direct", modules, hooks);
+  const laterChecker = await runIngressEntry("checker", modules, hooks);
+  return {
+    entry,
+    fault,
+    first,
+    laterDirect,
+    laterChecker,
+    target: targetAttempt ? { owner: targetAttempt.owner, ordinal: targetAttempt.ordinal } : null,
+    targetMediatedCloseCalls,
+    targetRawCloseCalls,
+    closedDescriptorDenials,
+    capturedCapability: Boolean(capturedIngressCapabilities),
+    oldHelperOutcome,
+    oldHelperAttempts,
+    ingressExports: Object.keys(modules.ingress).sort()
+  };
+}
+
+
+if (scenario === "capture_abuse" && responseModeArgument !== "true" && responseModeArgument !== "throw") {
+  throw new Error("capture abuse child requires a true or throw closeFault mode");
+}
+
 const receipt = scenario === "close_retry"
   ? await runCloseRetry()
   : scenario === "direct_close"
@@ -304,5 +496,12 @@ const receipt = scenario === "close_retry"
   ? await runDirectNoRawRetry()
   : scenario === "reuse"
   ? await runReuse()
+  : scenario === "ingress_raw_throw"
+  ? await runIngressTerminalFailure("raw_throw", false)
+  : scenario === "capture_abuse"
+  ? await runIngressTerminalFailure(
+    responseModeArgument === "true" ? "close_fault_true" : "close_fault_throw",
+    true
+  )
   : (() => { throw new Error(`unsupported mediation runtime scenario: ${scenario ?? "missing"}`); })();
 process.stdout.write(`${JSON.stringify(receipt)}\n`);

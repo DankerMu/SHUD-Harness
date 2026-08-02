@@ -13,25 +13,16 @@ import {
 
 const contractErrors = new WeakSet<object>();
 
-const ingressCloseBarriers = new WeakMap<ContractCapabilities, () => boolean>();
+type IngressCloseControl = (
+  descriptor: CapabilityDescriptor,
+  stage: "before_raw" | "no_raw"
+) => boolean | void;
+type IngressCapabilitiesConstructor = new (
+  hooks: CapabilityHooks,
+  closeControl: IngressCloseControl
+) => ContractCapabilities;
 
-const ingressNoRawCloseTickets = new WeakMap<ContractCapabilities, boolean>();
-
-function registerIngressCloseBarrier(capabilities: ContractCapabilities, barrier: () => boolean): void {
-  ingressCloseBarriers.set(capabilities, barrier);
-}
-
-export function allowsIngressRawClose(capabilities: ContractCapabilities): boolean {
-  const barrier = ingressCloseBarriers.get(capabilities);
-  if (!barrier) return true;
-  // ContractCapabilities queries once before raw work and again only when it never starts.
-  if (ingressNoRawCloseTickets.has(capabilities)) {
-    ingressNoRawCloseTickets.set(capabilities, true);
-  } else {
-    ingressNoRawCloseTickets.set(capabilities, false);
-  }
-  return barrier();
-}
+const IngressContractCapabilities = ContractCapabilities as unknown as IngressCapabilitiesConstructor;
 
 export type ContractErrorCode =
   | "CONTRACT_BYTES_LIMIT"
@@ -80,6 +71,7 @@ type ActiveIngressContext = {
   readonly liveOwners: Map<CapabilityDescriptor, LiveIngressOwner>;
   readonly closingDescriptors: CapabilityDescriptor[];
   readonly hookFailedDescriptors: Set<CapabilityDescriptor>;
+  noRawCloseTicket: CapabilityDescriptor | undefined;
 };
 
 const activeIngressContexts = new Set<ActiveIngressContext>();
@@ -92,6 +84,11 @@ function assertIngressWorkAvailable(): void {
 function registerIngressContext(hooks: DescriptorIngressHooks): ActiveIngressContext {
   assertIngressWorkAvailable();
   let context!: ActiveIngressContext;
+  const closeControl: IngressCloseControl = (descriptor, stage) => {
+    if (context.closingDescriptors.at(-1) !== descriptor) return false;
+    if (stage === "before_raw") return !descriptorIngressPoisoned;
+    context.noRawCloseTicket = descriptor;
+  };
   const guardedHooks: CapabilityHooks = Object.freeze({
     closeFault: (attempt) => hooks.closeFault?.(attempt) ?? false,
     onCloseAttempt: (attempt) => {
@@ -111,12 +108,12 @@ function registerIngressContext(hooks: DescriptorIngressHooks): ActiveIngressCon
     }
   });
   context = {
-    capabilities: new ContractCapabilities(guardedHooks),
+    capabilities: new IngressContractCapabilities(guardedHooks, closeControl),
     liveOwners: new Map<CapabilityDescriptor, LiveIngressOwner>(),
     closingDescriptors: [],
-    hookFailedDescriptors: new Set<CapabilityDescriptor>()
+    hookFailedDescriptors: new Set<CapabilityDescriptor>(),
+    noRawCloseTicket: undefined
   };
-  registerIngressCloseBarrier(context.capabilities, () => !descriptorIngressPoisoned);
   activeIngressContexts.add(context);
   return context;
 }
@@ -161,16 +158,17 @@ function poisonIngressAndRetainActiveOwners(): void {
     }
   }
 }
-function clearIngressCloseTicket(capabilities: ContractCapabilities): void {
-  ingressNoRawCloseTickets.delete(capabilities);
+function clearIngressCloseTicket(context: ActiveIngressContext): void {
+  context.noRawCloseTicket = undefined;
 }
 
 function takeIngressNoRawCloseTicket(
-  capabilities: ContractCapabilities,
+  context: ActiveIngressContext,
+  descriptor: CapabilityDescriptor,
   outcome: unknown
 ): IngressNoRawCloseRetry | undefined {
-  const noRaw = ingressNoRawCloseTickets.get(capabilities) === true;
-  ingressNoRawCloseTickets.delete(capabilities);
+  const noRaw = context.noRawCloseTicket === descriptor;
+  context.noRawCloseTicket = undefined;
   return noRaw ? Object.freeze({ outcome }) : undefined;
 }
 
@@ -192,15 +190,16 @@ function closeWithRetry(
   if (descriptorIngressPoisoned) return true;
   let hookFailed = false;
   for (let attempt = 0; attempt < NO_RAW_CLOSE_RETRY_LIMIT; attempt += 1) {
+    clearIngressCloseTicket(context);
     context.closingDescriptors.push(descriptor);
     try {
       context.capabilities.close(descriptor, owner);
-      clearIngressCloseTicket(context.capabilities);
+      clearIngressCloseTicket(context);
       hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
       return settleClosedIngressOwner(context, descriptor, hookFailed);
     } catch (error) {
       hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
-      const retry = takeIngressNoRawCloseTicket(context.capabilities, error);
+      const retry = takeIngressNoRawCloseTicket(context, descriptor, error);
       if (!retry) return settleClosedIngressOwner(context, descriptor, true);
       if (descriptorIngressPoisoned) return true;
       if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
