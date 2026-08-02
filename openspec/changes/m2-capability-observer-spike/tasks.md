@@ -76,6 +76,33 @@ descriptor-provenance allowlist plus the fd-0 and Linux `AT_FDCWD` mutations.
   - Verification: focused structural/runtime/direct tests plus the spike-local no-emit vocabulary proof, both public direct commands, typecheck, full `check`, strict OpenSpec, diff/scope/untracked/submodule hygiene, and Darwin/Linux Bun 1.2.19 receipts are green.
   - Handoff: #176 may consume only `CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and immutable `DESCRIPTOR_OPERATION_POLICY` from `contracts/lib/capabilities.ts`; the registry stays private, `DescriptorIngressOperation` remains ingress-only, and #176 cannot broaden descriptor origin, flags, lifecycle, event fields, or public receipts.
 
+### Issue #185 descriptor mediation runtime replacement
+
+This expanded/high fixture is the human-selected runtime child of PR #184's
+terminal ceiling split. Its minimal mergeable slice is the #175-owned one-shot
+five-primitive synchronous mediation seam plus only raw-outcome and
+terminal-close corrections and their causal process proof.
+
+- [x] #185.A Land the exact private primitive mediation seam.
+  - In: `contracts/lib/capabilities.ts`, the minimum private close barrier in `contracts/lib/ingress.ts`, focused process helpers/tests, and this #185 overlay.
+  - Export only runtime `installDescriptorPrimitiveMediator` and erased `DescriptorPrimitiveInvocation`/`DescriptorPrimitiveMediator`; the mediator's exact return is `undefined`; preserve the prior public/type surface otherwise.
+  - Mediate only `openSync`, resolved FFI `openat`, `fstatSync`, `readSync`, and `closeSync`. Keep validation, denials, loaders, issuance, lifecycle, and hooks outside. The ephemeral invocation is synchronous, exactly once, raw-result/error private, and returns `undefined`.
+  - Preserve no-installer behavior, exact callback reentry, stable missing/async/repeated/expired errors, raw outcome precedence, no raw fallback, and all existing descriptor lifecycle/error receipts. A post-invocation throw or non-`undefined` return cannot replace the saved raw outcome and is ignored without property access.
+  - Process-isolated installer/typeproof row proves invalid -> valid -> valid ordering, stable errors, validation before latch, frozen/non-constructible shape, standard own/inherited surface, and no hidden authority property.
+- [x] #185.B Enforce the trusted synchronous producer contract.
+  - The mediator MUST return exactly `undefined`. A pre-invocation non-`undefined` value emits stable ASYNC with zero raw calls; after raw start, any returned/thrown value is non-authoritative and receives no property inspection or Promise assimilation.
+  - Promise return/throw is producer misuse outside the seam contract; a producer must pre-handle its own rejection. The descriptor owner MUST NOT install global rejection listeners, rewrite constructors/species, call `Bun.peek` as a sink, or claim to settle arbitrary hostile Promises.
+  - Process-isolated five-primitive rows prove raw return/throw followed by a pre-handled rejected Promise cannot replace the exact raw result/error/count or leak a resource; pre-invocation pre-handled Promise fails stable ASYNC with zero raw calls; ordinary thenable/Proxy getters remain unread. Direct/checker rows preserve exact public receipts.
+- [x] #185.C Make ingress terminal close atomic.
+  - Ingress retains every unsettled owner and retries only private no-raw close failure, at most twice. A second refusal atomically snapshots live owners and poisons all active/later ingress.
+  - Recheck poison after every untrusted pre-raw callback, including `onCloseAttempt`, before ingress-owned raw `closeSync`. Nested poison forbids the outer raw close, third attempt, snapshot deletion, later OS work, and retained-owner/fd growth while preserving primary/cleanup precedence.
+  - Direct/direct, direct/checker, and checker/direct process interleavings prove exact poison transition, zero post-poison raw operations, fixed live-owner/fd cardinality, strong retention, and existing schema-invalid later-admission receipts.
+- [x] #185.D Verify and hand off the runtime child.
+  - Darwin and read-only Linux Bun 1.2.19 focused contracts and descriptor type proof pass; both public direct commands emit exact LF-terminated receipts; full `check`, strict OpenSpec, and diff/scope/submodule hygiene pass.
+  - Execute a non-persisted source mutation of only the #185 runtime owner against only the focused #185 runtime rows, restore exact source immediately, and record red exit plus restoration/green receipts in orchestrator evidence. #185 MUST NOT add or own a reusable causal-red command/script, complete transcript, manifest, or durable receipt; those artifacts belong exclusively to #186.
+  - Append exactly one PR #184 `ceiling-split` accountability line naming children #185/#186 to `docs/review-loop-log.jsonl`; the scope oracle permits only that canonical-doc path and rejects every other `docs/**` delta.
+  - Handoff: #186 may add only proof/analyzer/test/evidence artifacts over this runtime seam. #176 remains blocked until #186 completes. Its eventual allowlist is the union of #175's five existing exports (`CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, `DESCRIPTOR_OPERATION_POLICY`) and #185's three additions (`installDescriptorPrimitiveMediator`, `DescriptorPrimitiveInvocation`, `DescriptorPrimitiveMediator`); no other import/export is allowed.
+  - Out: reusable/full causal-red procedure and durable transcript/receipt, complete acquisition graph, suspended `afterAdmission`, and all-`observe` proof (#186); #176/#177/#178 implementation; production packages/workflows; network security; locks; submodules; `design.md`.
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.

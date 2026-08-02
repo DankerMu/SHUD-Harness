@@ -13,7 +13,10 @@ type TypeProofMutation =
   | "policy_extra"
   | "policy_missing"
   | "ingress_extra"
-  | "ingress_missing";
+  | "ingress_missing"
+  | "primitive_invocation_result"
+  | "primitive_mediator_operation"
+  | "primitive_mediator_result";
 
 function compilerOptions(): ts.CompilerOptions {
   const parsed = ts.getParsedCommandLineOfConfigFile(typeConfigPath, {}, ts.sys);
@@ -33,6 +36,24 @@ function mutateVocabularySource(
   source: string,
   mutation: TypeProofMutation
 ): string {
+  if (mutation === "primitive_invocation_result") {
+    return source.replace(
+      "export type DescriptorPrimitiveInvocation = () => unknown;",
+      "export type DescriptorPrimitiveInvocation = () => number;"
+    );
+  }
+  if (mutation === "primitive_mediator_operation") {
+    return source.replace(
+      "  operation: DescriptorOperation,\n  invoke: DescriptorPrimitiveInvocation\n) => undefined;",
+      "  operation: \"open_root\",\n  invoke: DescriptorPrimitiveInvocation\n) => undefined;"
+    );
+  }
+  if (mutation === "primitive_mediator_result") {
+    return source.replace(
+      "  operation: DescriptorOperation,\n  invoke: DescriptorPrimitiveInvocation\n) => undefined;",
+      "  operation: DescriptorOperation,\n  invoke: DescriptorPrimitiveInvocation\n) => string;"
+    );
+  }
   if (mutation === "descriptor_extra") {
     return source.replace('  | "close_sync";', '  | "close_sync"\n  | "unexpected_operation";');
   }
@@ -82,7 +103,7 @@ async function compileMutatedProof(mutation: TypeProofMutation): Promise<readonl
 }
 
 describe("descriptor operation type proof", () => {
-  test("the spike-local no-emit witness accepts only the exact canonical and ingress vocabularies", async () => {
+  test("the spike-local no-emit witness accepts only exact descriptor vocabulary and erased mediator types", async () => {
     expect(compileNoEmit(typeProofPath).length).toBe(0);
 
     for (const mutation of [
@@ -91,7 +112,10 @@ describe("descriptor operation type proof", () => {
       "policy_extra",
       "policy_missing",
       "ingress_extra",
-      "ingress_missing"
+      "ingress_missing",
+      "primitive_invocation_result",
+      "primitive_mediator_operation",
+      "primitive_mediator_result"
     ] as const) {
       const diagnostics = await compileMutatedProof(mutation);
       expect(diagnostics.length).toBeGreaterThan(0);

@@ -5,12 +5,13 @@ The repository SHALL implement the Git status capability observer only under the
 spike ownership boundary. The spike MUST NOT be imported, invoked, packaged, or
 shipped by a production package; MUST NOT change StackLock schema/runtime behavior;
 MUST NOT change production manifests, lockfiles, imports, generated schemas,
-release assembly, existing workflows, canonical docs, or the four read-only
-submodules; and MUST NOT close Issue #132 or restore PR #133 behavior.
+release assembly, existing workflows, canonical docs other than the single
+`docs/review-loop-log.jsonl` PR #184 terminal-accountability append, or the four
+read-only submodules; and MUST NOT close Issue #132 or restore PR #133 behavior.
 
 #### Scenario: Spike executes without production integration
-- **WHEN** the spike runner, native prototype, fixtures, validator, evidence, and isolated CI entry are added
-- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, and the Phase-0.5-only `openspec/project-profile.md` update
+- **WHEN** the spike runner, native prototype, fixtures, validator, evidence, isolated CI entry, and Issue #185 governance append are added
+- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, the Phase-0.5-only `openspec/project-profile.md` update, and `docs/review-loop-log.jsonl`; that log contains exactly one `pr:184`, `outcome:"ceiling-split"`, `children:[185,186]` record and no other canonical-doc delta is allowed
 
 #### Scenario: Accepted evidence is produced
 - **WHEN** a valid complete run yields terminal decision `accepted`
@@ -305,6 +306,92 @@ primary-error/cleanup precedence, and zero target bytes.
 - **WHEN** either direct input kind uses only the exact lifecycle and flags
 - **THEN** its #171 receipt, four-SHA/capacity behavior, cleanup/error precedence, no-side-effect contract, and descriptor baseline remain unchanged on Darwin and Linux Bun 1.2.19
 
+
+### Requirement: Descriptor primitive mediation preserves raw authority
+
+The descriptor owner SHALL expose exactly one new runtime export,
+module-instance one-shot `installDescriptorPrimitiveMediator`, and exactly two
+type-only exports, `DescriptorPrimitiveInvocation = () => unknown` and
+`DescriptorPrimitiveMediator = (operation: DescriptorOperation, invoke:
+DescriptorPrimitiveInvocation) => undefined`. It MUST NOT expose registry state,
+raw descriptors/callables/results/errors, lifecycle internals, or any
+reset/uninstall/replacement/general authority path.
+
+#### Scenario: Invalid installation does not consume the one-shot
+- **WHEN** an isolated module instance receives an invalid mediator, then a valid mediator, then a second valid mediator
+- **THEN** the invalid call emits the stable validation error without latching, the first valid call succeeds, the second valid call emits `CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ALREADY_INSTALLED`, and the exported installer is frozen, non-constructible, and exposes no nonstandard authority-bearing property
+
+Only the canonical raw `openSync`, resolved FFI `openat`, `fstatSync`,
+`readSync`, and `closeSync` callsites MAY execute inside the mediator callback.
+Validation, denial, acquisition, issuance, hooks, and lifecycle settlement MUST
+remain outside. The invocation MUST be synchronous, callback-scoped,
+exactly-once, return only `undefined`, and keep all raw values private. Every
+public capability entry MUST reject reentry before observable work while the
+callback is active.
+
+A raw invocation begun before mediator return SHALL own the original capability
+outcome. Later mediator throws, repeated calls, or non-`undefined` returns MUST
+NOT replace the raw return/error, skip issuance or terminal settlement, or
+expose the raw object. Without a raw start, omission, non-`undefined` return,
+deferred use, and pre-invocation callback throw MUST keep their stable error and
+perform zero raw calls. The invocation MUST expire before classification. The
+owner MUST NOT read or assimilate Promise, thenable, `constructor`,
+`Symbol.species`, or Proxy-controlled properties.
+
+The mediator is a trusted synchronous producer and MUST return exactly
+`undefined`. Returning or throwing a Promise is outside this contract; the
+producer MUST handle its own rejection before exposure. The owner MUST NOT use
+a global rejection listener, constructor/species rewrite, or `Bun.peek` as a
+rejection sink, and MUST NOT claim to modify an arbitrary Promise's internal
+handled state.
+
+#### Scenario: Pre-invocation non-undefined return fails without inspection
+- **WHEN** the mediator returns a pre-handled rejected Promise, ordinary thenable, or Proxy before calling `invoke`
+- **THEN** the owner reads no property, emits the stable async protocol error, performs zero raw calls, and leaves rejection handling owned by the producer
+
+#### Scenario: Post-invocation values cannot replace raw authority
+- **WHEN** any of the five raw primitives returns or throws and the mediator then returns a pre-handled rejected Promise, ordinary thenable, or Proxy, or throws any value
+- **THEN** the exact raw return/error and raw-call count remain authoritative, issuance/terminal settlement completes, no resource is orphaned, and no mediator value property is read
+
+#### Scenario: Promise misuse is not globally suppressed
+- **WHEN** a producer violates the exact-`undefined` contract with a Promise
+- **THEN** the owner installs no global rejection listener, performs no constructor/species rewrite or `Bun.peek` sink, and promises no handled-state mutation; compile-time typeproof rejects a conforming mediator declaration with that return type
+
+### Requirement: Ingress terminal close is atomic across untrusted callbacks
+
+Ingress SHALL retain every live unsettled close owner strongly and retry only
+the private no-raw close classification, at most twice total. A second
+persistent refusal MUST atomically snapshot all live owners and poison every
+active and later ingress. Before an ingress-owned raw `closeSync` starts, the
+owner MUST recheck poison after each untrusted pre-raw callback, including
+`onCloseAttempt`.
+
+If nested work poisons ingress, the outer operation MUST perform no raw close,
+third attempt, snapshot release, later OS operation, or retained-owner/fd
+growth. The owner remains strongly retained. Existing primary-versus-cleanup
+error precedence and later direct/checker schema-invalid receipt MUST remain
+exact. Direct `ContractCapabilities.close` behavior outside ingress MUST remain
+compatible.
+
+#### Scenario: Nested refusal poisons before outer raw close
+- **WHEN** direct/direct, direct/checker, or checker/direct `onCloseAttempt` reentry causes the second no-raw refusal while an outer ingress close is between its callback and raw primitive
+- **THEN** poison is observed before raw start, every post-poison raw-operation count including `closeSync` is zero, no third attempt occurs, owner/fd cardinality is fixed, and all snapshotted owners remain strongly retained
+
+#### Scenario: Raw-start and no-raw close outcomes remain distinct
+- **WHEN** close mediation omits, throws, returns async output, invokes raw close successfully, or invokes raw close that fails
+- **THEN** only no-raw outcomes are retryable, any raw start is terminal, no retry bypasses mediation, and existing cleanup/primary result precedence is preserved
+
+### Requirement: Issue #185 runtime verification is causal
+
+The delivered proof MUST run process-isolated five-primitive Promise matrices,
+representative direct/checker receipt rows, and all three nested close
+interleavings on Darwin and read-only Linux Bun 1.2.19. It MUST retain current
+descriptor structural/runtime/typeproof tests, both public direct receipts,
+full repository `check`, strict OpenSpec, and scope/submodule hygiene.
+
+#### Scenario: Runtime replacement handoff is narrow
+- **WHEN** Issue #185 completes and Issue #186 later hands off to #176
+- **THEN** the installer and two erased types are the only additions to #175's existing allowed set (`CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and `DESCRIPTOR_OPERATION_POLICY`); no other runtime/type export is allowed, Issue #186 owns the complete acquisition/interleaving/callback/durable-evidence proof, and #176 remains blocked until #186 completes
 
 ### Requirement: Outcome, verdict, validity, and decision are distinct
 The evidence schema SHALL model exactly these layers:

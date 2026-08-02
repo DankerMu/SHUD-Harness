@@ -49,30 +49,30 @@ describe("retained descriptor structural authority", () => {
         replaceSourceAnchor(
           replaceSourceAnchor(
             source,
-            "    return readSync(record.fd, buffer, offset, length, position);",
-            `    return readSync(
+            "readSync(record.fd, buffer, offset, length, position)",
+            `readSync(
       record
         .fd,
       buffer,
       offset,
       length,
       position
-    );`
+    )`
           ),
-          "    const descriptor = openAt()(parentRecord.fd, childCString(childName), flags);",
-          `    const descriptor = openAt()(
+          "openAtPrimitive(parentRecord.fd, childPath, flags)",
+          `openAtPrimitive(
       parentRecord
         .fd,
-      childCString(childName),
+      childPath,
       flags
-    );`
+    )`
         ),
-        "    const stats = fstatSync(record.fd, { bigint: true });",
-        `    const stats = fstatSync(
+        "fstatSync(record.fd, { bigint: true })",
+        `fstatSync(
       record
         .fd,
       { bigint: true }
-    );`
+    )`
       ),
       "      closeSync(record.fd);",
       `      closeSync(
@@ -112,24 +112,24 @@ function localDescriptorDecoy(): void {
     );
     counterfeit = replaceSourceAnchor(
       counterfeit,
-      "    phase: CapabilityPhase\n  ): CapabilityDescriptor {\n    const requestedPhase =",
-      "    phase: string\n  ): CapabilityDescriptor {\n    const requestedPhase ="
+      "    phase: CapabilityPhase\n  ): CapabilityDescriptor {",
+      "    phase: string\n  ): CapabilityDescriptor {"
     );
     counterfeit = replaceSourceAnchor(counterfeit, "owner: CloseOwner", "owner: string");
     counterfeit = replaceSourceAnchor(
       counterfeit,
-      "    return readSync(record.fd, buffer, offset, length, position);",
-      "    return 0;"
+      "readSync(record.fd, buffer, offset, length, position)",
+      "0"
     );
     counterfeit = replaceSourceAnchor(
       counterfeit,
-      "    const descriptor = openAt()(parentRecord.fd, childCString(childName), flags);",
-      "    const descriptor = -1;"
+      "openAtPrimitive(parentRecord.fd, childPath, flags)",
+      "-1"
     );
     counterfeit = replaceSourceAnchor(
       counterfeit,
-      "    const stats = fstatSync(record.fd, { bigint: true });",
-      "    throw new Error(\"counterfeit\");"
+      "fstatSync(record.fd, { bigint: true })",
+      "undefined as never"
     );
     counterfeit = replaceSourceAnchor(counterfeit, "      closeSync(record.fd);", "      return;");
     counterfeit = counterfeit
@@ -144,10 +144,10 @@ const structuralDescriptorCounterfeit = [
   "stat(descriptor: CapabilityDescriptor)",
   "readRetained(descriptor: CapabilityDescriptor, phase: CapabilityPhase)",
   "close(descriptor: CapabilityDescriptor, owner: CloseOwner)",
-  "readSync(record.fd, buffer, offset, length, position)",
-  "openAt()(parentRecord.fd, childCString(childName), flags)",
-  "fstatSync(record.fd, { bigint: true })",
-  "closeSync(record.fd)",
+      "readSync(record.fd, buffer, offset, length, position)",
+      "openAtPrimitive(parentRecord.fd, childPath, flags)",
+      "fstatSync(record.fd, { bigint: true })",
+      "closeSync(record.fd)",
   "readonly #registry = new WeakMap",
   "this.#registry.get(capability)",
   "readonly #currentGenerationByDescriptor = new Map",
@@ -170,10 +170,17 @@ const structuralDescriptorCounterfeit = [
     ]);
   });
 
-  test("the checked-in source keeps only private retained-descriptor operands and no ambient parent operand", async () => {
+  test("the checked-in source keeps only private retained-descriptor operands and mediated raw primitives", async () => {
     const source = await readFile(capabilitiesSourcePath, "utf8");
-    expect(source).toContain("return readSync(record.fd,");
+    expect(source).toContain('invokeDescriptorPrimitive("open_root", () => openSync(root, DIRECTORY_OPEN_FLAGS))');
+    expect(source).toContain('invokeDescriptorPrimitive(\n      "openat",\n      () => openAtPrimitive');
+    expect(source).toContain('invokeDescriptorPrimitive("fstat_sync", () => fstatSync(record.fd, { bigint: true }))');
+    expect(source).toContain('invokeDescriptorPrimitive("read_sync", () => readSync(record.fd, buffer, offset, length, position))');
+    expect(source).toContain('invokeDescriptorPrimitive("close_sync", () => {');
+    expect(source).not.toContain('invokeDescriptorPrimitive("mark_retained"');
+    expect(source).toContain("openAtPrimitive(parentRecord.fd, childPath, flags)");
     expect(source).toContain("fstatSync(record.fd,");
+    expect(source).toContain("readSync(record.fd,");
     expect(source).toContain("closeSync(record.fd)");
     expect(source).not.toContain("openAt()(-100,");
   });

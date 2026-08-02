@@ -10,6 +10,82 @@ Issue #132 cannot safely finish its cross-platform dirty-state observer with the
 - Persist a bounded, reviewable, content-addressed raw evidence bundle and a separately normalized decision projection. `accepted` requires every mandatory row on both platforms plus every decision-bearing supply, reproducibility, repository, and governance gate; a technical row failure records `rejected` and forbids pathname, Linux-only, or weakened-contract fallback.
 - Keep the spike outside production packages and public StackLock seams. It does not restore PR #133, change Issue #132 runtime behavior, add a production Rust toolchain, or alter the StackLock schema.
 - The current Issue #175 delivery is the first #172 replacement child: it binds only post-admission `openat`/`fstatSync`/`readSync`/`closeSync` operations to retained or verification descriptor provenance and proves fd `0` and Linux `AT_FDCWD` mutations fail before side effects; delegate topology, Worker lifecycle, and final evidence remain dependency-ordered follow-ups.
+- Human-selected ceiling split Issue #185 replaces only PR #184's runtime half: a #175-owned, module-instance one-shot synchronous descriptor-primitive mediator plus closed raw-outcome and ingress terminal-close semantics. Issue #186 depends on #185 and owns the complete acquisition/interleaving/callback/durable-evidence proof.
+
+## Issue #185 descriptor mediation runtime contract
+
+PR #184 proved that the #175 handoff needs a private runtime trust signal, but
+its fifth review round confirmed defects in mediator result handling and
+terminal cleanup. Issue #185 is the runtime replacement slice. It adds exactly
+one runtime export, `installDescriptorPrimitiveMediator`, and exactly two
+erased type exports:
+
+```ts
+type DescriptorPrimitiveInvocation = () => unknown;
+type DescriptorPrimitiveMediator = (
+  operation: DescriptorOperation,
+  invoke: DescriptorPrimitiveInvocation
+) => undefined;
+```
+
+The installer is a frozen, non-constructible, module-instance one-shot callable.
+Runtime validation precedes latching. It exposes no registry, raw callable,
+raw result/error, lifecycle control, getter, reset, uninstall, replacement, or
+general authority-enter path.
+
+The private owner mediates only the raw `openSync`, already-resolved FFI
+`openat`, `fstatSync`, `readSync`, and `closeSync` callsites. Validation,
+denials, FFI loading/symbol resolution, descriptor issuance, caller hooks, and
+lifecycle settlement remain outside each callback. The invocation closure is
+synchronous, callback-scoped, exactly once, and returns only `undefined`.
+Every public `ContractCapabilities` entry rejects reentry before observable
+work while a primitive callback is active.
+
+A raw invocation that started before mediator return owns the original
+capability result. The exact raw return or thrown object remains private and
+authoritative over any later mediator throw, repeated invocation, or
+non-`undefined` return; those values are ignored without property access after
+raw start. No raw start yields the stable missing/async/expired or original
+pre-invocation callback failure and zero raw calls. A non-`undefined` return
+before invocation is the stable async protocol error. The owner expires the
+invocation before classification and MUST NOT inspect or assimilate Promise,
+thenable, `constructor`, `Symbol.species`, or Proxy-controlled properties.
+
+The mediator is a trusted synchronous producer. It MUST return exactly
+`undefined`; returning or throwing a Promise is outside this contract and the
+producer MUST handle its own rejection before exposure. Bun 1.2.19 has no public
+species-bypassing operation that can set a hostile Promise's internal handled
+state, so the descriptor owner neither observes nor claims to settle arbitrary
+Promise values. This does not weaken raw authority: once `invoke` starts, the
+saved raw outcome, issuance, and terminal settlement still complete without
+reading the mediator's later value.
+
+For `close_sync`, no raw start restores retryability; a raw start is terminal.
+Ingress retries only the private no-raw classification, at most twice total,
+while strongly retaining each unsettled live owner. A second persistent
+refusal atomically poisons the module-instance ingress boundary and snapshots
+all live owners. Before any ingress-owned raw close starts, the owner rechecks
+that terminal state after every untrusted pre-raw callback, including
+`onCloseAttempt`. If nested work poisoned ingress, the outer close starts no
+raw `closeSync`, performs no third attempt or snapshot release, and leaves the
+owner strongly retained. All later direct/checker admissions fail with the
+existing schema-invalid receipt before fd allocation. Existing primary versus
+cleanup error precedence remains exact.
+
+The runtime proof is process-isolated: all five primitives cover raw
+return/throw followed by a pre-handled rejected Promise, ordinary thenable,
+Proxy, or thrown value, proving raw authority/resource closure and zero
+property inspection; a pre-invocation non-`undefined` row proves stable ASYNC
+with zero raw calls. Direct/checker receipts cover
+representative paths; direct/direct, direct/checker, and checker/direct nested
+close interleavings prove zero post-poison raw operations and fixed owner/fd
+cardinality. #185 runs only a non-persisted focused runtime mutation and owns no
+reusable causal-red script, complete transcript, manifest, or durable receipt.
+Issue #186 exclusively owns those artifacts plus the complete copied-tree
+acquisition scanner, suspended `afterAdmission` matrix, and all-`observe`
+callback proof. After #186, #176's exact allowlist is the union of #175's five
+existing exports and #185's installer plus two erased types; no prior handoff
+entry is removed.
 
 ## Capabilities
 
