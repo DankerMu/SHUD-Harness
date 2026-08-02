@@ -22,6 +22,15 @@ type DirectCloseReceipt = Readonly<{
   exactPreInvocationOutcome: boolean | null;
 }>;
 
+type PublicConstructorSurplusReceipt = Readonly<{
+  surplusCallbackCalls: number;
+  closeOutcome: string;
+  rawCalls: number;
+  fdBaseline: number;
+  fdAfterOpen: number;
+  fdAfterClose: number;
+}>;
+
 type Entry = "direct" | "checker";
 type EntryReceipt = Readonly<{ outcome: string; stdout: string; stderr: string }>;
 type IngressTerminalReceipt = Readonly<{
@@ -35,8 +44,14 @@ type IngressTerminalReceipt = Readonly<{
   targetRawCloseCalls: number;
   closedDescriptorDenials: number;
   capturedCapability: boolean;
-  oldHelperOutcome: string;
-  oldHelperAttempts: number;
+  capturedContext: boolean;
+  capturedOwnCallableProbeAttempts: number;
+  capturedOwnCallableKeys: readonly string[];
+  capturedOwnCallableCalls: number;
+  setContextOnCloseAttemptForgeAttempts: number;
+  setContextOnCloseAttemptForgeSucceeded: boolean;
+  setContextDenialForgeAttempts: number;
+  setContextDenialForgeSucceeded: boolean;
   ingressExports: readonly string[];
 }>;
 
@@ -90,7 +105,7 @@ async function receipt<T>(args: readonly string[], productionRoot?: string): Pro
 function injectPrematureCloseFault(source: string): string {
   const anchor = "    if (!rawCloseAttempted) {";
   if (!source.includes(anchor)) throw new Error("premature closeFault mutation anchor is absent");
-  return source.replace(anchor, "    this.hooks.closeFault?.(attempt);\n" + anchor);
+  return source.replace(anchor, "    this.#hooks.closeFault?.(attempt);\n" + anchor);
 }
 
 function injectGenericNoRawCloseRewrite(source: string): string {
@@ -102,7 +117,6 @@ function injectGenericNoRawCloseRewrite(source: string): string {
 function injectOmissionOnlyNoRawRestore(source: string): string {
   const anchor = `    if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }`;
   if (!source.includes(anchor)) throw new Error("selective no-raw restoration mutation anchor is absent");
@@ -110,27 +124,47 @@ function injectOmissionOnlyNoRawRestore(source: string): string {
       if (closeError instanceof Error &&
           closeError.message === "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING") {
         record.state = stateBeforeClose;
-        ingressCloseControl?.(descriptor, "no_raw");
       }
       throw closeError;
     }`);
 }
 
-function injectMissingNoRawTicketAsRetry(source: string): string {
-  const anchor = "const retry = takeIngressNoRawCloseTicket(context, descriptor, error);";
-  if (!source.includes(anchor)) throw new Error("missing no-raw ticket mutation anchor is absent");
+function injectMissingRawStartSignalAsRetry(source: string): string {
+  const anchor = "      if (closeAttempt.rawStarted()) return settleClosedIngressOwner(context, descriptor, true);";
+  if (!source.includes(anchor)) throw new Error("raw-start settlement mutation anchor is absent");
   return source.replace(
     anchor,
-    "const retry = takeIngressNoRawCloseTicket(context, descriptor, error) ?? Object.freeze({ outcome: error });"
+    "      if (false) return settleClosedIngressOwner(context, descriptor, true);"
   );
 }
 
+function injectHiddenIngressCapabilityControl(source: string): string {
+  const guardedHooksAnchor = "    const guardedHooks: CapabilityHooks = Object.freeze({";
+  const rawStartAnchor = "        this.#closeAttempt?.markRawStarted();";
+  const capabilityAnchor = "    this.#capabilities = new ContractCapabilities(guardedHooks);";
+  if (
+    !source.includes(guardedHooksAnchor) ||
+    !source.includes(rawStartAnchor) ||
+    !source.includes(capabilityAnchor)
+  ) {
+    throw new Error("hidden ingress capability control mutation anchor is absent");
+  }
+  return source
+    .replace(guardedHooksAnchor, "    let forgedNoRawSignal = false;\n" + guardedHooksAnchor)
+    .replace(rawStartAnchor, "        if (!forgedNoRawSignal) this.#closeAttempt?.markRawStarted();")
+    .replace(capabilityAnchor, `    this.#capabilities = new ContractCapabilities(guardedHooks);
+    Object.defineProperty(this.#capabilities, Symbol("allowsIngressRawClose"), {
+      value: (): void => {
+        forgedNoRawSignal = true;
+      }
+    });`);
+}
 
-function assertIngressTerminalReceipt(
+
+function assertIngressTerminalityReceipt(
   receipt: IngressTerminalReceipt,
   entry: Entry,
-  fault: IngressTerminalReceipt["fault"],
-  capturesCapability: boolean
+  fault: IngressTerminalReceipt["fault"]
 ): void {
   expect(receipt.entry).toBe(entry);
   expect(receipt.fault).toBe(fault);
@@ -141,10 +175,25 @@ function assertIngressTerminalReceipt(
   expect(receipt.targetMediatedCloseCalls).toBe(1);
   expect(receipt.targetRawCloseCalls).toBe(1);
   expect(receipt.closedDescriptorDenials).toBe(0);
-  expect(receipt.capturedCapability).toBe(capturesCapability);
-  expect(receipt.oldHelperAttempts).toBe(capturesCapability ? 1 : 0);
-  expect(receipt.oldHelperOutcome).toBe(capturesCapability ? "ABSENT" : "NOT_ATTEMPTED");
   expect(receipt.ingressExports).toEqual(INGRESS_RUNTIME_EXPORTS);
+}
+
+function assertIngressTerminalReceipt(
+  receipt: IngressTerminalReceipt,
+  entry: Entry,
+  fault: IngressTerminalReceipt["fault"],
+  capturesCapability: boolean
+): void {
+  assertIngressTerminalityReceipt(receipt, entry, fault);
+  expect(receipt.capturedCapability).toBe(capturesCapability);
+  expect(receipt.capturedContext).toBe(false);
+  expect(receipt.capturedOwnCallableProbeAttempts).toBe(capturesCapability ? 1 : 0);
+  expect(receipt.capturedOwnCallableKeys).toEqual([]);
+  expect(receipt.capturedOwnCallableCalls).toBe(0);
+  expect(receipt.setContextOnCloseAttemptForgeAttempts).toBe(0);
+  expect(receipt.setContextOnCloseAttemptForgeSucceeded).toBe(false);
+  expect(receipt.setContextDenialForgeAttempts).toBe(0);
+  expect(receipt.setContextDenialForgeSucceeded).toBe(false);
 }
 
 describe("descriptor primitive mediation runtime", () => {
@@ -213,6 +262,15 @@ describe("descriptor primitive mediation runtime", () => {
     }
   });
 
+  test("the public JavaScript constructor ignores a surplus close-control callback", async () => {
+    const publicConstructor = await receipt<PublicConstructorSurplusReceipt>(["public_constructor_surplus"]);
+    expect(publicConstructor.surplusCallbackCalls).toBe(0);
+    expect(publicConstructor.closeOutcome).toBe("NO_ERROR");
+    expect(publicConstructor.rawCalls).toBe(1);
+    expect(publicConstructor.fdAfterOpen).toBeGreaterThan(publicConstructor.fdBaseline);
+    expect(publicConstructor.fdAfterClose).toBe(publicConstructor.fdBaseline);
+  });
+
   test("the direct-close receipt kills generic rewriting of a no-raw mediator error", async () => {
     await withProductionTree(undefined, async (tree) => {
       const source = await readFile(tree.capabilitiesPath, "utf8");
@@ -260,18 +318,14 @@ describe("descriptor primitive mediation runtime", () => {
     });
   });
 
-  test("the closeFault receipt kills a pre-raw cleanup mutation", async () => {
+  test("the closeFault receipt rejects a pre-raw cleanup mutation", async () => {
     await withProductionTree(undefined, async (tree) => {
       const source = await readFile(tree.capabilitiesPath, "utf8");
       await writeFile(tree.capabilitiesPath, injectPrematureCloseFault(source));
       const mutated = await receipt<Readonly<{
-        outcome: string;
         rawCallsWhenFirstCloseFault: number | null;
       }>>(["close_retry", "value", "direct"], tree.root);
-      expect(mutated).toMatchObject({
-        outcome: "NO_ERROR",
-        rawCallsWhenFirstCloseFault: 0
-      });
+      expect(mutated.rawCallsWhenFirstCloseFault).toBe(0);
     });
   });
 
@@ -302,15 +356,15 @@ describe("descriptor primitive mediation runtime", () => {
 
     await withProductionTree(undefined, async (tree) => {
       const ingressPath = join(tree.root, "lib", "ingress.ts");
-      await writeFile(ingressPath, injectMissingNoRawTicketAsRetry(await readFile(ingressPath, "utf8")));
+      await writeFile(ingressPath, injectMissingRawStartSignalAsRetry(await readFile(ingressPath, "utf8")));
       for (const entry of ["direct", "checker"] as const) {
         const mutated = await receipt<IngressTerminalReceipt>(
           ["ingress_raw_throw", "ordinary", entry],
           tree.root
         );
         expect(mutated.first).toEqual(FAILURE_BY_ENTRY[entry]);
-        expect(mutated.laterDirect).toEqual(FAILURE_BY_ENTRY.direct);
-        expect(mutated.laterChecker).toEqual(FAILURE_BY_ENTRY.checker);
+        expect(mutated.laterDirect).toEqual({ outcome: "NO_ERROR", stdout: "", stderr: "" });
+        expect(mutated.laterChecker).toEqual({ outcome: "CHECK:0", stdout: CHECK_SUCCESS, stderr: "" });
         expect(mutated.closedDescriptorDenials).toBe(1);
         expect(() => {
           assertIngressTerminalReceipt(mutated, entry, "raw_throw", false);
@@ -319,7 +373,23 @@ describe("descriptor primitive mediation runtime", () => {
     });
   });
 
-  test("a callback that captures an ingress capability cannot restore raw-start retry authority", async () => {
+  test("a Set-capture attempt cannot forge raw-start retry authority", async () => {
+    for (const [mode, fault] of [
+      ["true", "close_fault_true"],
+      ["throw", "close_fault_throw"]
+    ] as const) {
+      for (const entry of ["direct", "checker"] as const) {
+        const forged = await receipt<IngressTerminalReceipt>(["set_capture_abuse", mode, entry]);
+        expect(forged.capturedContext).toBe(false);
+        expect(forged.setContextOnCloseAttemptForgeAttempts).toBe(1);
+        expect(forged.setContextOnCloseAttemptForgeSucceeded).toBe(false);
+        expect(forged.setContextDenialForgeAttempts).toBe(0);
+        assertIngressTerminalityReceipt(forged, entry, fault);
+      }
+    }
+  });
+
+  test("captured ingress capability own-key probing rejects a hidden callable control mutation", async () => {
     for (const [mode, fault] of [
       ["true", "close_fault_true"],
       ["throw", "close_fault_throw"]
@@ -333,6 +403,27 @@ describe("descriptor primitive mediation runtime", () => {
         );
       }
     }
+
+    await withProductionTree(undefined, async (tree) => {
+      const ingressPath = join(tree.root, "lib", "ingress.ts");
+      await writeFile(
+        ingressPath,
+        injectHiddenIngressCapabilityControl(await readFile(ingressPath, "utf8"))
+      );
+      for (const [mode, fault] of [
+        ["true", "close_fault_true"],
+        ["throw", "close_fault_throw"]
+      ] as const) {
+        for (const entry of ["direct", "checker"] as const) {
+          const mutated = await receipt<IngressTerminalReceipt>(["capture_abuse", mode, entry], tree.root);
+          expect(mutated.capturedCapability).toBe(true);
+          expect(mutated.capturedOwnCallableProbeAttempts).toBe(1);
+          expect(mutated.capturedOwnCallableKeys).toEqual(["symbol:allowsIngressRawClose"]);
+          expect(mutated.capturedOwnCallableCalls).toBe(1);
+          expect(() => assertIngressTerminalityReceipt(mutated, entry, fault)).toThrow();
+        }
+      }
+    });
   });
 
 });

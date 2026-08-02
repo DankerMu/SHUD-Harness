@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import type { BigIntStats, DescriptorPrimitiveMediator } from "../lib/capabilities";
 
 type Entry = "direct" | "checker";
-type Scenario = "pre_raw" | "no_raw" | "post_raw";
+type Scenario = "pre_raw" | "no_raw" | "post_raw" | "map_clear_no_raw";
 type NoRawCloseMode = "omission" | "value" | "async" | "thenable" | "proxy" | "sentinel" | "hostile";
 type NoRawBehavior = "once" | "persistent";
 type CloseFaultMode = "false" | "true" | "throw";
@@ -32,7 +32,9 @@ type IngressModule = Readonly<{
     hooks?: CloseHooks
   ) => Promise<Uint8Array>;
   __poisonRetainedOwnerCount?: () => number;
-  __poisonRetainedOwnersForTest?: () => readonly unknown[];
+  __poisonRetainedOwnerDescriptorsForTest?: () => readonly unknown[];
+  __poisonLiveOwnerDescriptorsForTest?: () => readonly unknown[];
+  __poisonActiveOwnerDescriptorsForTest?: () => ReadonlyArray<readonly unknown[]>;
 }>;
 type CheckerModule = Readonly<{
   runCheckForTest: (
@@ -50,8 +52,8 @@ type ObservedLiveIngressOwner = Readonly<{
 const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
 const productionRoot = process.env[PRODUCTION_ROOT_ENV];
 const observedLiveOwnerMaps = new Set<Map<unknown, unknown>>();
-const observedOwnerIds = new WeakMap<object, number>();
-let nextObservedOwnerId = 1;
+const observedObjectIds = new WeakMap<object, number>();
+let nextObservedObjectId = 1;
 
 // Causal mutation rows select a copied production tree only after child startup.
 function libraryModuleSpecifier(name: "capabilities" | "checker" | "ingress"): string {
@@ -81,43 +83,49 @@ function installLiveOwnerProbe(): void {
   }) as typeof Map.prototype.set;
 }
 
-function ownerId(owner: ObservedLiveIngressOwner): number {
-  const existing = observedOwnerIds.get(owner);
+function observedObjectId(value: object): number {
+  const existing = observedObjectIds.get(value);
   if (existing !== undefined) return existing;
-  const id = nextObservedOwnerId;
-  nextObservedOwnerId += 1;
-  observedOwnerIds.set(owner, id);
+  const id = nextObservedObjectId;
+  nextObservedObjectId += 1;
+  observedObjectIds.set(value, id);
   return id;
 }
 
-function snapshotLiveOwnerIds(): readonly number[] {
-  const owners = new Set<ObservedLiveIngressOwner>();
-  for (const ownerMap of observedLiveOwnerMaps) {
-    for (const value of ownerMap.values()) {
-      if (isObservedLiveIngressOwner(value)) owners.add(value);
-    }
+function descriptorIds(descriptors: readonly unknown[]): readonly number[] {
+  const ids: number[] = [];
+  for (const descriptor of descriptors) {
+    if (typeof descriptor === "object" && descriptor !== null) ids.push(observedObjectId(descriptor));
   }
-  return [...owners].map(ownerId).sort((left, right) => left - right);
+  return ids.sort((left, right) => left - right);
+}
+
+function snapshotLiveOwnerIds(ingress: IngressModule): readonly number[] {
+  return descriptorIds(ingress.__poisonLiveOwnerDescriptorsForTest?.() ?? []);
+}
+
+function snapshotActiveOwnerIds(ingress: IngressModule): readonly (readonly number[])[] {
+  return (ingress.__poisonActiveOwnerDescriptorsForTest?.() ?? []).map(descriptorIds);
 }
 
 function retainedOwnerIds(ingress: IngressModule): readonly number[] | null {
-  const owners = ingress.__poisonRetainedOwnersForTest?.();
-  if (!owners) return null;
-  return owners
-    .filter(isObservedLiveIngressOwner)
-    .map(ownerId)
-    .sort((left, right) => left - right);
+  const descriptors = ingress.__poisonRetainedOwnerDescriptorsForTest?.();
+  return descriptors ? descriptorIds(descriptors) : null;
 }
 
 const childArguments = process.argv.slice(2);
-const scenario = (childArguments[0] === "no_raw" || childArguments[0] === "post_raw"
+const scenario = (
+  childArguments[0] === "no_raw" ||
+  childArguments[0] === "post_raw" ||
+  childArguments[0] === "map_clear_no_raw"
   ? childArguments[0]
-  : "pre_raw") as Scenario;
+  : "pre_raw"
+) as Scenario;
 const [outerEntryArgument, nestedEntryArgument] = scenario === "pre_raw"
   ? [childArguments[0], childArguments[1]]
-  : scenario === "post_raw"
-  ? [childArguments[1], childArguments[2]]
-  : [childArguments[3], undefined];
+  : scenario === "no_raw"
+  ? [childArguments[3], undefined]
+  : [childArguments[1], childArguments[2]];
 const outerEntry = (outerEntryArgument ?? "direct") as Entry;
 const nestedEntry = (nestedEntryArgument ?? "direct") as Entry;
 const noRawCloseMode = childArguments[1] as NoRawCloseMode | undefined;
@@ -303,6 +311,10 @@ async function runPreRawScenario(): Promise<unknown> {
     onCloseAttempt: (attempt: CloseAttempt): void => {
       if (nestedAdmission) {
         nestedCloseAttempts.push(attempt);
+        if (nestedCloseAttempts.length === 2) {
+          rawAtPoison = { ...raw };
+          liveOwnerCountAtPoison = snapshotLiveOwnerIds(modules.ingress).length;
+        }
         return;
       }
       if (nestedStarted) {
@@ -314,8 +326,6 @@ async function runPreRawScenario(): Promise<unknown> {
       nestedAdmission = true;
       nestedResult = runEntry(nestedEntry, modules, hooks);
       nestedAdmission = false;
-      rawAtPoison = { ...raw };
-      liveOwnerCountAtPoison = snapshotLiveOwnerIds().length;
     }
   });
   modules.capabilities.installDescriptorPrimitiveMediator((operation, invoke) => {
@@ -366,6 +376,123 @@ async function runPreRawScenario(): Promise<unknown> {
   };
 }
 
+async function runMapClearNoRawScenario(): Promise<unknown> {
+  if (
+    !(["direct", "checker"] as const).includes(outerEntry) ||
+    !(["direct", "checker"] as const).includes(nestedEntry)
+  ) {
+    throw new Error("map-clear no-raw poison child requires direct or checker entries");
+  }
+  installRawProbe();
+  installLiveOwnerProbe();
+  const modules = await loadModules();
+  const fdBaseline = await descriptorCount();
+  let capturedOuterOwnerMap: Map<unknown, unknown> | undefined;
+  let mapClearCaptureAttempts = 0;
+  let mapClearCapturedOwnerStore = false;
+  let outerOwnerIdsBeforeClear: readonly number[] = [];
+  let outerOwnerIdsAfterClear: readonly number[] = [];
+  let nestedOwnerIdsBeforePoison: readonly number[] = [];
+  let preCloseOwnerIds: readonly number[] = [];
+  let hooks: CloseHooks;
+  hooks = Object.freeze({
+    onCloseAttempt: (attempt: CloseAttempt): void => {
+      if (nestedAdmission) {
+        nestedCloseAttempts.push(attempt);
+        const activeOwnerIds = snapshotActiveOwnerIds(modules.ingress);
+        if (nestedOwnerIdsBeforePoison.length === 0) {
+          if (activeOwnerIds.length < 2) {
+            throw new Error("map-clear probe lacks distinct nested and outer owner receipts");
+          }
+          nestedOwnerIdsBeforePoison = activeOwnerIds[0]!;
+        }
+        if (nestedCloseAttempts.length === 2) {
+          const ownerIds: number[] = [];
+          for (const contextOwnerIds of activeOwnerIds) ownerIds.push(...contextOwnerIds);
+          preCloseOwnerIds = ownerIds.sort((left, right) => left - right);
+          rawAtPoison = { ...raw };
+        }
+        return;
+      }
+      if (nestedStarted) {
+        outerCloseAttempts += 1;
+        return;
+      }
+      outerCloseAttempts += 1;
+      mapClearCaptureAttempts += 1;
+      capturedOuterOwnerMap ??= [...observedLiveOwnerMaps].find((ownerMap) => ownerMap.size > 0);
+      mapClearCapturedOwnerStore ||= capturedOuterOwnerMap !== undefined;
+      const activeOwnerIdsBeforeClear = snapshotActiveOwnerIds(modules.ingress);
+      if (activeOwnerIdsBeforeClear.length !== 1) {
+        throw new Error("map-clear probe observed an unexpected active context before the target close");
+      }
+      outerOwnerIdsBeforeClear = activeOwnerIdsBeforeClear[0]!;
+      if (outerOwnerIdsBeforeClear.length === 0) {
+        throw new Error("map-clear probe observed no outer owners before the target close");
+      }
+      capturedOuterOwnerMap?.clear();
+      outerOwnerIdsAfterClear = snapshotActiveOwnerIds(modules.ingress)[0] ?? [];
+      nestedStarted = true;
+      nestedAdmission = true;
+      nestedResult = runEntry(nestedEntry, modules, hooks);
+      nestedAdmission = false;
+    }
+  });
+  modules.capabilities.installDescriptorPrimitiveMediator((operation, invoke) => {
+    if (operation === "close_sync" && nestedAdmission) {
+      nestedMediatedCloseCalls += 1;
+      return noRawCloseResponse("omission");
+    }
+    invoke();
+    return undefined;
+  });
+
+  const outerCloseBaseline = { ...raw };
+  const outer = await runEntry(outerEntry, modules, hooks);
+  if (!nestedResult) throw new Error("map-clear no-raw poison child did not start nested ingress");
+  const nested = await nestedResult;
+  nestedResult = undefined;
+  const retainedOwnerIdsAfterContextDeletion = retainedOwnerIds(modules.ingress);
+  const rawAfterOuter = { ...raw };
+  const fdAfterPoison = await descriptorCount();
+  const laterDirect = await runEntry("direct", modules, hooks);
+  const laterChecker = await runEntry("checker", modules, hooks);
+  const rawAfterLater = { ...raw };
+  const fdAfterLater = await descriptorCount();
+  const poisonSnapshot = rawAtPoison ?? rawAfterOuter;
+  if (preCloseOwnerIds.length === 0) {
+    throw new Error("map-clear no-raw proof lacks an exact pre-poison owner receipt");
+  }
+  return {
+    outerEntry,
+    nestedEntry,
+    outer,
+    nested,
+    laterDirect,
+    laterChecker,
+    nestedStarted,
+    nestedMediatedCloseCalls,
+    outerCloseAttempts,
+    nestedCloseAttempts: nestedCloseAttempts.map((attempt) => ({ owner: attempt.owner, ordinal: attempt.ordinal })),
+    mapClearCaptureAttempts,
+    mapClearCapturedOwnerStore,
+    outerOwnerIdsBeforeClear,
+    outerOwnerIdsAfterClear,
+    nestedOwnerIdsBeforePoison,
+    preCloseOwnerIds,
+    retainedOwnerIdsAfterContextDeletion,
+    outerCloseBaseline,
+    rawAtPoison: poisonSnapshot,
+    rawAfterOuter,
+    rawAfterLater,
+    postPoisonRaw: rawDelta(rawAfterOuter, poisonSnapshot),
+    laterRaw: rawDelta(rawAfterLater, rawAfterOuter),
+    fdBaseline,
+    fdAfterPoison,
+    fdAfterLater
+  };
+}
+
 async function runNoRawScenario(): Promise<unknown> {
   if (!noRawCloseMode || !noRawBehavior || !(["direct", "checker"] as const).includes(outerEntry)) {
     throw new Error("no-raw poison child requires a mode, behavior, and direct or checker entry");
@@ -384,7 +511,7 @@ async function runNoRawScenario(): Promise<unknown> {
   let mediatedCloseCalls = 0;
   const hooks: CloseHooks = Object.freeze({
     onCloseAttempt: () => {
-      const liveOwnerIds = snapshotLiveOwnerIds();
+      const liveOwnerIds = snapshotLiveOwnerIds(modules.ingress);
       if (!firstCloseOwnerIds) {
         firstCloseOwnerIds = liveOwnerIds;
         rawAtFirstAttempt = { ...raw };
@@ -486,10 +613,14 @@ async function runPostRawScenario(): Promise<unknown> {
     onCloseAttempt: (attempt: CloseAttempt): void => {
       if (nestedAdmission) {
         postRawNestedCloseAttempts.push(attempt);
+        if (postRawNestedCloseAttempts.length === 2) {
+          postRawRawAtPoison = { ...raw };
+          liveOwnerIdsAtPoison = snapshotLiveOwnerIds(modules.ingress);
+        }
         return;
       }
       outerCloseAttemptRecords.push(attempt);
-      const liveOwnerIds = snapshotLiveOwnerIds();
+      const liveOwnerIds = snapshotLiveOwnerIds(modules.ingress);
       if (!targetAttempt && attempt.owner === "retained" && liveOwnerIds.length === 1) {
         targetAttempt = attempt;
         targetPreCloseOwnerIds = liveOwnerIds;
@@ -503,8 +634,6 @@ async function runPostRawScenario(): Promise<unknown> {
       nestedAdmission = true;
       postRawNestedResult = runEntry(nestedEntry, modules, hooks);
       nestedAdmission = false;
-      postRawRawAtPoison = { ...raw };
-      liveOwnerIdsAtPoison = snapshotLiveOwnerIds();
       if (postRawFaultMode === "throw") throw new Error("POST_RAW_CLOSE_FAULT_SENTINEL");
       return postRawFaultMode === "true";
     }
@@ -581,6 +710,8 @@ try {
     ? await runNoRawScenario()
     : scenario === "post_raw"
     ? await runPostRawScenario()
+    : scenario === "map_clear_no_raw"
+    ? await runMapClearNoRawScenario()
     : await runPreRawScenario();
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
 } catch (error) {

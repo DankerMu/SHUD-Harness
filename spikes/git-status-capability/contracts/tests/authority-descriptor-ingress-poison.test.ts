@@ -83,6 +83,35 @@ type PostRawReceipt = Readonly<{
   nestedMediatedCloseCalls: number;
 }>;
 
+type MapClearNoRawReceipt = Readonly<{
+  outerEntry: Entry;
+  nestedEntry: Entry;
+  outer: EntryOutcome;
+  nested: EntryOutcome;
+  laterDirect: EntryOutcome;
+  laterChecker: EntryOutcome;
+  nestedStarted: boolean;
+  nestedMediatedCloseCalls: number;
+  outerCloseAttempts: number;
+  nestedCloseAttempts: readonly CloseAttempt[];
+  mapClearCaptureAttempts: number;
+  mapClearCapturedOwnerStore: boolean;
+  outerOwnerIdsBeforeClear: readonly number[];
+  outerOwnerIdsAfterClear: readonly number[];
+  nestedOwnerIdsBeforePoison: readonly number[];
+  preCloseOwnerIds: readonly number[];
+  retainedOwnerIdsAfterContextDeletion: readonly number[] | null;
+  outerCloseBaseline: RawCounts;
+  rawAtPoison: RawCounts;
+  rawAfterOuter: RawCounts;
+  rawAfterLater: RawCounts;
+  postPoisonRaw: RawCounts;
+  laterRaw: RawCounts;
+  fdBaseline: number;
+  fdAfterPoison: number;
+  fdAfterLater: number;
+}>;
+
 const childPath = join(import.meta.dir, "authority-descriptor-ingress-poison-child.ts");
 const ERROR_RECEIPT = "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_SCHEMA_INVALID\"}\n";
 const ZERO_RAW: RawCounts = Object.freeze({ open_sync: 0, openat: 0, fstat_sync: 0, read_sync: 0, close_sync: 0 });
@@ -93,24 +122,60 @@ const POST_RAW_PAIRINGS = [
   ["direct", "checker"],
   ["checker", "direct"]
 ] as const;
+
+const MAP_CLEAR_PAIRINGS = [
+  ["direct", "direct"],
+  ["direct", "checker"],
+  ["checker", "direct"]
+] as const;
 const BYTES_LIMIT_RECEIPT = "{\"schema_version\":\"shud.git-status-capability.contract-error.v1\",\"status\":\"error\",\"code\":\"CONTRACT_BYTES_LIMIT\"}\n";
-const EVERY_OWNER_RETENTION = `    for (const owner of context.liveOwners.values()) {
-      retainedPoisonedIngressOwners.set(owner.descriptor, owner);
-    }`;
+const EVERY_OWNER_RETENTION = `  retainLiveOwners(): void {
+    for (let owner = this.#liveOwners; owner; owner = owner.next()) {
+      retainPoisonedIngressOwner(owner);
+    }
+  }`;
 
 function replaceEveryOwnerRetentionWithFirstOwnerOnly(source: string): string {
   if (!source.includes(EVERY_OWNER_RETENTION)) throw new Error("owner-retention loop anchor is absent");
   return source.replace(
     EVERY_OWNER_RETENTION,
-    `    const owner = context.liveOwners.values().next().value;
-    if (owner) retainedPoisonedIngressOwners.set(owner.descriptor, owner);`
+    `  retainLiveOwners(): void {
+    const owner = this.#liveOwners;
+    if (owner) retainPoisonedIngressOwner(owner);
+  }`
   );
 }
 
 function injectPoisonRetentionCount(source: string): string {
   return `${source}
-export const __poisonRetainedOwnerCount = (): number => retainedPoisonedIngressOwners.size;
-export const __poisonRetainedOwnersForTest = (): readonly unknown[] => [...retainedPoisonedIngressOwners.values()];
+export const __poisonRetainedOwnerCount = (): number => {
+  let count = 0;
+  for (let owner = retainedPoisonedIngressOwners; owner; owner = owner.retainedNext()) count += 1;
+  return count;
+};
+export const __poisonRetainedOwnerDescriptorsForTest = (): readonly unknown[] => {
+  const descriptors: CapabilityDescriptor[] = [];
+  for (let owner = retainedPoisonedIngressOwners; owner; owner = owner.retainedNext()) {
+    descriptors.push(owner.descriptor());
+  }
+  return Object.freeze(descriptors);
+};
+export const __poisonLiveOwnerDescriptorsForTest = (): readonly unknown[] => {
+  const descriptors: CapabilityDescriptor[] = [];
+  for (let context = activeIngressContexts; context; context = context.nextActive()) {
+    context.appendLiveOwnerDescriptors(descriptors);
+  }
+  return Object.freeze(descriptors);
+};
+export const __poisonActiveOwnerDescriptorsForTest = (): readonly (readonly unknown[])[] => {
+  const contexts: (readonly CapabilityDescriptor[])[] = [];
+  for (let context = activeIngressContexts; context; context = context.nextActive()) {
+    const descriptors: CapabilityDescriptor[] = [];
+    context.appendLiveOwnerDescriptors(descriptors);
+    contexts.push(Object.freeze(descriptors));
+  }
+  return Object.freeze(contexts);
+};
 `;
 }
 
@@ -133,23 +198,36 @@ async function runCopiedPoisonProof(
   return receipt;
 }
 
+async function runCopiedMapClearNoRawProbe(
+  outerEntry: Entry,
+  nestedEntry: Entry
+): Promise<MapClearNoRawReceipt> {
+  let receipt: MapClearNoRawReceipt | undefined;
+  await withProductionTree(undefined, async (tree) => {
+    const ingressPath = join(tree.root, "lib", "ingress.ts");
+    const ingress = await readFile(ingressPath, "utf8");
+    await writeFile(ingressPath, injectPoisonRetentionCount(ingress));
+    receipt = await childReceipt<MapClearNoRawReceipt>(
+      ["map_clear_no_raw", outerEntry, nestedEntry],
+      tree.root
+    );
+  });
+  if (!receipt) throw new Error("copied map-clear no-raw proof did not produce a receipt");
+  return receipt;
+}
+
 function moveRawCloseBeforeCloseAttempt(source: string): string {
   const anchor = `    const stateBeforeClose = record.state;
     record.state = "closed";
     const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
-    let hookError: unknown;
     try {
-      this.hooks.onCloseAttempt?.(attempt);
+      this.#hooks.onCloseAttempt?.(attempt);
     } catch (error) {
-      hookError = error;
-    }
-    let rawCloseAttempted = false;
-    const ingressCloseControl = this.#ingressCloseControl;
-    if (ingressCloseControl?.(descriptor, "before_raw") === false) {
       record.state = stateBeforeClose;
-      ingressCloseControl(descriptor, "no_raw");
-      throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+      throw error;
     }
+
+    let rawCloseAttempted = false;
     let closeError: unknown;
     try {
       invokeDescriptorPrimitive("close_sync", () => {
@@ -161,15 +239,14 @@ function moveRawCloseBeforeCloseAttempt(source: string): string {
     }
     if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }`;
   if (!source.includes(anchor)) throw new Error("pre-hook raw close mutation anchor is absent");
   return source.replace(anchor, `    const stateBeforeClose = record.state;
     record.state = "closed";
     const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
-    let closeError: unknown;
     let rawCloseAttempted = false;
+    let closeError: unknown;
     try {
       invokeDescriptorPrimitive("close_sync", () => {
         rawCloseAttempted = true;
@@ -178,21 +255,17 @@ function moveRawCloseBeforeCloseAttempt(source: string): string {
     } catch (error) {
       closeError = error;
     }
-    let hookError: unknown;
     try {
-      this.hooks.onCloseAttempt?.(attempt);
+      this.#hooks.onCloseAttempt?.(attempt);
     } catch (error) {
-      hookError = error;
-    }
-    const ingressCloseControl = this.#ingressCloseControl;
-    if (ingressCloseControl?.(descriptor, "before_raw") === false) {
-      record.state = stateBeforeClose;
-      ingressCloseControl(descriptor, "no_raw");
-      throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+      if (!rawCloseAttempted) {
+        record.state = stateBeforeClose;
+        throw error;
+      }
+      closeError ??= error;
     }
     if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }`);
 }
@@ -267,7 +340,6 @@ function expectedEntry(entry: Entry): EntryOutcome {
 function injectOmissionOnlyNoRawRestore(source: string): string {
   const anchor = `    if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }`;
   if (!source.includes(anchor)) throw new Error("selective no-raw restoration mutation anchor is absent");
@@ -275,42 +347,37 @@ function injectOmissionOnlyNoRawRestore(source: string): string {
       if (closeError instanceof Error &&
           closeError.message === "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING") {
         record.state = stateBeforeClose;
-        ingressCloseControl?.(descriptor, "no_raw");
       }
       throw closeError;
     }`);
 }
 
-function releaseFirstNoRawTicketOwner(source: string): string {
-  const anchor = `      if (descriptorIngressPoisoned) return true;
-      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`;
-  if (!source.includes(anchor)) throw new Error("first-ticket owner-release mutation anchor is absent");
-  return source.replace(anchor, `      if (descriptorIngressPoisoned) return true;
-      if (attempt === 0) releaseLiveIngressOwner(context, descriptor);
+function releaseFirstNoRawAttemptOwner(source: string): string {
+  const anchor = `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`;
+  if (!source.includes(anchor)) throw new Error("first-attempt owner-release mutation anchor is absent");
+  return source.replace(anchor, `      if (attempt === 0) releaseLiveIngressOwner(context, descriptor);
       if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`);
 }
 
 function insertRawFstatBetweenNoRawAttempts(source: string): string {
-  const anchor = `      if (descriptorIngressPoisoned) return true;
-      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`;
+  const anchor = `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`;
   if (!source.includes(anchor)) throw new Error("between-attempt raw fstat mutation anchor is absent");
-  return source.replace(anchor, `      if (descriptorIngressPoisoned) return true;
-      if (attempt === 0) context.capabilities.stat(descriptor);
+  return source.replace(anchor, `      if (attempt === 0) context.stat(descriptor);
       if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`);
 }
 
 function removeSentinelPoisonTransition(source: string): string {
   const anchor = `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
         poisonIngressAndRetainActiveOwners();
-        throw retry.outcome;
+        throw error;
       }`;
   if (!source.includes(anchor)) throw new Error("per-class poison transition mutation anchor is absent");
   return source.replace(anchor, `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
-        if (retry.outcome instanceof Error && retry.outcome.message === "NO_RAW_SENTINEL") {
-          throw retry.outcome;
+        if (error instanceof Error && error.message === "NO_RAW_SENTINEL") {
+          throw error;
         }
         poisonIngressAndRetainActiveOwners();
-        throw retry.outcome;
+        throw error;
       }`);
 }
 
@@ -324,7 +391,7 @@ function removeCommonPostClosePoisonGuard(source: string): string {
 type NoRawMutation =
   | "baseline"
   | "omission_only"
-  | "first_ticket_release"
+  | "first_attempt_release"
   | "missing_sentinel_poison"
   | "raw_fstat_between_attempts";
 
@@ -342,7 +409,7 @@ async function runCopiedNoRawProbe(
     }
     const ingressPath = join(tree.root, "lib", "ingress.ts");
     let ingress = await readFile(ingressPath, "utf8");
-    if (mutation === "first_ticket_release") ingress = releaseFirstNoRawTicketOwner(ingress);
+    if (mutation === "first_attempt_release") ingress = releaseFirstNoRawAttemptOwner(ingress);
     if (mutation === "raw_fstat_between_attempts") ingress = insertRawFstatBetweenNoRawAttempts(ingress);
     if (mutation === "missing_sentinel_poison") ingress = removeSentinelPoisonTransition(ingress);
     await writeFile(ingressPath, injectPoisonRetentionCount(ingress));
@@ -455,8 +522,6 @@ describe("ingress terminal close poison", () => {
       expect(receipt.laterChecker).toEqual(expectedEntry("checker"));
       expect(receipt.fdAfterPoison).toBeGreaterThan(receipt.fdBaseline);
       expect(receipt.fdAfterLater).toBe(receipt.fdAfterPoison);
-      expect(receipt.liveOwnerCountAtPoison).toBeGreaterThan(1);
-      expect(receipt.retainedOwnerCountAfterContextDeletion).toBeNull();
     }
   });
 
@@ -473,6 +538,44 @@ describe("ingress terminal close poison", () => {
       const mutated = await runCopiedPoisonProof(outerEntry, nestedEntry, true);
       expect(mutated.liveOwnerCountAtPoison).toBe(baseline.liveOwnerCountAtPoison);
       expect(mutated.retainedOwnerCountAfterContextDeletion).toBeLessThan(mutated.liveOwnerCountAtPoison);
+    }
+  });
+
+  test("a Map-capture attempt cannot alter the private outer owner snapshot", async () => {
+    for (const [outerEntry, nestedEntry] of MAP_CLEAR_PAIRINGS) {
+      const receipt = await runCopiedMapClearNoRawProbe(outerEntry, nestedEntry);
+      expect(receipt.outer).toEqual(expectedEntry(outerEntry));
+      expect(receipt.nested).toEqual(expectedEntry(nestedEntry));
+      expect(receipt.nestedStarted).toBe(true);
+      expect(receipt.nestedMediatedCloseCalls).toBe(2);
+      expect(receipt.outerCloseAttempts).toBe(1);
+      expect(receipt.nestedCloseAttempts).toEqual([
+        { owner: "unretained", ordinal: 1 },
+        { owner: "unretained", ordinal: 2 }
+      ]);
+      expect(receipt.mapClearCaptureAttempts).toBe(1);
+      expect(receipt.mapClearCapturedOwnerStore).toBe(false);
+      expect(receipt.outerOwnerIdsBeforeClear.length).toBeGreaterThan(0);
+      expect(receipt.outerOwnerIdsAfterClear).toEqual(receipt.outerOwnerIdsBeforeClear);
+      expect(receipt.nestedOwnerIdsBeforePoison.length).toBeGreaterThan(0);
+      const expectedPreCloseOwnerIds = [
+        ...receipt.outerOwnerIdsBeforeClear,
+        ...receipt.nestedOwnerIdsBeforePoison
+      ].sort((left, right) => left - right);
+      expect(receipt.preCloseOwnerIds).toEqual(expectedPreCloseOwnerIds);
+      expect(receipt.preCloseOwnerIds).toHaveLength(
+        receipt.outerOwnerIdsBeforeClear.length + receipt.nestedOwnerIdsBeforePoison.length
+      );
+      const retainedOwnerIds = receipt.retainedOwnerIdsAfterContextDeletion;
+      if (retainedOwnerIds === null) throw new Error("map-clear no-raw proof lacks retained-owner receipt");
+      expect(retainedOwnerIds).toEqual(receipt.preCloseOwnerIds);
+      expect(retainedOwnerIds).toHaveLength(receipt.preCloseOwnerIds.length);
+      expect(receipt.postPoisonRaw).toEqual(ZERO_RAW);
+      expect(receipt.laterRaw).toEqual(ZERO_RAW);
+      expect(receipt.laterDirect).toEqual(expectedEntry("direct"));
+      expect(receipt.laterChecker).toEqual(expectedEntry("checker"));
+      expect(receipt.fdAfterPoison).toBeGreaterThan(receipt.fdBaseline);
+      expect(receipt.fdAfterLater).toBe(receipt.fdAfterPoison);
     }
   });
 
@@ -546,7 +649,7 @@ describe("ingress terminal close poison", () => {
     }
   });
 
-  test("the omission-only restoration and ticket mutation leaves only omission ingress rows green", async () => {
+  test("the omission-only restoration mutation leaves only omission ingress rows green", async () => {
     for (const mode of NO_RAW_CLOSE_MODES) {
       for (const outerEntry of ["direct", "checker"] as const) {
         const firstRefusal = await runCopiedNoRawProbe(mode, "once", outerEntry, "omission_only");
@@ -578,13 +681,13 @@ describe("ingress terminal close poison", () => {
     }
   });
 
-  test("the first-ticket owner-release mutation loses the pre-close owner identity before poison", async () => {
+  test("the first-attempt owner-release mutation loses the pre-close owner identity before poison", async () => {
     for (const outerEntry of ["direct", "checker"] as const) {
       const mutated = await runCopiedNoRawProbe(
         "omission",
         "persistent",
         outerEntry,
-        "first_ticket_release"
+        "first_attempt_release"
       );
       expect(mutated.firstCloseOwnerIds.length).toBeGreaterThan(0);
       expect(mutated.secondCloseOwnerIds).not.toEqual(mutated.firstCloseOwnerIds);

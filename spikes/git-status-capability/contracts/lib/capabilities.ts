@@ -68,10 +68,6 @@ export type CapabilityHooks = Readonly<{
   onDescriptorAuthorityDenial?: (denial: DescriptorAuthorityDenial) => void;
 }>;
 
-type IngressCloseControl = (
-  descriptor: CapabilityDescriptor,
-  stage: "before_raw" | "no_raw"
-) => boolean | void;
 
 const OPTIONAL_FS_CONSTANTS = constants as typeof constants & Readonly<{ O_CLOEXEC?: number }>;
 export const FILE_OPEN_FLAGS = constants.O_RDONLY | (OPTIONAL_FS_CONSTANTS.O_CLOEXEC ?? 0) |
@@ -289,13 +285,10 @@ export class ContractCapabilities {
   #nextGeneration = 0;
   #closeOrdinal = 0;
   #admissionSealed = false;
-  readonly #ingressCloseControl: IngressCloseControl | undefined;
-  private readonly hooks: CapabilityHooks;
+  readonly #hooks: CapabilityHooks;
 
-  constructor(hooks?: CapabilityHooks);
-  constructor(hooks: CapabilityHooks = {}, ingressCloseControl?: IngressCloseControl) {
-    this.hooks = hooks;
-    this.#ingressCloseControl = ingressCloseControl;
+  constructor(hooks: CapabilityHooks = {}) {
+    this.#hooks = hooks;
   }
 
   sealAdmission(): void {
@@ -410,19 +403,14 @@ export class ContractCapabilities {
     const stateBeforeClose = record.state;
     record.state = "closed";
     const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
-    let hookError: unknown;
     try {
-      this.hooks.onCloseAttempt?.(attempt);
+      this.#hooks.onCloseAttempt?.(attempt);
     } catch (error) {
-      hookError = error;
-    }
-    let rawCloseAttempted = false;
-    const ingressCloseControl = this.#ingressCloseControl;
-    if (ingressCloseControl?.(descriptor, "before_raw") === false) {
       record.state = stateBeforeClose;
-      ingressCloseControl(descriptor, "no_raw");
-      throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+      throw error;
     }
+
+    let rawCloseAttempted = false;
     let closeError: unknown;
     try {
       invokeDescriptorPrimitive("close_sync", () => {
@@ -434,22 +422,22 @@ export class ContractCapabilities {
     }
     if (!rawCloseAttempted) {
       record.state = stateBeforeClose;
-      ingressCloseControl?.(descriptor, "no_raw");
       throw closeError;
     }
+
     let injectedFault = false;
     try {
-      injectedFault = this.hooks.closeFault?.(attempt) ?? false;
-    } catch (error) {
-      hookError = hookError ?? error;
+      injectedFault = this.#hooks.closeFault?.(attempt) ?? false;
+    } catch {
+      injectedFault = true;
     }
-    if (injectedFault || closeError || hookError) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+    if (injectedFault || closeError) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
   }
 
   rejectForbidden(fault: ContractAuthorityFault, phase: CapabilityPhase): never {
     assertDescriptorPrimitiveMediationInactive();
     if (phase !== "post_admission") throw new Error("CONTRACT_CAPABILITY_FAULT_PHASE_INVALID");
-    this.hooks.onAuthorityViolation?.(fault);
+    this.#hooks.onAuthorityViolation?.(fault);
     throw new Error(`CONTRACT_CAPABILITY_FORBIDDEN_${fault}`);
   }
 
@@ -540,7 +528,7 @@ export class ContractCapabilities {
       phase
     });
     try {
-      this.hooks.onDescriptorAuthorityDenial?.(denial);
+      this.#hooks.onDescriptorAuthorityDenial?.(denial);
     } catch {
       // The denial is authoritative even if an observation hook misbehaves.
     }

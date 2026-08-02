@@ -13,17 +13,6 @@ import {
 
 const contractErrors = new WeakSet<object>();
 
-type IngressCloseControl = (
-  descriptor: CapabilityDescriptor,
-  stage: "before_raw" | "no_raw"
-) => boolean | void;
-type IngressCapabilitiesConstructor = new (
-  hooks: CapabilityHooks,
-  closeControl: IngressCloseControl
-) => ContractCapabilities;
-
-const IngressContractCapabilities = ContractCapabilities as unknown as IngressCapabilitiesConstructor;
-
 export type ContractErrorCode =
   | "CONTRACT_BYTES_LIMIT"
   | "CONTRACT_UTF8_INVALID"
@@ -59,63 +48,281 @@ export type DescriptorIngressHooks = Readonly<{
   authorityFault?: ContractAuthorityFault;
 }> & CapabilityHooks;
 
-type IngressNoRawCloseRetry = Readonly<{ outcome: unknown }>;
 const NO_RAW_CLOSE_RETRY_LIMIT = 2;
-type LiveIngressOwner = Readonly<{
-  capabilities: ContractCapabilities;
-  descriptor: CapabilityDescriptor;
-  owner: CloseOwner;
-}>;
-type ActiveIngressContext = {
-  readonly capabilities: ContractCapabilities;
-  readonly liveOwners: Map<CapabilityDescriptor, LiveIngressOwner>;
-  readonly closingDescriptors: CapabilityDescriptor[];
-  readonly hookFailedDescriptors: Set<CapabilityDescriptor>;
-  noRawCloseTicket: CapabilityDescriptor | undefined;
-};
+const PRE_RAW_CLOSE_BARRIER_RETRY_LIMIT = 2;
 
-const activeIngressContexts = new Set<ActiveIngressContext>();
-const retainedPoisonedIngressOwners = new Map<CapabilityDescriptor, LiveIngressOwner>();
+class IngressOwnerNode {
+  readonly #capabilities: ContractCapabilities;
+  readonly #descriptor: CapabilityDescriptor;
+  #owner: CloseOwner;
+  #next: IngressOwnerNode | undefined;
+  #retainedNext: IngressOwnerNode | undefined;
+  #retained = false;
+
+  constructor(
+    capabilities: ContractCapabilities,
+    descriptor: CapabilityDescriptor,
+    owner: CloseOwner,
+    next: IngressOwnerNode | undefined
+  ) {
+    this.#capabilities = capabilities;
+    this.#descriptor = descriptor;
+    this.#owner = owner;
+    this.#next = next;
+  }
+
+  matches(descriptor: CapabilityDescriptor): boolean {
+    return this.#descriptor === descriptor;
+  }
+
+  updateOwner(owner: CloseOwner): void {
+    this.#owner = owner;
+  }
+
+  descriptor(): CapabilityDescriptor {
+    return this.#descriptor;
+  }
+
+  next(): IngressOwnerNode | undefined {
+    return this.#next;
+  }
+
+  relink(next: IngressOwnerNode | undefined): void {
+    this.#next = next;
+  }
+
+  retain(next: IngressOwnerNode | undefined): boolean {
+    if (this.#retained) return false;
+    this.#retained = true;
+    this.#retainedNext = next;
+    return true;
+  }
+
+  retainedNext(): IngressOwnerNode | undefined {
+    return this.#retainedNext;
+  }
+
+  relinkRetained(next: IngressOwnerNode | undefined): void {
+    this.#retainedNext = next;
+  }
+}
+
+class IngressCloseAttempt {
+  #rawStarted = false;
+  #hookFailed = false;
+  #closedDescriptorDenied = false;
+
+  markRawStarted(): void {
+    this.#rawStarted = true;
+  }
+
+  markHookFailed(): void {
+    this.#hookFailed = true;
+  }
+
+  markClosedDescriptorDenied(): void {
+    this.#closedDescriptorDenied = true;
+  }
+
+  rawStarted(): boolean {
+    return this.#rawStarted;
+  }
+
+  hookFailed(): boolean {
+    return this.#hookFailed;
+  }
+
+  closedDescriptorDenied(): boolean {
+    return this.#closedDescriptorDenied;
+  }
+}
+
+class ActiveIngressContext {
+  readonly #capabilities: ContractCapabilities;
+  #liveOwners: IngressOwnerNode | undefined;
+  #activeNext: ActiveIngressContext | undefined;
+  #closeAttempt: IngressCloseAttempt | undefined;
+
+  constructor(hooks: DescriptorIngressHooks) {
+    const guardedHooks: CapabilityHooks = Object.freeze({
+      closeFault: (attempt) => {
+        this.#closeAttempt?.markRawStarted();
+        return hooks.closeFault?.(attempt) ?? false;
+      },
+      onCloseAttempt: (attempt) => {
+        try {
+          hooks.onCloseAttempt?.(attempt);
+        } catch (error) {
+          this.#closeAttempt?.markHookFailed();
+          throw error;
+        }
+        assertIngressWorkAvailable();
+      },
+      onAuthorityViolation: (fault) => {
+        hooks.onAuthorityViolation?.(fault);
+      },
+      onDescriptorAuthorityDenial: (denial) => {
+        if (denial.operation === "close_sync" && denial.reason === "closed_descriptor") {
+          this.#closeAttempt?.markClosedDescriptorDenied();
+        }
+        hooks.onDescriptorAuthorityDenial?.(denial);
+      }
+    });
+    this.#capabilities = new ContractCapabilities(guardedHooks);
+  }
+
+  sealAdmission(): void {
+    this.#capabilities.sealAdmission();
+  }
+
+  openRoot(root: string, phase: "admission" | "post_admission"): CapabilityDescriptor {
+    return this.#capabilities.openRoot(root, phase);
+  }
+
+  openRelative(
+    parent: CapabilityDescriptor,
+    childName: string,
+    flags: number,
+    phase: "admission" | "post_admission"
+  ): CapabilityDescriptor {
+    return this.#capabilities.openRelative(parent, childName, flags, phase);
+  }
+
+  markRetained(descriptor: CapabilityDescriptor, kind: "file" | "directory"): void {
+    this.#capabilities.markRetained(descriptor, kind);
+  }
+
+  stat(descriptor: CapabilityDescriptor): BigIntStats {
+    return this.#capabilities.stat(descriptor);
+  }
+
+  readRetained(
+    descriptor: CapabilityDescriptor,
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number,
+    phase: "admission" | "post_admission"
+  ): number {
+    return this.#capabilities.readRetained(descriptor, buffer, offset, length, position, phase);
+  }
+
+  rejectForbidden(fault: ContractAuthorityFault, phase: "admission" | "post_admission"): never {
+    return this.#capabilities.rejectForbidden(fault, phase);
+  }
+
+  close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
+    this.#capabilities.close(descriptor, owner);
+  }
+
+  trackOwner(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
+    this.#liveOwners = new IngressOwnerNode(this.#capabilities, descriptor, owner, this.#liveOwners);
+  }
+
+  updateOwner(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
+    for (let current = this.#liveOwners; current; current = current.next()) {
+      if (!current.matches(descriptor)) continue;
+      current.updateOwner(owner);
+      return;
+    }
+    throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  }
+
+  releaseOwner(descriptor: CapabilityDescriptor): void {
+    let previous: IngressOwnerNode | undefined;
+    for (let current = this.#liveOwners; current; current = current.next()) {
+      if (!current.matches(descriptor)) {
+        previous = current;
+        continue;
+      }
+      const next = current.next();
+      if (previous) previous.relink(next);
+      else this.#liveOwners = next;
+      current.relink(undefined);
+      return;
+    }
+  }
+
+  retainLiveOwners(): void {
+    for (let owner = this.#liveOwners; owner; owner = owner.next()) {
+      retainPoisonedIngressOwner(owner);
+    }
+  }
+
+  appendLiveOwnerDescriptors(descriptors: CapabilityDescriptor[]): void {
+    for (let owner = this.#liveOwners; owner; owner = owner.next()) {
+      descriptors.push(owner.descriptor());
+    }
+  }
+
+  nextActive(): ActiveIngressContext | undefined {
+    return this.#activeNext;
+  }
+
+  relinkActive(next: ActiveIngressContext | undefined): void {
+    this.#activeNext = next;
+  }
+
+  startCloseAttempt(): IngressCloseAttempt {
+    if (this.#closeAttempt) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    const closeAttempt = new IngressCloseAttempt();
+    this.#closeAttempt = closeAttempt;
+    return closeAttempt;
+  }
+
+  finishCloseAttempt(closeAttempt: IngressCloseAttempt): void {
+    if (this.#closeAttempt === closeAttempt) this.#closeAttempt = undefined;
+  }
+}
+
+let activeIngressContexts: ActiveIngressContext | undefined;
+let retainedPoisonedIngressOwners: IngressOwnerNode | undefined;
 let descriptorIngressPoisoned = false;
 
 function assertIngressWorkAvailable(): void {
   if (descriptorIngressPoisoned) throw new ContractError("CONTRACT_SCHEMA_INVALID");
 }
+
+function retainPoisonedIngressOwner(owner: IngressOwnerNode): void {
+  if (owner.retain(retainedPoisonedIngressOwners)) retainedPoisonedIngressOwners = owner;
+}
+
+function releaseRetainedPoisonedIngressOwner(descriptor: CapabilityDescriptor): void {
+  let previous: IngressOwnerNode | undefined;
+  for (let owner = retainedPoisonedIngressOwners; owner; owner = owner.retainedNext()) {
+    if (!owner.matches(descriptor)) {
+      previous = owner;
+      continue;
+    }
+    const next = owner.retainedNext();
+    if (previous) previous.relinkRetained(next);
+    else retainedPoisonedIngressOwners = next;
+    owner.relinkRetained(undefined);
+    return;
+  }
+}
+
+
 function registerIngressContext(hooks: DescriptorIngressHooks): ActiveIngressContext {
   assertIngressWorkAvailable();
-  let context!: ActiveIngressContext;
-  const closeControl: IngressCloseControl = (descriptor, stage) => {
-    if (context.closingDescriptors.at(-1) !== descriptor) return false;
-    if (stage === "before_raw") return !descriptorIngressPoisoned;
-    context.noRawCloseTicket = descriptor;
-  };
-  const guardedHooks: CapabilityHooks = Object.freeze({
-    closeFault: (attempt) => hooks.closeFault?.(attempt) ?? false,
-    onCloseAttempt: (attempt) => {
-      try {
-        hooks.onCloseAttempt?.(attempt);
-      } catch (error) {
-        const descriptor = context.closingDescriptors.at(-1);
-        if (descriptor) context.hookFailedDescriptors.add(descriptor);
-        throw error;
-      }
-    },
-    onAuthorityViolation: (fault) => {
-      hooks.onAuthorityViolation?.(fault);
-    },
-    onDescriptorAuthorityDenial: (denial) => {
-      hooks.onDescriptorAuthorityDenial?.(denial);
-    }
-  });
-  context = {
-    capabilities: new IngressContractCapabilities(guardedHooks, closeControl),
-    liveOwners: new Map<CapabilityDescriptor, LiveIngressOwner>(),
-    closingDescriptors: [],
-    hookFailedDescriptors: new Set<CapabilityDescriptor>(),
-    noRawCloseTicket: undefined
-  };
-  activeIngressContexts.add(context);
+  const context = new ActiveIngressContext(hooks);
+  context.relinkActive(activeIngressContexts);
+  activeIngressContexts = context;
   return context;
+}
+
+function unregisterIngressContext(context: ActiveIngressContext): void {
+  if (activeIngressContexts === context) {
+    activeIngressContexts = context.nextActive();
+    context.relinkActive(undefined);
+    return;
+  }
+  for (let previous = activeIngressContexts; previous; previous = previous.nextActive()) {
+    if (previous.nextActive() !== context) continue;
+    previous.relinkActive(context.nextActive());
+    context.relinkActive(undefined);
+    return;
+  }
 }
 
 function trackLiveIngressOwner(
@@ -124,11 +331,7 @@ function trackLiveIngressOwner(
   owner: CloseOwner
 ): void {
   assertIngressWorkAvailable();
-  context.liveOwners.set(descriptor, Object.freeze({
-    capabilities: context.capabilities,
-    descriptor,
-    owner
-  }));
+  context.trackOwner(descriptor, owner);
 }
 
 function updateLiveIngressOwner(
@@ -136,40 +339,20 @@ function updateLiveIngressOwner(
   descriptor: CapabilityDescriptor,
   owner: CloseOwner
 ): void {
-  if (!context.liveOwners.has(descriptor)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-  context.liveOwners.set(descriptor, Object.freeze({
-    capabilities: context.capabilities,
-    descriptor,
-    owner
-  }));
+  context.updateOwner(descriptor, owner);
 }
 
 function releaseLiveIngressOwner(context: ActiveIngressContext, descriptor: CapabilityDescriptor): void {
-  context.liveOwners.delete(descriptor);
-  retainedPoisonedIngressOwners.delete(descriptor);
+  context.releaseOwner(descriptor);
+  if (retainedPoisonedIngressOwners) releaseRetainedPoisonedIngressOwner(descriptor);
 }
 
 function poisonIngressAndRetainActiveOwners(): void {
   if (descriptorIngressPoisoned) return;
   descriptorIngressPoisoned = true;
-  for (const context of activeIngressContexts) {
-    for (const owner of context.liveOwners.values()) {
-      retainedPoisonedIngressOwners.set(owner.descriptor, owner);
-    }
+  for (let context = activeIngressContexts; context; context = context.nextActive()) {
+    context.retainLiveOwners();
   }
-}
-function clearIngressCloseTicket(context: ActiveIngressContext): void {
-  context.noRawCloseTicket = undefined;
-}
-
-function takeIngressNoRawCloseTicket(
-  context: ActiveIngressContext,
-  descriptor: CapabilityDescriptor,
-  outcome: unknown
-): IngressNoRawCloseRetry | undefined {
-  const noRaw = context.noRawCloseTicket === descriptor;
-  context.noRawCloseTicket = undefined;
-  return noRaw ? Object.freeze({ outcome }) : undefined;
 }
 
 function settleClosedIngressOwner(
@@ -189,28 +372,37 @@ function closeWithRetry(
 ): boolean {
   if (descriptorIngressPoisoned) return true;
   let hookFailed = false;
-  for (let attempt = 0; attempt < NO_RAW_CLOSE_RETRY_LIMIT; attempt += 1) {
-    clearIngressCloseTicket(context);
-    context.closingDescriptors.push(descriptor);
+  let barrierFailures = 0;
+  for (let attempt = 0; ; ) {
+    const closeAttempt = context.startCloseAttempt();
     try {
-      context.capabilities.close(descriptor, owner);
-      clearIngressCloseTicket(context);
-      hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
+      context.close(descriptor, owner);
+      hookFailed ||= closeAttempt.hookFailed();
       return settleClosedIngressOwner(context, descriptor, hookFailed);
     } catch (error) {
-      hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
-      const retry = takeIngressNoRawCloseTicket(context, descriptor, error);
-      if (!retry) return settleClosedIngressOwner(context, descriptor, true);
+      hookFailed ||= closeAttempt.hookFailed();
+      if (closeAttempt.rawStarted()) return settleClosedIngressOwner(context, descriptor, true);
+      if (closeAttempt.closedDescriptorDenied()) {
+        return settleClosedIngressOwner(context, descriptor, true);
+      }
       if (descriptorIngressPoisoned) return true;
+      if (closeAttempt.hookFailed()) {
+        if (barrierFailures + 1 === PRE_RAW_CLOSE_BARRIER_RETRY_LIMIT) {
+          poisonIngressAndRetainActiveOwners();
+          throw error;
+        }
+        barrierFailures += 1;
+        continue;
+      }
       if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
         poisonIngressAndRetainActiveOwners();
-        throw retry.outcome;
+        throw error;
       }
+      attempt += 1;
     } finally {
-      context.closingDescriptors.pop();
+      context.finishCloseAttempt(closeAttempt);
     }
   }
-  return true;
 }
 
 function sameEntry(left: BigIntStats, right: BigIntStats): boolean {
@@ -278,19 +470,18 @@ function openDescriptorBoundPath(
   const root = parse(physicalAbsolutePath).root;
   const segments = absoluteSegments(physicalAbsolutePath);
   if (segments.length === 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
-  const capabilities = context.capabilities;
   const components: RetainedComponent[] = [];
   try {
     assertIngressWorkAvailable();
     observe?.({ phase: "admission", operation: "open_root", path: root });
     assertIngressWorkAvailable();
-    const rootDescriptor = capabilities.openRoot(root, "admission");
+    const rootDescriptor = context.openRoot(root, "admission");
     trackLiveIngressOwner(context, rootDescriptor, "unretained");
     try {
       assertIngressWorkAvailable();
-      const rootStats = capabilities.stat(rootDescriptor);
+      const rootStats = context.stat(rootDescriptor);
       assertExpectedType(rootStats, false);
-      capabilities.markRetained(rootDescriptor, "directory");
+      context.markRetained(rootDescriptor, "directory");
       updateLiveIngressOwner(context, rootDescriptor, "retained");
       components.push({ descriptor: rootDescriptor, stats: rootStats, final: false });
     } catch (error) {
@@ -313,7 +504,7 @@ function openDescriptorBoundPath(
         path: childName
       });
       assertIngressWorkAvailable();
-      const descriptor = capabilities.openRelative(
+      const descriptor = context.openRelative(
         parentDescriptor,
         childName,
         final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS,
@@ -322,9 +513,9 @@ function openDescriptorBoundPath(
       trackLiveIngressOwner(context, descriptor, "unretained");
       try {
         assertIngressWorkAvailable();
-        const stats = capabilities.stat(descriptor);
+        const stats = context.stat(descriptor);
         assertExpectedType(stats, final);
-        capabilities.markRetained(descriptor, final ? "file" : "directory");
+        context.markRetained(descriptor, final ? "file" : "directory");
         updateLiveIngressOwner(context, descriptor, "retained");
         components.push({ descriptor, childName, stats, final });
       } catch (error) {
@@ -350,12 +541,11 @@ function verifyRetainedChain(
   observe?: DescriptorOperationObserver,
   deferCleanup = false
 ): boolean {
-  const capabilities = context.capabilities;
   let cleanupFailed = false;
   for (let index = 0; index < admission.components.length; index += 1) {
     assertIngressWorkAvailable();
     const retained = admission.components[index]!;
-    const retainedStats = capabilities.stat(retained.descriptor);
+    const retainedStats = context.stat(retained.descriptor);
     assertExpectedType(retainedStats, retained.final);
     if (!sameEntry(retained.stats, retainedStats)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     if (index === 0) continue;
@@ -367,7 +557,7 @@ function verifyRetainedChain(
       path: retained.childName!
     });
     assertIngressWorkAvailable();
-    const verificationDescriptor = capabilities.openRelative(
+    const verificationDescriptor = context.openRelative(
       parent.descriptor,
       retained.childName!,
       retained.final ? FILE_OPEN_FLAGS : DIRECTORY_OPEN_FLAGS,
@@ -377,7 +567,7 @@ function verifyRetainedChain(
     let verificationPrimary: ContractError | undefined;
     try {
       assertIngressWorkAvailable();
-      const verificationStats = capabilities.stat(verificationDescriptor);
+      const verificationStats = context.stat(verificationDescriptor);
       assertExpectedType(verificationStats, retained.final);
       if (!sameEntry(retained.stats, verificationStats)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     } catch (error) {
@@ -566,18 +756,17 @@ export async function readBoundedFile(
   beforeCleanup?: (bytes: Uint8Array) => void
 ): Promise<Uint8Array> {
   const context = registerIngressContext(hooks);
-  const capabilities = context.capabilities;
   let admission: DescriptorAdmission | undefined;
   let primary: ContractError | undefined;
   let result: Uint8Array | undefined;
   let verificationCleanupFailed = false;
   try {
     admission = openDescriptorBoundPath(path, context, hooks.observe);
-    capabilities.sealAdmission();
+    context.sealAdmission();
     const final = admission.components.at(-1)!;
     await hooks.afterAdmission?.(admission.logicalAbsolutePath);
     assertIngressWorkAvailable();
-    if (hooks.authorityFault) capabilities.rejectForbidden(hooks.authorityFault, "post_admission");
+    if (hooks.authorityFault) context.rejectForbidden(hooks.authorityFault, "post_admission");
     assertIngressWorkAvailable();
     verificationCleanupFailed = verifyRetainedChain(admission, context, hooks.observe, true);
     assertIngressWorkAvailable();
@@ -592,7 +781,7 @@ export async function readBoundedFile(
           path: final.childName!
         });
         assertIngressWorkAvailable();
-        const bytesRead = capabilities.readRetained(
+        const bytesRead = context.readRetained(
           final.descriptor,
           buffer,
           length,
@@ -618,7 +807,7 @@ export async function readBoundedFile(
     primary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
   } finally {
     const cleanupFailed = admission ? closeAll(context, admission.components) : false;
-    activeIngressContexts.delete(context);
+    unregisterIngressContext(context);
     if (!primary && (verificationCleanupFailed || cleanupFailed)) primary = new ContractError("CONTRACT_SCHEMA_INVALID");
   }
   if (primary) throw primary;

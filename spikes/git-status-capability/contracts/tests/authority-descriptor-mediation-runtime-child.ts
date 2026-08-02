@@ -1,6 +1,6 @@
 import { mock } from "bun:test";
 import * as originalFs from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -20,10 +20,13 @@ type Scenario =
   | "direct_no_raw_retry"
   | "reuse"
   | "ingress_raw_throw"
-  | "capture_abuse";
+  | "capture_abuse"
+  | "set_capture_abuse"
+  | "public_constructor_surplus";
 
 const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
 const productionRoot = process.env[PRODUCTION_ROOT_ENV];
+const descriptorDirectory = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
 // Causal mutation rows select a copied production tree only after child startup.
 
 function libraryModuleSpecifier(name: "capabilities" | "checker" | "ingress"): string {
@@ -135,6 +138,10 @@ async function loadIngressRuntimeModules(): Promise<IngressRuntimeModules> {
   });
 }
 
+async function descriptorCount(): Promise<number> {
+  return (await readdir(descriptorDirectory)).length;
+}
+
 async function runIngressEntry(
   entry: Entry,
   modules: IngressRuntimeModules,
@@ -163,27 +170,51 @@ async function runIngressEntry(
   }
 }
 
-type CapturedIngressOwner = Readonly<{ capabilities: ContractCapabilities }>;
 let capturedIngressCapabilities: ContractCapabilities | undefined;
 
-function isCapturedIngressOwner(value: unknown): value is CapturedIngressOwner {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Readonly<Record<string, unknown>>;
-  return typeof candidate.capabilities === "object" && candidate.capabilities !== null;
+function installCapabilityCapture(capabilities: CapabilitiesModule): void {
+  const prototype = (capabilities.ContractCapabilities as unknown as { prototype: ContractCapabilities }).prototype;
+  const originalOpenRoot = prototype.openRoot;
+  prototype.openRoot = function (
+    this: ContractCapabilities,
+    ...args: Parameters<typeof originalOpenRoot>
+  ): CapabilityDescriptor {
+    capturedIngressCapabilities ??= this;
+    return Reflect.apply(originalOpenRoot, this, args) as CapabilityDescriptor;
+  };
 }
 
-function installCapabilityCapture(): void {
-  const originalMapSet = Map.prototype.set;
-  Map.prototype.set = (function (
-    this: Map<unknown, unknown>,
-    key: unknown,
+type CapturedActiveIngressContext = object;
+let capturedActiveIngressContext: CapturedActiveIngressContext | undefined;
+
+function isCapturedActiveIngressContext(value: unknown): value is CapturedActiveIngressContext {
+  if (typeof value !== "object" || value === null) return false;
+  return typeof Reflect.get(value, "capabilities") === "object" &&
+    Reflect.get(value, "liveOwners") instanceof Map &&
+    Array.isArray(Reflect.get(value, "closingDescriptors")) &&
+    Reflect.get(value, "hookFailedDescriptors") instanceof Set;
+}
+
+function installActiveIngressContextCapture(): void {
+  const originalSetAdd = Set.prototype.add;
+  Set.prototype.add = (function (
+    this: Set<unknown>,
     value: unknown
-  ): Map<unknown, unknown> {
-    if (!capturedIngressCapabilities && isCapturedIngressOwner(value)) {
-      capturedIngressCapabilities = value.capabilities;
+  ): Set<unknown> {
+    if (!capturedActiveIngressContext && isCapturedActiveIngressContext(value)) {
+      capturedActiveIngressContext = value;
     }
-    return Reflect.apply(originalMapSet, this, [key, value]) as Map<unknown, unknown>;
-  }) as typeof Map.prototype.set;
+    return Reflect.apply(originalSetAdd, this, [value]) as Set<unknown>;
+  }) as typeof Set.prototype.add;
+}
+
+function forgeCapturedActiveIngressTicket(): boolean {
+  if (!capturedActiveIngressContext) return false;
+  const closingDescriptors = Reflect.get(capturedActiveIngressContext, "closingDescriptors");
+  if (!Array.isArray(closingDescriptors)) return false;
+  const descriptor = closingDescriptors.at(-1);
+  if (typeof descriptor !== "object" || descriptor === null) return false;
+  return Reflect.set(capturedActiveIngressContext, "noRawCloseTicket", descriptor);
 }
 
 function closeQuietly(
@@ -365,6 +396,37 @@ async function runDirectClose(): Promise<unknown> {
   };
 }
 
+async function runPublicConstructorSurplus(): Promise<unknown> {
+  installCloseProbe(false);
+  const module = await loadCapabilities();
+  const fdBaseline = await descriptorCount();
+  let surplusCallbackCalls = 0;
+  const countedFalseCallback = (): false => {
+    surplusCallbackCalls += 1;
+    return false;
+  };
+  const PublicContractCapabilities = module.ContractCapabilities as unknown as new (
+    hooks?: CapabilityHooks,
+    surplusCloseControl?: (
+      descriptor: CapabilityDescriptor,
+      stage: "before_raw" | "no_raw"
+    ) => boolean | void
+  ) => ContractCapabilities;
+  const capabilities = new PublicContractCapabilities({}, countedFalseCallback);
+  const descriptor = capabilities.openRoot("/", "admission");
+  const fdAfterOpen = await descriptorCount();
+  const closeOutcome = errorMessage(() => { capabilities.close(descriptor, "unretained"); });
+  const fdAfterClose = await descriptorCount();
+  return {
+    surplusCallbackCalls,
+    closeOutcome: closeOutcome.message,
+    rawCalls: rawCloseCalls,
+    fdBaseline,
+    fdAfterOpen,
+    fdAfterClose
+  };
+}
+
 async function runReuse(): Promise<unknown> {
   installCloseProbe(true, true);
   const module = await loadCapabilities();
@@ -389,10 +451,12 @@ async function runReuse(): Promise<unknown> {
 }
 
 type IngressTerminalFault = "raw_throw" | "close_fault_true" | "close_fault_throw";
+type IngressCaptureMode = "none" | "capability_own_keys" | "set_context";
+
 
 async function runIngressTerminalFailure(
   fault: IngressTerminalFault,
-  captureCapability: boolean
+  captureMode: IngressCaptureMode
 ): Promise<unknown> {
   const entry = entryArgument;
   if (!entry) throw new Error("ingress terminal child requires a direct or checker entry");
@@ -403,18 +467,24 @@ async function runIngressTerminalFailure(
   let targetRawCloseCalls = 0;
   let closedDescriptorDenials = 0;
   let targetPhase = true;
-  let oldHelperOutcome = "NOT_ATTEMPTED";
-  let oldHelperAttempts = 0;
+  let capturedOwnCallableProbeAttempts = 0;
+  const capturedOwnCallableKeys: string[] = [];
+  let capturedOwnCallableCalls = 0;
+  let setContextOnCloseAttemptForgeAttempts = 0;
+  let setContextOnCloseAttemptForgeSucceeded = false;
+  let setContextDenialForgeAttempts = 0;
+  let setContextDenialForgeSucceeded = false;
 
   installCloseProbe(fault === "raw_throw", true, () => {
     if (activeTargetAttempt?.ordinal === targetAttempt?.ordinal) targetRawCloseCalls += 1;
   });
-  if (captureCapability) installCapabilityCapture();
+  if (captureMode === "set_context") installActiveIngressContextCapture();
 
   const [capabilities, modules] = await Promise.all([
     loadCapabilities(),
     loadIngressRuntimeModules()
   ]);
+  if (captureMode === "capability_own_keys") installCapabilityCapture(capabilities);
   const hooks: CapabilityHooks = Object.freeze({
     onCloseAttempt: (attempt) => {
       if (!targetPhase) {
@@ -423,23 +493,30 @@ async function runIngressTerminalFailure(
       }
       activeTargetAttempt = attempt;
       targetAttempt ??= attempt;
-      if (!captureCapability || oldHelperAttempts !== 0) return;
-      oldHelperAttempts += 1;
-      if (!capturedIngressCapabilities) {
-        oldHelperOutcome = "CAPTURE_MISSING";
-        return;
+      if (attempt.ordinal !== targetAttempt.ordinal) return;
+
+      if (captureMode === "capability_own_keys" && capturedOwnCallableProbeAttempts === 0) {
+        capturedOwnCallableProbeAttempts += 1;
+        if (capturedIngressCapabilities) {
+          for (const key of Reflect.ownKeys(capturedIngressCapabilities)) {
+            const callable = Reflect.get(capturedIngressCapabilities, key);
+            if (typeof callable !== "function") continue;
+            capturedOwnCallableKeys.push(
+              typeof key === "symbol" ? `symbol:${key.description ?? ""}` : key
+            );
+            try {
+              Reflect.apply(callable, capturedIngressCapabilities, []);
+              capturedOwnCallableCalls += 1;
+            } catch {
+              // The probe is observational; an injected callable must not disrupt close bookkeeping.
+            }
+          }
+        }
       }
-      const oldHelper = (modules.ingress as unknown as Readonly<Record<string, unknown>>)
-        .allowsIngressRawClose;
-      if (typeof oldHelper !== "function") {
-        oldHelperOutcome = "ABSENT";
-        return;
-      }
-      try {
-        (oldHelper as (capabilities: ContractCapabilities) => unknown)(capturedIngressCapabilities);
-        oldHelperOutcome = "CALLED";
-      } catch (error) {
-        oldHelperOutcome = error instanceof Error ? `THREW:${error.message}` : "THREW";
+
+      if (captureMode === "set_context") {
+        setContextOnCloseAttemptForgeAttempts += 1;
+        setContextOnCloseAttemptForgeSucceeded ||= forgeCapturedActiveIngressTicket();
       }
     },
     closeFault: (attempt) => {
@@ -450,6 +527,10 @@ async function runIngressTerminalFailure(
     onDescriptorAuthorityDenial: (denial) => {
       if (denial.operation === "close_sync" && denial.reason === "closed_descriptor") {
         closedDescriptorDenials += 1;
+        if (captureMode === "set_context") {
+          setContextDenialForgeAttempts += 1;
+          setContextDenialForgeSucceeded ||= forgeCapturedActiveIngressTicket();
+        }
       }
     }
   });
@@ -477,14 +558,24 @@ async function runIngressTerminalFailure(
     targetRawCloseCalls,
     closedDescriptorDenials,
     capturedCapability: Boolean(capturedIngressCapabilities),
-    oldHelperOutcome,
-    oldHelperAttempts,
+    capturedContext: Boolean(capturedActiveIngressContext),
+    capturedOwnCallableProbeAttempts,
+    capturedOwnCallableKeys,
+    capturedOwnCallableCalls,
+    setContextOnCloseAttemptForgeAttempts,
+    setContextOnCloseAttemptForgeSucceeded,
+    setContextDenialForgeAttempts,
+    setContextDenialForgeSucceeded,
     ingressExports: Object.keys(modules.ingress).sort()
   };
 }
 
 
-if (scenario === "capture_abuse" && responseModeArgument !== "true" && responseModeArgument !== "throw") {
+if (
+  (scenario === "capture_abuse" || scenario === "set_capture_abuse") &&
+  responseModeArgument !== "true" &&
+  responseModeArgument !== "throw"
+) {
   throw new Error("capture abuse child requires a true or throw closeFault mode");
 }
 
@@ -497,11 +588,18 @@ const receipt = scenario === "close_retry"
   : scenario === "reuse"
   ? await runReuse()
   : scenario === "ingress_raw_throw"
-  ? await runIngressTerminalFailure("raw_throw", false)
+  ? await runIngressTerminalFailure("raw_throw", "none")
   : scenario === "capture_abuse"
   ? await runIngressTerminalFailure(
     responseModeArgument === "true" ? "close_fault_true" : "close_fault_throw",
-    true
+    "capability_own_keys"
   )
+  : scenario === "set_capture_abuse"
+  ? await runIngressTerminalFailure(
+    responseModeArgument === "true" ? "close_fault_true" : "close_fault_throw",
+    "set_context"
+  )
+  : scenario === "public_constructor_surplus"
+  ? await runPublicConstructorSurplus()
   : (() => { throw new Error(`unsupported mediation runtime scenario: ${scenario ?? "missing"}`); })();
 process.stdout.write(`${JSON.stringify(receipt)}\n`);
