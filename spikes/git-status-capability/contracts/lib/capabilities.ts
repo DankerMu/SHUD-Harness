@@ -168,16 +168,6 @@ function isBoundedRead(
 }
 
 /**
- * Close-only synchronous bridge. Its callback is the raw-start linearization
- * point: a close that returns or throws after that callback has started raw
- * work, while a bridge omission leaves the descriptor retryable.
- */
-function invokeRawClose(fd: number, onRawStart: () => void): void {
-  onRawStart();
-  closeSync(fd);
-}
-
-/**
  * The only module allowed to import OS filesystem authority for direct contracts.
  * It exposes a closed read-only vocabulary; forbidden controls fail before an OS call.
  */
@@ -298,7 +288,7 @@ export class ContractCapabilities {
     let rawStarted = false;
     let closeError: unknown;
     try {
-      invokeRawClose(record.fd, () => { rawStarted = true; });
+      this.#invokeRawClose(record, () => { rawStarted = true; });
     } catch (error) {
       closeError = error;
     }
@@ -313,6 +303,16 @@ export class ContractCapabilities {
       hookError = hookError ?? error;
     }
     if (injectedFault || closeError || hookError) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+  }
+
+  /**
+   * Close-only synchronous bridge. Its callback is the raw-start linearization
+   * point: a close that returns or throws after that callback has started raw
+   * work, while a bridge omission leaves the descriptor retryable.
+   */
+  #invokeRawClose(record: DescriptorRecord, onRawStart: () => void): void {
+    onRawStart();
+    closeSync(record.fd);
   }
 
   rejectForbidden(fault: ContractAuthorityFault, phase: CapabilityPhase): never {

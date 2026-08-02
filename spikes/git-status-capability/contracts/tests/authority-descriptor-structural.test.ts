@@ -74,7 +74,7 @@ describe("retained descriptor structural authority", () => {
       { bigint: true }
     );`
       ),
-      "      closeSync(record.fd);",
+      "    closeSync(record.fd);",
       `      closeSync(
         record
           .fd
@@ -131,7 +131,7 @@ function localDescriptorDecoy(): void {
       "    const stats = fstatSync(record.fd, { bigint: true });",
       "    throw new Error(\"counterfeit\");"
     );
-    counterfeit = replaceSourceAnchor(counterfeit, "      closeSync(record.fd);", "      return;");
+    counterfeit = replaceSourceAnchor(counterfeit, "    closeSync(record.fd);", "    return;");
     counterfeit = counterfeit
       .replaceAll("#registry", "#registryUnchecked")
       .replaceAll("#currentGenerationByDescriptor", "#generationUnchecked")

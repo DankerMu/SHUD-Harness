@@ -9,36 +9,25 @@ const contractsRoot = join(import.meta.dir, "..");
 const libraryRoot = join(contractsRoot, "lib");
 
 function bridgeSource(source: string): string {
-  const bridge = `function invokeRawClose(fd: number, onRawStart: () => void): void {
-  const mode = process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE;
-  if (mode === "omit") return;
-  if (mode === "omit_once") {
-    process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE = "invoke";
-    return;
-  }
-  if (mode === "invoke_then_omit") {
-    process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE = "omit";
-  }
-  onRawStart();
-  closeSync(fd);
-}`;
-  const anchor = `function invokeRawClose(fd: number, onRawStart: () => void): void {
-  onRawStart();
-  closeSync(fd);
-}`;
-  if (source.includes(anchor)) return source.replace(anchor, bridge);
-
-  const legacyAnchor = "      closeSync(record.fd);";
-  if (!source.includes(legacyAnchor)) throw new Error("close runtime bridge anchor is absent");
-  return source.replace(legacyAnchor, `      const mode = process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE;
-      if (mode === "omit") {
-        // Test-copy mediator omission leaves the legacy close path observable.
-      } else if (mode === "omit_once") {
-        process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE = "invoke";
-      } else {
-        if (mode === "invoke_then_omit") process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE = "omit";
-        closeSync(record.fd);
-      }`);
+  const bridge = `  #invokeRawClose(record: DescriptorRecord, onRawStart: () => void): void {
+    const mode = process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE;
+    if (mode === "omit") return;
+    if (mode === "omit_once") {
+      process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE = "invoke";
+      return;
+    }
+    if (mode === "invoke_then_omit") {
+      process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE = "omit";
+    }
+    onRawStart();
+    closeSync(record.fd);
+  }`;
+  const anchor = `  #invokeRawClose(record: DescriptorRecord, onRawStart: () => void): void {
+    onRawStart();
+    closeSync(record.fd);
+  }`;
+  if (!source.includes(anchor)) throw new Error("close runtime bridge anchor is absent");
+  return source.replace(anchor, bridge);
 }
 
 function ingressProbeSource(source: string, mutation: CloseRuntimeMutation): string {
