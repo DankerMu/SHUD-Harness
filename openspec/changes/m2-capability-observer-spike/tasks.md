@@ -81,7 +81,7 @@ descriptor-provenance allowlist plus the fd-0 and Linux `AT_FDCWD` mutations.
 Fixture level: `expanded`; repair intensity: `high`; upstream suggestion:
 `expanded` (agree). This terminal replacement consumes PR #192 governance read-only.
 
-- [ ] #193.A Transfer the minimum unmerged close runtime and bind settlement.
+- [x] #193.A Transfer the minimum unmerged close runtime and bind settlement.
   - Current-base transfer: `origin/main` has #175 descriptor lifecycle but no
     primitive mediator, ingress close-attempt context, poison owner list, or
     no-raw retry. Add only the private bridge needed for descriptor-attributed
@@ -100,7 +100,7 @@ Fixture level: `expanded`; repair intensity: `high`; upstream suggestion:
     settled. A sibling raw close MUST NOT release a no-raw target. Raw start,
     including `closeSync` throw, is terminal: no retry; its owner/receipt follows
     existing close-error precedence.
-- [ ] #193.B Preserve one immutable public CloseAttempt identity.
+- [x] #193.B Preserve one immutable public CloseAttempt identity.
   - In: the same close hook bridge and focused direct/ingress/checker identity
     rows only.
   - Out: arbitrary hostile/falsy thrown-value policy and #189 reentry proof.
@@ -108,7 +108,7 @@ Fixture level: `expanded`; repair intensity: `high`; upstream suggestion:
   - I/O: a non-hostile `WeakSet` hook pair sees the same frozen reference within
     one close; a private retry sees exactly one different frozen reference and
     preserves the legacy cleanup/error receipt.
-- [ ] #193.C Prove and hand off the runtime slice.
+- [x] #193.C Prove and hand off the runtime slice.
   - In: only the #193.A/B focused process rows and copied-source mutations.
   - Out: durable/reusable causal procedure, #189 proof matrix, and production
     or governance artifacts.
