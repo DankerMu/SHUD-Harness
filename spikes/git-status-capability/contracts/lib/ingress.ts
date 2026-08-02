@@ -49,7 +49,6 @@ export type DescriptorIngressHooks = Readonly<{
 }> & CapabilityHooks;
 
 const NO_RAW_CLOSE_RETRY_LIMIT = 2;
-const PRE_RAW_CLOSE_BARRIER_RETRY_LIMIT = 2;
 
 class IngressOwnerNode {
   readonly #capabilities: ContractCapabilities;
@@ -110,7 +109,7 @@ class IngressOwnerNode {
 class IngressCloseAttempt {
   #rawStarted = false;
   #hookFailed = false;
-  #closedDescriptorDenied = false;
+  #poisonObserved = false;
 
   markRawStarted(): void {
     this.#rawStarted = true;
@@ -120,8 +119,8 @@ class IngressCloseAttempt {
     this.#hookFailed = true;
   }
 
-  markClosedDescriptorDenied(): void {
-    this.#closedDescriptorDenied = true;
+  markPoisonObserved(): void {
+    this.#poisonObserved = true;
   }
 
   rawStarted(): boolean {
@@ -132,39 +131,30 @@ class IngressCloseAttempt {
     return this.#hookFailed;
   }
 
-  closedDescriptorDenied(): boolean {
-    return this.#closedDescriptorDenied;
+  poisonObserved(): boolean {
+    return this.#poisonObserved;
   }
 }
 
 class ActiveIngressContext {
   readonly #capabilities: ContractCapabilities;
+  readonly #hooks: DescriptorIngressHooks;
+  #closeOrdinal = 0;
   #liveOwners: IngressOwnerNode | undefined;
   #activeNext: ActiveIngressContext | undefined;
   #closeAttempt: IngressCloseAttempt | undefined;
 
   constructor(hooks: DescriptorIngressHooks) {
+    this.#hooks = hooks;
     const guardedHooks: CapabilityHooks = Object.freeze({
       closeFault: (attempt) => {
         this.#closeAttempt?.markRawStarted();
         return hooks.closeFault?.(attempt) ?? false;
       },
-      onCloseAttempt: (attempt) => {
-        try {
-          hooks.onCloseAttempt?.(attempt);
-        } catch (error) {
-          this.#closeAttempt?.markHookFailed();
-          throw error;
-        }
-        assertIngressWorkAvailable();
-      },
       onAuthorityViolation: (fault) => {
         hooks.onAuthorityViolation?.(fault);
       },
       onDescriptorAuthorityDenial: (denial) => {
-        if (denial.operation === "close_sync" && denial.reason === "closed_descriptor") {
-          this.#closeAttempt?.markClosedDescriptorDenied();
-        }
         hooks.onDescriptorAuthorityDenial?.(denial);
       }
     });
@@ -212,7 +202,30 @@ class ActiveIngressContext {
   }
 
   close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
-    this.#capabilities.close(descriptor, owner);
+    const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
+    let hookFailed = false;
+    try {
+      this.#hooks.onCloseAttempt?.(attempt);
+    } catch {
+      // Ordinary hook failure is reported only after a terminal raw close.
+      this.#closeAttempt?.markHookFailed();
+      hookFailed = true;
+    }
+    if (descriptorIngressPoisoned) {
+      this.#closeAttempt?.markPoisonObserved();
+      throw new ContractError("CONTRACT_SCHEMA_INVALID");
+    }
+
+    let closeThrew = false;
+    let closeError: unknown;
+    try {
+      this.#capabilities.close(descriptor, owner);
+    } catch (error) {
+      closeThrew = true;
+      closeError = error;
+    }
+    if (closeThrew) throw closeError;
+    if (hookFailed) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
   }
 
   trackOwner(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
@@ -371,32 +384,29 @@ function closeWithRetry(
   owner: CloseOwner
 ): boolean {
   if (descriptorIngressPoisoned) return true;
+  let attempt = 0;
   let hookFailed = false;
-  let barrierFailures = 0;
-  for (let attempt = 0; ; ) {
+  for (;;) {
     const closeAttempt = context.startCloseAttempt();
+    let closeThrew = false;
+    let closeError: unknown;
     try {
       context.close(descriptor, owner);
-      hookFailed ||= closeAttempt.hookFailed();
-      return settleClosedIngressOwner(context, descriptor, hookFailed);
     } catch (error) {
+      closeThrew = true;
+      closeError = error;
+    }
+    try {
       hookFailed ||= closeAttempt.hookFailed();
-      if (closeAttempt.rawStarted()) return settleClosedIngressOwner(context, descriptor, true);
-      if (closeAttempt.closedDescriptorDenied()) {
-        return settleClosedIngressOwner(context, descriptor, true);
+      // closeFault is the only signal that permits live-owner release.
+      if (closeAttempt.rawStarted()) {
+        return settleClosedIngressOwner(context, descriptor, closeThrew || hookFailed);
       }
-      if (descriptorIngressPoisoned) return true;
-      if (closeAttempt.hookFailed()) {
-        if (barrierFailures + 1 === PRE_RAW_CLOSE_BARRIER_RETRY_LIMIT) {
-          poisonIngressAndRetainActiveOwners();
-          throw error;
-        }
-        barrierFailures += 1;
-        continue;
-      }
+      if (closeAttempt.poisonObserved() || descriptorIngressPoisoned) return true;
       if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
         poisonIngressAndRetainActiveOwners();
-        throw error;
+        if (closeThrew) throw closeError;
+        throw new ContractError("CONTRACT_SCHEMA_INVALID");
       }
       attempt += 1;
     } finally {

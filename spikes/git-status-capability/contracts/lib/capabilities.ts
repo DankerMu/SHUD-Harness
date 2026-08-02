@@ -403,14 +403,16 @@ export class ContractCapabilities {
     const stateBeforeClose = record.state;
     record.state = "closed";
     const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
+    let hookFailed = false;
     try {
       this.#hooks.onCloseAttempt?.(attempt);
-    } catch (error) {
-      record.state = stateBeforeClose;
-      throw error;
+    } catch {
+      // An ordinary observation hook cannot cancel a direct terminal close.
+      hookFailed = true;
     }
 
     let rawCloseAttempted = false;
+    let rawCloseThrew = false;
     let closeError: unknown;
     try {
       invokeDescriptorPrimitive("close_sync", () => {
@@ -418,6 +420,7 @@ export class ContractCapabilities {
         closeSync(record.fd);
       });
     } catch (error) {
+      rawCloseThrew = true;
       closeError = error;
     }
     if (!rawCloseAttempted) {
@@ -431,7 +434,9 @@ export class ContractCapabilities {
     } catch {
       injectedFault = true;
     }
-    if (injectedFault || closeError) throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+    if (hookFailed || injectedFault || rawCloseThrew) {
+      throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+    }
   }
 
   rejectForbidden(fault: ContractAuthorityFault, phase: CapabilityPhase): never {

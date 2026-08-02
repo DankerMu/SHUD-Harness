@@ -22,6 +22,24 @@ type DirectCloseReceipt = Readonly<{
   exactPreInvocationOutcome: boolean | null;
 }>;
 
+type DirectHookTerminalReceipt = Readonly<{
+  owner: "unretained" | "retained" | "verification";
+  closeOutcome: Readonly<{ message: string; exactRaw: boolean }>;
+  unusableOutcome: Readonly<{ message: string; exactRaw: boolean }>;
+  rawCalls: number;
+  denials: readonly string[];
+}>;
+type IngressOrdinaryHookReceipt = Readonly<{
+  entry: Entry;
+  first: EntryReceipt;
+  later: EntryReceipt;
+  rawAfterFirst: number;
+  rawAfterLater: number;
+  fdBaseline: number;
+  fdAfterFirst: number;
+  fdAfterLater: number;
+}>;
+
 type PublicConstructorSurplusReceipt = Readonly<{
   surplusCallbackCalls: number;
   closeOutcome: string;
@@ -130,12 +148,33 @@ function injectOmissionOnlyNoRawRestore(source: string): string {
 }
 
 function injectMissingRawStartSignalAsRetry(source: string): string {
-  const anchor = "      if (closeAttempt.rawStarted()) return settleClosedIngressOwner(context, descriptor, true);";
+  const anchor = `      if (closeAttempt.rawStarted()) {
+        return settleClosedIngressOwner(context, descriptor, closeThrew || hookFailed);
+      }`;
   if (!source.includes(anchor)) throw new Error("raw-start settlement mutation anchor is absent");
   return source.replace(
     anchor,
-    "      if (false) return settleClosedIngressOwner(context, descriptor, true);"
+    `      if (false) {
+        return settleClosedIngressOwner(context, descriptor, closeThrew || hookFailed);
+      }`
   );
+}
+
+function injectHookRollbackBeforeRaw(source: string): string {
+  const anchor = `    let hookFailed = false;
+    try {
+      this.#hooks.onCloseAttempt?.(attempt);
+    } catch {
+      // An ordinary observation hook cannot cancel a direct terminal close.
+      hookFailed = true;
+    }`;
+  if (!source.includes(anchor)) throw new Error("direct hook rollback mutation anchor is absent");
+  return source.replace(anchor, `    try {
+      this.#hooks.onCloseAttempt?.(attempt);
+    } catch (error) {
+      record.state = stateBeforeClose;
+      throw error;
+    }`);
 }
 
 function injectHiddenIngressCapabilityControl(source: string): string {
@@ -262,6 +301,43 @@ describe("descriptor primitive mediation runtime", () => {
     }
   });
 
+  test("ordinary close hooks are terminal directly and do not create ingress poison", async () => {
+    for (const owner of ["unretained", "retained", "verification"] as const) {
+      const direct = await receipt<DirectHookTerminalReceipt>(["direct_hook_terminal", owner]);
+      expect(direct.owner).toBe(owner);
+      expect(direct.closeOutcome).toEqual({ message: CLOSE_ERROR, exactRaw: false });
+      expect(direct.unusableOutcome).toEqual({
+        message: "CONTRACT_CAPABILITY_DESCRIPTOR_DENIED",
+        exactRaw: false
+      });
+      expect(direct.rawCalls).toBe(1);
+      expect(direct.denials).toEqual(["closed_descriptor"]);
+    }
+
+    await withProductionTree(undefined, async (tree) => {
+      const source = await readFile(tree.capabilitiesPath, "utf8");
+      await writeFile(tree.capabilitiesPath, injectHookRollbackBeforeRaw(source));
+      const mutated = await receipt<DirectHookTerminalReceipt>(["direct_hook_terminal", "retained"], tree.root);
+      expect(mutated.closeOutcome).toEqual({ message: "ORDINARY_CLOSE_HOOK_FAILURE", exactRaw: false });
+      expect(mutated.unusableOutcome).toEqual({ message: "NO_ERROR", exactRaw: false });
+      expect(mutated.rawCalls).toBe(0);
+      expect(mutated.denials).toEqual([]);
+    });
+
+    for (const entry of ["direct", "checker"] as const) {
+      const ingress = await receipt<IngressOrdinaryHookReceipt>(["ingress_hook_terminal", "ordinary", entry]);
+      expect(ingress.entry).toBe(entry);
+      expect(ingress.first).toEqual(FAILURE_BY_ENTRY[entry]);
+      expect(ingress.later).toEqual(entry === "direct"
+        ? { outcome: "NO_ERROR", stdout: "", stderr: "" }
+        : { outcome: "CHECK:0", stdout: CHECK_SUCCESS, stderr: "" });
+      expect(ingress.rawAfterFirst).toBeGreaterThan(0);
+      expect(ingress.rawAfterLater).toBeGreaterThan(ingress.rawAfterFirst);
+      expect(ingress.fdAfterFirst).toBe(ingress.fdBaseline);
+      expect(ingress.fdAfterLater).toBe(ingress.fdBaseline);
+    }
+  });
+
   test("the public JavaScript constructor ignores a surplus close-control callback", async () => {
     const publicConstructor = await receipt<PublicConstructorSurplusReceipt>(["public_constructor_surplus"]);
     expect(publicConstructor.surplusCallbackCalls).toBe(0);
@@ -363,8 +439,8 @@ describe("descriptor primitive mediation runtime", () => {
           tree.root
         );
         expect(mutated.first).toEqual(FAILURE_BY_ENTRY[entry]);
-        expect(mutated.laterDirect).toEqual({ outcome: "NO_ERROR", stdout: "", stderr: "" });
-        expect(mutated.laterChecker).toEqual({ outcome: "CHECK:0", stdout: CHECK_SUCCESS, stderr: "" });
+        expect(mutated.laterDirect).toEqual(FAILURE_BY_ENTRY.direct);
+        expect(mutated.laterChecker).toEqual(FAILURE_BY_ENTRY.checker);
         expect(mutated.closedDescriptorDenials).toBe(1);
         expect(() => {
           assertIngressTerminalReceipt(mutated, entry, "raw_throw", false);

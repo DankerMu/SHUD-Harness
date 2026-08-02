@@ -8,7 +8,13 @@ import { pathToFileURL } from "node:url";
 import type { BigIntStats, DescriptorPrimitiveMediator } from "../lib/capabilities";
 
 type Entry = "direct" | "checker";
-type Scenario = "pre_raw" | "no_raw" | "post_raw" | "map_clear_no_raw";
+type Scenario =
+  | "pre_raw"
+  | "no_raw"
+  | "post_raw"
+  | "map_clear_no_raw"
+  | "mixed_pre_raw"
+  | "same_pair_reentrant";
 type NoRawCloseMode = "omission" | "value" | "async" | "thenable" | "proxy" | "sentinel" | "hostile";
 type NoRawBehavior = "once" | "persistent";
 type CloseFaultMode = "false" | "true" | "throw";
@@ -16,13 +22,16 @@ type PrimaryMode = "none" | "prior_primary";
 type CloseHooks = Readonly<{
   onCloseAttempt?: (attempt: CloseAttempt) => void;
   closeFault?: (attempt: CloseAttempt) => boolean;
+  onDescriptorAuthorityDenial?: (denial: Readonly<{ operation: string; reason: string }>) => void;
 }>;
 type RawPrimitive = "open_sync" | "openat" | "fstat_sync" | "read_sync" | "close_sync";
 type RawCounts = Record<RawPrimitive, number>;
 type CloseAttempt = Readonly<{ owner: "unretained" | "retained" | "verification"; ordinal: number }>;
 type OpenAt = (parentDescriptor: number, path: Buffer, flags: number) => number;
 type EntryOutcome = Readonly<{ code: string; exit: number | null; stdout: string; stderr: string }>;
+type CapabilityClose = (descriptor: unknown, owner: CloseAttempt["owner"]) => void;
 type CapabilitiesModule = Readonly<{
+  ContractCapabilities: Readonly<{ prototype: Readonly<{ close: CapabilityClose }> }>;
   installDescriptorPrimitiveMediator: (mediator: DescriptorPrimitiveMediator) => void;
 }>;
 type IngressModule = Readonly<{
@@ -117,7 +126,9 @@ const childArguments = process.argv.slice(2);
 const scenario = (
   childArguments[0] === "no_raw" ||
   childArguments[0] === "post_raw" ||
-  childArguments[0] === "map_clear_no_raw"
+  childArguments[0] === "map_clear_no_raw" ||
+  childArguments[0] === "mixed_pre_raw" ||
+  childArguments[0] === "same_pair_reentrant"
   ? childArguments[0]
   : "pre_raw"
 ) as Scenario;
@@ -125,6 +136,8 @@ const [outerEntryArgument, nestedEntryArgument] = scenario === "pre_raw"
   ? [childArguments[0], childArguments[1]]
   : scenario === "no_raw"
   ? [childArguments[3], undefined]
+  : scenario === "mixed_pre_raw" || scenario === "same_pair_reentrant"
+  ? [childArguments[1], undefined]
   : [childArguments[1], childArguments[2]];
 const outerEntry = (outerEntryArgument ?? "direct") as Entry;
 const nestedEntry = (nestedEntryArgument ?? "direct") as Entry;
@@ -509,8 +522,10 @@ async function runNoRawScenario(): Promise<unknown> {
   let mediatedCloseCallsAtPoison: number | undefined;
   let refusedCloseCalls = 0;
   let mediatedCloseCalls = 0;
+  const targetCloseAttempts: CloseAttempt[] = [];
   const hooks: CloseHooks = Object.freeze({
-    onCloseAttempt: () => {
+    onCloseAttempt: (attempt) => {
+      if (targetCloseAttempts.length < 2) targetCloseAttempts.push(attempt);
       const liveOwnerIds = snapshotLiveOwnerIds(modules.ingress);
       if (!firstCloseOwnerIds) {
         firstCloseOwnerIds = liveOwnerIds;
@@ -553,6 +568,7 @@ async function runNoRawScenario(): Promise<unknown> {
       outer,
       refusedCloseCalls,
       mediatedCloseCalls,
+      closeAttempts: targetCloseAttempts.map((attempt) => ({ owner: attempt.owner, ordinal: attempt.ordinal })),
       firstCloseOwnerIds: firstCloseOwnerIds ?? [],
       rawAtFirstAttempt: rawAtFirstAttempt ?? rawAfterOuter,
       rawAfterFirstRawClose: rawAfterFirstRawClose ?? null,
@@ -576,6 +592,7 @@ async function runNoRawScenario(): Promise<unknown> {
     refusedCloseCalls,
     mediatedCloseCallsAtPoison: mediationAtPoison,
     mediatedCloseCallsAfterLater: mediatedCloseCalls,
+    closeAttempts: targetCloseAttempts.map((attempt) => ({ owner: attempt.owner, ordinal: attempt.ordinal })),
     firstCloseOwnerIds: firstCloseOwnerIds ?? [],
     secondCloseOwnerIds: secondCloseOwnerIds ?? [],
     rawAtFirstAttempt: rawAtFirstAttempt ?? rawAfterOuter,
@@ -585,6 +602,97 @@ async function runNoRawScenario(): Promise<unknown> {
     rawAfterLater,
     laterRaw: rawDelta(rawAfterLater, poisonSnapshot),
     retainedOwnerIdsAfterContextDeletion
+  };
+}
+
+async function runMixedPreRawScenario(): Promise<unknown> {
+  if (!(["direct", "checker"] as const).includes(outerEntry)) {
+    throw new Error("mixed pre-raw child requires a direct or checker entry");
+  }
+  installRawProbe();
+  const modules = await loadModules();
+  const fdBaseline = await descriptorCount();
+  const closeAttempts: CloseAttempt[] = [];
+  let mediatedCloseCalls = 0;
+  const hooks: CloseHooks = Object.freeze({
+    onCloseAttempt: (attempt) => {
+      closeAttempts.push(attempt);
+      if (closeAttempts.length === 1) throw new Error("MIXED_PRE_RAW_HOOK_FAILURE");
+    }
+  });
+  modules.capabilities.installDescriptorPrimitiveMediator((operation, invoke) => {
+    if (operation === "close_sync") {
+      mediatedCloseCalls += 1;
+      return undefined;
+    }
+    invoke();
+    return undefined;
+  });
+  const outer = await runEntry(outerEntry, modules, hooks);
+  const rawAfterOuter = { ...raw };
+  const fdAfterOuter = await descriptorCount();
+  const laterDirect = await runEntry("direct", modules, hooks);
+  const laterChecker = await runEntry("checker", modules, hooks);
+  const rawAfterLater = { ...raw };
+  return {
+    outerEntry,
+    outer,
+    laterDirect,
+    laterChecker,
+    closeAttempts: closeAttempts.map((attempt) => ({ owner: attempt.owner, ordinal: attempt.ordinal })),
+    mediatedCloseCalls,
+    rawAfterOuter,
+    rawAfterLater,
+    laterRaw: rawDelta(rawAfterLater, rawAfterOuter),
+    fdBaseline,
+    fdAfterOuter,
+    fdAfterLater: await descriptorCount()
+  };
+}
+
+async function runSamePairReentrantScenario(): Promise<unknown> {
+  if (!(["direct", "checker"] as const).includes(outerEntry)) {
+    throw new Error("same-pair reentrant child requires a direct or checker entry");
+  }
+  installRawProbe();
+  const modules = await loadModules();
+  const prototype = modules.capabilities.ContractCapabilities.prototype as { close: CapabilityClose };
+  const originalClose = prototype.close;
+  let armed = false;
+  let reentrantCloseCalls = 0;
+  let targetRawCloseCalls = 0;
+  let closedDescriptorDenials = 0;
+  prototype.close = function(this: unknown, descriptor, owner): void {
+    if (armed) {
+      armed = false;
+      reentrantCloseCalls += 1;
+      const rawBefore = raw.close_sync;
+      Reflect.apply(originalClose, this, [descriptor, owner]);
+      targetRawCloseCalls += raw.close_sync - rawBefore;
+    }
+    Reflect.apply(originalClose, this, [descriptor, owner]);
+  };
+  const fdBaseline = await descriptorCount();
+  const outer = await runEntry(outerEntry, modules, {
+    onCloseAttempt: () => { armed ||= reentrantCloseCalls === 0; },
+    onDescriptorAuthorityDenial: (denial) => {
+      if (denial.operation === "close_sync" && denial.reason === "closed_descriptor") {
+        closedDescriptorDenials += 1;
+      }
+    }
+  });
+  const fdAfterOuter = await descriptorCount();
+  const later = await runEntry(outerEntry, modules, {});
+  return {
+    outerEntry,
+    outer,
+    later,
+    reentrantCloseCalls,
+    targetRawCloseCalls,
+    closedDescriptorDenials,
+    fdBaseline,
+    fdAfterOuter,
+    fdAfterLater: await descriptorCount()
   };
 }
 
@@ -708,6 +816,10 @@ async function runPostRawScenario(): Promise<unknown> {
 try {
   const receipt = scenario === "no_raw"
     ? await runNoRawScenario()
+    : scenario === "mixed_pre_raw"
+    ? await runMixedPreRawScenario()
+    : scenario === "same_pair_reentrant"
+    ? await runSamePairReentrantScenario()
     : scenario === "post_raw"
     ? await runPostRawScenario()
     : scenario === "map_clear_no_raw"

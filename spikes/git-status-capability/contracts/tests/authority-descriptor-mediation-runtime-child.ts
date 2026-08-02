@@ -17,7 +17,9 @@ type NoRawCloseMode = "omission" | "value" | "async" | "thenable" | "proxy" | "s
 type Scenario =
   | "close_retry"
   | "direct_close"
+  | "direct_hook_terminal"
   | "direct_no_raw_retry"
+  | "ingress_hook_terminal"
   | "reuse"
   | "ingress_raw_throw"
   | "capture_abuse"
@@ -36,6 +38,7 @@ function libraryModuleSpecifier(name: "capabilities" | "checker" | "ingress"): s
 
 type CapabilitiesModule = Readonly<{
   ContractCapabilities: new (hooks?: CapabilityHooks) => ContractCapabilities;
+  DIRECTORY_OPEN_FLAGS: number;
   installDescriptorPrimitiveMediator: (mediator: DescriptorPrimitiveMediator) => void;
 }>;
 
@@ -396,6 +399,62 @@ async function runDirectClose(): Promise<unknown> {
   };
 }
 
+async function runDirectHookTerminal(): Promise<unknown> {
+  installCloseProbe(false);
+  const module = await loadCapabilities();
+  const owner = responseModeArgument as "unretained" | "retained" | "verification";
+  if (!["unretained", "retained", "verification"].includes(owner)) {
+    throw new Error("direct hook terminal child requires a close owner");
+  }
+  const denials: string[] = [];
+  const capabilities = new module.ContractCapabilities({
+    onCloseAttempt: () => {
+      throw new Error("ORDINARY_CLOSE_HOOK_FAILURE");
+    },
+    onDescriptorAuthorityDenial: (denial) => {
+      denials.push(denial.reason);
+    }
+  });
+  let descriptor = capabilities.openRoot("/", "admission");
+  if (owner !== "unretained") {
+    capabilities.stat(descriptor);
+    capabilities.markRetained(descriptor, "directory");
+  }
+  if (owner === "verification") {
+    capabilities.sealAdmission();
+    descriptor = capabilities.openRelative(descriptor, "dev", module.DIRECTORY_OPEN_FLAGS, "post_admission");
+  }
+  const closeOutcome = errorMessage(() => { capabilities.close(descriptor, owner); });
+  const unusableOutcome = errorMessage(() => { capabilities.stat(descriptor); });
+  return { owner, closeOutcome, unusableOutcome, rawCalls: rawCloseCalls, denials };
+}
+
+async function runIngressOrdinaryHookTerminal(): Promise<unknown> {
+  const entry = entryArgument;
+  if (!entry) throw new Error("ingress ordinary hook child requires a direct or checker entry");
+  installCloseProbe(false);
+  const modules = await loadIngressRuntimeModules();
+  const fdBaseline = await descriptorCount();
+  const first = await runIngressEntry(entry, modules, {
+    onCloseAttempt: () => {
+      throw new Error("ORDINARY_INGRESS_CLOSE_HOOK_FAILURE");
+    }
+  });
+  const rawAfterFirst = rawCloseCalls;
+  const fdAfterFirst = await descriptorCount();
+  const later = await runIngressEntry(entry, modules, {});
+  return {
+    entry,
+    first,
+    later,
+    rawAfterFirst,
+    rawAfterLater: rawCloseCalls,
+    fdBaseline,
+    fdAfterFirst,
+    fdAfterLater: await descriptorCount()
+  };
+}
+
 async function runPublicConstructorSurplus(): Promise<unknown> {
   installCloseProbe(false);
   const module = await loadCapabilities();
@@ -583,8 +642,12 @@ const receipt = scenario === "close_retry"
   ? await runCloseRetry()
   : scenario === "direct_close"
   ? await runDirectClose()
+  : scenario === "direct_hook_terminal"
+  ? await runDirectHookTerminal()
   : scenario === "direct_no_raw_retry"
   ? await runDirectNoRawRetry()
+  : scenario === "ingress_hook_terminal"
+  ? await runIngressOrdinaryHookTerminal()
   : scenario === "reuse"
   ? await runReuse()
   : scenario === "ingress_raw_throw"

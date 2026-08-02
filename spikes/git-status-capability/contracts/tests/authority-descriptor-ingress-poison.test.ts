@@ -44,6 +44,7 @@ type NoRawReceipt = Readonly<{
   laterDirect?: EntryOutcome;
   laterChecker?: EntryOutcome;
   refusedCloseCalls: number;
+  closeAttempts: readonly CloseAttempt[];
   mediatedCloseCalls?: number;
   mediatedCloseCallsAtPoison?: number;
   mediatedCloseCallsAfterLater?: number;
@@ -57,6 +58,33 @@ type NoRawReceipt = Readonly<{
   rawAfterLater?: RawCounts;
   laterRaw?: RawCounts;
   retainedOwnerIdsAfterContextDeletion: readonly number[] | null;
+}>;
+
+type MixedPreRawReceipt = Readonly<{
+  outerEntry: Entry;
+  outer: EntryOutcome;
+  laterDirect: EntryOutcome;
+  laterChecker: EntryOutcome;
+  closeAttempts: readonly CloseAttempt[];
+  mediatedCloseCalls: number;
+  rawAfterOuter: RawCounts;
+  rawAfterLater: RawCounts;
+  laterRaw: RawCounts;
+  fdBaseline: number;
+  fdAfterOuter: number;
+  fdAfterLater: number;
+}>;
+
+type SamePairReentrantReceipt = Readonly<{
+  outerEntry: Entry;
+  outer: EntryOutcome;
+  later: EntryOutcome;
+  reentrantCloseCalls: number;
+  targetRawCloseCalls: number;
+  closedDescriptorDenials: number;
+  fdBaseline: number;
+  fdAfterOuter: number;
+  fdAfterLater: number;
 }>;
 type CloseAttempt = Readonly<{ owner: "unretained" | "retained" | "verification"; ordinal: number }>;
 type PostRawReceipt = Readonly<{
@@ -217,57 +245,12 @@ async function runCopiedMapClearNoRawProbe(
 }
 
 function moveRawCloseBeforeCloseAttempt(source: string): string {
-  const anchor = `    const stateBeforeClose = record.state;
-    record.state = "closed";
-    const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
-    try {
-      this.#hooks.onCloseAttempt?.(attempt);
-    } catch (error) {
-      record.state = stateBeforeClose;
-      throw error;
-    }
-
-    let rawCloseAttempted = false;
-    let closeError: unknown;
-    try {
-      invokeDescriptorPrimitive("close_sync", () => {
-        rawCloseAttempted = true;
-        closeSync(record.fd);
-      });
-    } catch (error) {
-      closeError = error;
-    }
-    if (!rawCloseAttempted) {
-      record.state = stateBeforeClose;
-      throw closeError;
-    }`;
-  if (!source.includes(anchor)) throw new Error("pre-hook raw close mutation anchor is absent");
-  return source.replace(anchor, `    const stateBeforeClose = record.state;
-    record.state = "closed";
-    const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
-    let rawCloseAttempted = false;
-    let closeError: unknown;
-    try {
-      invokeDescriptorPrimitive("close_sync", () => {
-        rawCloseAttempted = true;
-        closeSync(record.fd);
-      });
-    } catch (error) {
-      closeError = error;
-    }
-    try {
-      this.#hooks.onCloseAttempt?.(attempt);
-    } catch (error) {
-      if (!rawCloseAttempted) {
-        record.state = stateBeforeClose;
-        throw error;
-      }
-      closeError ??= error;
-    }
-    if (!rawCloseAttempted) {
-      record.state = stateBeforeClose;
-      throw closeError;
-    }`);
+  const anchor = `  close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
+    const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });`;
+  if (!source.includes(anchor)) throw new Error("ingress pre-hook raw close mutation anchor is absent");
+  return source.replace(anchor, `  close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
+    if (!this.#activeNext) this.#capabilities.close(descriptor, owner);
+    const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });`);
 }
 
 async function runCopiedPreRawOrderingProbe(
@@ -276,8 +259,8 @@ async function runCopiedPreRawOrderingProbe(
 ): Promise<PoisonReceipt> {
   let receipt: PoisonReceipt | undefined;
   await withProductionTree(undefined, async (tree) => {
-    const capabilities = await readFile(tree.capabilitiesPath, "utf8");
-    await writeFile(tree.capabilitiesPath, moveRawCloseBeforeCloseAttempt(capabilities));
+    const ingressPath = join(tree.root, "lib", "ingress.ts");
+    await writeFile(ingressPath, moveRawCloseBeforeCloseAttempt(await readFile(ingressPath, "utf8")));
     receipt = await runPoisonProbe(outerEntry, nestedEntry, tree.root);
   });
   if (!receipt) throw new Error("copied pre-raw ordering proof did not produce a receipt");
@@ -315,6 +298,20 @@ async function runNoRawProbe(
   productionRoot?: string
 ): Promise<NoRawReceipt> {
   return await childReceipt<NoRawReceipt>(["no_raw", mode, behavior, outerEntry], productionRoot);
+}
+
+async function runMixedPreRawProbe(
+  outerEntry: Entry,
+  productionRoot?: string
+): Promise<MixedPreRawReceipt> {
+  return await childReceipt<MixedPreRawReceipt>(["mixed_pre_raw", outerEntry], productionRoot);
+}
+
+async function runSamePairReentrantProbe(
+  outerEntry: Entry,
+  productionRoot?: string
+): Promise<SamePairReentrantReceipt> {
+  return await childReceipt<SamePairReentrantReceipt>(["same_pair_reentrant", outerEntry], productionRoot);
 }
 
 async function runPostRawProbe(
@@ -369,16 +366,25 @@ function insertRawFstatBetweenNoRawAttempts(source: string): string {
 function removeSentinelPoisonTransition(source: string): string {
   const anchor = `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
         poisonIngressAndRetainActiveOwners();
-        throw error;
+        if (closeThrew) throw closeError;
+        throw new ContractError("CONTRACT_SCHEMA_INVALID");
       }`;
   if (!source.includes(anchor)) throw new Error("per-class poison transition mutation anchor is absent");
   return source.replace(anchor, `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
-        if (error instanceof Error && error.message === "NO_RAW_SENTINEL") {
-          throw error;
+        if (closeError instanceof Error && closeError.message === "NO_RAW_SENTINEL") {
+          if (closeThrew) throw closeError;
+          throw new ContractError("CONTRACT_SCHEMA_INVALID");
         }
         poisonIngressAndRetainActiveOwners();
-        throw error;
+        if (closeThrew) throw closeError;
+        throw new ContractError("CONTRACT_SCHEMA_INVALID");
       }`);
+}
+
+function permitThirdPreRawAttempt(source: string): string {
+  const anchor = `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`;
+  if (!source.includes(anchor)) throw new Error("total pre-raw ceiling mutation anchor is absent");
+  return source.replace(anchor, `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT + 1) {`);
 }
 
 function removeCommonPostClosePoisonGuard(source: string): string {
@@ -440,6 +446,21 @@ async function runCopiedPostRawProbe(
   return receipt;
 }
 
+async function runCopiedMixedPreRawProbe(
+  outerEntry: Entry,
+  permitThird: boolean
+): Promise<MixedPreRawReceipt> {
+  let receipt: MixedPreRawReceipt | undefined;
+  await withProductionTree(undefined, async (tree) => {
+    const ingressPath = join(tree.root, "lib", "ingress.ts");
+    const source = await readFile(ingressPath, "utf8");
+    await writeFile(ingressPath, permitThird ? permitThirdPreRawAttempt(source) : source);
+    receipt = await runMixedPreRawProbe(outerEntry, tree.root);
+  });
+  if (!receipt) throw new Error("copied mixed pre-raw proof did not produce a receipt");
+  return receipt;
+}
+
 function expectedPriorPrimary(entry: Entry): EntryOutcome {
   if (entry === "direct") {
     return { code: "CONTRACT_BYTES_LIMIT", exit: null, stdout: "", stderr: "" };
@@ -484,6 +505,7 @@ function expectPersistentNoRawTransitions(receipt: NoRawReceipt): void {
 
 function expectPersistentNoRawPoisonState(outerEntry: Entry, receipt: NoRawReceipt): void {
   expect(receipt.outer).toEqual(expectedEntry(outerEntry));
+  expect(receipt.closeAttempts.map((attempt) => attempt.ordinal)).toEqual([1, 2]);
   expect(receipt.refusedCloseCalls).toBe(2);
   expect(receipt.mediatedCloseCallsAtPoison).toBe(2);
   expect(receipt.mediatedCloseCallsAfterLater).toBe(2);
@@ -611,6 +633,7 @@ describe("ingress terminal close poison", () => {
         expect(firstRefusal.behavior).toBe("once");
         expectSuccessfulEntry(outerEntry, firstRefusal.outer);
         expect(firstRefusal.refusedCloseCalls).toBe(1);
+        expect(firstRefusal.closeAttempts.map((attempt) => attempt.ordinal)).toEqual([1, 2]);
         expect(firstRefusal.firstCloseOwnerIds.length).toBeGreaterThan(0);
         const rawAfterFirstRetry = firstRefusal.rawAfterFirstRawClose;
         expect(rawAfterFirstRetry).not.toBeNull();
@@ -622,6 +645,42 @@ describe("ingress terminal close poison", () => {
         expectPersistentNoRawPoisonState(outerEntry, persistentRefusal);
         expectPersistentNoRawTransitions(persistentRefusal);
       }
+    }
+  });
+
+  test("mixed hook and mediator refusal consumes one total two-attempt pre-raw budget", async () => {
+    for (const outerEntry of ["direct", "checker"] as const) {
+      const baseline = await runCopiedMixedPreRawProbe(outerEntry, false);
+      expect(baseline.outerEntry).toBe(outerEntry);
+      expect(baseline.outer).toEqual(expectedEntry(outerEntry));
+      expect(baseline.closeAttempts.map((attempt) => attempt.ordinal)).toEqual([1, 2]);
+      expect(baseline.mediatedCloseCalls).toBe(2);
+      expect(baseline.rawAfterOuter.close_sync).toBe(0);
+      expect(baseline.laterDirect).toEqual(expectedEntry("direct"));
+      expect(baseline.laterChecker).toEqual(expectedEntry("checker"));
+      expect(baseline.laterRaw).toEqual(ZERO_RAW);
+      expect(baseline.fdAfterOuter).toBeGreaterThan(baseline.fdBaseline);
+      expect(baseline.fdAfterLater).toBe(baseline.fdAfterOuter);
+
+      const mutated = await runCopiedMixedPreRawProbe(outerEntry, true);
+      expect(mutated.closeAttempts.map((attempt) => attempt.ordinal)).toEqual([1, 2, 3]);
+      expect(mutated.mediatedCloseCalls).toBe(3);
+      expect(mutated.rawAfterOuter.close_sync).toBe(0);
+      expect(mutated.laterRaw).toEqual(ZERO_RAW);
+    }
+  });
+
+  test("same-pair prototype reentry settles only after its one proven raw close", async () => {
+    for (const outerEntry of ["direct", "checker"] as const) {
+      const receipt = await runSamePairReentrantProbe(outerEntry);
+      expect(receipt.outerEntry).toBe(outerEntry);
+      expect(receipt.outer).toEqual(expectedEntry(outerEntry));
+      expectSuccessfulEntry(outerEntry, receipt.later);
+      expect(receipt.reentrantCloseCalls).toBe(1);
+      expect(receipt.targetRawCloseCalls).toBe(1);
+      expect(receipt.closedDescriptorDenials).toBe(1);
+      expect(receipt.fdAfterOuter).toBe(receipt.fdBaseline);
+      expect(receipt.fdAfterLater).toBe(receipt.fdBaseline);
     }
   });
 
@@ -659,23 +718,40 @@ describe("ingress terminal close poison", () => {
           outerEntry,
           "omission_only"
         );
+        expect(persistentRefusal.firstCloseOwnerIds.length).toBeGreaterThan(0);
         if (mode === "omission") {
           expectSuccessfulEntry(outerEntry, firstRefusal.outer);
+          expect(firstRefusal.closeAttempts.map((attempt) => attempt.ordinal)).toEqual([1, 2]);
           expect(firstRefusal.refusedCloseCalls).toBe(1);
           expect(firstRefusal.rawAfterFirstRawClose?.close_sync).toBe(
             firstRefusal.rawAtFirstAttempt.close_sync + 1
           );
           expect(persistentRefusal.outer).toEqual(expectedEntry(outerEntry));
+          expect(persistentRefusal.closeAttempts.map((attempt) => attempt.ordinal)).toEqual([1, 2]);
+          expect(persistentRefusal.refusedCloseCalls).toBe(2);
           expect(persistentRefusal.mediatedCloseCallsAtPoison).toBe(2);
           expect(persistentRefusal.mediatedCloseCallsAfterLater).toBe(2);
           expect(persistentRefusal.retainedOwnerIdsAfterContextDeletion).toEqual(
             persistentRefusal.firstCloseOwnerIds
           );
         } else {
-          expect(firstRefusal.outer.code).not.toBe("NO_ERROR");
+          expect(firstRefusal.outer).toEqual(expectedEntry(outerEntry));
+          expect(firstRefusal.closeAttempts.map((attempt) => attempt.ordinal)).toEqual([1, 2]);
+          expect(firstRefusal.refusedCloseCalls).toBe(1);
+          expect(firstRefusal.mediatedCloseCalls).toBe(1);
+          expect(persistentRefusal.outer).toEqual(expectedEntry(outerEntry));
+          expect(persistentRefusal.closeAttempts.map((attempt) => attempt.ordinal)).toEqual([1, 2]);
+          expect(persistentRefusal.refusedCloseCalls).toBe(1);
           const callsBeforeLater = persistentRefusal.mediatedCloseCallsAtPoison ?? 0;
-          expect(callsBeforeLater).toBeGreaterThan(0);
-          expect(persistentRefusal.mediatedCloseCallsAfterLater).toBeGreaterThan(callsBeforeLater);
+          expect(callsBeforeLater).toBe(1);
+          expect(persistentRefusal.mediatedCloseCallsAfterLater).toBe(callsBeforeLater);
+          expectPersistentNoRawTransitions(persistentRefusal);
+          expect(persistentRefusal.retainedOwnerIdsAfterContextDeletion).toEqual(
+            persistentRefusal.firstCloseOwnerIds
+          );
+          expect(persistentRefusal.laterDirect).toEqual(expectedEntry("direct"));
+          expect(persistentRefusal.laterChecker).toEqual(expectedEntry("checker"));
+          expect(persistentRefusal.laterRaw).toEqual(ZERO_RAW);
         }
       }
     }
