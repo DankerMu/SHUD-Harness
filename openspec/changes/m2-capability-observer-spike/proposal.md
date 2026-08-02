@@ -10,6 +10,7 @@ Issue #132 cannot safely finish its cross-platform dirty-state observer with the
 - Persist a bounded, reviewable, content-addressed raw evidence bundle and a separately normalized decision projection. `accepted` requires every mandatory row on both platforms plus every decision-bearing supply, reproducibility, repository, and governance gate; a technical row failure records `rejected` and forbids pathname, Linux-only, or weakened-contract fallback.
 - Keep the spike outside production packages and public StackLock seams. It does not restore PR #133, change Issue #132 runtime behavior, add a production Rust toolchain, or alter the StackLock schema.
 - The current Issue #175 delivery is the first #172 replacement child: it binds only post-admission `openat`/`fstatSync`/`readSync`/`closeSync` operations to retained or verification descriptor provenance and proves fd `0` and Linux `AT_FDCWD` mutations fail before side effects; delegate topology, Worker lifecycle, and final evidence remain dependency-ordered follow-ups.
+- Issue #193 is the terminal replacement of the unmerged #188 runtime slice: it establishes descriptor-attributed close settlement and a single public close-attempt identity for ingress hooks, without absorbing #189's hostile/reentry proof closure.
 
 ## Capabilities
 

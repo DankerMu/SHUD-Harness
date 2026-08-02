@@ -1055,6 +1055,77 @@ Handoff to #176 from `contracts/lib/capabilities.ts`: only
 reusable. #176 may add delegate-topology rows but cannot change origins, flags,
 lifecycle, event fields, or public receipts.
 
+### Issue #193 close-attempt identity and owner-settlement fixture overlay
+
+Issue #193 replaces the unmerged #188 runtime child after its terminal split.
+The effective fixture is `expanded` with `repair=high`; the upstream `expanded`
+suggestion is accepted. PR #192 is consumed read-only.
+
+| Risk pack | Selection | Evidence |
+|---|---|---|
+| Public API / CLI | Selected | Direct, ingress, and checker hooks preserve exact close/error receipts. |
+| Config / setup | Not selected | No configuration or bootstrap change. |
+| File I/O / path / overwrite | Not selected | Existing descriptor-only reads remain; no new pathname/write surface. |
+| Schema / fields | Not selected | Receipt and source schemas are unchanged. |
+| Auth / permissions / secrets | Not selected | No credential or permission surface. |
+| Concurrency / shared state / ordering | Selected | Nested hook order, per-descriptor raw attribution, two-attempt budget, and poison settlement are state transitions. |
+| Resource limits / discovery | Selected | Process-local descriptor baseline and retained-owner identity must remain stable. |
+| Legacy compatibility / examples | Selected | `WeakSet` callback identity and direct/checker receipts retain existing behavior. |
+| Error / rollback / partial outputs | Selected | No-raw restores retryability; sibling raw cannot release another owner; poison precedes release. |
+| Release / dependency compatibility | Selected | Bun/typecheck/full check prove no package, lock, workflow, or export drift. |
+| Documentation / migration | Not selected | No user-facing migration. |
+| Scientific governance / PI gate | Not selected | No scientific behavior or claim. |
+| SHUD/rSHUD/AutoSHUD compatibility | Not selected | Read-only submodules untouched. |
+| Zero / agent role governance | Not selected | Zero/runtime adapters untouched. |
+
+Governing invariant: an ingress owner is released only after the raw close for
+that same descriptor starts, and every public callback for one logical close sees
+the same immutable `CloseAttempt` identity.
+
+Source of truth: the instance-private descriptor record plus an ingress-private
+attempt record keyed by descriptor identity and ordinal; no context-wide raw-start
+boolean may authorize settlement.
+
+Current-base transfer / I-O matrix:
+
+| Missing on `origin/main` | #193 private addition | Controlled input | Required observable output |
+|---|---|---|---|
+| #185 primitive close mediation | close-only synchronous bridge | target `omit|invoke`, sibling `invoke` | target-attributed raw count only; no public mediator control |
+| ingress close attempt / owner settlement | descriptor-keyed private attempt and owner record | target hook closes sibling, target omits | target retained after poison/context deletion; no FD growth |
+| one callback token | shared frozen attempt passed through both hooks | `WeakSet` `onCloseAttempt`/`closeFault` pair | same reference within one close; new frozen reference on retry |
+
+The transfer excludes public raw descriptor/token access and all #189 hostile,
+captured-authority, and broad reentry closure. The raw-start linearization point
+is invocation of the target `closeSync`, whether it returns or throws; that start
+settles the target terminally and never consumes another retry.
+
+| Invariant surface | #193 evidence |
+|---|---|
+| Producers | `ContractCapabilities.close` creates one frozen callback attempt and reports raw start for its descriptor only. |
+| Validators/preflight | Ingress checks owner/descriptor identity, poison, and retry ordinal before settlement. |
+| Storage | Private descriptor registry and active/retained ingress owner lists only. |
+| Public entrypoints | Direct capability, `readBoundedFile`, and checker hook seams. |
+| Downstream | #189 consumes the landed runtime but owns hostile/reentry proof closure. |
+| Failure/cleanup | No-raw target retains owner; poison/context deletion retains its identity; raw-start remains terminal. |
+| Evidence | Direct/checker process rows, red copied-source attribution mutation, Darwin/Linux focused tests, typecheck/check/OpenSpec. |
+
+Boundary checklist: change only close runtime and focused proofs; retain the
+five-primitive mediation boundary and #175 exports; no public control API,
+pathname access, write/publish, Worker/child/network, package, workflow, lock,
+submodule, or canonical-governance change.
+
+Regression rows:
+
+- sibling raw close during target hook + target mediator omission -> target raw
+  count zero, target retained through poison/context deletion, no fd growth.
+- copied source removes descriptor attribution -> same row fails its owner/fd
+  oracle while the unmodified source passes.
+- one logical close with `WeakSet` hook correlation -> direct, ingress, and
+  checker observe the identical frozen attempt identity and matching cleanup receipt.
+- two ordinary no-raw outcomes -> exactly two distinct frozen attempt identities,
+  zero third callback/raw operation, poison-before-release, and retained owner.
+- target `closeSync` return or throw -> exactly one target raw start, no retry,
+  and existing terminal close-error/receipt precedence.
 
 ## Invariant Matrix
 

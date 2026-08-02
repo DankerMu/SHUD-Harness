@@ -76,6 +76,54 @@ descriptor-provenance allowlist plus the fd-0 and Linux `AT_FDCWD` mutations.
   - Verification: focused structural/runtime/direct tests plus the spike-local no-emit vocabulary proof, both public direct commands, typecheck, full `check`, strict OpenSpec, diff/scope/untracked/submodule hygiene, and Darwin/Linux Bun 1.2.19 receipts are green.
   - Handoff: #176 may consume only `CapabilityDescriptor`, `DescriptorCapabilityState`, `DescriptorOperation`, `DescriptorAuthorityDenial`, and immutable `DESCRIPTOR_OPERATION_POLICY` from `contracts/lib/capabilities.ts`; the registry stays private, `DescriptorIngressOperation` remains ingress-only, and #176 cannot broaden descriptor origin, flags, lifecycle, event fields, or public receipts.
 
+### Issue #193 close-attempt identity and owner-settlement overlay
+
+Fixture level: `expanded`; repair intensity: `high`; upstream suggestion:
+`expanded` (agree). This terminal replacement consumes PR #192 governance read-only.
+
+- [ ] #193.A Transfer the minimum unmerged close runtime and bind settlement.
+  - Current-base transfer: `origin/main` has #175 descriptor lifecycle but no
+    primitive mediator, ingress close-attempt context, poison owner list, or
+    no-raw retry. Add only the private bridge needed for descriptor-attributed
+    raw start and owner settlement.
+  - In: `contracts/lib/{capabilities,ingress}.ts` and focused process-isolated
+    `authority-descriptor-{mediation-runtime,ingress-poison}*` helpers/tests.
+  - Out: a public control API, public raw-fd/token exposure, all non-close
+    primitive behavior, hostile-hook normalization, captured-authority/reentry
+    closure, complete causal evidence, packages/workflows/locks/submodules, and
+    canonical governance files.
+  - Depends on: merged #175 and PR #192 only.
+  - I/O: controlled target/sibling descriptors plus mediator `omit|invoke` yield
+    target-attributed raw count, owner identity after poison/context deletion,
+    descriptor baseline, and existing direct/checker receipt.
+  - Bind raw-start receipt to the same descriptor and logical close attempt being
+    settled. A sibling raw close MUST NOT release a no-raw target. Raw start,
+    including `closeSync` throw, is terminal: no retry; its owner/receipt follows
+    existing close-error precedence.
+- [ ] #193.B Preserve one immutable public CloseAttempt identity.
+  - In: the same close hook bridge and focused direct/ingress/checker identity
+    rows only.
+  - Out: arbitrary hostile/falsy thrown-value policy and #189 reentry proof.
+  - Depends on: #193.A's private close bridge.
+  - I/O: a non-hostile `WeakSet` hook pair sees the same frozen reference within
+    one close; a private retry sees exactly one different frozen reference and
+    preserves the legacy cleanup/error receipt.
+- [ ] #193.C Prove and hand off the runtime slice.
+  - In: only the #193.A/B focused process rows and copied-source mutations.
+  - Out: durable/reusable causal procedure, #189 proof matrix, and production
+    or governance artifacts.
+  - Depends on: #193.A and #193.B.
+  - Direct/checker sibling-raw target-omission rows prove target raw count zero,
+    owner identity retained after poison/context deletion, no descriptor growth,
+    and a copied descriptor-attribution mutation red.
+  - Consecutive ordinary no-raw rows prove exactly two distinct frozen attempts,
+    zero third callback/raw operation, poison-before-release, and owner retention.
+    Raw `closeSync` return and throw rows prove one raw start and no retry.
+  - Darwin and read-only Linux Bun 1.2.19 focused suites, descriptor typecheck,
+    full `check`, strict OpenSpec, and scope/submodule hygiene pass.
+  - Handoff: #189 begins only after #193 merges and owns hostile-hook,
+    captured-authority/reentry, and broad causal-retention proof closure.
+
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.
