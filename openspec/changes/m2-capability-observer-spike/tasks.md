@@ -111,15 +111,15 @@ independent P1 findings. Issue #185 remains the parent tracker and is replaced
 by dependency-ordered Issues #188, #189, and #190. No further repair or review
 round is allowed on PR #187.
 
-- [ ] #188.A Close the descriptor close state machine.
+- [x] #188.A Close the descriptor close state machine.
   - Preserve #185's one-shot five-primitive mediation runtime and public/type surface.
   - Treat omission, non-`undefined`/async output, thenable/Proxy, sentinel throw, and hostile throw uniformly as no-raw close outcomes: restore direct retryability, issue only ingress-private retry authority, retry at most once, and poison on a second refusal without a third attempt or raw work.
   - After raw start, check poison on every `closeFault` completion path—normal false, injected-fault true, or thrown sentinel—before any success- or catch-settlement release. Nested poison MUST terminate the active outer ingress, preserve every poison snapshot, retain raw-start terminality without a second raw close, and remain a cleanup failure that never replaces an already selected primary result/error.
-- [ ] #188.B Prove no-raw classification and reentrant poison settlement.
+- [x] #188.B Prove no-raw classification and reentrant poison settlement.
   - Direct and ingress rows cover every no-raw class. First no-raw then raw performs exactly one raw close. Persistent refusal preserves the owner identity/cardinality anchored before the first close through both mediation attempts, zero raw calls, poison, and active-context deletion; same-module later direct/checker admissions fail before mediation/raw work with the attempt count fixed at two.
   - A copied-source mutation that preserves canonical omission restoration/ticket behavior while withholding them only from non-omission classes leaves omission direct/ingress rows green and makes every non-omission row red. A first-ticket owner-release mutation and a missing per-class poison-transition mutation are also red.
   - Direct/direct, direct/checker, and checker/direct rows select the final retained/root owner by identity/ordinal, observe exactly one target raw `close_sync` before its post-raw `closeFault`, then synchronously produce nested poison for false, true, and thrown-sentinel hook exits. With no prior primary, the outer result is exact schema-invalid/exit-2; with a prior primary, that exact primary remains authoritative. Every row performs no second raw close or later OS work and preserves the pre-close owner set after context deletion. Removing the common post-close poison check makes these rows red.
-- [ ] #188.C Verify and hand off the prerequisite runtime child.
+- [x] #188.C Verify and hand off the prerequisite runtime child.
   - Darwin and read-only Linux Bun 1.2.19 focused contracts and descriptor type proof pass; both public direct commands, full `check`, strict OpenSpec, and diff/scope/submodule hygiene pass.
   - Verify read-only that the unique PR #187 terminal-accountability and Issue #185 sizing-retro records already name children #188/#189/#190; #188 MUST NOT append duplicate records or otherwise modify either canonical log or `.review-gate-issues.json`.
   - Handoff: #189 and #190 may proceed independently after #188. #186 and #176 remain blocked until all three replacement children complete.

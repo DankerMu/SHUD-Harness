@@ -53,6 +53,16 @@ type ControlReceipt = Readonly<{
   nativeHostilityReads: number;
 }>;
 
+type NoRawCloseMode = "omission" | "value" | "async" | "thenable" | "proxy" | "sentinel" | "hostile";
+type DirectNoRawRetryReceipt = Readonly<{
+  mode: NoRawCloseMode;
+  firstOutcome: string;
+  firstSentinel: boolean;
+  firstHostile: boolean;
+  secondOutcome: string;
+  mediatedCloseCalls: number;
+  rawCalls: number;
+}>;
 type DirectCloseReceipt = Readonly<{
   responseMode: ResponseMode;
   outcome: Readonly<{ message: string; exactRaw: boolean }>;
@@ -95,6 +105,16 @@ const REENTRY_ERROR = "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_REENTRY";
 const INVALID_INSTALLER_ERROR = "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVALID";
 const REPEATED_INSTALLER_ERROR = "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_ALREADY_INSTALLED";
 const PRODUCTION_ROOT_ENV = "SHUD_DESCRIPTOR_PRODUCTION_ROOT";
+const NO_RAW_CLOSE_MODES = ["omission", "value", "async", "thenable", "proxy", "sentinel", "hostile"] as const;
+const NO_RAW_DIRECT_OUTCOMES: Readonly<Record<NoRawCloseMode, string>> = Object.freeze({
+  omission: MISSING_ERROR,
+  value: ASYNC_ERROR,
+  async: ASYNC_ERROR,
+  thenable: ASYNC_ERROR,
+  proxy: ASYNC_ERROR,
+  sentinel: "MEDIATOR_THROWN_SENTINEL",
+  hostile: "MEDIATOR_THROWN_PROXY"
+});
 
 
 async function runChild(
@@ -181,6 +201,25 @@ function injectGenericNoRawCloseRewrite(source: string): string {
   const anchor = "      throw closeError;";
   if (!source.includes(anchor)) throw new Error("generic no-raw close mutation anchor is absent");
   return source.replace(anchor, '      throw new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");');
+}
+
+function injectOmissionOnlyNoRawRestore(source: string): string {
+  const anchor = `    if (!rawCloseAttempted) {
+      record.state = stateBeforeClose;
+      // A second ingress query acknowledges that this close never started raw work.
+      allowsIngressRawClose(this);
+      throw closeError;
+    }`;
+  if (!source.includes(anchor)) throw new Error("selective no-raw restoration mutation anchor is absent");
+  return source.replace(anchor, `    if (!rawCloseAttempted) {
+      if (closeError instanceof Error &&
+          closeError.message === "CONTRACT_CAPABILITY_PRIMITIVE_MEDIATOR_INVOCATION_MISSING") {
+        record.state = stateBeforeClose;
+        // A second ingress query acknowledges that this close never started raw work.
+        allowsIngressRawClose(this);
+      }
+      throw closeError;
+    }`);
 }
 describe("descriptor primitive mediation runtime", () => {
 
@@ -348,6 +387,49 @@ describe("descriptor primitive mediation runtime", () => {
       });
       expect(direct.exactPreInvocationOutcome).toBe(false);
       expect(direct.rawCalls).toBe(0);
+    });
+  });
+
+  test("direct close restores every no-raw class without consuming ingress retry authority", async () => {
+    for (const mode of NO_RAW_CLOSE_MODES) {
+      const direct = await receipt<DirectNoRawRetryReceipt>([
+        "direct_no_raw_retry",
+        "close_sync",
+        "returned",
+        mode
+      ]);
+      expect(direct.mode).toBe(mode);
+      expect(direct.firstOutcome).toBe(NO_RAW_DIRECT_OUTCOMES[mode]);
+      expect(direct.firstSentinel).toBe(mode === "sentinel");
+      expect(direct.firstHostile).toBe(mode === "hostile");
+      expect(direct.secondOutcome).toBe("NO_ERROR");
+      expect(direct.mediatedCloseCalls).toBe(2);
+      expect(direct.rawCalls).toBe(1);
+    }
+  });
+
+  test("the selective omission restoration mutation leaves only the omission direct row green", async () => {
+    await withProductionTree(undefined, async (tree) => {
+      const source = await readFile(tree.capabilitiesPath, "utf8");
+      await writeFile(tree.capabilitiesPath, injectOmissionOnlyNoRawRestore(source));
+      for (const mode of NO_RAW_CLOSE_MODES) {
+        const direct = await receipt<DirectNoRawRetryReceipt>([
+          "direct_no_raw_retry",
+          "close_sync",
+          "returned",
+          mode
+        ], tree.root);
+        if (mode === "omission") {
+          expect(direct.firstOutcome).toBe(NO_RAW_DIRECT_OUTCOMES[mode]);
+          expect(direct.secondOutcome).toBe("NO_ERROR");
+          expect(direct.mediatedCloseCalls).toBe(2);
+          expect(direct.rawCalls).toBe(1);
+        } else {
+          expect(direct.secondOutcome).not.toBe("NO_ERROR");
+          expect(direct.mediatedCloseCalls).toBe(1);
+          expect(direct.rawCalls).toBe(0);
+        }
+      }
     });
   });
 

@@ -19,6 +19,7 @@ type Target = "open_root" | "openat" | "fstat_sync" | "read_sync" | "close_sync"
 type RawMode = "returned" | "threw" | "pre";
 type PromiseResponse = "ordinary" | "constructor" | "species" | "sink";
 type ResponseMode = PromiseResponse | "value" | "throw" | "sentinel" | "thenable" | "proxy";
+type NoRawCloseMode = "omission" | "value" | "async" | "thenable" | "proxy" | "sentinel" | "hostile";
 type Scenario =
   | "installer"
   | "default"
@@ -28,6 +29,7 @@ type Scenario =
   | "third_arg"
   | "close_retry"
   | "direct_close"
+  | "direct_no_raw_retry"
   | "hook_forwarding"
   | "hostile_hooks"
   | "gc"
@@ -54,12 +56,13 @@ const [scenario, targetArgument, rawModeArgument, responseModeArgument, entryArg
   Scenario | undefined,
   Target | undefined,
   RawMode | undefined,
-  ResponseMode | undefined,
+  string | undefined,
   "direct" | "checker" | undefined
 ];
 const target = targetArgument ?? "open_root";
 const rawMode = rawModeArgument ?? "returned";
-const responseMode = responseModeArgument ?? "ordinary";
+const responseMode = (responseModeArgument ?? "ordinary") as ResponseMode;
+const noRawCloseMode = (responseModeArgument ?? "omission") as NoRawCloseMode;
 const rawError = Object.assign(new Error("MEDIATOR_RAW_SENTINEL"), { marker: "raw-private" });
 const mediatorThrownSentinel = new Error("MEDIATOR_THROWN_SENTINEL");
 const rawCounts: Record<Target, number> = {
@@ -693,6 +696,53 @@ async function runCloseRetry(): Promise<unknown> {
   };
 }
 
+function noRawCloseResponse(mode: NoRawCloseMode): undefined {
+  if (mode === "omission") return undefined;
+  if (mode === "async") return Promise.resolve() as unknown as undefined;
+  if (mode === "value" || mode === "thenable" || mode === "proxy") {
+    return mediatorValue(mode) as undefined;
+  }
+  if (mode === "sentinel") throw mediatorThrownSentinel;
+  throw mediatorThrownProxy;
+}
+
+async function runDirectNoRawRetry(): Promise<unknown> {
+  installRawProbe("close_sync", false);
+  const module = await loadCapabilities();
+  let mediatedCloseCalls = 0;
+  module.installDescriptorPrimitiveMediator((operation, invoke): undefined => {
+    if (operation !== "close_sync") {
+      invoke();
+      return undefined;
+    }
+    mediatedCloseCalls += 1;
+    if (mediatedCloseCalls === 1) return noRawCloseResponse(noRawCloseMode);
+    invoke();
+    return undefined;
+  });
+  const capabilities = new module.ContractCapabilities();
+  const descriptor = capabilities.openRoot("/", "admission");
+  let firstCaught: unknown;
+  const firstOutcome = errorMessage(() => {
+    try {
+      capabilities.close(descriptor, "unretained");
+    } catch (error) {
+      firstCaught = error;
+      throw error;
+    }
+  });
+  const secondOutcome = errorMessage(() => { capabilities.close(descriptor, "unretained"); });
+  return {
+    mode: noRawCloseMode,
+    firstOutcome: firstOutcome.message,
+    firstSentinel: firstCaught === mediatorThrownSentinel,
+    firstHostile: firstCaught === mediatorThrownProxy,
+    secondOutcome: secondOutcome.message,
+    mediatedCloseCalls,
+    rawCalls: rawCounts.close_sync
+  };
+}
+
 async function runDirectClose(): Promise<unknown> {
   installRawProbe("close_sync", false);
   const module = await loadCapabilities();
@@ -934,6 +984,8 @@ const receipt = scenario === "installer"
   ? await runCloseRetry()
   : scenario === "direct_close"
   ? await runDirectClose()
+  : scenario === "direct_no_raw_retry"
+  ? await runDirectNoRawRetry()
   : scenario === "hook_forwarding"
   ? await runHookForwarding()
   : scenario === "hostile_hooks"

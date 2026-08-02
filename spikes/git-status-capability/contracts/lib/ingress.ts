@@ -174,6 +174,16 @@ function takeIngressNoRawCloseTicket(
   return noRaw ? Object.freeze({ outcome }) : undefined;
 }
 
+function settleClosedIngressOwner(
+  context: ActiveIngressContext,
+  descriptor: CapabilityDescriptor,
+  failed: boolean
+): boolean {
+  if (descriptorIngressPoisoned) return true;
+  releaseLiveIngressOwner(context, descriptor);
+  return failed;
+}
+
 function closeWithRetry(
   context: ActiveIngressContext,
   descriptor: CapabilityDescriptor,
@@ -187,15 +197,11 @@ function closeWithRetry(
       context.capabilities.close(descriptor, owner);
       clearIngressCloseTicket(context.capabilities);
       hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
-      releaseLiveIngressOwner(context, descriptor);
-      return hookFailed;
+      return settleClosedIngressOwner(context, descriptor, hookFailed);
     } catch (error) {
       hookFailed ||= context.hookFailedDescriptors.delete(descriptor);
       const retry = takeIngressNoRawCloseTicket(context.capabilities, error);
-      if (!retry) {
-        releaseLiveIngressOwner(context, descriptor);
-        return true;
-      }
+      if (!retry) return settleClosedIngressOwner(context, descriptor, true);
       if (descriptorIngressPoisoned) return true;
       if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
         poisonIngressAndRetainActiveOwners();
