@@ -22,6 +22,7 @@ type PoisonReceipt = Readonly<{
   nestedMediatedCloseCalls: number;
   outerCloseAttempts: number;
   nestedCloseAttempts: readonly Readonly<{ owner: string; ordinal: number }>[];
+  outerCloseBaseline: RawCounts;
   rawAtPoison: RawCounts;
   rawAfterOuter: RawCounts;
   rawAfterLater: RawCounts;
@@ -48,7 +49,8 @@ type NoRawReceipt = Readonly<{
   mediatedCloseCallsAfterLater?: number;
   firstCloseOwnerIds: readonly number[];
   secondCloseOwnerIds?: readonly number[];
-  rawBeforeFirstClose: RawCounts;
+  rawAtFirstAttempt: RawCounts;
+  rawAtSecondAttempt?: RawCounts;
   rawAfterFirstRawClose?: RawCounts | null;
   rawAfterOuter?: RawCounts;
   rawAtPoison?: RawCounts;
@@ -128,6 +130,86 @@ async function runCopiedPoisonProof(
     receipt = await runPoisonProbe(outerEntry, nestedEntry, tree.root);
   });
   if (!receipt) throw new Error("copied poison proof did not produce a receipt");
+  return receipt;
+}
+
+function moveRawCloseBeforeCloseAttempt(source: string): string {
+  const anchor = `    const stateBeforeClose = record.state;
+    record.state = "closed";
+    const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
+    let hookError: unknown;
+    try {
+      this.hooks.onCloseAttempt?.(attempt);
+    } catch (error) {
+      hookError = error;
+    }
+    if (!allowsIngressRawClose(this)) {
+      record.state = stateBeforeClose;
+      // A second ingress query acknowledges that this close never started raw work.
+      allowsIngressRawClose(this);
+      throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+    }
+    let closeError: unknown;
+    let rawCloseAttempted = false;
+    try {
+      invokeDescriptorPrimitive("close_sync", () => {
+        rawCloseAttempted = true;
+        closeSync(record.fd);
+      });
+    } catch (error) {
+      closeError = error;
+    }
+    if (!rawCloseAttempted) {
+      record.state = stateBeforeClose;
+      // A second ingress query acknowledges that this close never started raw work.
+      allowsIngressRawClose(this);
+      throw closeError;
+    }`;
+  if (!source.includes(anchor)) throw new Error("pre-hook raw close mutation anchor is absent");
+  return source.replace(anchor, `    const stateBeforeClose = record.state;
+    record.state = "closed";
+    const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
+    let closeError: unknown;
+    let rawCloseAttempted = false;
+    try {
+      invokeDescriptorPrimitive("close_sync", () => {
+        rawCloseAttempted = true;
+        closeSync(record.fd);
+      });
+    } catch (error) {
+      closeError = error;
+    }
+    let hookError: unknown;
+    try {
+      this.hooks.onCloseAttempt?.(attempt);
+    } catch (error) {
+      hookError = error;
+    }
+    if (!allowsIngressRawClose(this)) {
+      record.state = stateBeforeClose;
+      // A second ingress query acknowledges that this close never started raw work.
+      allowsIngressRawClose(this);
+      throw hookError ?? new Error("CONTRACT_CAPABILITY_CLOSE_FAILED");
+    }
+    if (!rawCloseAttempted) {
+      record.state = stateBeforeClose;
+      // A second ingress query acknowledges that this close never started raw work.
+      allowsIngressRawClose(this);
+      throw closeError;
+    }`);
+}
+
+async function runCopiedPreRawOrderingProbe(
+  outerEntry: Entry,
+  nestedEntry: Entry
+): Promise<PoisonReceipt> {
+  let receipt: PoisonReceipt | undefined;
+  await withProductionTree(undefined, async (tree) => {
+    const capabilities = await readFile(tree.capabilitiesPath, "utf8");
+    await writeFile(tree.capabilitiesPath, moveRawCloseBeforeCloseAttempt(capabilities));
+    receipt = await runPoisonProbe(outerEntry, nestedEntry, tree.root);
+  });
+  if (!receipt) throw new Error("copied pre-raw ordering proof did not produce a receipt");
   return receipt;
 }
 
@@ -212,6 +294,15 @@ function releaseFirstNoRawTicketOwner(source: string): string {
       if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`);
 }
 
+function insertRawFstatBetweenNoRawAttempts(source: string): string {
+  const anchor = `      if (descriptorIngressPoisoned) return true;
+      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`;
+  if (!source.includes(anchor)) throw new Error("between-attempt raw fstat mutation anchor is absent");
+  return source.replace(anchor, `      if (descriptorIngressPoisoned) return true;
+      if (attempt === 0) context.capabilities.stat(descriptor);
+      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {`);
+}
+
 function removeSentinelPoisonTransition(source: string): string {
   const anchor = `      if (attempt + 1 === NO_RAW_CLOSE_RETRY_LIMIT) {
         poisonIngressAndRetainActiveOwners();
@@ -234,7 +325,12 @@ function removeCommonPostClosePoisonGuard(source: string): string {
   return source.replace(anchor, "  releaseLiveIngressOwner(context, descriptor);");
 }
 
-type NoRawMutation = "baseline" | "omission_only" | "first_ticket_release" | "missing_sentinel_poison";
+type NoRawMutation =
+  | "baseline"
+  | "omission_only"
+  | "first_ticket_release"
+  | "missing_sentinel_poison"
+  | "raw_fstat_between_attempts";
 
 async function runCopiedNoRawProbe(
   mode: NoRawCloseMode,
@@ -251,6 +347,7 @@ async function runCopiedNoRawProbe(
     const ingressPath = join(tree.root, "lib", "ingress.ts");
     let ingress = await readFile(ingressPath, "utf8");
     if (mutation === "first_ticket_release") ingress = releaseFirstNoRawTicketOwner(ingress);
+    if (mutation === "raw_fstat_between_attempts") ingress = insertRawFstatBetweenNoRawAttempts(ingress);
     if (mutation === "missing_sentinel_poison") ingress = removeSentinelPoisonTransition(ingress);
     await writeFile(ingressPath, injectPoisonRetentionCount(ingress));
     receipt = await runNoRawProbe(mode, behavior, outerEntry, tree.root);
@@ -298,6 +395,43 @@ function expectSuccessfulEntry(entry: Entry, outcome: EntryOutcome): void {
   }
 }
 
+function rawDelta(after: RawCounts, before: RawCounts): RawCounts {
+  return {
+    open_sync: after.open_sync - before.open_sync,
+    openat: after.openat - before.openat,
+    fstat_sync: after.fstat_sync - before.fstat_sync,
+    read_sync: after.read_sync - before.read_sync,
+    close_sync: after.close_sync - before.close_sync
+  };
+}
+
+function expectPreRawOuterCloseOrdering(receipt: PoisonReceipt): void {
+  expect(rawDelta(receipt.rawAtPoison, receipt.outerCloseBaseline).close_sync).toBe(0);
+}
+
+function expectPersistentNoRawTransitions(receipt: NoRawReceipt): void {
+  const { rawAtSecondAttempt, rawAtPoison, rawAfterOuter } = receipt;
+  if (!rawAtSecondAttempt || !rawAtPoison || !rawAfterOuter) {
+    throw new Error("persistent no-raw receipt lacks transition snapshots");
+  }
+  expect(rawDelta(rawAtSecondAttempt, receipt.rawAtFirstAttempt)).toEqual(ZERO_RAW);
+  expect(rawDelta(rawAtPoison, rawAtSecondAttempt)).toEqual(ZERO_RAW);
+  expect(rawDelta(rawAfterOuter, rawAtPoison)).toEqual(ZERO_RAW);
+}
+
+function expectPersistentNoRawPoisonState(outerEntry: Entry, receipt: NoRawReceipt): void {
+  expect(receipt.outer).toEqual(expectedEntry(outerEntry));
+  expect(receipt.refusedCloseCalls).toBe(2);
+  expect(receipt.mediatedCloseCallsAtPoison).toBe(2);
+  expect(receipt.mediatedCloseCallsAfterLater).toBe(2);
+  expect(receipt.firstCloseOwnerIds.length).toBeGreaterThan(0);
+  expect(receipt.secondCloseOwnerIds).toEqual(receipt.firstCloseOwnerIds);
+  expect(receipt.retainedOwnerIdsAfterContextDeletion).toEqual(receipt.firstCloseOwnerIds);
+  expect(receipt.laterDirect).toEqual(expectedEntry("direct"));
+  expect(receipt.laterChecker).toEqual(expectedEntry("checker"));
+  expect(receipt.laterRaw).toEqual(ZERO_RAW);
+}
+
 describe("ingress terminal close poison", () => {
   test("a nested refusal terminally blocks the outer close and later ingress work", async () => {
     for (const [outerEntry, nestedEntry] of [
@@ -318,6 +452,7 @@ describe("ingress terminal close poison", () => {
         { owner: "unretained", ordinal: 2 }
       ]);
       expect(receipt.rawAtPoison.open_sync + receipt.rawAtPoison.openat).toBeGreaterThan(0);
+      expectPreRawOuterCloseOrdering(receipt);
       expect(receipt.postPoisonRaw).toEqual(ZERO_RAW);
       expect(receipt.laterRaw).toEqual(ZERO_RAW);
       expect(receipt.laterDirect).toEqual(expectedEntry("direct"));
@@ -345,6 +480,30 @@ describe("ingress terminal close poison", () => {
     }
   });
 
+  test("copied pre-hook raw close is rejected by the pre-raw ordering oracle", async () => {
+    for (const [outerEntry, nestedEntry] of [
+      ["direct", "direct"],
+      ["direct", "checker"],
+      ["checker", "direct"]
+    ] as const) {
+      const baseline = await runPoisonProbe(outerEntry, nestedEntry);
+      expectPreRawOuterCloseOrdering(baseline);
+
+      const mutated = await runCopiedPreRawOrderingProbe(outerEntry, nestedEntry);
+      expect(mutated.outer).toEqual(expectedEntry(outerEntry));
+      expect(mutated.nested).toEqual(expectedEntry(nestedEntry));
+      expect(mutated.nestedMediatedCloseCalls).toBe(2);
+      expect(mutated.nestedCloseAttempts).toEqual([
+        { owner: "unretained", ordinal: 1 },
+        { owner: "unretained", ordinal: 2 }
+      ]);
+      expect(mutated.postPoisonRaw).toEqual(ZERO_RAW);
+      expect(mutated.laterRaw).toEqual(ZERO_RAW);
+      expect(rawDelta(mutated.rawAtPoison, mutated.outerCloseBaseline).close_sync).toBe(1);
+      expect(() => expectPreRawOuterCloseOrdering(mutated)).toThrow();
+    }
+  });
+
   test("every no-raw close class retries once, then retains the anchored owner set on poison", async () => {
     for (const mode of NO_RAW_CLOSE_MODES) {
       for (const outerEntry of ["direct", "checker"] as const) {
@@ -356,26 +515,37 @@ describe("ingress terminal close poison", () => {
         expect(firstRefusal.firstCloseOwnerIds.length).toBeGreaterThan(0);
         const rawAfterFirstRetry = firstRefusal.rawAfterFirstRawClose;
         expect(rawAfterFirstRetry).not.toBeNull();
-        expect(rawAfterFirstRetry?.close_sync).toBe(firstRefusal.rawBeforeFirstClose.close_sync + 1);
+        expect(rawAfterFirstRetry?.close_sync).toBe(firstRefusal.rawAtFirstAttempt.close_sync + 1);
 
         const persistentRefusal = await runCopiedNoRawProbe(mode, "persistent", outerEntry, "baseline");
         expect(persistentRefusal.mode).toBe(mode);
         expect(persistentRefusal.behavior).toBe("persistent");
-        expect(persistentRefusal.outer).toEqual(expectedEntry(outerEntry));
-        expect(persistentRefusal.refusedCloseCalls).toBe(2);
-        expect(persistentRefusal.mediatedCloseCallsAtPoison).toBe(2);
-        expect(persistentRefusal.mediatedCloseCallsAfterLater).toBe(2);
-        expect(persistentRefusal.rawAtPoison?.close_sync).toBe(
-          persistentRefusal.rawBeforeFirstClose.close_sync
+        expectPersistentNoRawPoisonState(outerEntry, persistentRefusal);
+        expectPersistentNoRawTransitions(persistentRefusal);
+      }
+    }
+  });
+
+  test("copied fstat work between no-raw attempts is rejected by the persistent transition oracle", async () => {
+    for (const mode of NO_RAW_CLOSE_MODES) {
+      for (const outerEntry of ["direct", "checker"] as const) {
+        const mutated = await runCopiedNoRawProbe(
+          mode,
+          "persistent",
+          outerEntry,
+          "raw_fstat_between_attempts"
         );
-        expect(persistentRefusal.firstCloseOwnerIds.length).toBeGreaterThan(0);
-        expect(persistentRefusal.secondCloseOwnerIds).toEqual(persistentRefusal.firstCloseOwnerIds);
-        expect(persistentRefusal.retainedOwnerIdsAfterContextDeletion).toEqual(
-          persistentRefusal.firstCloseOwnerIds
-        );
-        expect(persistentRefusal.laterDirect).toEqual(expectedEntry("direct"));
-        expect(persistentRefusal.laterChecker).toEqual(expectedEntry("checker"));
-        expect(persistentRefusal.laterRaw).toEqual(ZERO_RAW);
+        expect(mutated.mode).toBe(mode);
+        expect(mutated.behavior).toBe("persistent");
+        expectPersistentNoRawPoisonState(outerEntry, mutated);
+        const { rawAtSecondAttempt, rawAtPoison, rawAfterOuter } = mutated;
+        if (!rawAtSecondAttempt || !rawAtPoison || !rawAfterOuter) {
+          throw new Error("fstat mutation receipt lacks transition snapshots");
+        }
+        expect(rawDelta(rawAtSecondAttempt, mutated.rawAtFirstAttempt).fstat_sync).toBe(1);
+        expect(rawDelta(rawAtPoison, rawAtSecondAttempt)).toEqual(ZERO_RAW);
+        expect(rawDelta(rawAfterOuter, rawAtPoison)).toEqual(ZERO_RAW);
+        expect(() => expectPersistentNoRawTransitions(mutated)).toThrow();
       }
     }
   });
@@ -394,7 +564,7 @@ describe("ingress terminal close poison", () => {
           expectSuccessfulEntry(outerEntry, firstRefusal.outer);
           expect(firstRefusal.refusedCloseCalls).toBe(1);
           expect(firstRefusal.rawAfterFirstRawClose?.close_sync).toBe(
-            firstRefusal.rawBeforeFirstClose.close_sync + 1
+            firstRefusal.rawAtFirstAttempt.close_sync + 1
           );
           expect(persistentRefusal.outer).toEqual(expectedEntry(outerEntry));
           expect(persistentRefusal.mediatedCloseCallsAtPoison).toBe(2);

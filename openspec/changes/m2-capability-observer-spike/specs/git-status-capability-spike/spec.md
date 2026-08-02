@@ -5,14 +5,12 @@ The repository SHALL implement the Git status capability observer only under the
 spike ownership boundary. The spike MUST NOT be imported, invoked, packaged, or
 shipped by a production package; MUST NOT change StackLock schema/runtime behavior;
 MUST NOT change production manifests, lockfiles, imports, generated schemas,
-release assembly, existing workflows, canonical docs other than the append-only
-`docs/review-loop-log.jsonl` and `docs/stage-pipeline-log.jsonl` terminal
-governance records, or the four read-only submodules; and MUST NOT close Issue
-#132 or restore PR #133 behavior.
+release assembly, existing workflows, canonical docs, or the four read-only
+submodules; and MUST NOT close Issue #132 or restore PR #133 behavior.
 
 #### Scenario: Spike executes without production integration
-- **WHEN** the spike runner, native prototype, fixtures, validator, evidence, isolated CI entry, and replacement-family governance appends are added
-- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, the Phase-0.5-only `openspec/project-profile.md` update, `docs/review-loop-log.jsonl`, `docs/stage-pipeline-log.jsonl`, and `.review-gate-issues.json`; terminal records bind PR #184 to children #185/#186 and PR #187/Issue #185 to children #188/#189/#190, and no other canonical-doc delta is allowed
+- **WHEN** the spike runner, native prototype, fixtures, validator, evidence, and isolated CI entry are added
+- **THEN** the only changed paths relative to frozen implementation base `9b761459760db16c1088ec81f91387790f8567e2` are `spikes/git-status-capability/**`, `.github/workflows/git-status-capability-spike.yml`, this OpenSpec change directory, and the Phase-0.5-only `openspec/project-profile.md` update
 
 #### Scenario: Accepted evidence is produced
 - **WHEN** a valid complete run yields terminal decision `accepted`

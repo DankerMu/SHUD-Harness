@@ -326,6 +326,8 @@ async function runPreRawScenario(): Promise<unknown> {
     invoke();
     return undefined;
   });
+  // Nested work begins only from the outer close hook, so this is before any outer raw close.
+  const outerCloseBaseline = { ...raw };
 
   const outer = await runEntry(outerEntry, modules, hooks);
   const nested = await nestedResult!;
@@ -350,6 +352,7 @@ async function runPreRawScenario(): Promise<unknown> {
     nestedMediatedCloseCalls,
     outerCloseAttempts,
     nestedCloseAttempts: nestedCloseAttempts.map((attempt) => ({ owner: attempt.owner, ordinal: attempt.ordinal })),
+    outerCloseBaseline,
     rawAtPoison: poisonSnapshot,
     rawAfterOuter,
     rawAfterLater,
@@ -372,8 +375,11 @@ async function runNoRawScenario(): Promise<unknown> {
   const modules = await loadModules();
   let firstCloseOwnerIds: readonly number[] | undefined;
   let secondCloseOwnerIds: readonly number[] | undefined;
-  let rawBeforeFirstClose: RawCounts | undefined;
+  let rawAtFirstAttempt: RawCounts | undefined;
+  let rawAtSecondAttempt: RawCounts | undefined;
+  let rawAtPoison: RawCounts | undefined;
   let rawAfterFirstRawClose: RawCounts | undefined;
+  let mediatedCloseCallsAtPoison: number | undefined;
   let refusedCloseCalls = 0;
   let mediatedCloseCalls = 0;
   const hooks: CloseHooks = Object.freeze({
@@ -381,9 +387,15 @@ async function runNoRawScenario(): Promise<unknown> {
       const liveOwnerIds = snapshotLiveOwnerIds();
       if (!firstCloseOwnerIds) {
         firstCloseOwnerIds = liveOwnerIds;
-        rawBeforeFirstClose = { ...raw };
+        rawAtFirstAttempt = { ...raw };
       } else if (noRawBehavior === "persistent" && refusedCloseCalls === 1 && !secondCloseOwnerIds) {
         secondCloseOwnerIds = liveOwnerIds;
+        rawAtSecondAttempt = { ...raw };
+        // Baseline production poisons synchronously after this second refusal, before the outer await resolves.
+        queueMicrotask(() => {
+          rawAtPoison = { ...raw };
+          mediatedCloseCallsAtPoison = mediatedCloseCalls;
+        });
       }
     },
     closeFault: () => {
@@ -415,15 +427,15 @@ async function runNoRawScenario(): Promise<unknown> {
       refusedCloseCalls,
       mediatedCloseCalls,
       firstCloseOwnerIds: firstCloseOwnerIds ?? [],
-      rawBeforeFirstClose: rawBeforeFirstClose ?? rawAfterOuter,
+      rawAtFirstAttempt: rawAtFirstAttempt ?? rawAfterOuter,
       rawAfterFirstRawClose: rawAfterFirstRawClose ?? null,
       rawAfterOuter,
       retainedOwnerIdsAfterContextDeletion
     };
   }
 
-  const rawAtPoison = { ...raw };
-  const mediatedCloseCallsAtPoison = mediatedCloseCalls;
+  const poisonSnapshot = rawAtPoison ?? rawAfterOuter;
+  const mediationAtPoison = mediatedCloseCallsAtPoison ?? mediatedCloseCalls;
   const laterDirect = await runEntry("direct", modules, hooks);
   const laterChecker = await runEntry("checker", modules, hooks);
   const rawAfterLater = { ...raw };
@@ -435,14 +447,16 @@ async function runNoRawScenario(): Promise<unknown> {
     laterDirect,
     laterChecker,
     refusedCloseCalls,
-    mediatedCloseCallsAtPoison,
+    mediatedCloseCallsAtPoison: mediationAtPoison,
     mediatedCloseCallsAfterLater: mediatedCloseCalls,
     firstCloseOwnerIds: firstCloseOwnerIds ?? [],
     secondCloseOwnerIds: secondCloseOwnerIds ?? [],
-    rawBeforeFirstClose: rawBeforeFirstClose ?? rawAtPoison,
-    rawAtPoison,
+    rawAtFirstAttempt: rawAtFirstAttempt ?? rawAfterOuter,
+    rawAtSecondAttempt,
+    rawAtPoison: poisonSnapshot,
+    rawAfterOuter,
     rawAfterLater,
-    laterRaw: rawDelta(rawAfterLater, rawAtPoison),
+    laterRaw: rawDelta(rawAfterLater, poisonSnapshot),
     retainedOwnerIdsAfterContextDeletion
   };
 }
