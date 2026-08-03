@@ -124,6 +124,62 @@ Fixture level: `expanded`; repair intensity: `high`; upstream suggestion:
   - Handoff: #189 begins only after #193 merges and owns hostile-hook,
     captured-authority/reentry, and broad causal-retention proof closure.
 
+### Issue #189 descriptor-mediation causal-proof closure overlay
+
+Fixture level: `expanded`; repair intensity: `high`; upstream suggestion:
+`expanded/high` (agree: expanded fixture, high repair intensity). Depends on
+merged #193 only; #190 stays an independent sibling and #186 stays blocked
+until all #185 replacement children complete. The minimal mergeable slice is
+the focused process-local causal proof for hostile hook/value handling,
+inherited hook forwarding, rejection-sink absence, callback reentry, exact
+mediated read returns, and retained-owner closure on #193's runtime contract.
+
+- [ ] #189.A Normalize hostile hook and mediator values identity-only.
+  - In: `contracts/lib/{capabilities,ingress}.ts` error/hook normalization
+    seams only, plus focused `authority-descriptor-mediation-runtime*` and
+    poison child/test helpers.
+  - Replace every prototype-inspecting recognition of thrown/returned values
+    on mediation paths (`instanceof`, property probes) with identity-only
+    normalization; no returned or thrown mediator value is property-inspected
+    before or after raw start, and all five primitive raw outcomes remain
+    authoritative.
+  - Prove lazy hook forwarding preserves inherited/non-enumerable properties
+    and original receivers via a class instance exposing only inherited
+    `closeFault`; prove falsy hostile hook throws preserve exact direct and
+    checker compatibility receipts (CAND-R5-04).
+  - Out: reentry/captured-authority closure and rejection-sink oracle
+    (#189.B), installer/type boundary (#190), durable evidence (#186).
+  - Verification: acceptance rows 1-3; hostile all-trap thrown/returned Proxy
+    rows across five primitives and pre/post-raw modes record zero prototype
+    or `has` traps; `instanceof`, trap-observation, and own-property-gate
+    mutations are red.
+- [ ] #189.B Close reentry, captured authority, rejection sink, retention,
+      and exact-read proofs.
+  - In: reentry rejection before validation, mutation, hooks, or raw work in
+    every public `ContractCapabilities` entry and every public ingress
+    capability/token seam, including prototype-captured authority
+    (CAND-R5-05); alias-aware structural rejection-sink oracle rows plus
+    operation-time listener-registration/`Bun.peek` traces; mixed and
+    same-pair no-raw retained-owner identity snapshot rows (CAND-R5-02);
+    mediated `read_sync` exact byte-count and buffer rows.
+  - Out: any public control API, raw fd/token exposure, or non-close primitive
+    behavior change beyond the corrections these causal mutations expose.
+  - Verification: acceptance rows 4-7; aliased add/remove listener, detached
+    `Bun.peek`, Promise-identity rewrite, guard-removal, first-owner-release,
+    and positive off-by-one read mutations are red with zero state/raw/hook
+    side effects on the green path.
+- [ ] #189.C Prove and hand off the closed causal slice.
+  - In: only the #189.A/B focused process rows, copied-source mutations, and
+    the descriptor structural mutation oracle entries they require.
+  - Verification: Darwin and read-only Linux Bun 1.2.19 focused suites,
+    descriptor typecheck, full `check`, strict OpenSpec, and
+    diff/scope/untracked/submodule hygiene pass; direct and checker public
+    receipts stay byte-identical.
+  - Handoff: #186 consumes the closed causal proof; #190 owns the
+    installer/type boundary; no #189 change may weaken #193 close-attempt
+    identity/settlement, #175 descriptor lifecycle, or the five-primitive
+    mediation boundary.
+
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.
   - PR boundary: pure evidence-to-validation library/CLI module; minimal mergeable slice consumes committed synthetic bundles and never runs Git, fixtures, or native code.

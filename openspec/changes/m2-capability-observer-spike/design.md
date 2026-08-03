@@ -1127,6 +1127,93 @@ Regression rows:
 - target `closeSync` return or throw -> exactly one target raw start, no retry,
   and existing terminal close-error/receipt precedence.
 
+### Issue #189 descriptor-mediation causal-proof closure fixture overlay
+
+Issue #189 closes the causal proof gaps verified by PR #187 Round 3 and routed
+by PR #191 Round 5, on top of the merged #193 runtime. The effective fixture is
+`expanded` with `repair=high`; the upstream `expanded/high` suggestion is
+accepted.
+
+| Risk pack | Selection | Evidence |
+|---|---|---|
+| Public API / CLI | Selected | Every public `ContractCapabilities`/ingress capability entry gains reentry rejection while direct/checker receipts stay byte-identical. |
+| Config / setup | Not selected | No configuration or bootstrap change. |
+| File I/O / path / overwrite | Not selected | Mediated-read proof observes existing descriptor reads exactly; no new pathname/write surface. |
+| Schema / fields | Not selected | Receipt and source schemas are unchanged. |
+| Auth / permissions / secrets | Selected | Prototype-captured ingress capability/token must not bypass reentry poison or the private close-attempt budget (CAND-R5-05). |
+| Concurrency / shared state / ordering | Selected | Reentry latches, poison-before-release ordering, and retained-owner identity through context deletion are state transitions. |
+| Resource limits / discovery | Selected | Two-attempt ceiling, descriptor baseline stability, and bounded registration/peek traces. |
+| Legacy compatibility / examples | Selected | Falsy hostile hook throws (CAND-R5-04) and all #175/#193 direct/checker receipts retain exact behavior. |
+| Error / rollback / partial outputs | Selected | Hostile thrown/returned values normalize identity-only; close-error precedence and raw-outcome authority are preserved. |
+| Release / dependency compatibility | Selected | Bun/typecheck/full check prove no package, lock, workflow, or export drift. |
+| Documentation / migration | Not selected | No user-facing migration. |
+| Scientific governance / PI gate | Not selected | No scientific behavior or claim. |
+| SHUD/rSHUD/AutoSHUD compatibility | Not selected | Read-only submodules untouched. |
+| Zero / agent role governance | Not selected | Zero/runtime adapters untouched. |
+
+Governing invariant: no hostile mediator/hook value and no reentrant or
+captured callback authority can observe, mutate, or bypass descriptor-mediation
+state — hook lookup/call failures normalize identity-only without prototype
+inspection, all five primitive raw outcomes remain authoritative, reentry and
+poison boundaries hold at every public entry, and pre-close owner identity
+survives poison and context deletion.
+
+Source of truth: instance-private descriptor records and ingress-private
+owner/attempt lists; `ContractError` recognition by construction identity
+(private brand or instance set), never by prototype chain, `instanceof`, or
+property inspection of foreign values.
+
+Verified-gap closure matrix:
+
+| Verified gap (origin) | Closure surface | Required observable output |
+|---|---|---|
+| Hostile thrown hook values skip identity-only normalization (R3) | ingress/capabilities normalization seams | Canonical schema-invalid/exit-2 receipts, zero prototype traps; `instanceof` mutation red |
+| Hostile Proxy fixtures omit observable traps (R3) | mediation-runtime fixtures | All-trap Proxies across five primitives, pre/post-raw; `has`/prototype-observation mutations red |
+| Inherited `closeFault` masked by own property (R3) | lazy hook forwarding proof | Class instance with only inherited `closeFault` forwards with original receiver; own-property gate mutation red |
+| Rejection-sink proof misses aliases/transient registration (R3) | alias-aware structural oracle + operation-time traces | Aliased add/remove listener, detached `Bun.peek`, Promise-identity rewrite mutations rejected |
+| Reentry proof covers only `sealAdmission` (R3) | every public capability/ingress entry | Stable REENTRY or poison boundary with zero state/raw/hook effects; guard-removal mutations red |
+| Mixed/same-pair no-raw owner retention unproven (CAND-R5-02) | retained-owner identity snapshot rows | Pre-close owner identity/cardinality retained through poison/context deletion; first-owner-release mutations red |
+| Falsy hostile hook throws changed compatibility (CAND-R5-04) | direct/checker compatibility rows | Exact legacy receipts preserved for falsy thrown values |
+| Captured ingress capability/token bypass (CAND-R5-05) | ingress capability/token hardening | Captured authority cannot bypass reentry poison or total-attempt boundaries |
+| `read_sync` byte count unobserved (R3) | mediated read rows | Exact byte count and buffer contents; positive off-by-one mutation red |
+
+Boundary checklist: change only `contracts/lib/{capabilities,ingress}.ts`
+(source corrections exposed by the causal mutations only), the focused
+descriptor mediation runtime and poison child/test helpers, and the descriptor
+structural mutation oracle; retain the five-primitive mediation boundary, #175
+exports and lifecycle, and #193 close-attempt identity/settlement; no public
+control API, pathname access, write/publish, Worker/child/network, package,
+workflow, lock, submodule, or canonical-governance change; #190 installer/type
+boundary and #186 durable evidence stay untouched.
+
+Regression rows:
+
+- hostile all-trap Proxy thrown from any hook, pre- and post-raw -> canonical
+  schema-invalid/exit-2 receipt, zero prototype/`has` traps, raw outcome
+  authoritative.
+- hostile all-trap Proxy returned by the mediator across five primitives ->
+  no property inspection before or after raw start; exact raw outcome and
+  resource settlement asserted.
+- class instance with only inherited `closeFault` -> lazily forwarded with the
+  original receiver; own-property gate mutation red.
+- copied source with aliased/transient rejection listener, detached
+  `Bun.peek`, or Promise identity rewrite -> structural/trace row red while
+  unmodified source shows zero registrations.
+- reentrant call into every public capability method, including via captured
+  ingress capability/token -> stable REENTRY or poison boundary, zero
+  state/raw/hook effects; each guard-removal mutation red.
+- mixed and same-pair no-raw close pairs -> exact pre-close owner
+  identity/cardinality retained through poison/context deletion; no fd growth.
+- falsy primitive values (`undefined`, `null`, `0`, `""`, `false`) thrown from
+  hostile hooks -> identity-only normalization never property-probes or
+  `in`-tests the primitive; exact legacy direct/checker receipts preserved
+  (CAND-R5-04).
+- mediated read of a known fixture -> exact byte count and buffer contents;
+  positive off-by-one return mutation red.
+- unchanged sibling consumers (public direct commands, checker rows, #175
+  vocabulary/preload/structural rows) -> byte-identical receipts on
+  Darwin/Linux.
+
 ## Invariant Matrix
 
 | Stage | Authority / invariant | Enforcement and evidence |
