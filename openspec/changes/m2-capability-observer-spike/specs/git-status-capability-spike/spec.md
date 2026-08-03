@@ -342,6 +342,40 @@ The evidence schema SHALL model exactly these layers:
 - **WHEN** all harness evidence/gates are complete but one or more row verdicts fail
 - **THEN** run status is `valid_complete`, terminal decision is `rejected`, and harness-health succeeds while `expect accepted` fails
 
+### Requirement: Ingress close settlement binds raw start and callback identity
+
+For an ingress-owned descriptor, owner release MUST be authorized only by raw
+`closeSync` start for that same descriptor and logical close attempt. A raw close
+of any sibling descriptor MUST NOT authorize target-owner release. The public
+`onCloseAttempt` and `closeFault` callbacks for one logical close MUST receive
+the same immutable `CloseAttempt` reference; an ingress-private retry creates a
+new logical attempt. Existing direct capability close behavior and exact
+direct/checker receipts remain compatible.
+
+#### Scenario: Sibling raw close cannot settle a no-raw target
+- **WHEN** a target `onCloseAttempt` closes a retained sibling while target
+  `close_sync` is omitted
+- **THEN** target raw count is zero, the target remains retained after poison and
+  active-context deletion, and descriptor baseline does not grow
+
+#### Scenario: Callback identity remains one logical attempt
+- **WHEN** `onCloseAttempt` stores its attempt in a `WeakSet` and `closeFault`
+  observes that set during direct, ingress, or checker close
+- **THEN** both callbacks receive the same frozen reference and preserve the
+  corresponding legacy cleanup/error receipt; a no-raw retry receives a distinct
+  next-attempt reference
+
+#### Scenario: Raw start is terminal whether close reports success or failure
+- **WHEN** target `closeSync` starts and then returns or throws
+- **THEN** target raw count is exactly one, no retry occurs, and existing close
+  error/receipt precedence settles that target owner
+
+#### Scenario: Two ordinary no-raw outcomes poison without a third attempt
+- **WHEN** the same target has two non-hostile no-raw close outcomes
+- **THEN** the two callback attempts are distinct and frozen, poison occurs before
+  target release, owner identity remains retained after context deletion, and no
+  third callback, raw operation, or later ingress work occurs
+
 ### Requirement: Observation is read-only, bounded, and fully settled
 The observer MUST enforce the inclusive finite bounds frozen in the catalog for
 frame/index bytes, index entries, path bytes/depth, nested repositories, traversal,
