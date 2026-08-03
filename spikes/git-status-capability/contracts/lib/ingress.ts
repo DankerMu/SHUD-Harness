@@ -47,10 +47,19 @@ function isContractError(value: unknown): value is ContractError {
 
 export type IngressProfile = Readonly<{ bytes: number; depth: number; nodes: number; items: number }>;
 /**
- * An admission hook may be asynchronous. Only a value that is a promise by
- * construction identity (an internal-slot check that reads no property of the
- * returned value) is awaited; any other return value, including a thenable, is
- * treated as a completed synchronous hook and is never inspected or assimilated.
+ * An admission hook may be asynchronous. Only a value that is a promise both by
+ * construction identity - an internal-slot check that reads no property of the
+ * returned value - and by plain native identity - its prototype is exactly
+ * `Promise.prototype` and it carries no own property - is awaited. A
+ * foreign-identity promise is rejected fail-closed with
+ * `CONTRACT_SCHEMA_INVALID` and is never assimilated, whether it hijacks
+ * `constructor` or `then` with own accessors or is an instance of a `Promise`
+ * subclass, because promise resolution would otherwise read those properties
+ * after the latch that ran the hook has already returned. Any other return
+ * value, including a thenable, is treated as a completed synchronous hook and is
+ * never inspected or assimilated. A well-behaved hook returns nothing or a bare
+ * promise, so the deviation this rejects is narrow: a genuine promise carrying
+ * any own property is refused rather than awaited.
  */
 export type DescriptorAdmissionHook = (absolutePath: string) => void | Promise<void>;
 export type DescriptorIngressOperation = Readonly<{
@@ -88,6 +97,35 @@ function assertNoCallbackReentry(): void {
  */
 function observeIngress(hooks: DescriptorIngressHooks, operation: DescriptorIngressOperation): void {
   withCapabilityCallback(() => hooks.observe?.(operation));
+}
+
+/**
+ * The single await choke-point for a mediator-supplied value, and the only
+ * `await` of one anywhere in this module. Its caller reaches it only through an
+ * `isPromise` test, so an operation whose hook returned nothing still never
+ * suspends: the boundary yields no window a concurrent caller could use against
+ * a sealed operation that has nothing to wait for.
+ *
+ * `isPromise` is an internal-slot test: it reads no property, and a Proxy never
+ * passes it, so the identity checks here observe internal state only and can run
+ * no foreign code. That test is not sufficient on its own, because `await`
+ * performs promise resolution, which reads `constructor` and then `then` off the
+ * value whenever its constructor is not the intrinsic promise constructor -
+ * reads that would run after the latch that invoked the hook has already
+ * returned, with the admission sealed and every retained descriptor open, on a
+ * value that can then refuse to settle and strand them. So identity is checked
+ * first and a foreign one is a contract failure rather than an adoption: an
+ * own-accessor hijack fails the own-key test and a `Promise` subclass fails the
+ * prototype test. Only a plain native promise is awaited, and it is awaited
+ * inside the latch, so any residual resolution work still inherits an armed
+ * context. The latch's synchronous arm is released as the callback suspends, so
+ * an operation started outside every callback stays unaffected meanwhile.
+ */
+async function awaitAdmissionSettlement(admitted: Promise<unknown>): Promise<void> {
+  if (Object.getPrototypeOf(admitted) !== Promise.prototype || Reflect.ownKeys(admitted).length !== 0) {
+    throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  }
+  await withCapabilityCallback(async () => { await admitted; });
 }
 
 /**
@@ -745,7 +783,7 @@ export async function readBoundedFile(
     context.sealAdmission();
     const final = admission.components.at(-1)!;
     const admitted = withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));
-    if (isPromise(admitted)) await admitted;
+    if (isPromise(admitted)) await awaitAdmissionSettlement(admitted);
     assertIngressWorkAvailable();
     const authorityFault = withCapabilityCallback(() => admittedAuthorityFault(hooks));
     if (authorityFault) context.rejectForbidden(authorityFault, "post_admission");

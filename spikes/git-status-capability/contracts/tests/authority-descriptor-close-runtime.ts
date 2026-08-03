@@ -22,6 +22,7 @@ export type CloseRuntimeMutation =
   | "unvalidated_authority_fault"
   | "unlatched_before_cleanup"
   | "inspected_admission_return"
+  | "adopted_foreign_promise_identity"
   | undefined;
 export type CloseRuntimeTree = Readonly<{ root: string }>;
 export type RejectionSinkDenial =
@@ -244,8 +245,23 @@ function ingressMutation(source: string, mutation: CloseRuntimeMutation): string
     return replaceAnchor(
       source,
       "    const admitted = withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));\n" +
-        "    if (isPromise(admitted)) await admitted;",
+        "    if (isPromise(admitted)) await awaitAdmissionSettlement(admitted);",
       "    await withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));",
+      mutation
+    );
+  }
+  // #189 F6: the awaited value passes the internal-slot promise test but its
+  // identity is never checked, so promise resolution reads `constructor` and
+  // `then` off a foreign-identity promise with the latch already released, and
+  // the value it returns from `then` never settles.
+  if (mutation === "adopted_foreign_promise_identity") {
+    return replaceAnchor(
+      source,
+      "  if (Object.getPrototypeOf(admitted) !== Promise.prototype || Reflect.ownKeys(admitted).length !== 0) {\n" +
+        '    throw new ContractError("CONTRACT_SCHEMA_INVALID");\n' +
+        "  }\n" +
+        "  await withCapabilityCallback(async () => { await admitted; });",
+      "  await admitted;",
       mutation
     );
   }

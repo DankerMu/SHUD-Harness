@@ -607,12 +607,21 @@ type ReentryOrigin =
   | "authority_violation"
   | "after_admission"
   | "after_admission_async"
+  | "admission_promise_adoption"
   | "accessor_observe"
   | "accessor_authority_fault"
   | "authority_fault_coercion"
   | "before_cleanup"
   | "denial";
 type ReentryRow = Readonly<{ method: string; outcome: string; rawDelta: number; denialCalls: number }>;
+
+/** The receipt an operation that never settled reports instead of an outcome. */
+const UNSETTLED_OUTCOME: EntryOutcome = Object.freeze({
+  code: "UNSETTLED_OPERATION",
+  exit: null,
+  stdout: "",
+  stderr: ""
+});
 
 /** Origins driven through the shared ingress hooks object, in receipt order. */
 const HOOK_REENTRY_ORIGINS: readonly ReentryOrigin[] = [
@@ -622,11 +631,66 @@ const HOOK_REENTRY_ORIGINS: readonly ReentryOrigin[] = [
   "authority_violation",
   "after_admission",
   "after_admission_async",
+  "admission_promise_adoption",
   "accessor_observe",
   "accessor_authority_fault",
   "authority_fault_coercion",
   "before_cleanup"
 ];
+
+type AdoptionShape = "genuine_promise_hostile_constructor" | "promise_subclass_hostile_then";
+const ADOPTION_SHAPES: readonly AdoptionShape[] = [
+  "genuine_promise_hostile_constructor",
+  "promise_subclass_hostile_then"
+];
+
+/**
+ * Adoption-identity mediator values for `afterAdmission`. Both are promises by
+ * internal slot, so an internal-slot test alone admits them, and both have a
+ * foreign identity, so `await` would resolve them through the generic promise
+ * path: it reads `constructor` and then `then` off the first, and calls the
+ * overridden `then` of the second. Each of those reads is a mediator control
+ * point that runs during promise resolution - after the latch that invoked the
+ * hook has returned - and each hands back a value that never settles, so an
+ * adopting boundary also strands every descriptor the operation still holds.
+ */
+function hostileIdentityPromise(
+  shape: AdoptionShape,
+  onRead: (key: "constructor" | "then") => void
+): unknown {
+  if (shape === "genuine_promise_hostile_constructor") {
+    // A genuine, already-resolved promise carrying two own accessors. Its
+    // prototype is untouched, so only the own-key test can tell it apart.
+    const admitted = Promise.resolve();
+    const hijack = (key: "constructor" | "then", value: unknown): void => {
+      Object.defineProperty(admitted, key, {
+        configurable: true,
+        enumerable: false,
+        get(): unknown {
+          onRead(key);
+          return value;
+        }
+      });
+    };
+    hijack("constructor", function HijackedPromiseConstructor(): void { /* not the intrinsic */ });
+    hijack("then", (): void => { /* the adopted value never settles */ });
+    return admitted;
+  }
+  // A `Promise` subclass instance with no own key at all, so only the prototype
+  // test can tell it apart. `then` is redefined on the subclass prototype, so
+  // the instance itself stays indistinguishable by own keys.
+  class HostileIdentityPromise extends Promise<void> {}
+  Object.defineProperty(HostileIdentityPromise.prototype, "then", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value(): Promise<void> {
+      onRead("then");
+      return new Promise<void>(() => { /* the adopted value never settles */ });
+    }
+  });
+  return HostileIdentityPromise.resolve();
+}
 
 /**
  * Accessor-form hooks: `observe` and `authorityFault` are prototype getters, so
@@ -841,6 +905,17 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
             }
           }
           : {}),
+        // The adoption seam: the hook returns a value that is a promise by
+        // internal slot but foreign by identity, so every property read promise
+        // resolution would perform on it is a reentry attempt.
+        ...(origin === "admission_promise_adoption"
+          ? {
+            afterAdmission: ((): unknown => hostileIdentityPromise(
+              "genuine_promise_hostile_constructor",
+              () => { run("admission_promise_adoption"); }
+            )) as unknown as (path: string) => void
+          }
+          : {}),
         closeFault: (attempt) => {
           token ??= attempt;
           run("close_fault");
@@ -860,13 +935,18 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
         },
         onDescriptorAuthorityDenial: () => { denialCalls += 1; }
       });
-    const outcome = await runEntry(
-      entry,
-      modules,
-      hooks,
-      undefined,
-      origin === "before_cleanup" ? (): void => { run("before_cleanup"); } : undefined
-    );
+    // A boundary that adopts a foreign-identity promise never settles, so the
+    // adoption origin is probed under a bound and reports the hang as its
+    // outcome instead of hanging the receipt with it.
+    const outcome: EntryOutcome = origin === "admission_promise_adoption"
+      ? (await boundedEntry(entry, modules, hooks)).outcome ?? UNSETTLED_OUTCOME
+      : await runEntry(
+        entry,
+        modules,
+        hooks,
+        undefined,
+        origin === "before_cleanup" ? (): void => { run("before_cleanup"); } : undefined
+      );
     const settled = await Promise.all(pending);
     const followOnIngress = await runEntry("ingress", modules, Object.freeze({}));
     const followOnChecker = await runEntry("checker", modules, Object.freeze({}));
@@ -980,10 +1060,15 @@ async function runThenable(modules: Modules, entry: Entry): Promise<unknown> {
     settled: neverSettlingResult.settled,
     outcome: neverSettlingResult.outcome,
     thenReads,
+    constructorReads: 0,
     traps: totalTraps(observedTraps()),
     trapNames: Object.keys(observedTraps()).sort(),
+    primitiveProbes: totalTraps(Object.freeze({ ...primitiveProbes })),
     rawFinal: rawDelta(neverSettlingRawBefore, snapshotRaw()),
     rawAtHookCompletion: null,
+    batteryFired: false,
+    battery: Object.freeze([]),
+    denialCalls: 0,
     fdBefore: neverSettlingFdBefore,
     fdAfter: descriptorCount()
   }));
@@ -1003,15 +1088,96 @@ async function runThenable(modules: Modules, entry: Entry): Promise<unknown> {
     settled: nativeResult.settled,
     outcome: nativeResult.outcome,
     thenReads: 0,
+    constructorReads: 0,
     traps: totalTraps(observedTraps()),
     trapNames: Object.keys(observedTraps()).sort(),
+    primitiveProbes: totalTraps(Object.freeze({ ...primitiveProbes })),
     rawFinal: rawDelta(nativeRawBefore, snapshotRaw()),
     rawAtHookCompletion,
+    batteryFired: false,
+    battery: Object.freeze([]),
+    denialCalls: 0,
     fdBefore: nativeFdBefore,
     fdAfter: descriptorCount()
   }));
 
+  for (const shape of ADOPTION_SHAPES) rows.push(await adoptionRow(modules, entry, shape));
+
   return Object.freeze({ entry, rows: Object.freeze(rows) });
+}
+
+/**
+ * Adoption-identity row. The hook returns a foreign-identity promise whose every
+ * resolution-time property read runs the full reentry battery with the sealed
+ * operation's capability and its retained file descriptor in hand, so the row
+ * carries both halves of the proof: that the reads never happened, and that a
+ * read which did happen would have found no authority to use.
+ */
+async function adoptionRow(modules: Modules, entry: Entry, shape: AdoptionShape): Promise<unknown> {
+  const prototype = modules.capabilities.ContractCapabilities.prototype;
+  const originalOpenRoot = prototype.openRoot;
+  const originalOpenRelative = prototype.openRelative;
+  let capabilities: CapabilityInstance | undefined;
+  let rootDescriptor: object | undefined;
+  let fileDescriptor: object | undefined;
+  prototype.openRoot = function(this: CapabilityInstance, root, phase): object {
+    const descriptor = Reflect.apply(originalOpenRoot, this, [root, phase]) as object;
+    capabilities ??= this;
+    rootDescriptor ??= descriptor;
+    return descriptor;
+  };
+  prototype.openRelative = function(this: CapabilityInstance, parent, childName, flags, phase): object {
+    const descriptor = Reflect.apply(originalOpenRelative, this, [parent, childName, flags, phase]) as object;
+    capabilities ??= this;
+    if (phase === "admission") fileDescriptor = descriptor;
+    return descriptor;
+  };
+
+  const reads = { constructor: 0, then: 0 };
+  const pending: Array<Promise<ReentryRow>> = [];
+  let fired = false;
+  let battery: readonly ReentryRow[] = [];
+  let denialCalls = 0;
+  const onRead = (key: "constructor" | "then"): void => {
+    reads[key] += 1;
+    if (fired) return;
+    fired = true;
+    battery = reentryBattery(
+      modules,
+      capabilities,
+      { root: rootDescriptor, file: fileDescriptor, token: undefined },
+      () => denialCalls,
+      pending
+    );
+  };
+
+  resetObservations();
+  const fdBefore = descriptorCount();
+  const rawBefore = snapshotRaw();
+  const result = await boundedEntry(entry, modules, Object.freeze({
+    afterAdmission: ((): unknown => hostileIdentityPromise(shape, onRead)) as unknown as (path: string) => void,
+    onDescriptorAuthorityDenial: (): void => { denialCalls += 1; }
+  }));
+  const batteryRows = Object.freeze([...battery, ...(await Promise.all(pending))]);
+  prototype.openRoot = originalOpenRoot;
+  prototype.openRelative = originalOpenRelative;
+  return Object.freeze({
+    kind: shape,
+    settled: result.settled,
+    outcome: result.outcome,
+    thenReads: reads.then,
+    constructorReads: reads.constructor,
+    traps: totalTraps(observedTraps()),
+    trapNames: Object.keys(observedTraps()).sort(),
+    primitiveProbes: totalTraps(Object.freeze({ ...primitiveProbes })),
+    rawFinal: rawDelta(rawBefore, snapshotRaw()),
+    rawAtHookCompletion: null,
+    batteryFired: fired,
+    battery: batteryRows,
+    denialCalls,
+    fdBefore,
+    fdAfter: descriptorCount()
+  });
 }
 
 /**
