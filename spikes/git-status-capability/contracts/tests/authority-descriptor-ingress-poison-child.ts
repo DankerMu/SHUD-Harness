@@ -23,7 +23,12 @@ type CapabilitiesModule = Readonly<{
     prototype: CapabilityInstance;
   };
 }>;
-type CloseState = Readonly<{ activeContextCount: number; retainedDescriptors: readonly object[] }>;
+type CloseState = Readonly<{
+  activeContextCount: number;
+  liveDescriptors: readonly object[];
+  retainedDescriptors: readonly object[];
+}>;
+type SiblingGlobal = { __shudDescriptorSiblingClose?: () => void };
 type IngressModule = Readonly<{
   __testIngressCloseState?: () => CloseState;
   readBoundedFile: (path: string, maximum: number, hooks?: CloseHooks) => Promise<Uint8Array>;
@@ -118,6 +123,29 @@ function closeState(ingress: IngressModule): CloseState {
   return state;
 }
 
+/**
+ * Exact pre-close owner identity and cardinality retention: every owner that
+ * was live when the poisoning close began must still be retained after the
+ * poison and after the active context is deleted, with no extra owner.
+ */
+function retainedOwnerRetention(
+  preCloseOwners: readonly object[],
+  state: CloseState
+): Readonly<{
+  preCloseOwnerCount: number;
+  retainedOwnerCount: number;
+  retainedOwnersMatchPreClose: boolean;
+}> {
+  const retained = state.retainedDescriptors;
+  return Object.freeze({
+    preCloseOwnerCount: preCloseOwners.length,
+    retainedOwnerCount: retained.length,
+    retainedOwnersMatchPreClose: preCloseOwners.length > 0 &&
+      preCloseOwners.length === retained.length &&
+      preCloseOwners.every((descriptor) => retained.includes(descriptor))
+  });
+}
+
 async function runSibling(
   modules: Readonly<{ capabilities: CapabilitiesModule; ingress: IngressModule; checker: CheckerModule }>
 ): Promise<unknown> {
@@ -144,6 +172,7 @@ async function runSibling(
   let targetAttempts = 0;
   let totalAttempts = 0;
   let closingSibling = false;
+  let preCloseOwners: readonly object[] = [];
   const hooks: CloseHooks = Object.freeze({
     closeFault: () => false,
     onCloseAttempt: (attempt) => {
@@ -156,13 +185,18 @@ async function runSibling(
         const sibling = admitted[0];
         if (!sibling || !capabilities) throw new Error("sibling close lacks admitted capabilities");
         rawBeforeTarget = raw.closeSync;
-        process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE = "invoke_then_omit";
-        closingSibling = true;
-        try {
-          capabilities.close(sibling, "retained");
-        } finally {
-          closingSibling = false;
-        }
+        preCloseOwners = closeState(modules.ingress).liveDescriptors;
+        // The sibling raw close is driven from the copied close bridge, not from
+        // this callback: every public capability entry now rejects callback reentry.
+        (globalThis as SiblingGlobal).__shudDescriptorSiblingClose = () => {
+          closingSibling = true;
+          try {
+            capabilities!.close(sibling, "retained");
+          } finally {
+            closingSibling = false;
+          }
+        };
+        process.env.SHUD_DESCRIPTOR_CLOSE_RUNTIME_BRIDGE = "sibling";
         return;
       }
       if (!closingSibling) targetAttempts += 1;
@@ -195,7 +229,8 @@ async function runSibling(
     targetAttempts,
     targetRetainedAfterContextDeletion: state.retainedDescriptors.includes(target),
     targetStillUsable,
-    totalAttempts
+    totalAttempts,
+    ...retainedOwnerRetention(preCloseOwners, state)
   });
 }
 
@@ -214,12 +249,16 @@ async function runTwoNoRaw(
 
   const attempts: CloseAttempt[] = [];
   let closeFaultCalls = 0;
+  let preCloseOwners: readonly object[] = [];
   const hooks: CloseHooks = Object.freeze({
     closeFault: () => {
       closeFaultCalls += 1;
       return false;
     },
-    onCloseAttempt: (attempt) => { attempts.push(attempt); }
+    onCloseAttempt: (attempt) => {
+      if (attempts.length === 0) preCloseOwners = closeState(modules.ingress).liveDescriptors;
+      attempts.push(attempt);
+    }
   });
   const outcome = await runEntry(entry, modules, hooks);
   if (!target || !capabilities) throw new Error("two-no-raw row did not reach a close target");
@@ -249,7 +288,8 @@ async function runTwoNoRaw(
     outcome,
     rawCloseCalls: raw.closeSync,
     targetRetainedAfterContextDeletion: state.retainedDescriptors.includes(target),
-    targetStillUsable
+    targetStillUsable,
+    ...retainedOwnerRetention(preCloseOwners, state)
   });
 }
 

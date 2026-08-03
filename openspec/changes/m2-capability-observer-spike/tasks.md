@@ -134,7 +134,7 @@ the focused process-local causal proof for hostile hook/value handling,
 inherited hook forwarding, rejection-sink absence, callback reentry, exact
 mediated read returns, and retained-owner closure on #193's runtime contract.
 
-- [ ] #189.A Normalize hostile hook and mediator values identity-only.
+- [x] #189.A Normalize hostile hook and mediator values identity-only.
   - In: `contracts/lib/{capabilities,ingress}.ts` error/hook normalization
     seams only, plus focused `authority-descriptor-mediation-runtime*` and
     poison child/test helpers.
@@ -153,7 +153,7 @@ mediated read returns, and retained-owner closure on #193's runtime contract.
     rows across five primitives and pre/post-raw modes record zero prototype
     or `has` traps; `instanceof`, trap-observation, and own-property-gate
     mutations are red.
-- [ ] #189.B Close reentry, captured authority, rejection sink, retention,
+- [x] #189.B Close reentry, captured authority, rejection sink, retention,
       and exact-read proofs.
   - In: reentry rejection before validation, mutation, hooks, or raw work in
     every public `ContractCapabilities` entry and every public ingress
@@ -168,7 +168,7 @@ mediated read returns, and retained-owner closure on #193's runtime contract.
     `Bun.peek`, Promise-identity rewrite, guard-removal, first-owner-release,
     and positive off-by-one read mutations are red with zero state/raw/hook
     side effects on the green path.
-- [ ] #189.C Prove and hand off the closed causal slice.
+- [x] #189.C Prove and hand off the closed causal slice.
   - In: only the #189.A/B focused process rows, copied-source mutations, and
     the descriptor structural mutation oracle entries they require.
   - Verification: Darwin and read-only Linux Bun 1.2.19 focused suites,

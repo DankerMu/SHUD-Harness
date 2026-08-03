@@ -1,9 +1,11 @@
 import { parse, resolve, sep } from "node:path";
 import { hasOnlyUnicodeScalars } from "./canonical-json";
 import {
+  capabilityCallbackActive,
   ContractCapabilities,
   DIRECTORY_OPEN_FLAGS,
   FILE_OPEN_FLAGS,
+  withCapabilityCallback,
   type BigIntStats,
   type CapabilityDescriptor,
   type CapabilityHooks,
@@ -22,11 +24,24 @@ export type ContractErrorCode =
   | "CONTRACT_JSON_ITEM_LIMIT"
   | "CONTRACT_SCHEMA_INVALID";
 
+/**
+ * Construction-time identity set for contract errors. Recognition never walks a
+ * prototype chain, never reads a property, and never `in`-tests a foreign
+ * value: `WeakSet.prototype.has` is total over primitives and triggers no Proxy
+ * trap, so a hostile thrown value stays unobserved.
+ */
+const contractErrorIdentities = new WeakSet<WeakKey>();
+
 export class ContractError extends Error {
   constructor(public readonly code: ContractErrorCode) {
     super(code);
     this.name = "ContractError";
+    contractErrorIdentities.add(this);
   }
+}
+
+function isContractError(value: unknown): value is ContractError {
+  return contractErrorIdentities.has(value as WeakKey);
 }
 
 export type IngressProfile = Readonly<{ bytes: number; depth: number; nodes: number; items: number }>;
@@ -44,6 +59,15 @@ export type DescriptorIngressHooks = Readonly<{
 }> & CapabilityHooks;
 
 const NO_RAW_CLOSE_ATTEMPTS = 2;
+
+/**
+ * Ingress-owned mediator callbacks (`observe`, `afterAdmission`) share the
+ * capability callback latch, so reentry from any mediator hook is rejected on
+ * every descriptor seam and at the public ingress entry alike.
+ */
+function assertNoCallbackReentry(): void {
+  if (capabilityCallbackActive()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+}
 
 class IngressOwnerNode {
   #next: IngressOwnerNode | undefined;
@@ -123,22 +147,21 @@ class ActiveIngressContext {
   readonly #attemptsByPublicAttempt = new WeakMap<CloseAttempt, IngressCloseAttempt>();
 
   constructor(private readonly hooks: DescriptorIngressHooks) {
+    // Every caller hook is looked up lazily on the caller's own object and its
+    // result is forwarded untouched, so inherited hooks keep their receiver and
+    // no returned mediator value is inspected on the way out.
     const guardedHooks: CapabilityHooks = Object.freeze({
       closeFault: (attempt) => {
         this.#attemptsByPublicAttempt.get(attempt)?.markRawStarted();
         return hooks.closeFault?.(attempt) ?? false;
       },
-      onAuthorityViolation: (fault) => {
-        hooks.onAuthorityViolation?.(fault);
-      },
+      onAuthorityViolation: (fault) => hooks.onAuthorityViolation?.(fault),
       onCloseAttempt: (attempt) => {
         const active = this.#activeCloseAttempts.at(-1);
         if (active?.bind(attempt)) this.#attemptsByPublicAttempt.set(attempt, active);
-        hooks.onCloseAttempt?.(attempt);
+        return hooks.onCloseAttempt?.(attempt);
       },
-      onDescriptorAuthorityDenial: (denial) => {
-        hooks.onDescriptorAuthorityDenial?.(denial);
-      }
+      onDescriptorAuthorityDenial: (denial) => hooks.onDescriptorAuthorityDenial?.(denial)
     });
     this.#capabilities = new ContractCapabilities(guardedHooks);
   }
@@ -381,7 +404,7 @@ function openDescriptorBoundPath(
   if (segments.length === 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const components: RetainedComponent[] = [];
   try {
-    observe?.({ phase: "admission", operation: "open_root", path: root });
+    withCapabilityCallback(() => observe?.({ phase: "admission", operation: "open_root", path: root }));
     assertIngressWorkAvailable();
     const rootDescriptor = context.openRoot(root, "admission");
     context.trackOwner(rootDescriptor, "unretained");
@@ -406,11 +429,11 @@ function openDescriptorBoundPath(
       const childName = segments[index]!;
       const final = index === segments.length - 1;
       const parentDescriptor = components.at(-1)!.descriptor;
-      observe?.({
+      withCapabilityCallback(() => observe?.({
         phase: "admission",
         operation: "open_relative",
         path: childName
-      });
+      }));
       assertIngressWorkAvailable();
       const descriptor = context.openRelative(
         parentDescriptor,
@@ -438,7 +461,7 @@ function openDescriptorBoundPath(
     return { logicalAbsolutePath: resolve(path), components: Object.freeze(components) };
   } catch (error) {
     closeAll(context, components);
-    if (error instanceof ContractError) throw error;
+    if (isContractError(error)) throw error;
     throw new ContractError("CONTRACT_SCHEMA_INVALID");
   }
 }
@@ -459,11 +482,11 @@ function verifyRetainedChain(
     if (index === 0) continue;
 
     const parent = admission.components[index - 1]!;
-    observe?.({
+    withCapabilityCallback(() => observe?.({
       phase: "post_admission",
       operation: "open_relative",
       path: retained.childName!
-    });
+    }));
     assertIngressWorkAvailable();
     const verificationDescriptor = context.openRelative(
       parent.descriptor,
@@ -479,7 +502,7 @@ function verifyRetainedChain(
       assertExpectedType(verificationStats, retained.final);
       if (!sameEntry(retained.stats, verificationStats)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     } catch (error) {
-      verificationPrimary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
+      verificationPrimary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
     } finally {
       let closeFailed = false;
       try {
@@ -594,7 +617,7 @@ class StrictJsonParser {
           if (!hasOnlyUnicodeScalars(decoded)) this.fail("CONTRACT_JSON_MALFORMED");
           return decoded;
         } catch (error) {
-          if (error instanceof ContractError) throw error;
+          if (isContractError(error)) throw error;
           this.fail("CONTRACT_JSON_MALFORMED");
         }
       }
@@ -663,6 +686,7 @@ export async function readBoundedFile(
   hooks: DescriptorIngressHooks = {},
   beforeCleanup?: (bytes: Uint8Array) => void
 ): Promise<Uint8Array> {
+  assertNoCallbackReentry();
   const context = registerIngressContext(hooks);
   let admission: DescriptorAdmission | undefined;
   let primary: ContractError | undefined;
@@ -672,7 +696,7 @@ export async function readBoundedFile(
     admission = openDescriptorBoundPath(path, context, hooks.observe);
     context.sealAdmission();
     const final = admission.components.at(-1)!;
-    await hooks.afterAdmission?.(admission.logicalAbsolutePath);
+    await withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));
     assertIngressWorkAvailable();
     if (hooks.authorityFault) context.rejectForbidden(hooks.authorityFault, "post_admission");
     assertIngressWorkAvailable();
@@ -683,11 +707,11 @@ export async function readBoundedFile(
       let length = 0;
       while (length < buffer.length) {
         assertIngressWorkAvailable();
-        hooks.observe?.({
+        withCapabilityCallback(() => hooks.observe?.({
           phase: "post_admission",
           operation: "read_retained",
           path: final.childName!
-        });
+        }));
         assertIngressWorkAvailable();
         const bytesRead = context.readRetained(
           final.descriptor,
@@ -707,7 +731,7 @@ export async function readBoundedFile(
     if (!result) throw new ContractError("CONTRACT_BYTES_LIMIT");
     beforeCleanup?.(result);
   } catch (error) {
-    primary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
+    primary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
   } finally {
     const cleanupFailed = admission ? closeAll(context, admission.components) : false;
     unregisterIngressContext(context);

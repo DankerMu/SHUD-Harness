@@ -106,12 +106,8 @@ function mutateCapabilitiesSource(source: string, mutation: CapabilityMutation |
   if (mutation === "guard_open_root") {
     return replaceRawCall(
       source,
-      [
-        '  openRoot(root: string, phase: CapabilityPhase): CapabilityDescriptor {\n' +
-          '    if (!isCapabilityPhase(phase) || phase !== "admission" || this.#admissionSealed) {'
-      ],
-      '  openRoot(root: string, phase: CapabilityPhase): CapabilityDescriptor {\n' +
-        "    openSync(root, DIRECTORY_OPEN_FLAGS);\n" +
+      ['    if (!isCapabilityPhase(phase) || phase !== "admission" || this.#admissionSealed) {'],
+      "    openSync(root, DIRECTORY_OPEN_FLAGS);\n" +
         '    if (!isCapabilityPhase(phase) || phase !== "admission" || this.#admissionSealed) {',
       mutation
     );

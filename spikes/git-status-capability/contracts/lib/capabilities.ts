@@ -127,7 +127,28 @@ type DescriptorRecord = {
 type DescriptorDenialRecord = Readonly<Pick<DescriptorRecord, "fd" | "generation" | "phase">>;
 
 let cachedOpenAt: OpenAt | undefined;
+let capabilityCallbackDepth = 0;
 const descriptorOwners = new WeakMap<CapabilityDescriptor, ContractCapabilities>();
+
+/**
+ * Arms the shared callback-reentry latch around one synchronous mediator
+ * callback. Every hook the mediation boundary hands control to runs inside this
+ * latch, so no captured, inherited, or prototype-extracted authority can call
+ * back into a descriptor operation. Hooks are synchronous, so the latch never
+ * spans an await and never leaks across concurrent operations.
+ */
+export function withCapabilityCallback<Value>(invoke: () => Value): Value {
+  capabilityCallbackDepth += 1;
+  try {
+    return invoke();
+  } finally {
+    capabilityCallbackDepth -= 1;
+  }
+}
+
+export function capabilityCallbackActive(): boolean {
+  return capabilityCallbackDepth > 0;
+}
 
 function openAt(): OpenAt {
   if (cachedOpenAt) return cachedOpenAt;
@@ -181,10 +202,12 @@ export class ContractCapabilities {
   constructor(private readonly hooks: CapabilityHooks = {}) {}
 
   sealAdmission(): void {
+    this.#assertNoCallbackReentry();
     this.#admissionSealed = true;
   }
 
   openRoot(root: string, phase: CapabilityPhase): CapabilityDescriptor {
+    this.#assertNoCallbackReentry();
     if (!isCapabilityPhase(phase) || phase !== "admission" || this.#admissionSealed) {
       return this.#deny("open_root", "phase_invalid", null, null, null);
     }
@@ -198,6 +221,7 @@ export class ContractCapabilities {
     flags: number,
     phase: CapabilityPhase
   ): CapabilityDescriptor {
+    this.#assertNoCallbackReentry();
     const requestedPhase = isCapabilityPhase(phase) ? phase : null;
     const parentRecord = this.#resolve(parent, "openat", requestedPhase, "unproven_parent");
     if (!requestedPhase) return this.#denyRecord("openat", "phase_invalid", parentRecord);
@@ -228,6 +252,7 @@ export class ContractCapabilities {
   }
 
   markRetained(descriptor: CapabilityDescriptor, kind: DescriptorKind): void {
+    this.#assertNoCallbackReentry();
     const record = this.#resolve(descriptor, "mark_retained", null);
     if (this.#admissionSealed && record.state === "pending_retained") {
       return this.#denyRecord("mark_retained", "phase_invalid", record);
@@ -242,6 +267,7 @@ export class ContractCapabilities {
   }
 
   stat(descriptor: CapabilityDescriptor): BigIntStats {
+    this.#assertNoCallbackReentry();
     const record = this.#resolve(descriptor, "fstat_sync", null);
     const stats = fstatSync(record.fd, { bigint: true });
     record.statValidated = true;
@@ -257,6 +283,7 @@ export class ContractCapabilities {
     position: number,
     phase: CapabilityPhase
   ): number {
+    this.#assertNoCallbackReentry();
     const requestedPhase = isCapabilityPhase(phase) ? phase : null;
     const record = this.#resolve(descriptor, "read_sync", requestedPhase);
     if (requestedPhase !== "post_admission" || !this.#admissionSealed) {
@@ -272,6 +299,7 @@ export class ContractCapabilities {
   }
 
   close(descriptor: CapabilityDescriptor, owner: CloseOwner): void {
+    this.#assertNoCallbackReentry();
     const record = this.#resolve(descriptor, "close_sync", null);
     const expectedOwner = CLOSE_OWNERS_BY_STATE[record.state as keyof typeof CLOSE_OWNERS_BY_STATE];
     if (owner !== expectedOwner) return this.#denyRecord("close_sync", "owner_mismatch", record);
@@ -281,7 +309,7 @@ export class ContractCapabilities {
     const attempt = Object.freeze({ owner, ordinal: ++this.#closeOrdinal });
     let hookError: unknown;
     try {
-      this.hooks.onCloseAttempt?.(attempt);
+      withCapabilityCallback(() => this.hooks.onCloseAttempt?.(attempt));
     } catch (error) {
       hookError = error;
     }
@@ -298,7 +326,7 @@ export class ContractCapabilities {
     }
     let injectedFault = false;
     try {
-      injectedFault = this.hooks.closeFault?.(attempt) ?? false;
+      injectedFault = withCapabilityCallback(() => this.hooks.closeFault?.(attempt)) ?? false;
     } catch (error) {
       hookError = hookError ?? error;
     }
@@ -316,9 +344,20 @@ export class ContractCapabilities {
   }
 
   rejectForbidden(fault: ContractAuthorityFault, phase: CapabilityPhase): never {
+    this.#assertNoCallbackReentry();
     if (phase !== "post_admission") throw new Error("CONTRACT_CAPABILITY_FAULT_PHASE_INVALID");
-    this.hooks.onAuthorityViolation?.(fault);
+    withCapabilityCallback(() => this.hooks.onAuthorityViolation?.(fault));
     throw new Error(`CONTRACT_CAPABILITY_FORBIDDEN_${fault}`);
+  }
+
+  /**
+   * Rejects every public entry reached from inside a mediator callback before
+   * any validation, state mutation, nested hook, or raw descriptor work.
+   * Captured, inherited, and prototype-extracted methods carry no exemption:
+   * the latch belongs to the callback, not to the call site.
+   */
+  #assertNoCallbackReentry(): void {
+    if (capabilityCallbackActive()) throw new Error("CONTRACT_CAPABILITY_DESCRIPTOR_DENIED");
   }
 
   #issue(
@@ -407,7 +446,7 @@ export class ContractCapabilities {
       phase
     });
     try {
-      this.hooks.onDescriptorAuthorityDenial?.(denial);
+      withCapabilityCallback(() => this.hooks.onDescriptorAuthorityDenial?.(denial));
     } catch {
       // The denial is authoritative even if an observation hook misbehaves.
     }
