@@ -1,4 +1,5 @@
 import { dlopen } from "bun:ffi";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { closeSync, constants, fstatSync, openSync, readSync, type BigIntStats } from "node:fs";
 
 export type { BigIntStats };
@@ -128,26 +129,33 @@ type DescriptorDenialRecord = Readonly<Pick<DescriptorRecord, "fd" | "generation
 
 let cachedOpenAt: OpenAt | undefined;
 let capabilityCallbackDepth = 0;
+const callbackLatch = new AsyncLocalStorage<true>();
 const descriptorOwners = new WeakMap<CapabilityDescriptor, ContractCapabilities>();
 
 /**
- * Arms the shared callback-reentry latch around one synchronous mediator
- * callback. Every hook the mediation boundary hands control to runs inside this
- * latch, so no captured, inherited, or prototype-extracted authority can call
- * back into a descriptor operation. Hooks are synchronous, so the latch never
- * spans an await and never leaks across concurrent operations.
+ * Arms the shared callback-reentry latch around one mediator callback. Every
+ * hook the mediation boundary hands control to runs inside this latch, so no
+ * captured, inherited, or prototype-extracted authority can call back into a
+ * descriptor operation.
+ *
+ * The latch has two arms because a mediator callback may be asynchronous. The
+ * synchronous depth covers the callback body and any nested callback; the
+ * async-context arm additionally covers every continuation of an asynchronous
+ * callback, so the latch stays armed across the callback's awaits. That arm is
+ * scoped to the callback's own async context, so an operation started
+ * independently of any callback is never latched by it.
  */
 export function withCapabilityCallback<Value>(invoke: () => Value): Value {
   capabilityCallbackDepth += 1;
   try {
-    return invoke();
+    return callbackLatch.run(true, invoke);
   } finally {
     capabilityCallbackDepth -= 1;
   }
 }
 
 export function capabilityCallbackActive(): boolean {
-  return capabilityCallbackDepth > 0;
+  return capabilityCallbackDepth > 0 || callbackLatch.getStore() === true;
 }
 
 function openAt(): OpenAt {

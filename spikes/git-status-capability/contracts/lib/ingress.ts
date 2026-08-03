@@ -1,4 +1,5 @@
 import { parse, resolve, sep } from "node:path";
+import { isPromise } from "node:util/types";
 import { hasOnlyUnicodeScalars } from "./canonical-json";
 import {
   capabilityCallbackActive,
@@ -45,6 +46,12 @@ function isContractError(value: unknown): value is ContractError {
 }
 
 export type IngressProfile = Readonly<{ bytes: number; depth: number; nodes: number; items: number }>;
+/**
+ * An admission hook may be asynchronous. Only a value that is a promise by
+ * construction identity (an internal-slot check that reads no property of the
+ * returned value) is awaited; any other return value, including a thenable, is
+ * treated as a completed synchronous hook and is never inspected or assimilated.
+ */
 export type DescriptorAdmissionHook = (absolutePath: string) => void | Promise<void>;
 export type DescriptorIngressOperation = Readonly<{
   phase: "admission" | "post_admission";
@@ -61,12 +68,25 @@ export type DescriptorIngressHooks = Readonly<{
 const NO_RAW_CLOSE_ATTEMPTS = 2;
 
 /**
- * Ingress-owned mediator callbacks (`observe`, `afterAdmission`) share the
- * capability callback latch, so reentry from any mediator hook is rejected on
- * every descriptor seam and at the public ingress entry alike.
+ * Every ingress-owned mediator callback (`observe`, `afterAdmission`,
+ * `beforeCleanup`, and the `authorityFault` lookup) shares the capability
+ * callback latch for its whole execution, including the continuations of an
+ * asynchronous `afterAdmission`, so reentry from any mediator hook is rejected
+ * on every descriptor seam and at the public ingress entry alike. An operation
+ * started outside every callback carries no latch, so it is unaffected while a
+ * concurrent operation is suspended inside its own hook.
  */
 function assertNoCallbackReentry(): void {
   if (capabilityCallbackActive()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+}
+
+/**
+ * The single ingress observation seam: the hook property is looked up and
+ * called inside one latch, so an accessor-form `observe` cannot reenter the
+ * boundary from its getter either, and the caller keeps its own receiver.
+ */
+function observeIngress(hooks: DescriptorIngressHooks, operation: DescriptorIngressOperation): void {
+  withCapabilityCallback(() => hooks.observe?.(operation));
 }
 
 class IngressOwnerNode {
@@ -394,7 +414,7 @@ function assertExpectedType(stats: BigIntStats, final: boolean): void {
 function openDescriptorBoundPath(
   path: string,
   context: ActiveIngressContext,
-  observe?: DescriptorOperationObserver
+  hooks: DescriptorIngressHooks
 ): DescriptorAdmission {
   assertIngressWorkAvailable();
   if (hasForbiddenRawPathComponent(path)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
@@ -404,7 +424,7 @@ function openDescriptorBoundPath(
   if (segments.length === 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const components: RetainedComponent[] = [];
   try {
-    withCapabilityCallback(() => observe?.({ phase: "admission", operation: "open_root", path: root }));
+    observeIngress(hooks, { phase: "admission", operation: "open_root", path: root });
     assertIngressWorkAvailable();
     const rootDescriptor = context.openRoot(root, "admission");
     context.trackOwner(rootDescriptor, "unretained");
@@ -429,11 +449,7 @@ function openDescriptorBoundPath(
       const childName = segments[index]!;
       const final = index === segments.length - 1;
       const parentDescriptor = components.at(-1)!.descriptor;
-      withCapabilityCallback(() => observe?.({
-        phase: "admission",
-        operation: "open_relative",
-        path: childName
-      }));
+      observeIngress(hooks, { phase: "admission", operation: "open_relative", path: childName });
       assertIngressWorkAvailable();
       const descriptor = context.openRelative(
         parentDescriptor,
@@ -469,7 +485,7 @@ function openDescriptorBoundPath(
 function verifyRetainedChain(
   admission: DescriptorAdmission,
   context: ActiveIngressContext,
-  observe?: DescriptorOperationObserver,
+  hooks: DescriptorIngressHooks,
   deferCleanup = false
 ): boolean {
   let cleanupFailed = false;
@@ -482,11 +498,11 @@ function verifyRetainedChain(
     if (index === 0) continue;
 
     const parent = admission.components[index - 1]!;
-    withCapabilityCallback(() => observe?.({
+    observeIngress(hooks, {
       phase: "post_admission",
       operation: "open_relative",
       path: retained.childName!
-    }));
+    });
     assertIngressWorkAvailable();
     const verificationDescriptor = context.openRelative(
       parent.descriptor,
@@ -693,25 +709,27 @@ export async function readBoundedFile(
   let result: Uint8Array | undefined;
   let verificationCleanupFailed = false;
   try {
-    admission = openDescriptorBoundPath(path, context, hooks.observe);
+    admission = openDescriptorBoundPath(path, context, hooks);
     context.sealAdmission();
     const final = admission.components.at(-1)!;
-    await withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));
+    const admitted = withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));
+    if (isPromise(admitted)) await admitted;
     assertIngressWorkAvailable();
-    if (hooks.authorityFault) context.rejectForbidden(hooks.authorityFault, "post_admission");
+    const authorityFault = withCapabilityCallback(() => hooks.authorityFault);
+    if (authorityFault) context.rejectForbidden(authorityFault, "post_admission");
     assertIngressWorkAvailable();
-    verificationCleanupFailed = verifyRetainedChain(admission, context, hooks.observe, true);
+    verificationCleanupFailed = verifyRetainedChain(admission, context, hooks, true);
     assertIngressWorkAvailable();
     if (final.stats.size <= maximum) {
       const buffer = Buffer.alloc(maximum + 1);
       let length = 0;
       while (length < buffer.length) {
         assertIngressWorkAvailable();
-        withCapabilityCallback(() => hooks.observe?.({
+        observeIngress(hooks, {
           phase: "post_admission",
           operation: "read_retained",
           path: final.childName!
-        }));
+        });
         assertIngressWorkAvailable();
         const bytesRead = context.readRetained(
           final.descriptor,
@@ -727,9 +745,10 @@ export async function readBoundedFile(
       if (length <= maximum) result = buffer.subarray(0, length);
     }
     assertIngressWorkAvailable();
-    verificationCleanupFailed = verifyRetainedChain(admission, context, hooks.observe, true) || verificationCleanupFailed;
+    verificationCleanupFailed = verifyRetainedChain(admission, context, hooks, true) || verificationCleanupFailed;
     if (!result) throw new ContractError("CONTRACT_BYTES_LIMIT");
-    beforeCleanup?.(result);
+    const admittedBytes = result;
+    withCapabilityCallback(() => beforeCleanup?.(admittedBytes));
   } catch (error) {
     primary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
   } finally {

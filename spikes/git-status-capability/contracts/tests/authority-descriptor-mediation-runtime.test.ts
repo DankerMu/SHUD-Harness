@@ -108,9 +108,36 @@ type ReentryOriginReceipt = Readonly<{
   fired: boolean;
   outcome: EntryOutcome;
   denialCalls: number;
+  authorityFaultReads: number | null;
+  faultsReportedToHook: readonly string[];
+  followOnIngress: EntryOutcome;
+  followOnChecker: EntryOutcome;
   battery: readonly ReentryRow[];
 }>;
 type ReentryReceipt = Readonly<{ entry: Entry; origins: readonly ReentryOriginReceipt[] }>;
+type ThenableRow = Readonly<{
+  kind: "never_settling_thenable" | "native_promise";
+  settled: boolean;
+  outcome: EntryOutcome | null;
+  thenReads: number;
+  traps: number;
+  trapNames: readonly string[];
+  rawFinal: Counters;
+  rawAtHookCompletion: Counters | null;
+  fdBefore: number;
+  fdAfter: number;
+}>;
+type ThenableReceipt = Readonly<{ entry: Entry; rows: readonly ThenableRow[] }>;
+type ConcurrencyReceipt = Readonly<{
+  entry: Entry;
+  first: EntryOutcome;
+  firstPendingWhileSecondRan: boolean;
+  second: EntryOutcome;
+  secondRaw: Counters;
+  suspendedBeforeSecond: boolean;
+  fdBefore: number;
+  fdAfter: number;
+}>;
 type ReadReceipt = Readonly<{
   entry: Entry;
   outcome: EntryOutcome;
@@ -131,6 +158,7 @@ const fixturePath = join(
 );
 
 const HOSTILE_SITES: readonly HostileSite[] = [
+  "after_admission_1",
   "observe_open_root",
   "observe_open_relative_1",
   "observe_open_relative_2",
@@ -170,8 +198,21 @@ const REENTRY_ORIGINS: readonly string[] = [
   "close_attempt",
   "close_fault",
   "authority_violation",
+  "after_admission",
+  "after_admission_async",
+  "accessor_observe",
+  "accessor_authority_fault",
+  "before_cleanup",
   "denial"
 ];
+/** `beforeCleanup` is an ingress-entry parameter the checker never exposes. */
+const CHECKER_REENTRY_ORIGINS: readonly string[] = REENTRY_ORIGINS.filter(
+  (origin) => origin !== "before_cleanup"
+);
+const FAILING_REENTRY_ORIGINS: ReadonlySet<string> = new Set([
+  "authority_violation",
+  "accessor_authority_fault"
+]);
 const DENIED = "CONTRACT_CAPABILITY_DESCRIPTOR_DENIED";
 
 /**
@@ -319,6 +360,18 @@ function assertHostileRow(row: HostileRow, entry: Entry): void {
   );
 }
 
+function originReceipt(receiptValue: ReentryReceipt, origin: string): ReentryOriginReceipt {
+  const found = receiptValue.origins.find((candidate) => candidate.origin === origin);
+  if (!found) throw new Error(`reentry origin is absent: ${origin}`);
+  return found;
+}
+
+function thenableRow(receiptValue: ThenableReceipt, kind: ThenableRow["kind"]): ThenableRow {
+  const row = receiptValue.rows.find((candidate) => candidate.kind === kind);
+  if (!row) throw new Error(`thenable row is absent: ${kind}`);
+  return row;
+}
+
 function reentryRow(origin: ReentryOriginReceipt, method: string): ReentryRow {
   const row = origin.battery.find((candidate) => candidate.method === method);
   if (!row) throw new Error(`reentry row is absent: ${origin.origin}/${method}`);
@@ -330,12 +383,28 @@ function assertReentryOrigin(origin: ReentryOriginReceipt, entry: Entry): void {
   expect(origin.battery.map((row) => row.method).sort()).toEqual([...REENTRY_METHODS].sort());
   for (const method of REENTRY_METHODS) {
     const row = reentryRow(origin, method);
-    expect(row.outcome).toBe(method === "ingress_read_bounded_file" ? "CONTRACT_SCHEMA_INVALID" : DENIED);
-    expect(row.rawDelta).toBe(0);
-    expect(row.denialCalls).toBe(0);
+    expect([origin.origin, method, row.outcome]).toEqual([
+      origin.origin,
+      method,
+      method === "ingress_read_bounded_file" ? "CONTRACT_SCHEMA_INVALID" : DENIED
+    ]);
+    expect([origin.origin, method, row.rawDelta]).toEqual([origin.origin, method, 0]);
+    expect([origin.origin, method, row.denialCalls]).toEqual([origin.origin, method, 0]);
   }
-  if (origin.origin === "authority_violation") {
-    expect(origin.outcome).toEqual(expectedFailure(entry));
+  // A rejected reentry is not a mediation fault: the process-global ingress
+  // poison must stay clear for every later independent operation.
+  expect([origin.origin, origin.followOnIngress]).toEqual([origin.origin, expectedSuccess("ingress")]);
+  expect([origin.origin, origin.followOnChecker]).toEqual([origin.origin, expectedSuccess("checker")]);
+  if (origin.origin === "accessor_observe" || origin.origin === "accessor_authority_fault") {
+    // One `authorityFault` lookup per `readBoundedFile`, and the exact value
+    // read is the value handed to `rejectForbidden`.
+    expect([origin.origin, origin.authorityFaultReads]).toEqual([origin.origin, 1]);
+    expect(origin.faultsReportedToHook).toEqual(
+      origin.origin === "accessor_authority_fault" ? ["file_write"] : []
+    );
+  }
+  if (FAILING_REENTRY_ORIGINS.has(origin.origin)) {
+    expect([origin.origin, origin.outcome]).toEqual([origin.origin, expectedFailure(entry)]);
     expect(origin.denialCalls).toBe(0);
     return;
   }
@@ -344,7 +413,7 @@ function assertReentryOrigin(origin: ReentryOriginReceipt, entry: Entry): void {
     expect(origin.denialCalls).toBe(1);
     return;
   }
-  expect(origin.outcome).toEqual(expectedSuccess(entry));
+  expect([origin.origin, origin.outcome]).toEqual([origin.origin, expectedSuccess(entry)]);
   expect(origin.denialCalls).toBe(0);
 }
 
@@ -583,7 +652,9 @@ describe("descriptor close runtime mediation", () => {
   test("every public capability entry and captured authority rejects callback reentry", async () => {
     for (const entry of ["ingress", "checker"] as const) {
       const reentry = await receipt<ReentryReceipt>(["reentry", entry]);
-      expect(reentry.origins.map((origin) => origin.origin)).toEqual([...REENTRY_ORIGINS]);
+      expect(reentry.origins.map((origin) => origin.origin)).toEqual(
+        entry === "ingress" ? [...REENTRY_ORIGINS] : [...CHECKER_REENTRY_ORIGINS]
+      );
       for (const origin of reentry.origins) assertReentryOrigin(origin, entry);
     }
 
@@ -601,6 +672,130 @@ describe("descriptor close runtime mediation", () => {
     expect(reentryRow(observed!, "captured_token_stat").denialCalls).toBeGreaterThan(0);
     expect(reentryRow(observed!, "ingress_read_bounded_file").rawDelta).toBeGreaterThan(0);
     expect(observed!.outcome).toEqual(expectedFailure("ingress"));
+  });
+
+  test("an asynchronous admission hook is awaited by construction identity and never inspected", async () => {
+    for (const entry of ["ingress", "checker"] as const) {
+      const thenable = await receipt<ThenableReceipt>(["thenable", entry]);
+      expect(thenable.rows.map((row) => row.kind)).toEqual(["never_settling_thenable", "native_promise"]);
+
+      // A foreign thenable is neither read nor adopted: the operation settles
+      // with the canonical receipt and leaks no descriptor.
+      const hostileThenable = thenableRow(thenable, "never_settling_thenable");
+      expect(hostileThenable.settled).toBe(true);
+      expect(hostileThenable.thenReads).toBe(0);
+      expect(hostileThenable.traps).toBe(0);
+      expect(hostileThenable.trapNames).toEqual([]);
+      expect(hostileThenable.outcome).toEqual(expectedSuccess(entry));
+      expect(hostileThenable.rawFinal).toEqual(BASELINE_RAW);
+      expect(hostileThenable.fdAfter).toBe(hostileThenable.fdBefore);
+
+      // A genuine promise is still awaited to completion: no post-admission raw
+      // work has started when the hook's own continuation observes the counters.
+      const native = thenableRow(thenable, "native_promise");
+      expect(native.settled).toBe(true);
+      expect(native.outcome).toEqual(expectedSuccess(entry));
+      expect(native.rawAtHookCompletion).toEqual(SITE_RAW.after_admission_1.atInjection);
+      expect(native.rawFinal).toEqual(BASELINE_RAW);
+      expect(native.fdAfter).toBe(native.fdBefore);
+    }
+
+    const inspected = await mutatedReceipt<ThenableReceipt>(
+      "inspected_admission_return",
+      ["thenable", "ingress"]
+    );
+    const hung = thenableRow(inspected, "never_settling_thenable");
+    expect(hung.thenReads).toBe(1);
+    expect(hung.settled).toBe(false);
+    expect(hung.fdAfter).toBeGreaterThan(hung.fdBefore);
+
+    const inspectedHostile = await mutatedReceipt<HostileReceipt>(
+      "inspected_admission_return",
+      ["hostile", "ingress"]
+    );
+    const returnedAdmission = hostileRow(inspectedHostile, "after_admission_1", "returned");
+    expect(returnedAdmission.trapNames).toContain("get");
+    expect(returnedAdmission.traps).toBeGreaterThan(0);
+    expect(() => assertHostileRow(returnedAdmission, "ingress")).toThrow();
+  });
+
+  test("an operation started outside every callback is unaffected by a suspended admission hook", async () => {
+    for (const entry of ["ingress", "checker"] as const) {
+      const concurrency = await receipt<ConcurrencyReceipt>(["concurrency", entry]);
+      expect(concurrency.suspendedBeforeSecond).toBe(true);
+      expect(concurrency.firstPendingWhileSecondRan).toBe(true);
+      expect(concurrency.second).toEqual(expectedSuccess(entry));
+      expect(concurrency.secondRaw).toEqual(BASELINE_RAW);
+      expect(concurrency.first).toEqual(expectedSuccess(entry));
+      expect(concurrency.fdAfter).toBe(concurrency.fdBefore);
+    }
+
+    // Holding the process-global latch across the suspension would reject the
+    // independent operation instead.
+    const suspended = await mutatedReceipt<ConcurrencyReceipt>(
+      "suspended_global_latch",
+      ["concurrency", "ingress"]
+    );
+    expect(suspended.suspendedBeforeSecond).toBe(true);
+    expect(suspended.second).toEqual(expectedFailure("ingress"));
+  });
+
+  test("every #189 latch-boundary mutation is red on the reentry battery", async () => {
+    // F1: the latch releases at the first await of an asynchronous hook, so the
+    // hook's continuation reenters with full authority.
+    const asyncUnlatched = await mutatedReceipt<ReentryReceipt>(
+      "async_unlatched_callback",
+      ["reentry", "ingress", "after_admission_async"]
+    );
+    const unlatchedContinuation = originReceipt(asyncUnlatched, "after_admission_async");
+    expect(unlatchedContinuation.fired).toBe(true);
+    expect(() => assertReentryOrigin(unlatchedContinuation, "ingress")).toThrow();
+    expect(reentryRow(unlatchedContinuation, "stat").outcome).toBe("NO_ERROR");
+    expect(reentryRow(unlatchedContinuation, "stat").rawDelta).toBeGreaterThan(0);
+    expect(reentryRow(unlatchedContinuation, "ingress_read_bounded_file").rawDelta).toBeGreaterThan(0);
+    const stillLatchedSynchronous = await mutatedReceipt<ReentryReceipt>(
+      "async_unlatched_callback",
+      ["reentry", "ingress", "after_admission"]
+    );
+    expect(() => assertReentryOrigin(originReceipt(stillLatchedSynchronous, "after_admission"), "ingress"))
+      .not.toThrow();
+
+    // F2: the hook property is read in the caller's own frame, so an accessor
+    // reenters unlatched and `authorityFault` is read twice.
+    const unlatchedLookup = await mutatedReceipt<ReentryReceipt>(
+      "unlatched_hook_lookup",
+      ["reentry", "ingress", "accessor_observe"]
+    );
+    const accessorObserve = originReceipt(unlatchedLookup, "accessor_observe");
+    expect(accessorObserve.fired).toBe(true);
+    expect(() => assertReentryOrigin(accessorObserve, "ingress")).toThrow();
+    expect(reentryRow(accessorObserve, "stat").rawDelta).toBeGreaterThan(0);
+    const doubleRead = await mutatedReceipt<ReentryReceipt>(
+      "unlatched_hook_lookup",
+      ["reentry", "ingress", "accessor_authority_fault"]
+    );
+    const accessorFault = originReceipt(doubleRead, "accessor_authority_fault");
+    expect(accessorFault.authorityFaultReads).toBe(2);
+    // The second read is the one `rejectForbidden` acts on, so the fault the
+    // boundary reports is not the fault the guard tested.
+    expect(accessorFault.faultsReportedToHook.at(-1)).toBe("child_spawn");
+    expect(() => assertReentryOrigin(accessorFault, "ingress")).toThrow();
+
+    // F3: `beforeCleanup` runs unlatched while every admission descriptor is open.
+    const unlatchedCleanup = await mutatedReceipt<ReentryReceipt>(
+      "unlatched_before_cleanup",
+      ["reentry", "ingress", "before_cleanup"]
+    );
+    const beforeCleanup = originReceipt(unlatchedCleanup, "before_cleanup");
+    expect(beforeCleanup.fired).toBe(true);
+    expect(() => assertReentryOrigin(beforeCleanup, "ingress")).toThrow();
+    expect(reentryRow(beforeCleanup, "stat").rawDelta).toBeGreaterThan(0);
+    const untouchedAdmission = await mutatedReceipt<ReentryReceipt>(
+      "unlatched_before_cleanup",
+      ["reentry", "ingress", "after_admission"]
+    );
+    expect(() => assertReentryOrigin(originReceipt(untouchedAdmission, "after_admission"), "ingress"))
+      .not.toThrow();
   });
 
   test("mediated reads return the exact byte count and bytes of the retained file", async () => {

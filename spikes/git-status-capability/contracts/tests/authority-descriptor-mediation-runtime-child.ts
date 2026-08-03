@@ -30,7 +30,9 @@ type Scenario =
   | "inherited"
   | "sink"
   | "reentry"
-  | "read";
+  | "read"
+  | "thenable"
+  | "concurrency";
 type EntryOutcome = Readonly<{ code: string | null; exit: number | null; stdout: string; stderr: string }>;
 type Counters = Readonly<{ openRoot: number; openat: number; fstat: number; read: number; close: number }>;
 type CapabilityInstance = {
@@ -59,7 +61,12 @@ type CapabilitiesModule = Readonly<{
   FILE_OPEN_FLAGS: number;
 }>;
 type IngressModule = Readonly<{
-  readBoundedFile: (path: string, maximum: number, hooks?: CloseHooks) => Promise<Uint8Array>;
+  readBoundedFile: (
+    path: string,
+    maximum: number,
+    hooks?: CloseHooks,
+    beforeCleanup?: (bytes: Uint8Array) => void
+  ) => Promise<Uint8Array>;
 }>;
 type CheckerModule = Readonly<{
   runCheckForTest: (
@@ -74,7 +81,11 @@ type Modules = Readonly<{
   checker: CheckerModule;
 }>;
 
-const [scenarioArgument, entryArgument] = process.argv.slice(2) as [Scenario | undefined, string | undefined];
+const [scenarioArgument, entryArgument, originArgument] = process.argv.slice(2) as [
+  Scenario | undefined,
+  string | undefined,
+  string | undefined
+];
 if (!scenarioArgument || !entryArgument) throw new Error("close runtime child requires a scenario and entry");
 const scenario = scenarioArgument;
 const productionRoot = process.env.SHUD_DESCRIPTOR_PRODUCTION_ROOT;
@@ -234,11 +245,12 @@ async function runEntry(
   entry: Entry,
   modules: Modules,
   hooks: CloseHooks,
-  onSettled?: () => void
+  onSettled?: () => void,
+  beforeCleanup?: (bytes: Uint8Array) => void
 ): Promise<EntryOutcome> {
   if (entry === "ingress") {
     try {
-      await modules.ingress.readBoundedFile(validInput, 64 * 1024, hooks);
+      await modules.ingress.readBoundedFile(validInput, 64 * 1024, hooks, beforeCleanup);
       onSettled?.();
       return Object.freeze({ code: null, exit: null, stdout: "", stderr: "" });
     } catch (error) {
@@ -364,6 +376,7 @@ async function runTerminal(modules: Modules, entry: Entry, shouldThrow: boolean)
 
 const FALSY_SITES = ["observe_open_relative_1", "after_admission_1", "close_attempt_1"] as const;
 const HOSTILE_SITES = [
+  "after_admission_1",
   "observe_open_root",
   "observe_open_relative_1",
   "observe_open_relative_2",
@@ -585,8 +598,83 @@ async function runSink(modules: Modules, entry: Entry): Promise<unknown> {
   });
 }
 
-type ReentryOrigin = "observe" | "close_attempt" | "close_fault" | "authority_violation" | "denial";
+type ReentryOrigin =
+  | "observe"
+  | "close_attempt"
+  | "close_fault"
+  | "authority_violation"
+  | "after_admission"
+  | "after_admission_async"
+  | "accessor_observe"
+  | "accessor_authority_fault"
+  | "before_cleanup"
+  | "denial";
 type ReentryRow = Readonly<{ method: string; outcome: string; rawDelta: number; denialCalls: number }>;
+
+/** Origins driven through the shared ingress hooks object, in receipt order. */
+const HOOK_REENTRY_ORIGINS: readonly ReentryOrigin[] = [
+  "observe",
+  "close_attempt",
+  "close_fault",
+  "authority_violation",
+  "after_admission",
+  "after_admission_async",
+  "accessor_observe",
+  "accessor_authority_fault",
+  "before_cleanup"
+];
+
+/**
+ * Accessor-form hooks: `observe` and `authorityFault` are prototype getters, so
+ * the reentry attempt originates in the property lookup itself rather than in a
+ * hook call. The `authorityFault` getter also reports a different fault on a
+ * second read, so any double lookup is visible in the violation receipt.
+ */
+class AccessorIngressHooks {
+  armed = false;
+  authorityFaultReads = 0;
+  observeReads = 0;
+  readonly faults: string[] = [];
+
+  constructor(
+    readonly origin: ReentryOrigin,
+    readonly run: (candidate: ReentryOrigin) => void,
+    readonly countDenial: () => void
+  ) {}
+
+  afterAdmission(this: AccessorIngressHooks): void {
+    this.armed = true;
+  }
+
+  onAuthorityViolation(this: AccessorIngressHooks, fault: string): void {
+    this.faults.push(fault);
+  }
+
+  onDescriptorAuthorityDenial(this: AccessorIngressHooks): void {
+    this.countDenial();
+  }
+}
+
+Object.defineProperty(AccessorIngressHooks.prototype, "observe", {
+  configurable: true,
+  enumerable: false,
+  get(this: AccessorIngressHooks): (operation: IngressOperation) => void {
+    this.observeReads += 1;
+    if (this.armed) this.run("accessor_observe");
+    return (): void => undefined;
+  }
+});
+
+Object.defineProperty(AccessorIngressHooks.prototype, "authorityFault", {
+  configurable: true,
+  enumerable: false,
+  get(this: AccessorIngressHooks): string | undefined {
+    this.authorityFaultReads += 1;
+    if (this.origin !== "accessor_authority_fault") return undefined;
+    this.run("accessor_authority_fault");
+    return this.authorityFaultReads === 1 ? "file_write" : "child_spawn";
+  }
+});
 
 function reentryBattery(
   modules: Modules,
@@ -664,8 +752,18 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
   const originalOpenRoot = prototype.openRoot;
   const originalOpenRelative = prototype.openRelative;
   const results: unknown[] = [];
+  // `beforeCleanup` is an ingress-entry parameter, so the checker cannot install
+  // a hostile one: that origin belongs to the ingress receipt only. A single
+  // origin can also be selected, because one unlatched origin poisons the
+  // process-global ingress for every origin that would follow it.
+  const origins = HOOK_REENTRY_ORIGINS.filter((candidate) =>
+    (candidate !== "before_cleanup" || entry === "ingress") &&
+    (originArgument === undefined || candidate === originArgument));
+  if (originArgument !== undefined && origins.length === 0) {
+    throw new Error(`unsupported reentry origin selection: ${originArgument}`);
+  }
 
-  for (const origin of ["observe", "close_attempt", "close_fault", "authority_violation"] as const) {
+  for (const origin of origins) {
     let capabilities: CapabilityInstance | undefined;
     let rootDescriptor: object | undefined;
     let fileDescriptor: object | undefined;
@@ -697,30 +795,60 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
         pending
       );
     };
-    const hooks: CloseHooks = Object.freeze({
-      ...(origin === "authority_violation" ? { authorityFault: "file_write" as const } : {}),
-      closeFault: (attempt) => {
-        token ??= attempt;
-        run("close_fault");
-        return false;
-      },
-      // The read observation is the first ingress-owned callback that runs with
-      // a captured capability, a retained file descriptor, and a sealed admission.
-      observe: (operation) => { if (operation.operation === "read_retained") run("observe"); },
-      onAuthorityViolation: () => { run("authority_violation"); },
-      onCloseAttempt: (attempt) => {
-        token ??= attempt;
-        run("close_attempt");
-      },
-      onDescriptorAuthorityDenial: () => { denialCalls += 1; }
-    });
-    const outcome = await runEntry(entry, modules, hooks);
+    const accessor = origin === "accessor_observe" || origin === "accessor_authority_fault"
+      ? new AccessorIngressHooks(origin, run, () => { denialCalls += 1; })
+      : undefined;
+    const faults: string[] = [];
+    const hooks: CloseHooks = accessor
+      ? accessor as unknown as CloseHooks
+      : Object.freeze({
+        ...(origin === "authority_violation" ? { authorityFault: "file_write" as const } : {}),
+        ...(origin === "after_admission" ? { afterAdmission: (): void => { run("after_admission"); } } : {}),
+        ...(origin === "after_admission_async"
+          ? {
+            afterAdmission: async (): Promise<void> => {
+              await null;
+              run("after_admission_async");
+            }
+          }
+          : {}),
+        closeFault: (attempt) => {
+          token ??= attempt;
+          run("close_fault");
+          return false;
+        },
+        // The read observation is the first ingress-owned callback that runs with
+        // a captured capability, a retained file descriptor, and a sealed admission.
+        observe: (operation) => { if (operation.operation === "read_retained") run("observe"); },
+        onAuthorityViolation: (fault) => {
+          faults.push(fault);
+          run("authority_violation");
+        },
+        onCloseAttempt: (attempt) => {
+          token ??= attempt;
+          run("close_attempt");
+        },
+        onDescriptorAuthorityDenial: () => { denialCalls += 1; }
+      });
+    const outcome = await runEntry(
+      entry,
+      modules,
+      hooks,
+      undefined,
+      origin === "before_cleanup" ? (): void => { run("before_cleanup"); } : undefined
+    );
     const settled = await Promise.all(pending);
+    const followOnIngress = await runEntry("ingress", modules, Object.freeze({}));
+    const followOnChecker = await runEntry("checker", modules, Object.freeze({}));
     results.push(Object.freeze({
       origin,
       fired,
       outcome,
       denialCalls,
+      authorityFaultReads: accessor?.authorityFaultReads ?? null,
+      faultsReportedToHook: Object.freeze([...(accessor ? accessor.faults : faults)]),
+      followOnIngress,
+      followOnChecker,
       battery: Object.freeze([...battery, ...settled])
     }));
   }
@@ -752,14 +880,148 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
   } catch (error) {
     directOutcome = error instanceof Error ? error.message : "NON_ERROR_THROWN";
   }
+  const directBatteryRows = Object.freeze([...directBattery, ...(await Promise.all(directPending))]);
   results.push(Object.freeze({
     origin: "denial" satisfies ReentryOrigin,
     fired: directFired,
     outcome: Object.freeze({ code: directOutcome, exit: null, stdout: "", stderr: "" }),
     denialCalls: denials.length,
-    battery: Object.freeze([...directBattery, ...(await Promise.all(directPending))])
+    authorityFaultReads: null,
+    faultsReportedToHook: Object.freeze([]),
+    followOnIngress: await runEntry("ingress", modules, Object.freeze({})),
+    followOnChecker: await runEntry("checker", modules, Object.freeze({})),
+    battery: directBatteryRows
   }));
   return Object.freeze({ entry, origins: Object.freeze(results) });
+}
+
+const BOUNDED_SETTLEMENT_MS = 2000;
+
+/**
+ * Bounded settlement probe. A mediation boundary that adopts a foreign thenable
+ * never settles, so the row must be able to report the hang instead of hanging
+ * the suite with it.
+ */
+async function boundedEntry(
+  entry: Entry,
+  modules: Modules,
+  hooks: CloseHooks
+): Promise<Readonly<{ settled: boolean; outcome: EntryOutcome | null }>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<Readonly<{ settled: false; outcome: null }>>((resolve) => {
+    timer = setTimeout(() => resolve(Object.freeze({ settled: false, outcome: null })), BOUNDED_SETTLEMENT_MS);
+  });
+  const settlement = runEntry(entry, modules, hooks).then(
+    (outcome) => Object.freeze({ settled: true as const, outcome })
+  );
+  const result = await Promise.race([settlement, bound]);
+  if (timer !== undefined) clearTimeout(timer);
+  return result;
+}
+
+/**
+ * Returned-value rows for `afterAdmission`: a never-settling thenable must be
+ * ignored without a single property read, and a genuine promise must still be
+ * awaited to completion before any post-admission verification work starts.
+ */
+async function runThenable(modules: Modules, entry: Entry): Promise<unknown> {
+  const rows: unknown[] = [];
+
+  let thenReads = 0;
+  const neverSettling = Object.create(null) as Record<string, unknown>;
+  Object.defineProperty(neverSettling, "then", {
+    configurable: true,
+    enumerable: false,
+    get(): (resolve: () => void) => void {
+      thenReads += 1;
+      return (): void => { /* the adopted thenable never settles */ };
+    }
+  });
+  resetObservations();
+  const neverSettlingFdBefore = descriptorCount();
+  const neverSettlingRawBefore = snapshotRaw();
+  const neverSettlingResult = await boundedEntry(entry, modules, Object.freeze({
+    afterAdmission: (() => neverSettling) as unknown as (path: string) => void
+  }));
+  rows.push(Object.freeze({
+    kind: "never_settling_thenable",
+    settled: neverSettlingResult.settled,
+    outcome: neverSettlingResult.outcome,
+    thenReads,
+    traps: totalTraps(observedTraps()),
+    trapNames: Object.keys(observedTraps()).sort(),
+    rawFinal: rawDelta(neverSettlingRawBefore, snapshotRaw()),
+    rawAtHookCompletion: null,
+    fdBefore: neverSettlingFdBefore,
+    fdAfter: descriptorCount()
+  }));
+
+  let rawAtHookCompletion: Counters | null = null;
+  resetObservations();
+  const nativeFdBefore = descriptorCount();
+  const nativeRawBefore = snapshotRaw();
+  const nativeResult = await boundedEntry(entry, modules, Object.freeze({
+    afterAdmission: (async (): Promise<void> => {
+      await null;
+      rawAtHookCompletion = rawDelta(nativeRawBefore, snapshotRaw());
+    }) as unknown as (path: string) => void
+  }));
+  rows.push(Object.freeze({
+    kind: "native_promise",
+    settled: nativeResult.settled,
+    outcome: nativeResult.outcome,
+    thenReads: 0,
+    traps: totalTraps(observedTraps()),
+    trapNames: Object.keys(observedTraps()).sort(),
+    rawFinal: rawDelta(nativeRawBefore, snapshotRaw()),
+    rawAtHookCompletion,
+    fdBefore: nativeFdBefore,
+    fdAfter: descriptorCount()
+  }));
+
+  return Object.freeze({ entry, rows: Object.freeze(rows) });
+}
+
+/**
+ * Non-interference row: while operation A is suspended inside its own
+ * asynchronous `afterAdmission`, operation B is started independently of every
+ * callback and must complete normally.
+ */
+async function runConcurrency(modules: Modules, entry: Entry): Promise<unknown> {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let suspended = false;
+  let firstSettled = false;
+  const fdBefore = descriptorCount();
+  const first = runEntry(entry, modules, Object.freeze({
+    afterAdmission: (async (): Promise<void> => {
+      await null;
+      suspended = true;
+      await gate;
+    }) as unknown as (path: string) => void
+  })).then((outcome) => {
+    firstSettled = true;
+    return outcome;
+  });
+  await null;
+  await null;
+  const suspendedBeforeSecond = suspended;
+  const secondRawBefore = snapshotRaw();
+  const second = await runEntry(entry, modules, Object.freeze({}));
+  const secondRaw = rawDelta(secondRawBefore, snapshotRaw());
+  const firstPendingWhileSecondRan = !firstSettled;
+  release();
+  const firstOutcome = await first;
+  return Object.freeze({
+    entry,
+    first: firstOutcome,
+    firstPendingWhileSecondRan,
+    second,
+    secondRaw,
+    suspendedBeforeSecond,
+    fdBefore,
+    fdAfter: descriptorCount()
+  });
 }
 
 async function runRead(modules: Modules, entry: Entry): Promise<unknown> {
@@ -826,5 +1088,9 @@ const receipt = scenario === "identity"
   ? await runReentry(modules, entryArgument as Entry)
   : scenario === "read"
   ? await runRead(modules, entryArgument as Entry)
+  : scenario === "thenable"
+  ? await runThenable(modules, entryArgument as Entry)
+  : scenario === "concurrency"
+  ? await runConcurrency(modules, entryArgument as Entry)
   : (() => { throw new Error(`unsupported close runtime scenario: ${scenario}`); })();
 process.stdout.write(`${JSON.stringify(receipt)}\n`);

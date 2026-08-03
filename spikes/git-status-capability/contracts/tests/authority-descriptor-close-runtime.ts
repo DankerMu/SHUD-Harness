@@ -16,6 +16,11 @@ export type CloseRuntimeMutation =
   | "promise_identity_rewrite"
   | "remove_reentry_guard"
   | "read_off_by_one"
+  | "async_unlatched_callback"
+  | "suspended_global_latch"
+  | "unlatched_hook_lookup"
+  | "unlatched_before_cleanup"
+  | "inspected_admission_return"
   | undefined;
 export type CloseRuntimeTree = Readonly<{ root: string }>;
 export type RejectionSinkDenial =
@@ -93,11 +98,42 @@ function capabilitiesMutation(source: string, mutation: CloseRuntimeMutation): s
   if (mutation === "returned_value_inspection") {
     return replaceAnchor(
       source,
-      "  try {\n    return invoke();\n  } finally {\n    capabilityCallbackDepth -= 1;\n  }",
-      "  try {\n    const returned = invoke();\n" +
+      "  try {\n    return callbackLatch.run(true, invoke);\n  } finally {\n    capabilityCallbackDepth -= 1;\n  }",
+      "  try {\n    const returned = callbackLatch.run(true, invoke);\n" +
         '    if ((typeof returned === "object" || typeof returned === "function") && returned !== null) {\n' +
         "      Reflect.ownKeys(returned as object);\n    }\n" +
         "    return returned;\n  } finally {\n    capabilityCallbackDepth -= 1;\n  }",
+      mutation
+    );
+  }
+  // #189 F1: the pre-fix latch, whose synchronous depth releases at the first
+  // await of an asynchronous mediator callback, leaving its continuation
+  // unlatched.
+  if (mutation === "async_unlatched_callback") {
+    return replaceAnchor(
+      source,
+      "    return callbackLatch.run(true, invoke);",
+      "    return invoke();",
+      mutation
+    );
+  }
+  // The rejected alternative fix: hold the process-global latch across the
+  // whole asynchronous callback, which also latches unrelated concurrent
+  // operations.
+  if (mutation === "suspended_global_latch") {
+    return replaceAnchor(
+      source,
+      "  capabilityCallbackDepth += 1;\n  try {\n    return callbackLatch.run(true, invoke);\n" +
+        "  } finally {\n    capabilityCallbackDepth -= 1;\n  }",
+      "  capabilityCallbackDepth += 1;\n  let suspended = false;\n  try {\n" +
+        "    const returned = callbackLatch.run(true, invoke);\n" +
+        "    const thenable = returned as Readonly<{ then?: unknown }> | null | undefined;\n" +
+        '    if (thenable && typeof thenable.then === "function") {\n' +
+        "      suspended = true;\n" +
+        "      const release = (): void => { capabilityCallbackDepth -= 1; };\n" +
+        "      (thenable.then as (onDone: () => void, onFail: () => void) => void)" +
+        ".call(returned, release, release);\n    }\n" +
+        "    return returned;\n  } finally {\n    if (!suspended) capabilityCallbackDepth -= 1;\n  }",
       mutation
     );
   }
@@ -149,6 +185,43 @@ function ingressMutation(source: string, mutation: CloseRuntimeMutation): string
   }
   if (mutation === "remove_reentry_guard") {
     return replaceAnchor(source, "  assertNoCallbackReentry();\n", "", mutation);
+  }
+  // #189 F2: the hook property is read in the caller's own frame, so an
+  // accessor-form `observe` runs unlatched and `authorityFault` is read twice.
+  if (mutation === "unlatched_hook_lookup") {
+    return replaceAnchor(
+      replaceAnchor(
+        source,
+        "  withCapabilityCallback(() => hooks.observe?.(operation));",
+        "  const observe = hooks.observe;\n  withCapabilityCallback(() => observe?.(operation));",
+        mutation
+      ),
+      "    const authorityFault = withCapabilityCallback(() => hooks.authorityFault);\n" +
+        '    if (authorityFault) context.rejectForbidden(authorityFault, "post_admission");',
+      '    if (hooks.authorityFault) context.rejectForbidden(hooks.authorityFault, "post_admission");',
+      mutation
+    );
+  }
+  // #189 F3: `beforeCleanup` runs unlatched while every admission descriptor is
+  // still open.
+  if (mutation === "unlatched_before_cleanup") {
+    return replaceAnchor(
+      source,
+      "    withCapabilityCallback(() => beforeCleanup?.(admittedBytes));",
+      "    beforeCleanup?.(admittedBytes);",
+      mutation
+    );
+  }
+  // #189 F4: the raw await inspects the returned value's `then` property and
+  // adopts a hostile thenable, so the operation can never settle.
+  if (mutation === "inspected_admission_return") {
+    return replaceAnchor(
+      source,
+      "    const admitted = withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));\n" +
+        "    if (isPromise(admitted)) await admitted;",
+      "    await withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));",
+      mutation
+    );
   }
   if (
     mutation === "aliased_rejection_listener" ||
