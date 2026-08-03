@@ -82,6 +82,20 @@ const CLOSE_OWNERS_BY_STATE = Object.freeze({
 } as const);
 
 /**
+ * Frozen authority-fault vocabulary, keyed by the exact `ContractAuthorityFault`
+ * literals and holding the complete rejection message for each one. The message
+ * is looked up, never interpolated, so `rejectForbidden` cannot coerce a foreign
+ * value: a caller-controlled `Symbol.toPrimitive` or `toString` is never invoked
+ * by this seam, whatever the caller hands it.
+ */
+const AUTHORITY_FAULT_MESSAGES = Object.freeze({
+  ambient_absolute_open: "CONTRACT_CAPABILITY_FORBIDDEN_ambient_absolute_open",
+  replacement_object_read: "CONTRACT_CAPABILITY_FORBIDDEN_replacement_object_read",
+  file_write: "CONTRACT_CAPABILITY_FORBIDDEN_file_write",
+  child_spawn: "CONTRACT_CAPABILITY_FORBIDDEN_child_spawn"
+} satisfies Readonly<Record<ContractAuthorityFault, string>>);
+
+/**
  * Frozen lifecycle vocabulary for every raw descriptor primitive. This is data,
  * not a fallback dispatch path: every method below enforces this exact policy.
  */
@@ -139,11 +153,17 @@ const descriptorOwners = new WeakMap<CapabilityDescriptor, ContractCapabilities>
  * descriptor operation.
  *
  * The latch has two arms because a mediator callback may be asynchronous. The
- * synchronous depth covers the callback body and any nested callback; the
- * async-context arm additionally covers every continuation of an asynchronous
- * callback, so the latch stays armed across the callback's awaits. That arm is
- * scoped to the callback's own async context, so an operation started
- * independently of any callback is never latched by it.
+ * synchronous depth covers the callback body and any nested callback. The
+ * async-context arm covers every async resource that descends from the callback
+ * - not only its own continuations - so the latch stays armed across the
+ * callback's awaits and equally across work the callback merely schedules
+ * (`setTimeout`, `queueMicrotask`, a queued task) even after the operation that
+ * ran the callback has settled and closed its descriptors. Such scheduled work
+ * inherits the latch and is therefore rejected as reentry: the arm is
+ * deliberately fail-closed and is never disarmed. That arm is scoped to the
+ * callback's own async context, so an operation started independently of any
+ * callback - including one concurrent with a suspended callback - is never
+ * latched by it.
  */
 export function withCapabilityCallback<Value>(invoke: () => Value): Value {
   capabilityCallbackDepth += 1;
@@ -177,6 +197,15 @@ function childCString(value: string): Buffer {
 
 function isCapabilityPhase(value: unknown): value is CapabilityPhase {
   return value === "admission" || value === "post_admission";
+}
+
+/**
+ * Membership test over the frozen fault vocabulary. It reads no property of the
+ * candidate and coerces nothing: a non-string is rejected by `typeof` before
+ * `Object.hasOwn` could turn it into a property key.
+ */
+function isContractAuthorityFault(value: unknown): value is ContractAuthorityFault {
+  return typeof value === "string" && Object.hasOwn(AUTHORITY_FAULT_MESSAGES, value);
 }
 
 function isValidChildName(value: unknown): value is string {
@@ -351,11 +380,17 @@ export class ContractCapabilities {
     closeSync(record.fd);
   }
 
+  /**
+   * The fault is validated against the frozen vocabulary before it reaches the
+   * observation hook or the thrown message, so a foreign value handed to this
+   * public method is rejected rather than coerced outside the callback latch.
+   */
   rejectForbidden(fault: ContractAuthorityFault, phase: CapabilityPhase): never {
     this.#assertNoCallbackReentry();
     if (phase !== "post_admission") throw new Error("CONTRACT_CAPABILITY_FAULT_PHASE_INVALID");
+    if (!isContractAuthorityFault(fault)) throw new Error("CONTRACT_CAPABILITY_FAULT_INVALID");
     withCapabilityCallback(() => this.hooks.onAuthorityViolation?.(fault));
-    throw new Error(`CONTRACT_CAPABILITY_FORBIDDEN_${fault}`);
+    throw new Error(AUTHORITY_FAULT_MESSAGES[fault]);
   }
 
   /**

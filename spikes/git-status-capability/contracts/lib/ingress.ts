@@ -68,12 +68,13 @@ export type DescriptorIngressHooks = Readonly<{
 const NO_RAW_CLOSE_ATTEMPTS = 2;
 
 /**
- * Every ingress-owned mediator callback (`observe`, `afterAdmission`,
- * `beforeCleanup`, and the `authorityFault` lookup) shares the capability
- * callback latch for its whole execution, including the continuations of an
- * asynchronous `afterAdmission`, so reentry from any mediator hook is rejected
- * on every descriptor seam and at the public ingress entry alike. An operation
- * started outside every callback carries no latch, so it is unaffected while a
+ * Every ingress-owned mediator seam (the `observe`, `afterAdmission`, and
+ * `beforeCleanup` callbacks, and the `authorityFault` lookup together with its
+ * validation) shares the capability callback latch for its whole execution,
+ * including every async resource descending from an asynchronous
+ * `afterAdmission`, so reentry from any mediator seam is rejected on every
+ * descriptor seam and at the public ingress entry alike. An operation started
+ * outside every callback carries no latch, so it is unaffected while a
  * concurrent operation is suspended inside its own hook.
  */
 function assertNoCallbackReentry(): void {
@@ -87,6 +88,37 @@ function assertNoCallbackReentry(): void {
  */
 function observeIngress(hooks: DescriptorIngressHooks, operation: DescriptorIngressOperation): void {
   withCapabilityCallback(() => hooks.observe?.(operation));
+}
+
+/**
+ * The frozen authority-fault vocabulary, restated as data so the ingress can
+ * admit a mediator-supplied fault without leaving the latch. Its literal keys
+ * are checked against `ContractAuthorityFault` by construction, so the two
+ * vocabularies cannot drift apart.
+ */
+const CONTRACT_AUTHORITY_FAULTS = Object.freeze({
+  ambient_absolute_open: true,
+  replacement_object_read: true,
+  file_write: true,
+  child_spawn: true
+} satisfies Readonly<Record<ContractAuthorityFault, true>>);
+
+/**
+ * The single ingress authority-fault seam: the mediator value is looked up and
+ * validated inside one latch, and only one of the four frozen literals leaves
+ * it. A foreign value is never coerced - not by this seam and not by the
+ * rejection it would otherwise reach - because a non-member is a contract
+ * failure here, and a valid literal is a primitive with no `Symbol.toPrimitive`
+ * or `toString` of its own. Absence is the only accepted non-fault: any other
+ * value, falsy or not, is outside the vocabulary.
+ */
+function admittedAuthorityFault(hooks: DescriptorIngressHooks): ContractAuthorityFault | undefined {
+  const requested: unknown = hooks.authorityFault;
+  if (requested === undefined) return undefined;
+  if (typeof requested !== "string" || !Object.hasOwn(CONTRACT_AUTHORITY_FAULTS, requested)) {
+    throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  }
+  return requested as ContractAuthorityFault;
 }
 
 class IngressOwnerNode {
@@ -715,7 +747,7 @@ export async function readBoundedFile(
     const admitted = withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));
     if (isPromise(admitted)) await admitted;
     assertIngressWorkAvailable();
-    const authorityFault = withCapabilityCallback(() => hooks.authorityFault);
+    const authorityFault = withCapabilityCallback(() => admittedAuthorityFault(hooks));
     if (authorityFault) context.rejectForbidden(authorityFault, "post_admission");
     assertIngressWorkAvailable();
     verificationCleanupFailed = verifyRetainedChain(admission, context, hooks, true);

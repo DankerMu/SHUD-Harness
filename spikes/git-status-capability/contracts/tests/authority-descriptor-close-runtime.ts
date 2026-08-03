@@ -19,6 +19,7 @@ export type CloseRuntimeMutation =
   | "async_unlatched_callback"
   | "suspended_global_latch"
   | "unlatched_hook_lookup"
+  | "unvalidated_authority_fault"
   | "unlatched_before_cleanup"
   | "inspected_admission_return"
   | undefined;
@@ -117,6 +118,20 @@ function capabilitiesMutation(source: string, mutation: CloseRuntimeMutation): s
       mutation
     );
   }
+  // #189 F5: the thrown rejection message is interpolated from the fault the
+  // caller supplied, so a foreign mediator value is coerced by the template
+  // literal - outside the latch, with every descriptor still open.
+  if (mutation === "unvalidated_authority_fault") {
+    return replaceAnchor(
+      source,
+      '    if (!isContractAuthorityFault(fault)) throw new Error("CONTRACT_CAPABILITY_FAULT_INVALID");\n' +
+        "    withCapabilityCallback(() => this.hooks.onAuthorityViolation?.(fault));\n" +
+        "    throw new Error(AUTHORITY_FAULT_MESSAGES[fault]);",
+      "    withCapabilityCallback(() => this.hooks.onAuthorityViolation?.(fault));\n" +
+        "    throw new Error(`CONTRACT_CAPABILITY_FORBIDDEN_${fault}`);",
+      mutation
+    );
+  }
   // The rejected alternative fix: hold the process-global latch across the
   // whole asynchronous callback, which also latches unrelated concurrent
   // operations.
@@ -196,9 +211,20 @@ function ingressMutation(source: string, mutation: CloseRuntimeMutation): string
         "  const observe = hooks.observe;\n  withCapabilityCallback(() => observe?.(operation));",
         mutation
       ),
-      "    const authorityFault = withCapabilityCallback(() => hooks.authorityFault);\n" +
+      "    const authorityFault = withCapabilityCallback(() => admittedAuthorityFault(hooks));\n" +
         '    if (authorityFault) context.rejectForbidden(authorityFault, "post_admission");',
-      '    if (hooks.authorityFault) context.rejectForbidden(hooks.authorityFault, "post_admission");',
+      "    if (admittedAuthorityFault(hooks)) {\n" +
+        '      context.rejectForbidden(admittedAuthorityFault(hooks)!, "post_admission");\n    }',
+      mutation
+    );
+  }
+  // #189 F5: the mediator value leaves the latch unvalidated, so the coercion
+  // the rejection performs on it runs with the latch disarmed.
+  if (mutation === "unvalidated_authority_fault") {
+    return replaceAnchor(
+      source,
+      "    const authorityFault = withCapabilityCallback(() => admittedAuthorityFault(hooks));",
+      "    const authorityFault = withCapabilityCallback(() => hooks.authorityFault);",
       mutation
     );
   }

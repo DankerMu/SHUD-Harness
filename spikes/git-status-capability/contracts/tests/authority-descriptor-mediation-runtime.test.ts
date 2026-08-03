@@ -109,6 +109,7 @@ type ReentryOriginReceipt = Readonly<{
   outcome: EntryOutcome;
   denialCalls: number;
   authorityFaultReads: number | null;
+  authorityFaultCoercions: number | null;
   faultsReportedToHook: readonly string[];
   followOnIngress: EntryOutcome;
   followOnChecker: EntryOutcome;
@@ -137,6 +138,26 @@ type ConcurrencyReceipt = Readonly<{
   suspendedBeforeSecond: boolean;
   fdBefore: number;
   fdAfter: number;
+}>;
+type AuthorityFaultRow = Readonly<{
+  label: string;
+  outcome: EntryOutcome;
+  violations: readonly string[];
+  coercions: number;
+  rawFinal: Counters;
+  fdBefore: number;
+  fdAfter: number;
+}>;
+type DirectFaultRow = Readonly<{
+  label: string;
+  outcome: string;
+  violations: readonly string[];
+  coercions: number;
+}>;
+type AuthorityFaultReceipt = Readonly<{
+  entry: Entry;
+  rows: readonly AuthorityFaultRow[];
+  direct: readonly DirectFaultRow[];
 }>;
 type ReadReceipt = Readonly<{
   entry: Entry;
@@ -202,8 +223,22 @@ const REENTRY_ORIGINS: readonly string[] = [
   "after_admission_async",
   "accessor_observe",
   "accessor_authority_fault",
+  "authority_fault_coercion",
   "before_cleanup",
   "denial"
+];
+/** The frozen `ContractAuthorityFault` vocabulary, restated independently. */
+const AUTHORITY_FAULT_LITERALS: readonly string[] = [
+  "ambient_absolute_open",
+  "replacement_object_read",
+  "file_write",
+  "child_spawn"
+];
+const INVALID_AUTHORITY_FAULT_LABELS: readonly string[] = [
+  "bogus_string",
+  "empty_string",
+  "plain_object",
+  "coercing_object"
 ];
 /** `beforeCleanup` is an ingress-entry parameter the checker never exposes. */
 const CHECKER_REENTRY_ORIGINS: readonly string[] = REENTRY_ORIGINS.filter(
@@ -360,6 +395,18 @@ function assertHostileRow(row: HostileRow, entry: Entry): void {
   );
 }
 
+function authorityFaultRow(receiptValue: AuthorityFaultReceipt, label: string): AuthorityFaultRow {
+  const row = receiptValue.rows.find((candidate) => candidate.label === label);
+  if (!row) throw new Error(`authority fault row is absent: ${label}`);
+  return row;
+}
+
+function directFaultRow(receiptValue: AuthorityFaultReceipt, label: string): DirectFaultRow {
+  const row = receiptValue.direct.find((candidate) => candidate.label === label);
+  if (!row) throw new Error(`direct authority fault row is absent: ${label}`);
+  return row;
+}
+
 function originReceipt(receiptValue: ReentryReceipt, origin: string): ReentryOriginReceipt {
   const found = receiptValue.origins.find((candidate) => candidate.origin === origin);
   if (!found) throw new Error(`reentry origin is absent: ${origin}`);
@@ -378,7 +425,40 @@ function reentryRow(origin: ReentryOriginReceipt, method: string): ReentryRow {
   return row;
 }
 
+/**
+ * The value-shaped mediator seam. `authorityFault` is a value, not a callback,
+ * so its only route back into the boundary is an implicit coercion of itself.
+ * The value is validated against the frozen fault vocabulary inside the latch
+ * that reads it, so no conversion of it ever runs: the hostile
+ * `Symbol.toPrimitive` is never called, and the reentry battery it would have
+ * run therefore does not exist. Whatever the battery did observe would still
+ * have to be a rejected reentry that did no descriptor work.
+ */
+function assertAuthorityFaultCoercionOrigin(origin: ReentryOriginReceipt, entry: Entry): void {
+  expect([origin.origin, origin.authorityFaultCoercions]).toEqual([origin.origin, 0]);
+  expect([origin.origin, origin.fired]).toEqual([origin.origin, false]);
+  for (const row of origin.battery) {
+    expect([row.method, row.outcome]).toEqual([
+      row.method,
+      row.method === "ingress_read_bounded_file" ? "CONTRACT_SCHEMA_INVALID" : DENIED
+    ]);
+    expect([row.method, row.rawDelta]).toEqual([row.method, 0]);
+    expect([row.method, row.denialCalls]).toEqual([row.method, 0]);
+  }
+  // A value outside the vocabulary is a contract failure, not an authority
+  // violation: the violation hook is never handed a value it would have to name.
+  expect(origin.outcome).toEqual(expectedFailure(entry));
+  expect(origin.faultsReportedToHook).toEqual([]);
+  expect(origin.denialCalls).toBe(0);
+  expect(origin.followOnIngress).toEqual(expectedSuccess("ingress"));
+  expect(origin.followOnChecker).toEqual(expectedSuccess("checker"));
+}
+
 function assertReentryOrigin(origin: ReentryOriginReceipt, entry: Entry): void {
+  if (origin.origin === "authority_fault_coercion") {
+    assertAuthorityFaultCoercionOrigin(origin, entry);
+    return;
+  }
   expect(origin.fired).toBe(true);
   expect(origin.battery.map((row) => row.method).sort()).toEqual([...REENTRY_METHODS].sort());
   for (const method of REENTRY_METHODS) {
@@ -781,6 +861,29 @@ describe("descriptor close runtime mediation", () => {
     expect(accessorFault.faultsReportedToHook.at(-1)).toBe("child_spawn");
     expect(() => assertReentryOrigin(accessorFault, "ingress")).toThrow();
 
+    // F5: the mediator fault value leaves the latch unvalidated, so the coercion
+    // the rejection message performs on it runs with the latch disarmed and
+    // every descriptor of the sealed operation still open.
+    const unvalidatedFault = await mutatedReceipt<ReentryReceipt>(
+      "unvalidated_authority_fault",
+      ["reentry", "ingress", "authority_fault_coercion"]
+    );
+    const coercedFault = originReceipt(unvalidatedFault, "authority_fault_coercion");
+    expect(coercedFault.authorityFaultCoercions).toBe(1);
+    expect(coercedFault.fired).toBe(true);
+    expect(() => assertReentryOrigin(coercedFault, "ingress")).toThrow();
+    expect(reentryRow(coercedFault, "readRetained").outcome).toBe("NO_ERROR");
+    expect(reentryRow(coercedFault, "readRetained").rawDelta).toBeGreaterThan(0);
+    expect(reentryRow(coercedFault, "stat").rawDelta).toBeGreaterThan(0);
+    expect(reentryRow(coercedFault, "ingress_read_bounded_file").outcome).toBe("NO_ERROR");
+    const untouchedAccessor = await mutatedReceipt<ReentryReceipt>(
+      "unvalidated_authority_fault",
+      ["reentry", "ingress", "accessor_authority_fault"]
+    );
+    expect(() =>
+      assertReentryOrigin(originReceipt(untouchedAccessor, "accessor_authority_fault"), "ingress")
+    ).not.toThrow();
+
     // F3: `beforeCleanup` runs unlatched while every admission descriptor is open.
     const unlatchedCleanup = await mutatedReceipt<ReentryReceipt>(
       "unlatched_before_cleanup",
@@ -796,6 +899,87 @@ describe("descriptor close runtime mediation", () => {
     );
     expect(() => assertReentryOrigin(originReceipt(untouchedAdmission, "after_admission"), "ingress"))
       .not.toThrow();
+  });
+
+  test("only the frozen fault vocabulary is admitted, and no fault value is ever coerced", async () => {
+    for (const entry of ["ingress", "checker"] as const) {
+      const faults = await receipt<AuthorityFaultReceipt>(["authority_fault", entry]);
+
+      // Every valid literal keeps its exact legacy receipt: the operation fails
+      // with the canonical code and the violation is reported once, verbatim.
+      for (const literal of AUTHORITY_FAULT_LITERALS) {
+        const row = authorityFaultRow(faults, `literal_${literal}`);
+        expect([literal, row.outcome]).toEqual([literal, expectedFailure(entry)]);
+        expect([literal, row.violations]).toEqual([literal, [literal]]);
+        expect([literal, row.coercions]).toEqual([literal, 0]);
+        expect([literal, row.rawFinal]).toEqual([literal, SITE_RAW.after_admission_1.thrownFinal]);
+        expect([literal, row.fdAfter]).toEqual([literal, row.fdBefore]);
+      }
+
+      // An absent fault is the only accepted non-fault.
+      const absent = authorityFaultRow(faults, "absent");
+      expect(absent.outcome).toEqual(expectedSuccess(entry));
+      expect(absent.violations).toEqual([]);
+      expect(absent.rawFinal).toEqual(BASELINE_RAW);
+
+      // Every value outside the vocabulary is rejected with the same stable
+      // receipt, is never reported as a violation, and is never converted.
+      for (const label of INVALID_AUTHORITY_FAULT_LABELS) {
+        const row = authorityFaultRow(faults, label);
+        expect([label, row.outcome]).toEqual([label, expectedFailure(entry)]);
+        expect([label, row.violations]).toEqual([label, []]);
+        expect([label, row.coercions]).toEqual([label, 0]);
+        expect([label, row.rawFinal]).toEqual([label, SITE_RAW.after_admission_1.thrownFinal]);
+        expect([label, row.fdAfter]).toEqual([label, row.fdBefore]);
+      }
+
+      // The public capability method enforces the same vocabulary on its own.
+      for (const literal of AUTHORITY_FAULT_LITERALS) {
+        expect(directFaultRow(faults, `literal_${literal}`)).toEqual({
+          label: `literal_${literal}`,
+          outcome: `CONTRACT_CAPABILITY_FORBIDDEN_${literal}`,
+          violations: [literal],
+          coercions: 0
+        });
+      }
+      for (const label of ["bogus_string", "coercing_object"]) {
+        expect(directFaultRow(faults, label)).toEqual({
+          label,
+          outcome: "CONTRACT_CAPABILITY_FAULT_INVALID",
+          violations: [],
+          coercions: 0
+        });
+      }
+      expect(directFaultRow(faults, "literal_admission_phase")).toEqual({
+        label: "literal_admission_phase",
+        outcome: "CONTRACT_CAPABILITY_FAULT_PHASE_INVALID",
+        violations: [],
+        coercions: 0
+      });
+    }
+
+    // Reverting the guard makes the boundary coerce the foreign value and
+    // silently admit a fault that is not in the vocabulary.
+    const unvalidated = await mutatedReceipt<AuthorityFaultReceipt>(
+      "unvalidated_authority_fault",
+      ["authority_fault", "ingress"]
+    );
+    const coerced = authorityFaultRow(unvalidated, "coercing_object");
+    expect(coerced.coercions).toBe(1);
+    expect(coerced.violations).toEqual(["NON_STRING_FAULT"]);
+    const directCoerced = directFaultRow(unvalidated, "coercing_object");
+    expect(directCoerced.coercions).toBe(1);
+    expect(directCoerced.outcome).toBe("CONTRACT_CAPABILITY_FORBIDDEN_file_write");
+    expect(directFaultRow(unvalidated, "bogus_string").outcome).toBe("CONTRACT_CAPABILITY_FORBIDDEN_bogus");
+    // The frozen message table and the interpolation it replaced agree on every
+    // valid literal, so the fix changes no receipt a real fault can produce.
+    const fixed = await receipt<AuthorityFaultReceipt>(["authority_fault", "ingress"]);
+    for (const literal of AUTHORITY_FAULT_LITERALS) {
+      expect(directFaultRow(unvalidated, `literal_${literal}`))
+        .toEqual(directFaultRow(fixed, `literal_${literal}`));
+      expect(authorityFaultRow(unvalidated, `literal_${literal}`).violations)
+        .toEqual(authorityFaultRow(fixed, `literal_${literal}`).violations);
+    }
   });
 
   test("mediated reads return the exact byte count and bytes of the retained file", async () => {

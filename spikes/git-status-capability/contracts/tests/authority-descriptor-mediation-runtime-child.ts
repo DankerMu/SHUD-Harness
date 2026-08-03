@@ -12,7 +12,8 @@ type IngressOperation = Readonly<{
 }>;
 type CloseHooks = {
   afterAdmission?: (path: string) => void | Promise<void>;
-  authorityFault?: "ambient_absolute_open" | "replacement_object_read" | "file_write" | "child_spawn";
+  /** Widened past the production literal union so hostile values can be injected. */
+  authorityFault?: unknown;
   closeFault?: (attempt: CloseAttempt) => boolean;
   observe?: (operation: IngressOperation) => void;
   onAuthorityViolation?: (fault: string) => void;
@@ -21,6 +22,7 @@ type CloseHooks = {
 };
 type Entry = "ingress" | "checker";
 type Scenario =
+  | "authority_fault"
   | "identity"
   | "retry"
   | "terminal_return"
@@ -48,7 +50,7 @@ type CapabilityInstance = {
     position: number,
     phase: string
   ) => number;
-  rejectForbidden: (fault: string, phase: string) => never;
+  rejectForbidden: (fault: unknown, phase: string) => never;
   sealAdmission: () => void;
   stat: (descriptor: object) => unknown;
 };
@@ -607,6 +609,7 @@ type ReentryOrigin =
   | "after_admission_async"
   | "accessor_observe"
   | "accessor_authority_fault"
+  | "authority_fault_coercion"
   | "before_cleanup"
   | "denial";
 type ReentryRow = Readonly<{ method: string; outcome: string; rawDelta: number; denialCalls: number }>;
@@ -621,6 +624,7 @@ const HOOK_REENTRY_ORIGINS: readonly ReentryOrigin[] = [
   "after_admission_async",
   "accessor_observe",
   "accessor_authority_fault",
+  "authority_fault_coercion",
   "before_cleanup"
 ];
 
@@ -675,6 +679,25 @@ Object.defineProperty(AccessorIngressHooks.prototype, "authorityFault", {
     return this.authorityFaultReads === 1 ? "file_write" : "child_spawn";
   }
 });
+
+/**
+ * Value-shaped hostile mediator seam. `authorityFault` is a value, not a
+ * callback, so the only control it can seize is an implicit coercion of itself.
+ * Every string conversion route runs the injected attempt and then returns a
+ * valid fault literal, so a boundary that coerces the value records the attempt
+ * twice: in the coercion count and in the reentry battery it was able to run.
+ */
+function coercingAuthorityFault(onCoercion: () => void): object {
+  const coerce = (): string => {
+    onCoercion();
+    return "file_write";
+  };
+  return Object.freeze({
+    [Symbol.toPrimitive]: coerce,
+    toString: coerce,
+    valueOf: coerce
+  });
+}
 
 function reentryBattery(
   modules: Modules,
@@ -771,6 +794,7 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
     let fired = false;
     let battery: readonly ReentryRow[] = [];
     let denialCalls = 0;
+    let authorityFaultCoercions = 0;
     const pending: Array<Promise<ReentryRow>> = [];
     prototype.openRoot = function(this: CapabilityInstance, root, phase): object {
       const descriptor = Reflect.apply(originalOpenRoot, this, [root, phase]) as object;
@@ -798,11 +822,16 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
     const accessor = origin === "accessor_observe" || origin === "accessor_authority_fault"
       ? new AccessorIngressHooks(origin, run, () => { denialCalls += 1; })
       : undefined;
+    const coercingFault = coercingAuthorityFault(() => {
+      authorityFaultCoercions += 1;
+      run("authority_fault_coercion");
+    });
     const faults: string[] = [];
     const hooks: CloseHooks = accessor
       ? accessor as unknown as CloseHooks
       : Object.freeze({
         ...(origin === "authority_violation" ? { authorityFault: "file_write" as const } : {}),
+        ...(origin === "authority_fault_coercion" ? { authorityFault: coercingFault } : {}),
         ...(origin === "after_admission" ? { afterAdmission: (): void => { run("after_admission"); } } : {}),
         ...(origin === "after_admission_async"
           ? {
@@ -821,7 +850,8 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
         // a captured capability, a retained file descriptor, and a sealed admission.
         observe: (operation) => { if (operation.operation === "read_retained") run("observe"); },
         onAuthorityViolation: (fault) => {
-          faults.push(fault);
+          // Reported without coercing it: a non-literal fault is named, not read.
+          faults.push(typeof fault === "string" ? fault : "NON_STRING_FAULT");
           run("authority_violation");
         },
         onCloseAttempt: (attempt) => {
@@ -846,6 +876,7 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
       outcome,
       denialCalls,
       authorityFaultReads: accessor?.authorityFaultReads ?? null,
+      authorityFaultCoercions,
       faultsReportedToHook: Object.freeze([...(accessor ? accessor.faults : faults)]),
       followOnIngress,
       followOnChecker,
@@ -887,6 +918,7 @@ async function runReentry(modules: Modules, entry: Entry): Promise<unknown> {
     outcome: Object.freeze({ code: directOutcome, exit: null, stdout: "", stderr: "" }),
     denialCalls: denials.length,
     authorityFaultReads: null,
+    authorityFaultCoercions: null,
     faultsReportedToHook: Object.freeze([]),
     followOnIngress: await runEntry("ingress", modules, Object.freeze({})),
     followOnChecker: await runEntry("checker", modules, Object.freeze({})),
@@ -1063,12 +1095,107 @@ async function runRead(modules: Modules, entry: Entry): Promise<unknown> {
   });
 }
 
+const AUTHORITY_FAULT_LITERALS = [
+  "ambient_absolute_open",
+  "replacement_object_read",
+  "file_write",
+  "child_spawn"
+] as const;
+type AuthorityFaultRow = Readonly<{
+  label: string;
+  outcome: EntryOutcome;
+  violations: readonly string[];
+  coercions: number;
+  rawFinal: Counters;
+  fdBefore: number;
+  fdAfter: number;
+}>;
+type DirectFaultRow = Readonly<{
+  label: string;
+  outcome: string;
+  violations: readonly string[];
+  coercions: number;
+}>;
+
+async function authorityFaultRow(
+  modules: Modules,
+  entry: Entry,
+  label: string,
+  makeValue: (onCoercion: () => void) => unknown
+): Promise<AuthorityFaultRow> {
+  let coercions = 0;
+  const violations: string[] = [];
+  const fdBefore = descriptorCount();
+  const rawBefore = snapshotRaw();
+  const outcome = await runEntry(entry, modules, Object.freeze({
+    authorityFault: makeValue(() => { coercions += 1; }),
+    onAuthorityViolation: (fault: string): void => {
+      violations.push(typeof fault === "string" ? fault : "NON_STRING_FAULT");
+    }
+  }));
+  return Object.freeze({
+    label,
+    outcome,
+    violations: Object.freeze([...violations]),
+    coercions,
+    rawFinal: rawDelta(rawBefore, snapshotRaw()),
+    fdBefore,
+    fdAfter: descriptorCount()
+  });
+}
+
+/** The public capability method reached directly, without the ingress seam. */
+function directFaultRow(
+  modules: Modules,
+  label: string,
+  makeValue: (onCoercion: () => void) => unknown,
+  phase: string
+): DirectFaultRow {
+  let coercions = 0;
+  const violations: string[] = [];
+  const capabilities = new modules.capabilities.ContractCapabilities(Object.freeze({
+    onAuthorityViolation: (fault: string): void => {
+      violations.push(typeof fault === "string" ? fault : "NON_STRING_FAULT");
+    }
+  }));
+  let outcome = "NO_ERROR";
+  try {
+    capabilities.rejectForbidden(makeValue(() => { coercions += 1; }), phase);
+  } catch (error) {
+    outcome = error instanceof Error ? error.message : "NON_ERROR_THROWN";
+  }
+  return Object.freeze({ label, outcome, violations: Object.freeze([...violations]), coercions });
+}
+
+async function runAuthorityFault(modules: Modules, entry: Entry): Promise<unknown> {
+  const rows: AuthorityFaultRow[] = [];
+  for (const literal of AUTHORITY_FAULT_LITERALS) {
+    rows.push(await authorityFaultRow(modules, entry, `literal_${literal}`, () => literal));
+  }
+  rows.push(await authorityFaultRow(modules, entry, "absent", () => undefined));
+  rows.push(await authorityFaultRow(modules, entry, "bogus_string", () => "bogus"));
+  rows.push(await authorityFaultRow(modules, entry, "empty_string", () => ""));
+  rows.push(await authorityFaultRow(modules, entry, "plain_object", () => Object.freeze({})));
+  rows.push(await authorityFaultRow(modules, entry, "coercing_object", coercingAuthorityFault));
+
+  const direct: DirectFaultRow[] = [];
+  for (const literal of AUTHORITY_FAULT_LITERALS) {
+    direct.push(directFaultRow(modules, `literal_${literal}`, () => literal, "post_admission"));
+  }
+  direct.push(directFaultRow(modules, "bogus_string", () => "bogus", "post_admission"));
+  direct.push(directFaultRow(modules, "coercing_object", coercingAuthorityFault, "post_admission"));
+  direct.push(directFaultRow(modules, "literal_admission_phase", () => "file_write", "admission"));
+  return Object.freeze({ entry, rows: Object.freeze(rows), direct: Object.freeze(direct) });
+}
+
 installRawProbe();
 installPrimitiveProbe();
 installSinkProbe();
 const modules = await loadModules();
 installOpenAtProbe(modules);
-const receipt = scenario === "identity"
+const receipt = scenario === "authority_fault"
+  ? await runAuthorityFault(modules, entryArgument as Entry)
+  : scenario === "identity"
   ? await runIdentity(modules, entryArgument)
   : scenario === "retry"
   ? await runRetry(modules, entryArgument as Entry)
