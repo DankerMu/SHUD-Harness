@@ -178,7 +178,39 @@ mediated read returns, and retained-owner closure on #193's runtime contract.
   - Handoff: #186 consumes the closed causal proof; #190 owns the
     installer/type boundary; no #189 change may weaken #193 close-attempt
     identity/settlement, #175 descriptor lifecycle, or the five-primitive
-    mediation boundary.
+    mediation boundary. The durable evidence must restate the three accepted
+    semantic deviations recorded in the design overlay verbatim.
+
+- [x] #189.D Make admission hooks synchronous (round-3 gate, PI decision).
+  - Why: the `reentry-latch-scope` class survived three value-shaped fixes because
+    it is context-shaped — a mediator picks the adoption job's async context at
+    `.then()` registration time, outside every latch, and no inspection of the
+    returned value can observe it. The overlay's absolute mediation invariant and
+    its permission of asynchronous admission hooks were jointly unsatisfiable.
+  - In: `DescriptorAdmissionHook` narrows to `(absolutePath: string) => void`;
+    the promise-identity gate and the mediated-await choke-point are removed
+    entirely; the admission hook's return value is discarded without any property
+    read; the two-arm latch is retained.
+  - Out: any widening of authority; #193 close-attempt identity/settlement, #175
+    descriptor lifecycle, the five-primitive mediation boundary, the frozen
+    authority-fault vocabulary, and every non-admission hook seam stay exactly as
+    merged.
+  - Superseded as structurally unreachable (removed, not weakened): the
+    `after_admission_async` reentry origin, the async arm of the F1 continuation
+    proof, the promise-identity gate with its two adoption rows and the
+    `adopted_foreign_promise_identity` / `inspected_admission_return` mutations,
+    the never-settling-thenable row, and the suspended-latch concurrency scenario
+    with its `suspended_global_latch` mutation. Each removal must cite the
+    construction that makes its scenario unreachable.
+  - Verification: the three new regression rows in the design overlay (value
+    discarded with zero reads/traps; source-level no-mediator-await oracle;
+    descendant scheduling still reentry-rejected) plus Darwin and read-only Linux
+    Bun 1.2.19 focused suites, descriptor typecheck, strict OpenSpec, and
+    diff/scope/untracked/submodule hygiene; direct and checker public receipts
+    stay byte-identical.
+  - Note: the root `tsconfig.json` include covers only `packages/**` and
+    `scripts/**`; `spikes/**` is excluded, so typecheck coverage for this change
+    comes solely from `tsconfig.descriptor-authority.json`.
 
 
 - [ ] 1.2 Implement the deterministic evidence validator and four-layer golden state machine.

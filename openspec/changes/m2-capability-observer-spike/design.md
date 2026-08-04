@@ -1153,10 +1153,20 @@ accepted.
 
 Governing invariant: no hostile mediator/hook value and no reentrant or
 captured callback authority can observe, mutate, or bypass descriptor-mediation
-state — hook lookup/call failures normalize identity-only without prototype
+state — **every mediator hook is synchronous, so no mediator-supplied value is
+ever awaited and no mediator-chosen async context ever runs while descriptors
+are live** — hook lookup/call failures normalize identity-only without prototype
 inspection, all five primitive raw outcomes remain authoritative, reentry and
 poison boundaries hold at every public entry, and pre-close owner identity
 survives poison and context deletion.
+
+The emphasised clause is load-bearing and was added by the round-3 gate
+decision below. Without it the remainder of this invariant is **not
+satisfiable**: an admission hook that may return a promise lets the mediator
+choose, at `.then()` registration time and outside every latch, the async
+context in which the adoption job of whatever that promise resolves to will
+run. That context is not a property of the returned value, so no inspection of
+the value can observe or constrain it.
 
 Source of truth: instance-private descriptor records and ingress-private
 owner/attempt lists; `ContractError` recognition by construction identity
@@ -1213,6 +1223,72 @@ Regression rows:
 - unchanged sibling consumers (public direct commands, checker rows, #175
   vocabulary/preload/structural rows) -> byte-identical receipts on
   Darwin/Linux.
+
+#### Round-3 gate amendment: synchronous admission hooks (PI decision)
+
+PR #196 reached the three-round hard gate with the `reentry-latch-scope` class
+still open after three value-shaped fixes (rounds 1, 2, and the round-2 root-cause
+choke-point). The round-3 evidence established that the class is **context-shaped,
+not value-shaped**: a mediator that registers `outer.then(() => hostile)` outside
+every latch and returns the resulting promise hands back a value indistinguishable
+from a well-behaved one — plain native, zero own keys, `Promise.prototype`
+prototype — while the adoption job of the thenable it resolves to inherits the
+registration-site async context. Measured on the clean fixed head: the reentry
+battery ran `stat`/`readRetained`/`close`/`sealAdmission` all `NO_ERROR` with the
+latch reported inactive, and the operation never settled.
+
+This overlay previously required an absolute mediation invariant *and* permitted
+asynchronous admission hooks. Those two clauses are jointly unsatisfiable; the
+fixture, not the implementation, was defective. The PI scope decision at the
+round-3 gate is to **remove asynchronous admission hooks** rather than qualify the
+invariant.
+
+| Amendment | Effect |
+|---|---|
+| `DescriptorAdmissionHook` returns `void`, not `void \| Promise<void>` | No mediator value is ever awaited; `lib/` contains no await of a mediator-supplied value at all. |
+| Admission hook return values are discarded without inspection | A returned thenable/promise/primitive is neither awaited, assimilated, nor property-probed; rejection is by value-free contract, so hostile shapes need no identity gate. |
+| Suspension window removed | With every hook synchronous, `readBoundedFile` has no interleaving point, so a captured authority has no unlatched moment to act in and no descriptor can be stranded by a hook that never settles. |
+| Superseded acceptance surfaces | The `after_admission_async` reentry origin, the async arm of the F1 continuation proof, the promise-identity gate and its adoption rows, and the suspended-latch concurrency scenario all describe behavior that is now structurally unreachable. They are removed as unreachable, not weakened to pass; the two-arm latch itself is retained, because a synchronous hook can still schedule descendant work. |
+
+Superseded verified-gap row: the round-2/round-3 entry "mediator-returned promise
+adopted with foreign identity or foreign context" is closed by construction rather
+than by proof — there is no await to attack.
+
+Additional regression rows:
+
+- admission hook returning any value (`undefined`, a primitive, an all-trap
+  Proxy, a plain native promise, a promise chained outside the latch) -> value
+  discarded with zero property reads and zero traps; receipt identical to the
+  `undefined` case; a mutation that reinstates awaiting the return value is red.
+- source-level oracle: `lib/` contains no `await` of a mediator-supplied value;
+  a mutation reintroducing one is red.
+- admission hook scheduling descendant work (`setTimeout`/`queueMicrotask`)
+  -> descendant is reentry-rejected by the retained ALS arm, proving the latch's
+  async arm still earns its place under synchronous-only hooks.
+
+Accepted semantic deviations (must be restated verbatim by the #186 durable
+evidence; each is a tightening, none widens authority):
+
+1. `afterAdmission` accepts synchronous hooks only: the exported type returns
+   `void` where it previously admitted `Promise<void>`, so an asynchronous hook
+   is now a compile-time error. At runtime a value returned by an untypechecked
+   caller is discarded unexamined — not awaited, not assimilated, not probed, and
+   not rejected — so its receipt is identical to a hook that returned nothing.
+   Enforcement is by construction (there is no await), never by inspection.
+2. `authorityFault` is fail-closed on falsy values: `undefined` is the only
+   non-fault. `""`, `0`, `false`, and `null` all reject as
+   `CONTRACT_SCHEMA_INVALID`.
+3. The capability latch's `AsyncLocalStorage` arm taints descendants and is never
+   disarmed: work a hook merely schedules is reentry-rejected even after the
+   operation that ran the hook has settled.
+
+Out-of-model premises (declared, not proven; spike-wide, pre-existing): global
+intrinsic integrity — the boundary reads `Object.getPrototypeOf`,
+`Reflect.ownKeys`, `Object.hasOwn`, and `Promise` from globals at call time, and
+a mediator that replaces them defeats this boundary as it already defeats the
+frozen authority-fault vocabulary. Same-process mediator conduct is likewise not
+policed: a hook can author an unhandled rejection in its own code regardless of
+this contract.
 
 ## Invariant Matrix
 
