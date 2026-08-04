@@ -1,5 +1,4 @@
 import { parse, resolve, sep } from "node:path";
-import { isPromise } from "node:util/types";
 import { hasOnlyUnicodeScalars } from "./canonical-json";
 import {
   capabilityCallbackActive,
@@ -47,21 +46,20 @@ function isContractError(value: unknown): value is ContractError {
 
 export type IngressProfile = Readonly<{ bytes: number; depth: number; nodes: number; items: number }>;
 /**
- * An admission hook may be asynchronous. Only a value that is a promise both by
- * construction identity - an internal-slot check that reads no property of the
- * returned value - and by plain native identity - its prototype is exactly
- * `Promise.prototype` and it carries no own property - is awaited. A
- * foreign-identity promise is rejected fail-closed with
- * `CONTRACT_SCHEMA_INVALID` and is never assimilated, whether it hijacks
- * `constructor` or `then` with own accessors or is an instance of a `Promise`
- * subclass, because promise resolution would otherwise read those properties
- * after the latch that ran the hook has already returned. Any other return
- * value, including a thenable, is treated as a completed synchronous hook and is
- * never inspected or assimilated. A well-behaved hook returns nothing or a bare
- * promise, so the deviation this rejects is narrow: a genuine promise carrying
- * any own property is refused rather than awaited.
+ * An admission hook is synchronous. The exported type returns `void`, so an
+ * asynchronous hook is a compile-time error, and whatever an untypechecked
+ * caller returns is discarded unexamined: the value is never awaited, never
+ * assimilated, never property-probed, and never rejected, so the receipt of a
+ * hook that returned a promise, a thenable, a primitive, or a Proxy is identical
+ * to the receipt of a hook that returned nothing.
+ *
+ * The guarantee is by construction, not by inspection: this module awaits no
+ * mediator-supplied value anywhere, so there is no adoption job whose async
+ * context a mediator could pick at registration time, no suspension window
+ * between the sealed admission and its verification, and no retained descriptor
+ * that a returned value which never settles could strand.
  */
-export type DescriptorAdmissionHook = (absolutePath: string) => void | Promise<void>;
+export type DescriptorAdmissionHook = (absolutePath: string) => void;
 export type DescriptorIngressOperation = Readonly<{
   phase: "admission" | "post_admission";
   operation: "open_root" | "open_relative" | "read_retained";
@@ -79,12 +77,14 @@ const NO_RAW_CLOSE_ATTEMPTS = 2;
 /**
  * Every ingress-owned mediator seam (the `observe`, `afterAdmission`, and
  * `beforeCleanup` callbacks, and the `authorityFault` lookup together with its
- * validation) shares the capability callback latch for its whole execution,
- * including every async resource descending from an asynchronous
- * `afterAdmission`, so reentry from any mediator seam is rejected on every
- * descriptor seam and at the public ingress entry alike. An operation started
- * outside every callback carries no latch, so it is unaffected while a
- * concurrent operation is suspended inside its own hook.
+ * validation) shares the capability callback latch for its whole execution, so
+ * reentry from any mediator seam is rejected on every descriptor seam and at the
+ * public ingress entry alike. Every seam is synchronous and no mediator-supplied
+ * value is awaited, so no seam suspends while the latch is armed. The latch's
+ * async-context arm still earns its place: work a synchronous hook merely
+ * schedules (`setTimeout`, `queueMicrotask`) inherits the armed context and stays
+ * reentry-rejected even after the operation that ran the hook has settled. An
+ * operation started outside every callback carries no latch and is unaffected.
  */
 function assertNoCallbackReentry(): void {
   if (capabilityCallbackActive()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
@@ -97,35 +97,6 @@ function assertNoCallbackReentry(): void {
  */
 function observeIngress(hooks: DescriptorIngressHooks, operation: DescriptorIngressOperation): void {
   withCapabilityCallback(() => hooks.observe?.(operation));
-}
-
-/**
- * The single await choke-point for a mediator-supplied value, and the only
- * `await` of one anywhere in this module. Its caller reaches it only through an
- * `isPromise` test, so an operation whose hook returned nothing still never
- * suspends: the boundary yields no window a concurrent caller could use against
- * a sealed operation that has nothing to wait for.
- *
- * `isPromise` is an internal-slot test: it reads no property, and a Proxy never
- * passes it, so the identity checks here observe internal state only and can run
- * no foreign code. That test is not sufficient on its own, because `await`
- * performs promise resolution, which reads `constructor` and then `then` off the
- * value whenever its constructor is not the intrinsic promise constructor -
- * reads that would run after the latch that invoked the hook has already
- * returned, with the admission sealed and every retained descriptor open, on a
- * value that can then refuse to settle and strand them. So identity is checked
- * first and a foreign one is a contract failure rather than an adoption: an
- * own-accessor hijack fails the own-key test and a `Promise` subclass fails the
- * prototype test. Only a plain native promise is awaited, and it is awaited
- * inside the latch, so any residual resolution work still inherits an armed
- * context. The latch's synchronous arm is released as the callback suspends, so
- * an operation started outside every callback stays unaffected meanwhile.
- */
-async function awaitAdmissionSettlement(admitted: Promise<unknown>): Promise<void> {
-  if (Object.getPrototypeOf(admitted) !== Promise.prototype || Reflect.ownKeys(admitted).length !== 0) {
-    throw new ContractError("CONTRACT_SCHEMA_INVALID");
-  }
-  await withCapabilityCallback(async () => { await admitted; });
 }
 
 /**
@@ -782,8 +753,10 @@ export async function readBoundedFile(
     admission = openDescriptorBoundPath(path, context, hooks);
     context.sealAdmission();
     const final = admission.components.at(-1)!;
-    const admitted = withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));
-    if (isPromise(admitted)) await awaitAdmissionSettlement(admitted);
+    // The hook is synchronous and whatever it returns is discarded here,
+    // unexamined and unawaited, so its receipt is identical to a hook that
+    // returned nothing.
+    withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));
     assertIngressWorkAvailable();
     const authorityFault = withCapabilityCallback(() => admittedAuthorityFault(hooks));
     if (authorityFault) context.rejectForbidden(authorityFault, "post_admission");

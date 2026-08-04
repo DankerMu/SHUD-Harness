@@ -6,6 +6,8 @@ import * as capabilities from "../lib/capabilities";
 import * as ingress from "../lib/ingress";
 import { failure, success } from "./helpers";
 import {
+  librarySources,
+  mediatedAwaitDenials,
   mediationSources,
   rejectionSinkDenials,
   withCloseRuntimeTree,
@@ -116,35 +118,49 @@ type ReentryOriginReceipt = Readonly<{
   battery: readonly ReentryRow[];
 }>;
 type ReentryReceipt = Readonly<{ entry: Entry; origins: readonly ReentryOriginReceipt[] }>;
-type ThenableRow = Readonly<{
-  kind:
-    | "never_settling_thenable"
-    | "native_promise"
-    | "genuine_promise_hostile_constructor"
-    | "promise_subclass_hostile_then";
+type AdmissionReturnKind =
+  | "undefined"
+  | "primitive"
+  | "all_trap_proxy"
+  | "plain_native_promise"
+  | "chained_outside_latch";
+/**
+ * The boundary-attributable half of an admission-return row. It carries exactly
+ * what the boundary did with the value the hook returned, and nothing about the
+ * value's own behavior, so it must be identical across every kind.
+ */
+type AdmissionReturnObservation = Readonly<{
   settled: boolean;
   outcome: EntryOutcome | null;
-  thenReads: number;
-  constructorReads: number;
+  rawFinal: Counters;
   traps: number;
   trapNames: readonly string[];
   primitiveProbes: number;
-  rawFinal: Counters;
-  rawAtHookCompletion: Counters | null;
+  fdDelta: number;
   batteryFired: boolean;
-  battery: readonly ReentryRow[];
   denialCalls: number;
+}>;
+type AdmissionReturnRow = Readonly<{
+  kind: AdmissionReturnKind;
+  receipt: AdmissionReturnObservation;
+  thenReads: number;
+  continuationRan: boolean;
+  continuationSawSettledOperation: boolean | null;
+  battery: readonly ReentryRow[];
   fdBefore: number;
   fdAfter: number;
 }>;
-type ThenableReceipt = Readonly<{ entry: Entry; rows: readonly ThenableRow[] }>;
-type ConcurrencyReceipt = Readonly<{
+type AdmissionReturnReceipt = Readonly<{ entry: Entry; rows: readonly AdmissionReturnRow[] }>;
+type ScheduledDescendantReceipt = Readonly<{
   entry: Entry;
-  first: EntryOutcome;
-  firstPendingWhileSecondRan: boolean;
-  second: EntryOutcome;
-  secondRaw: Counters;
-  suspendedBeforeSecond: boolean;
+  outcome: EntryOutcome;
+  hookCalls: number;
+  microtaskFired: boolean;
+  timerFired: boolean;
+  microtaskBattery: readonly ReentryRow[];
+  timerBattery: readonly ReentryRow[];
+  denialCalls: number;
+  rawFinal: Counters;
   fdBefore: number;
   fdAfter: number;
 }>;
@@ -229,8 +245,6 @@ const REENTRY_ORIGINS: readonly string[] = [
   "close_fault",
   "authority_violation",
   "after_admission",
-  "after_admission_async",
-  "admission_promise_adoption",
   "accessor_observe",
   "accessor_authority_fault",
   "authority_fault_coercion",
@@ -259,23 +273,25 @@ const FAILING_REENTRY_ORIGINS: ReadonlySet<string> = new Set([
   "accessor_authority_fault"
 ]);
 /**
- * The two foreign-identity promise shapes an `afterAdmission` hook can return:
- * one a genuine promise whose `constructor` and `then` are own accessors, the
- * other a `Promise` subclass instance with no own key at all. Between them they
- * exhaust the ways a value can pass an internal-slot promise test and still
- * route `await` through the generic resolution path.
+ * Every way a mediator can hand a value back to a synchronous admission hook's
+ * caller, ending with the round-3 attack: a promise chained outside every latch,
+ * indistinguishable from a well-behaved one by any inspection of the value.
  */
-const ADOPTION_KINDS: readonly ThenableRow["kind"][] = [
-  "genuine_promise_hostile_constructor",
-  "promise_subclass_hostile_then"
+const ADMISSION_RETURN_KINDS: readonly AdmissionReturnKind[] = [
+  "undefined",
+  "primitive",
+  "all_trap_proxy",
+  "plain_native_promise",
+  "chained_outside_latch"
 ];
 const DENIED = "CONTRACT_CAPABILITY_DESCRIPTOR_DENIED";
 /**
- * Every mutation that lets the boundary adopt a foreign value costs the child's
- * bounded settlement probe its full two-second bound per row, so the tests that
- * drive those mutations need more than the default per-test budget.
+ * A mutation that reinstates awaiting the hook's return value strands the
+ * chained-attack row for the child's full bounded-settlement window, and every
+ * row waits on a real timer for the mediator's own continuation, so the tests
+ * that drive those rows need more than the default per-test budget.
  */
-const ADOPTION_TEST_TIMEOUT_MS = 60_000;
+const ADMISSION_RETURN_TIMEOUT_MS = 60_000;
 
 /**
  * Independent recomputation of the mediated path depth: the ingress admits one
@@ -440,9 +456,12 @@ function originReceipt(receiptValue: ReentryReceipt, origin: string): ReentryOri
   return found;
 }
 
-function thenableRow(receiptValue: ThenableReceipt, kind: ThenableRow["kind"]): ThenableRow {
+function admissionReturnRow(
+  receiptValue: AdmissionReturnReceipt,
+  kind: AdmissionReturnKind
+): AdmissionReturnRow {
   const row = receiptValue.rows.find((candidate) => candidate.kind === kind);
-  if (!row) throw new Error(`thenable row is absent: ${kind}`);
+  if (!row) throw new Error(`admission return row is absent: ${kind}`);
   return row;
 }
 
@@ -474,28 +493,22 @@ function assertBatteryDenied(battery: readonly ReentryRow[], label: string): voi
 }
 
 /**
- * The adoption-identity rows. A value that is a promise by internal slot but
- * foreign by identity is rejected before `await` can resolve it, so none of the
- * properties promise resolution reads is read, the reentry battery each of those
- * reads would have driven never runs, the operation settles with the canonical
- * contract receipt, and every descriptor it opened is closed again by its own
- * cleanup - net zero, not never-opened.
+ * The boundary-attributable receipt every admission-return row must produce,
+ * recomputed here rather than copied from the `undefined` row, so the identity
+ * assertion has an independent expectation to agree with.
  */
-function assertAdoptionRow(row: ThenableRow, entry: Entry): void {
-  const label = row.kind;
-  expect([label, row.settled]).toEqual([label, true]);
-  expect([label, row.outcome]).toEqual([label, expectedFailure(entry)]);
-  expect([label, row.constructorReads]).toEqual([label, 0]);
-  expect([label, row.thenReads]).toEqual([label, 0]);
-  expect([label, row.traps]).toEqual([label, 0]);
-  expect([label, row.trapNames]).toEqual([label, []]);
-  expect([label, row.primitiveProbes]).toEqual([label, 0]);
-  expect([label, row.batteryFired]).toEqual([label, false]);
-  expect([label, row.denialCalls]).toEqual([label, 0]);
-  assertBatteryDenied(row.battery, label);
-  expect([label, row.rawFinal]).toEqual([label, SITE_RAW.after_admission_1.thrownFinal]);
-  expect([label, row.rawFinal.openRoot + row.rawFinal.openat]).toEqual([label, row.rawFinal.close]);
-  expect([label, row.fdAfter]).toEqual([label, row.fdBefore]);
+function expectedAdmissionReturnObservation(entry: Entry): AdmissionReturnObservation {
+  return {
+    settled: true,
+    outcome: expectedSuccess(entry),
+    rawFinal: BASELINE_RAW,
+    traps: 0,
+    trapNames: [],
+    primitiveProbes: 0,
+    fdDelta: 0,
+    batteryFired: false,
+    denialCalls: 0
+  };
 }
 
 /**
@@ -527,32 +540,9 @@ function assertAuthorityFaultCoercionOrigin(origin: ReentryOriginReceipt, entry:
   expect(origin.followOnChecker).toEqual(expectedSuccess("checker"));
 }
 
-/**
- * The adoption-time mediator seam. `afterAdmission` returns a value that is a
- * promise by internal slot but foreign by identity, so its only route back into
- * the boundary is a property read performed by promise resolution. The value's
- * identity is checked before it is awaited, so no such read ever runs: the
- * reentry battery it would have driven does not exist, and the operation is a
- * contract failure that settles and releases its descriptors rather than an
- * adoption that strands them.
- */
-function assertAdmissionAdoptionOrigin(origin: ReentryOriginReceipt, entry: Entry): void {
-  expect([origin.origin, origin.fired]).toEqual([origin.origin, false]);
-  assertBatteryDenied(origin.battery, origin.origin);
-  expect(origin.outcome).toEqual(expectedFailure(entry));
-  expect(origin.faultsReportedToHook).toEqual([]);
-  expect(origin.denialCalls).toBe(0);
-  expect(origin.followOnIngress).toEqual(expectedSuccess("ingress"));
-  expect(origin.followOnChecker).toEqual(expectedSuccess("checker"));
-}
-
 function assertReentryOrigin(origin: ReentryOriginReceipt, entry: Entry): void {
   if (origin.origin === "authority_fault_coercion") {
     assertAuthorityFaultCoercionOrigin(origin, entry);
-    return;
-  }
-  if (origin.origin === "admission_promise_adoption") {
-    assertAdmissionAdoptionOrigin(origin, entry);
     return;
   }
   expect(origin.fired).toBe(true);
@@ -850,161 +840,173 @@ describe("descriptor close runtime mediation", () => {
     expect(observed!.outcome).toEqual(expectedFailure("ingress"));
   });
 
-  test("an admission hook is awaited only as a plain native promise, and no foreign value is inspected or adopted", async () => {
+  test("an admission hook's return value is discarded unexamined, whatever shape it has", async () => {
     for (const entry of ["ingress", "checker"] as const) {
-      const thenable = await receipt<ThenableReceipt>(["thenable", entry]);
-      expect(thenable.rows.map((row) => row.kind)).toEqual([
-        "never_settling_thenable",
-        "native_promise",
-        ...ADOPTION_KINDS
-      ]);
+      const returns = await receipt<AdmissionReturnReceipt>(["admission_return", entry]);
+      expect(returns.rows.map((row) => row.kind)).toEqual([...ADMISSION_RETURN_KINDS]);
+      const expected = expectedAdmissionReturnObservation(entry);
+      const baseline = admissionReturnRow(returns, "undefined");
 
-      // A foreign thenable is neither read nor adopted: the operation settles
-      // with the canonical receipt and leaks no descriptor.
-      const hostileThenable = thenableRow(thenable, "never_settling_thenable");
-      expect(hostileThenable.settled).toBe(true);
-      expect(hostileThenable.thenReads).toBe(0);
-      expect(hostileThenable.traps).toBe(0);
-      expect(hostileThenable.trapNames).toEqual([]);
-      expect(hostileThenable.outcome).toEqual(expectedSuccess(entry));
-      expect(hostileThenable.rawFinal).toEqual(BASELINE_RAW);
-      expect(hostileThenable.fdAfter).toBe(hostileThenable.fdBefore);
+      for (const kind of ADMISSION_RETURN_KINDS) {
+        const row = admissionReturnRow(returns, kind);
+        // The boundary-attributable receipt is the same for every shape, and it
+        // is the independently recomputed one, not merely self-consistent.
+        expect([kind, row.receipt]).toEqual([kind, expected]);
+        expect([kind, row.receipt]).toEqual([kind, baseline.receipt]);
+        expect([kind, row.fdAfter]).toEqual([kind, row.fdBefore]);
+        expect([kind, row.battery]).toEqual([kind, []]);
+      }
 
-      // A genuine promise is still awaited to completion: no post-admission raw
-      // work has started when the hook's own continuation observes the counters.
-      const native = thenableRow(thenable, "native_promise");
-      expect(native.settled).toBe(true);
-      expect(native.outcome).toEqual(expectedSuccess(entry));
-      expect(native.rawAtHookCompletion).toEqual(SITE_RAW.after_admission_1.atInjection);
-      expect(native.rawFinal).toEqual(BASELINE_RAW);
-      expect(native.fdAfter).toBe(native.fdBefore);
+      // Zero property reads and zero traps: the all-trap Proxy records no
+      // observation at all, and the chained attack's thenable is never probed by
+      // the boundary - the one read it does see belongs to the mediator's own
+      // adoption job, which runs after the operation has already settled.
+      const proxy = admissionReturnRow(returns, "all_trap_proxy");
+      expect(proxy.receipt.traps).toBe(0);
+      expect(proxy.receipt.trapNames).toEqual([]);
+      expect(proxy.continuationRan).toBe(false);
 
-      // A promise whose identity is foreign - a hijacked `constructor`/`then`
-      // pair on a genuine promise, or a `Promise` subclass with no own key - is
-      // refused before `await` could read a single property off it.
-      for (const kind of ADOPTION_KINDS) assertAdoptionRow(thenableRow(thenable, kind), entry);
+      for (const kind of ["plain_native_promise", "chained_outside_latch"] as const) {
+        const row = admissionReturnRow(returns, kind);
+        expect([kind, row.continuationRan]).toEqual([kind, true]);
+        // The operation had already settled when the returned value's own
+        // continuation ran, so the boundary waited for nothing.
+        expect([kind, row.continuationSawSettledOperation]).toEqual([kind, true]);
+      }
+      expect(admissionReturnRow(returns, "chained_outside_latch").thenReads).toBe(1);
+      for (const kind of ["undefined", "primitive"] as const) {
+        expect([kind, admissionReturnRow(returns, kind).continuationRan]).toEqual([kind, false]);
+      }
     }
 
-    const inspected = await mutatedReceipt<ThenableReceipt>(
-      "inspected_admission_return",
-      ["thenable", "ingress"]
+    // Reinstating the await is red exactly where the removed choke-point was
+    // attackable: the boundary suspends on the mediator's value, so the plain
+    // promise settles before the operation does, and the promise chained outside
+    // every latch strands the operation with its descriptors still open while the
+    // mediator's adoption job reaches its capability with full authority.
+    const awaited = await mutatedReceipt<AdmissionReturnReceipt>(
+      "awaited_admission_return",
+      ["admission_return", "ingress"]
     );
-    const hung = thenableRow(inspected, "never_settling_thenable");
-    expect(hung.thenReads).toBe(1);
-    expect(hung.settled).toBe(false);
-    expect(hung.fdAfter).toBeGreaterThan(hung.fdBefore);
+    const expectedIngress = expectedAdmissionReturnObservation("ingress");
 
-    const inspectedHostile = await mutatedReceipt<HostileReceipt>(
-      "inspected_admission_return",
-      ["hostile", "ingress"]
-    );
-    const returnedAdmission = hostileRow(inspectedHostile, "after_admission_1", "returned");
-    expect(returnedAdmission.trapNames).toContain("get");
-    expect(returnedAdmission.traps).toBeGreaterThan(0);
-    expect(() => assertHostileRow(returnedAdmission, "ingress")).toThrow();
+    // The plain-promise row shows why the class is context-shaped rather than
+    // value-shaped: the awaited value is well behaved, so the mutation leaves the
+    // whole receipt intact and only the ordering betrays the suspension.
+    const awaitedNative = admissionReturnRow(awaited, "plain_native_promise");
+    expect(awaitedNative.receipt).toEqual(expectedIngress);
+    expect(awaitedNative.continuationSawSettledOperation).toBe(false);
 
-    // F6: dropping the identity gate lets `await` adopt both foreign shapes. The
-    // resolution-time reads run with the latch already released, so the mediator
-    // reaches the sealed operation's own capability and its retained file
-    // descriptor, and the value it returns never settles, so the operation's
-    // cleanup never runs and its descriptors are stranded.
-    const adopted = await mutatedReceipt<ThenableReceipt>(
-      "adopted_foreign_promise_identity",
-      ["thenable", "ingress"]
-    );
-    for (const kind of ADOPTION_KINDS) {
-      const row = thenableRow(adopted, kind);
-      expect(() => assertAdoptionRow(row, "ingress")).toThrow();
-      expect([kind, row.thenReads]).toEqual([kind, 1]);
-      expect([kind, row.constructorReads]).toEqual([
-        kind,
-        kind === "genuine_promise_hostile_constructor" ? 1 : 0
-      ]);
-      expect([kind, row.settled]).toEqual([kind, false]);
-      expect([kind, row.outcome]).toEqual([kind, null]);
-      expect(row.fdAfter).toBeGreaterThan(row.fdBefore);
-      expect(row.rawFinal.openRoot + row.rawFinal.openat).toBeGreaterThan(row.rawFinal.close);
-      expect([kind, row.batteryFired]).toEqual([kind, true]);
-      expect(batteryRow(row.battery, kind, "stat").outcome).toBe("NO_ERROR");
-      expect(batteryRow(row.battery, kind, "readRetained").outcome).toBe("NO_ERROR");
-      expect(batteryRow(row.battery, kind, "readRetained").rawDelta).toBeGreaterThan(0);
-      expect(batteryRow(row.battery, kind, "ingress_read_bounded_file").outcome).toBe("NO_ERROR");
-      expect(batteryRow(row.battery, kind, "ingress_read_bounded_file").rawDelta).toBeGreaterThan(0);
+    const stranded = admissionReturnRow(awaited, "chained_outside_latch");
+    expect(stranded.receipt.settled).toBe(false);
+    expect(stranded.receipt.outcome).toBeNull();
+    expect(stranded.receipt).not.toEqual(expectedIngress);
+    expect(stranded.fdAfter).toBeGreaterThan(stranded.fdBefore);
+    expect(stranded.receipt.rawFinal.openRoot + stranded.receipt.rawFinal.openat)
+      .toBeGreaterThan(stranded.receipt.rawFinal.close);
+    expect(stranded.receipt.batteryFired).toBe(true);
+    expect(batteryRow(stranded.battery, "chained_outside_latch", "stat").outcome).toBe("NO_ERROR");
+    expect(batteryRow(stranded.battery, "chained_outside_latch", "readRetained").outcome).toBe("NO_ERROR");
+    expect(batteryRow(stranded.battery, "chained_outside_latch", "readRetained").rawDelta)
+      .toBeGreaterThan(0);
+    expect(batteryRow(stranded.battery, "chained_outside_latch", "ingress_read_bounded_file").outcome)
+      .toBe("NO_ERROR");
+
+    // The mutation is targeted: a hook that returns nothing, a primitive, or a
+    // Proxy keeps its exact receipt, because none of those is a promise.
+    for (const kind of ["undefined", "primitive", "all_trap_proxy"] as const) {
+      expect([kind, admissionReturnRow(awaited, kind).receipt]).toEqual([kind, expectedIngress]);
+    }
+  }, ADMISSION_RETURN_TIMEOUT_MS);
+
+  test("the library awaits no mediator-supplied value anywhere", async () => {
+    expect(mediatedAwaitDenials(await librarySources(undefined))).toEqual([]);
+
+    // The oracle is not vacuous: it denies the exact await the round-3 gate
+    // removed, and it denies it wherever in `lib/` it reappears.
+    expect(mediatedAwaitDenials(await librarySources("awaited_admission_return")))
+      .toEqual(["awaited_mediator_value"]);
+
+    const clean = await librarySources(undefined);
+    for (const reintroduced of [
+      "    await hooks.afterAdmission?.(admission!.logicalAbsolutePath);",
+      "    const admitted: unknown = hooks.afterAdmission;\n    await admitted;",
+      "    for await (const value of hooks as AsyncIterable<unknown>) void value;"
+    ]) {
+      const mutated = clean.map((source) => source.name !== "ingress.ts" ? source : {
+        name: source.name,
+        source: source.source.replace(
+          "    assertIngressWorkAvailable();",
+          `${reintroduced}\n    assertIngressWorkAvailable();`
+        )
+      });
+      expect(mediatedAwaitDenials(mutated)).toEqual(["awaited_mediator_value"]);
     }
 
-    // The two rows that do not depend on the gate keep their exact receipts, so
-    // the mutation is targeted rather than a blanket refusal to await.
-    for (const kind of ["never_settling_thenable", "native_promise"] as const) {
-      const row = thenableRow(adopted, kind);
-      expect([kind, row.settled]).toEqual([kind, true]);
-      expect([kind, row.outcome]).toEqual([kind, expectedSuccess("ingress")]);
-      expect([kind, row.rawFinal]).toEqual([kind, BASELINE_RAW]);
-    }
-  }, ADOPTION_TEST_TIMEOUT_MS);
-
-  test("an operation started outside every callback is unaffected by a suspended admission hook", async () => {
-    for (const entry of ["ingress", "checker"] as const) {
-      const concurrency = await receipt<ConcurrencyReceipt>(["concurrency", entry]);
-      expect(concurrency.suspendedBeforeSecond).toBe(true);
-      expect(concurrency.firstPendingWhileSecondRan).toBe(true);
-      expect(concurrency.second).toEqual(expectedSuccess(entry));
-      expect(concurrency.secondRaw).toEqual(BASELINE_RAW);
-      expect(concurrency.first).toEqual(expectedSuccess(entry));
-      expect(concurrency.fdAfter).toBe(concurrency.fdBefore);
-    }
-
-    // Holding the process-global latch across the suspension would reject the
-    // independent operation instead.
-    const suspended = await mutatedReceipt<ConcurrencyReceipt>(
-      "suspended_global_latch",
-      ["concurrency", "ingress"]
-    );
-    expect(suspended.suspendedBeforeSecond).toBe(true);
-    expect(suspended.second).toEqual(expectedFailure("ingress"));
+    // Formatting and comments cannot change the verdict, and an unparsable
+    // source fails closed.
+    const commented = clean.map((source) => ({
+      name: source.name,
+      source: `${source.source}\n// await hooks.afterAdmission?.(path);\nconst awaitDecoy = "await admitted";\n`
+    }));
+    expect(mediatedAwaitDenials(commented)).toEqual([]);
+    expect(mediatedAwaitDenials([{ name: "broken.ts", source: "function (" }]))
+      .toEqual(["awaited_mediator_value"]);
   });
 
-  test("every #189 latch-boundary mutation is red on the reentry battery", async () => {
-    // F1: the latch releases at the first await of an asynchronous hook, so the
-    // hook's continuation reenters with full authority.
-    const asyncUnlatched = await mutatedReceipt<ReentryReceipt>(
+  test("work a synchronous admission hook schedules is reentry-rejected by the retained latch arm", async () => {
+    for (const entry of ["ingress", "checker"] as const) {
+      const scheduled = await receipt<ScheduledDescendantReceipt>(["scheduled_descendant", entry]);
+      expect(scheduled.hookCalls).toBe(1);
+      expect(scheduled.outcome).toEqual(expectedSuccess(entry));
+      expect(scheduled.rawFinal).toEqual(BASELINE_RAW);
+      expect(scheduled.fdAfter).toBe(scheduled.fdBefore);
+      expect(scheduled.denialCalls).toBe(0);
+
+      // Both queues descend from the hook's async context, so both are latched
+      // even though the operation that ran the hook has already settled and
+      // closed every descriptor it held.
+      expect(scheduled.microtaskFired).toBe(true);
+      expect(scheduled.timerFired).toBe(true);
+      assertBatteryDenied(scheduled.microtaskBattery, `${entry}/queueMicrotask`);
+      assertBatteryDenied(scheduled.timerBattery, `${entry}/setTimeout`);
+      expect(scheduled.microtaskBattery.map((row) => row.method).sort())
+        .toEqual([...REENTRY_METHODS].sort());
+      expect(scheduled.timerBattery.map((row) => row.method).sort())
+        .toEqual([...REENTRY_METHODS].sort());
+    }
+
+    // F1, restated for synchronous-only hooks: without the async-context arm the
+    // descendants run unlatched, and a whole new ingress operation succeeds from
+    // a mediator continuation that the boundary never authorized.
+    const unlatched = await mutatedReceipt<ScheduledDescendantReceipt>(
       "async_unlatched_callback",
-      ["reentry", "ingress", "after_admission_async"]
+      ["scheduled_descendant", "ingress"]
     );
-    const unlatchedContinuation = originReceipt(asyncUnlatched, "after_admission_async");
-    expect(unlatchedContinuation.fired).toBe(true);
-    expect(() => assertReentryOrigin(unlatchedContinuation, "ingress")).toThrow();
-    expect(reentryRow(unlatchedContinuation, "stat").outcome).toBe("NO_ERROR");
-    expect(reentryRow(unlatchedContinuation, "stat").rawDelta).toBeGreaterThan(0);
-    expect(reentryRow(unlatchedContinuation, "ingress_read_bounded_file").rawDelta).toBeGreaterThan(0);
+    expect(unlatched.microtaskFired).toBe(true);
+    expect(unlatched.timerFired).toBe(true);
+    for (const [label, battery] of [
+      ["queueMicrotask", unlatched.microtaskBattery],
+      ["setTimeout", unlatched.timerBattery]
+    ] as const) {
+      expect(() => assertBatteryDenied(battery, label)).toThrow();
+      const nested = batteryRow(battery, label, "ingress_read_bounded_file");
+      expect([label, nested.outcome]).toEqual([label, "NO_ERROR"]);
+      expect(nested.rawDelta).toBeGreaterThan(0);
+    }
+  }, ADMISSION_RETURN_TIMEOUT_MS);
+
+
+  test("every #189 latch-boundary mutation is red on the reentry battery", async () => {
+    // F1's synchronous negative control: dropping the async-context arm leaves
+    // the synchronous depth intact, so a hook that reenters from its own frame
+    // is still rejected. The arm's own witness is the scheduled-descendant row.
     const stillLatchedSynchronous = await mutatedReceipt<ReentryReceipt>(
       "async_unlatched_callback",
       ["reentry", "ingress", "after_admission"]
     );
     expect(() => assertReentryOrigin(originReceipt(stillLatchedSynchronous, "after_admission"), "ingress"))
       .not.toThrow();
-
-    // F6: the awaited value's identity is never checked, so promise resolution
-    // reads `constructor` off a foreign-identity promise after the latch has
-    // been released, and the operation never settles.
-    const adopted = await mutatedReceipt<ReentryReceipt>(
-      "adopted_foreign_promise_identity",
-      ["reentry", "ingress", "admission_promise_adoption"]
-    );
-    const adoption = originReceipt(adopted, "admission_promise_adoption");
-    expect(adoption.fired).toBe(true);
-    expect(() => assertReentryOrigin(adoption, "ingress")).toThrow();
-    expect(reentryRow(adoption, "stat").outcome).toBe("NO_ERROR");
-    expect(reentryRow(adoption, "readRetained").outcome).toBe("NO_ERROR");
-    expect(reentryRow(adoption, "readRetained").rawDelta).toBeGreaterThan(0);
-    expect(reentryRow(adoption, "ingress_read_bounded_file").outcome).toBe("NO_ERROR");
-    expect(adoption.outcome.code).toBe("UNSETTLED_OPERATION");
-    const untouchedAsyncAdmission = await mutatedReceipt<ReentryReceipt>(
-      "adopted_foreign_promise_identity",
-      ["reentry", "ingress", "after_admission_async"]
-    );
-    expect(() =>
-      assertReentryOrigin(originReceipt(untouchedAsyncAdmission, "after_admission_async"), "ingress")
-    ).not.toThrow();
 
     // F2: the hook property is read in the caller's own frame, so an accessor
     // reenters unlatched and `authorityFault` is read twice.
@@ -1065,7 +1067,7 @@ describe("descriptor close runtime mediation", () => {
     );
     expect(() => assertReentryOrigin(originReceipt(untouchedAdmission, "after_admission"), "ingress"))
       .not.toThrow();
-  }, ADOPTION_TEST_TIMEOUT_MS);
+  }, ADMISSION_RETURN_TIMEOUT_MS);
 
   test("only the frozen fault vocabulary is admitted, and no fault value is ever coerced", async () => {
     for (const entry of ["ingress", "checker"] as const) {

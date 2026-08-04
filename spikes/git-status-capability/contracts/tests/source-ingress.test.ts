@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, parse, relative, resolve, sep } from "node:path";
 import { canonicalJson } from "../lib/canonical-json";
@@ -84,17 +85,19 @@ async function exerciseFailure(kind: Kind, fixturePath: string, scenario: Failur
 
     const result = await capture(["--input", selectedInput, "--kind", kind], {
       observe: (operation) => { operations.push(operation); },
-      afterAdmission: async () => {
+      // The admission hook is synchronous, so the replacement it stages is
+      // complete before the boundary resumes its own post-admission work.
+      afterAdmission: () => {
         if (scenario === "ancestor_replacement") {
           const retainedAncestor = join(upper, "ancestor.retained");
-          await rename(ancestor, retainedAncestor);
+          renameSync(ancestor, retainedAncestor);
           replacementPath = join(ancestor, "parent", basename(input));
-          await mkdir(join(ancestor, "parent"), { recursive: true });
-          await writeFile(replacementPath, replacementBytes);
+          mkdirSync(join(ancestor, "parent"), { recursive: true });
+          writeFileSync(replacementPath, replacementBytes);
         } else if (scenario === "final_replacement") {
-          await rename(input, `${input}.retained`);
+          renameSync(input, `${input}.retained`);
           replacementPath = input;
-          await writeFile(replacementPath, replacementBytes);
+          writeFileSync(replacementPath, replacementBytes);
         }
       }
     });

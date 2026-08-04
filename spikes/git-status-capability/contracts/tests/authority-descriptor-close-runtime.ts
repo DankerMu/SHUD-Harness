@@ -17,18 +17,18 @@ export type CloseRuntimeMutation =
   | "remove_reentry_guard"
   | "read_off_by_one"
   | "async_unlatched_callback"
-  | "suspended_global_latch"
   | "unlatched_hook_lookup"
   | "unvalidated_authority_fault"
   | "unlatched_before_cleanup"
-  | "inspected_admission_return"
-  | "adopted_foreign_promise_identity"
+  | "awaited_admission_return"
   | undefined;
 export type CloseRuntimeTree = Readonly<{ root: string }>;
 export type RejectionSinkDenial =
   | "rejection_listener_registration"
   | "promise_sink_peek"
   | "promise_identity_rewrite";
+/** #189.D: the boundary awaits no mediator-supplied value anywhere in `lib/`. */
+export type MediatedAwaitDenial = "awaited_mediator_value";
 
 const contractsRoot = join(import.meta.dir, "..");
 const libraryRoot = join(contractsRoot, "lib");
@@ -133,26 +133,6 @@ function capabilitiesMutation(source: string, mutation: CloseRuntimeMutation): s
       mutation
     );
   }
-  // The rejected alternative fix: hold the process-global latch across the
-  // whole asynchronous callback, which also latches unrelated concurrent
-  // operations.
-  if (mutation === "suspended_global_latch") {
-    return replaceAnchor(
-      source,
-      "  capabilityCallbackDepth += 1;\n  try {\n    return callbackLatch.run(true, invoke);\n" +
-        "  } finally {\n    capabilityCallbackDepth -= 1;\n  }",
-      "  capabilityCallbackDepth += 1;\n  let suspended = false;\n  try {\n" +
-        "    const returned = callbackLatch.run(true, invoke);\n" +
-        "    const thenable = returned as Readonly<{ then?: unknown }> | null | undefined;\n" +
-        '    if (thenable && typeof thenable.then === "function") {\n' +
-        "      suspended = true;\n" +
-        "      const release = (): void => { capabilityCallbackDepth -= 1; };\n" +
-        "      (thenable.then as (onDone: () => void, onFail: () => void) => void)" +
-        ".call(returned, release, release);\n    }\n" +
-        "    return returned;\n  } finally {\n    if (!suspended) capabilityCallbackDepth -= 1;\n  }",
-      mutation
-    );
-  }
   return source;
 }
 
@@ -239,29 +219,24 @@ function ingressMutation(source: string, mutation: CloseRuntimeMutation): string
       mutation
     );
   }
-  // #189 F4: the raw await inspects the returned value's `then` property and
-  // adopts a hostile thenable, so the operation can never settle.
-  if (mutation === "inspected_admission_return") {
+  // #189.D: the pre-decision choke-point, reinstated. The hook's return value is
+  // awaited whenever it is a promise by internal slot, so the boundary suspends
+  // between the sealed admission and its verification, and a mediator that
+  // resolves that promise to a thenable it registered outside every latch
+  // strands the operation there with every retained descriptor open.
+  if (mutation === "awaited_admission_return") {
     return replaceAnchor(
-      source,
-      "    const admitted = withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));\n" +
-        "    if (isPromise(admitted)) await awaitAdmissionSettlement(admitted);",
-      "    await withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));",
-      mutation
-    );
-  }
-  // #189 F6: the awaited value passes the internal-slot promise test but its
-  // identity is never checked, so promise resolution reads `constructor` and
-  // `then` off a foreign-identity promise with the latch already released, and
-  // the value it returns from `then` never settles.
-  if (mutation === "adopted_foreign_promise_identity") {
-    return replaceAnchor(
-      source,
-      "  if (Object.getPrototypeOf(admitted) !== Promise.prototype || Reflect.ownKeys(admitted).length !== 0) {\n" +
-        '    throw new ContractError("CONTRACT_SCHEMA_INVALID");\n' +
-        "  }\n" +
-        "  await withCapabilityCallback(async () => { await admitted; });",
-      "  await admitted;",
+      replaceAnchor(
+        source,
+        'import { parse, resolve, sep } from "node:path";',
+        'import { parse, resolve, sep } from "node:path";\nimport { isPromise } from "node:util/types";',
+        mutation
+      ),
+      "    withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));",
+      "    const admitted: unknown = withCapabilityCallback(\n" +
+        "      () => hooks.afterAdmission?.(admission!.logicalAbsolutePath)\n" +
+        "    );\n" +
+        "    if (isPromise(admitted)) await admitted;",
       mutation
     );
   }
@@ -349,6 +324,79 @@ export async function mediationSources(mutation: CloseRuntimeMutation): Promise<
     capabilitiesMutation(capabilities, mutation),
     ingressMutation(ingress, mutation)
   ]);
+}
+
+/** Every checked-in library source, with the requested mutation applied. */
+export async function librarySources(
+  mutation: CloseRuntimeMutation
+): Promise<readonly Readonly<{ name: string; source: string }>[]> {
+  const names = (await readdir(libraryRoot)).filter((name) => name.endsWith(".ts")).sort();
+  return Object.freeze(await Promise.all(names.map(async (name) => {
+    const source = await readFile(join(libraryRoot, name), "utf8");
+    return Object.freeze({
+      name,
+      source: name === "capabilities.ts"
+        ? capabilitiesMutation(source, mutation)
+        : name === "ingress.ts"
+        ? ingressMutation(source, mutation)
+        : source
+    });
+  })));
+}
+
+/**
+ * #189.D structural oracle: `lib/` awaits no mediator-supplied value anywhere.
+ *
+ * The allowlist is derived from the library itself rather than from a name list,
+ * so it cannot drift: an `await` is admitted only when its operand is a plain
+ * call of an `async function` declared somewhere in `lib/`, which is work the
+ * boundary owns end to end. Every other operand - a variable holding a hook's
+ * return value, a property or optional call on the caller's hooks object, a call
+ * of an imported or higher-order function that could hand back a mediator value
+ * - is denied, as is `for await`. Formatting, comments, and string literals
+ * cannot affect the verdict because the scan is over the parsed AST, and an
+ * unparsed source fails closed, exactly as `rejectionSinkDenials` does.
+ */
+export function mediatedAwaitDenials(
+  sources: readonly Readonly<{ name: string; source: string }>[]
+): readonly MediatedAwaitDenial[] {
+  const denied = Object.freeze(["awaited_mediator_value" as const]);
+  const parsedSources: ts.SourceFile[] = [];
+  for (const { name, source } of sources) {
+    const sourceFile = ts.createSourceFile(name, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+    const parsed = sourceFile as unknown as Readonly<{ parseDiagnostics?: readonly unknown[] }>;
+    if ((parsed.parseDiagnostics?.length ?? 0) > 0) return denied;
+    parsedSources.push(sourceFile);
+  }
+
+  const libraryOwnedAsyncFunctions = new Set<string>();
+  const collect = (node: ts.Node): void => {
+    if (
+      ts.isFunctionDeclaration(node) &&
+      node.name !== undefined &&
+      node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword)
+    ) {
+      libraryOwnedAsyncFunctions.add(node.name.text);
+    }
+    ts.forEachChild(node, collect);
+  };
+  for (const sourceFile of parsedSources) collect(sourceFile);
+
+  let mediated = false;
+  const visit = (node: ts.Node): void => {
+    if (ts.isForOfStatement(node) && node.awaitModifier !== undefined) mediated = true;
+    if (ts.isAwaitExpression(node)) {
+      const operand = node.expression;
+      const owned = ts.isCallExpression(operand) &&
+        ts.isIdentifier(operand.expression) &&
+        operand.questionDotToken === undefined &&
+        libraryOwnedAsyncFunctions.has(operand.expression.text);
+      if (!owned) mediated = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  for (const sourceFile of parsedSources) visit(sourceFile);
+  return mediated ? denied : Object.freeze([]);
 }
 
 /**

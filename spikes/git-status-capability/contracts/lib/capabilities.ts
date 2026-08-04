@@ -152,18 +152,16 @@ const descriptorOwners = new WeakMap<CapabilityDescriptor, ContractCapabilities>
  * captured, inherited, or prototype-extracted authority can call back into a
  * descriptor operation.
  *
- * The latch has two arms because a mediator callback may be asynchronous. The
- * synchronous depth covers the callback body and any nested callback. The
- * async-context arm covers every async resource that descends from the callback
- * - not only its own continuations - so the latch stays armed across the
- * callback's awaits and equally across work the callback merely schedules
- * (`setTimeout`, `queueMicrotask`, a queued task) even after the operation that
- * ran the callback has settled and closed its descriptors. Such scheduled work
- * inherits the latch and is therefore rejected as reentry: the arm is
- * deliberately fail-closed and is never disarmed. That arm is scoped to the
- * callback's own async context, so an operation started independently of any
- * callback - including one concurrent with a suspended callback - is never
- * latched by it.
+ * The latch has two arms because a synchronous callback can still schedule work
+ * that outlives its own frame. The synchronous depth covers the callback body
+ * and any nested callback. The async-context arm covers every async resource
+ * that descends from the callback, so work the callback merely schedules
+ * (`setTimeout`, `queueMicrotask`, a queued task) stays latched even after the
+ * operation that ran the callback has settled and closed its descriptors. Such
+ * scheduled work inherits the latch and is therefore rejected as reentry: the
+ * arm is deliberately fail-closed and is never disarmed. That arm is scoped to
+ * the callback's own async context, so an operation started independently of any
+ * callback is never latched by it.
  */
 export function withCapabilityCallback<Value>(invoke: () => Value): Value {
   capabilityCallbackDepth += 1;
