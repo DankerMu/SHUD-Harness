@@ -1127,6 +1127,169 @@ Regression rows:
 - target `closeSync` return or throw -> exactly one target raw start, no retry,
   and existing terminal close-error/receipt precedence.
 
+### Issue #189 descriptor-mediation causal-proof closure fixture overlay
+
+Issue #189 closes the causal proof gaps verified by PR #187 Round 3 and routed
+by PR #191 Round 5, on top of the merged #193 runtime. The effective fixture is
+`expanded` with `repair=high`; the upstream `expanded/high` suggestion is
+accepted.
+
+| Risk pack | Selection | Evidence |
+|---|---|---|
+| Public API / CLI | Selected | Every public `ContractCapabilities`/ingress capability entry gains reentry rejection while direct/checker receipts stay byte-identical. |
+| Config / setup | Not selected | No configuration or bootstrap change. |
+| File I/O / path / overwrite | Not selected | Mediated-read proof observes existing descriptor reads exactly; no new pathname/write surface. |
+| Schema / fields | Not selected | Receipt and source schemas are unchanged. |
+| Auth / permissions / secrets | Selected | Prototype-captured ingress capability/token must not bypass reentry poison or the private close-attempt budget (CAND-R5-05). |
+| Concurrency / shared state / ordering | Selected | Reentry latches, poison-before-release ordering, and retained-owner identity through context deletion are state transitions. |
+| Resource limits / discovery | Selected | Two-attempt ceiling, descriptor baseline stability, and bounded registration/peek traces. |
+| Legacy compatibility / examples | Selected | Falsy hostile hook throws (CAND-R5-04) and all #175/#193 direct/checker receipts retain exact behavior. |
+| Error / rollback / partial outputs | Selected | Hostile thrown/returned values normalize identity-only; close-error precedence and raw-outcome authority are preserved. |
+| Release / dependency compatibility | Selected | Bun/typecheck/full check prove no package, lock, workflow, or export drift. |
+| Documentation / migration | Not selected | No user-facing migration. |
+| Scientific governance / PI gate | Not selected | No scientific behavior or claim. |
+| SHUD/rSHUD/AutoSHUD compatibility | Not selected | Read-only submodules untouched. |
+| Zero / agent role governance | Not selected | Zero/runtime adapters untouched. |
+
+Governing invariant: no hostile mediator/hook value and no reentrant or
+captured callback authority can observe, mutate, or bypass descriptor-mediation
+state — **every mediator hook is synchronous, so no mediator-supplied value is
+ever awaited and no mediator-chosen async context ever runs while descriptors
+are live** — hook lookup/call failures normalize identity-only without prototype
+inspection, all five primitive raw outcomes remain authoritative, reentry and
+poison boundaries hold at every public entry, and pre-close owner identity
+survives poison and context deletion.
+
+The emphasised clause is load-bearing and was added by the round-3 gate
+decision below. Without it the remainder of this invariant is **not
+satisfiable**: an admission hook that may return a promise lets the mediator
+choose, at `.then()` registration time and outside every latch, the async
+context in which the adoption job of whatever that promise resolves to will
+run. That context is not a property of the returned value, so no inspection of
+the value can observe or constrain it.
+
+Source of truth: instance-private descriptor records and ingress-private
+owner/attempt lists; `ContractError` recognition by construction identity
+(private brand or instance set), never by prototype chain, `instanceof`, or
+property inspection of foreign values.
+
+Verified-gap closure matrix:
+
+| Verified gap (origin) | Closure surface | Required observable output |
+|---|---|---|
+| Hostile thrown hook values skip identity-only normalization (R3) | ingress/capabilities normalization seams | Canonical schema-invalid/exit-2 receipts, zero prototype traps; `instanceof` mutation red |
+| Hostile Proxy fixtures omit observable traps (R3) | mediation-runtime fixtures | All-trap Proxies across five primitives, pre/post-raw; `has`/prototype-observation mutations red |
+| Inherited `closeFault` masked by own property (R3) | lazy hook forwarding proof | Class instance with only inherited `closeFault` forwards with original receiver; own-property gate mutation red |
+| Rejection-sink proof misses aliases/transient registration (R3) | alias-aware structural oracle + operation-time traces | Aliased add/remove listener, detached `Bun.peek`, Promise-identity rewrite mutations rejected |
+| Reentry proof covers only `sealAdmission` (R3) | every public capability/ingress entry | Stable REENTRY or poison boundary with zero state/raw/hook effects; guard-removal mutations red |
+| Mixed/same-pair no-raw owner retention unproven (CAND-R5-02) | retained-owner identity snapshot rows | Pre-close owner identity/cardinality retained through poison/context deletion; first-owner-release mutations red |
+| Falsy hostile hook throws changed compatibility (CAND-R5-04) | direct/checker compatibility rows | Exact legacy receipts preserved for falsy thrown values |
+| Captured ingress capability/token bypass (CAND-R5-05) | ingress capability/token hardening | Captured authority cannot bypass reentry poison or total-attempt boundaries |
+| `read_sync` byte count unobserved (R3) | mediated read rows | Exact byte count and buffer contents; positive off-by-one mutation red |
+
+Boundary checklist: change only `contracts/lib/{capabilities,ingress}.ts`
+(source corrections exposed by the causal mutations only), the focused
+descriptor mediation runtime and poison child/test helpers, and the descriptor
+structural mutation oracle; retain the five-primitive mediation boundary, #175
+exports and lifecycle, and #193 close-attempt identity/settlement; no public
+control API, pathname access, write/publish, Worker/child/network, package,
+workflow, lock, submodule, or canonical-governance change; #190 installer/type
+boundary and #186 durable evidence stay untouched.
+
+Regression rows:
+
+- hostile all-trap Proxy thrown from any hook, pre- and post-raw -> canonical
+  schema-invalid/exit-2 receipt, zero prototype/`has` traps, raw outcome
+  authoritative.
+- hostile all-trap Proxy returned by the mediator across five primitives ->
+  no property inspection before or after raw start; exact raw outcome and
+  resource settlement asserted.
+- class instance with only inherited `closeFault` -> lazily forwarded with the
+  original receiver; own-property gate mutation red.
+- copied source with aliased/transient rejection listener, detached
+  `Bun.peek`, or Promise identity rewrite -> structural/trace row red while
+  unmodified source shows zero registrations.
+- reentrant call into every public capability method, including via captured
+  ingress capability/token -> stable REENTRY or poison boundary, zero
+  state/raw/hook effects; each guard-removal mutation red.
+- mixed and same-pair no-raw close pairs -> exact pre-close owner
+  identity/cardinality retained through poison/context deletion; no fd growth.
+- falsy primitive values (`undefined`, `null`, `0`, `""`, `false`) thrown from
+  hostile hooks -> identity-only normalization never property-probes or
+  `in`-tests the primitive; exact legacy direct/checker receipts preserved
+  (CAND-R5-04).
+- mediated read of a known fixture -> exact byte count and buffer contents;
+  positive off-by-one return mutation red.
+- unchanged sibling consumers (public direct commands, checker rows, #175
+  vocabulary/preload/structural rows) -> byte-identical receipts on
+  Darwin/Linux.
+
+#### Round-3 gate amendment: synchronous admission hooks (PI decision)
+
+PR #196 reached the three-round hard gate with the `reentry-latch-scope` class
+still open after three value-shaped fixes (rounds 1, 2, and the round-2 root-cause
+choke-point). The round-3 evidence established that the class is **context-shaped,
+not value-shaped**: a mediator that registers `outer.then(() => hostile)` outside
+every latch and returns the resulting promise hands back a value indistinguishable
+from a well-behaved one — plain native, zero own keys, `Promise.prototype`
+prototype — while the adoption job of the thenable it resolves to inherits the
+registration-site async context. Measured on the clean fixed head: the reentry
+battery ran `stat`/`readRetained`/`close`/`sealAdmission` all `NO_ERROR` with the
+latch reported inactive, and the operation never settled.
+
+This overlay previously required an absolute mediation invariant *and* permitted
+asynchronous admission hooks. Those two clauses are jointly unsatisfiable; the
+fixture, not the implementation, was defective. The PI scope decision at the
+round-3 gate is to **remove asynchronous admission hooks** rather than qualify the
+invariant.
+
+| Amendment | Effect |
+|---|---|
+| `DescriptorAdmissionHook` returns `void`, not `void \| Promise<void>` | No mediator value is ever awaited; `lib/` contains no await of a mediator-supplied value at all. |
+| Admission hook return values are discarded without inspection | A returned thenable/promise/primitive is neither awaited, assimilated, nor property-probed; rejection is by value-free contract, so hostile shapes need no identity gate. |
+| Suspension window removed | With every hook synchronous, `readBoundedFile` has no interleaving point, so a captured authority has no unlatched moment to act in and no descriptor can be stranded by a hook that never settles. |
+| Superseded acceptance surfaces | The `after_admission_async` reentry origin, the async arm of the F1 continuation proof, the promise-identity gate and its adoption rows, and the suspended-latch concurrency scenario all describe behavior that is now structurally unreachable. They are removed as unreachable, not weakened to pass; the two-arm latch itself is retained, because a synchronous hook can still schedule descendant work. |
+
+Superseded verified-gap row: the round-2/round-3 entry "mediator-returned promise
+adopted with foreign identity or foreign context" is closed by construction rather
+than by proof — there is no await to attack.
+
+Additional regression rows:
+
+- admission hook returning any value (`undefined`, a primitive, an all-trap
+  Proxy, a plain native promise, a promise chained outside the latch) -> value
+  discarded with zero property reads and zero traps; receipt identical to the
+  `undefined` case; a mutation that reinstates awaiting the return value is red.
+- source-level oracle: `lib/` contains no `await` of a mediator-supplied value;
+  a mutation reintroducing one is red.
+- admission hook scheduling descendant work (`setTimeout`/`queueMicrotask`)
+  -> descendant is reentry-rejected by the retained ALS arm, proving the latch's
+  async arm still earns its place under synchronous-only hooks.
+
+Accepted semantic deviations (must be restated verbatim by the #186 durable
+evidence; each is a tightening, none widens authority):
+
+1. `afterAdmission` accepts synchronous hooks only: the exported type returns
+   `void` where it previously admitted `Promise<void>`, so an asynchronous hook
+   is now a compile-time error. At runtime a value returned by an untypechecked
+   caller is discarded unexamined — not awaited, not assimilated, not probed, and
+   not rejected — so its receipt is identical to a hook that returned nothing.
+   Enforcement is by construction (there is no await), never by inspection.
+2. `authorityFault` is fail-closed on falsy values: `undefined` is the only
+   non-fault. `""`, `0`, `false`, and `null` all reject as
+   `CONTRACT_SCHEMA_INVALID`.
+3. The capability latch's `AsyncLocalStorage` arm taints descendants and is never
+   disarmed: work a hook merely schedules is reentry-rejected even after the
+   operation that ran the hook has settled.
+
+Out-of-model premises (declared, not proven; spike-wide, pre-existing): global
+intrinsic integrity — the boundary reads `Object.getPrototypeOf`,
+`Reflect.ownKeys`, `Object.hasOwn`, and `Promise` from globals at call time, and
+a mediator that replaces them defeats this boundary as it already defeats the
+frozen authority-fault vocabulary. Same-process mediator conduct is likewise not
+policed: a hook can author an unhandled rejection in its own code regardless of
+this contract.
+
 ## Invariant Matrix
 
 | Stage | Authority / invariant | Enforcement and evidence |

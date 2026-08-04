@@ -112,8 +112,8 @@ function localDescriptorDecoy(): void {
     );
     counterfeit = replaceSourceAnchor(
       counterfeit,
-      "    phase: CapabilityPhase\n  ): CapabilityDescriptor {\n    const requestedPhase =",
-      "    phase: string\n  ): CapabilityDescriptor {\n    const requestedPhase ="
+      "    phase: CapabilityPhase\n  ): CapabilityDescriptor {",
+      "    phase: string\n  ): CapabilityDescriptor {"
     );
     counterfeit = replaceSourceAnchor(counterfeit, "owner: CloseOwner", "owner: string");
     counterfeit = replaceSourceAnchor(

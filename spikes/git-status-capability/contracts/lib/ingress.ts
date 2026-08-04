@@ -1,9 +1,11 @@
 import { parse, resolve, sep } from "node:path";
 import { hasOnlyUnicodeScalars } from "./canonical-json";
 import {
+  capabilityCallbackActive,
   ContractCapabilities,
   DIRECTORY_OPEN_FLAGS,
   FILE_OPEN_FLAGS,
+  withCapabilityCallback,
   type BigIntStats,
   type CapabilityDescriptor,
   type CapabilityHooks,
@@ -22,15 +24,42 @@ export type ContractErrorCode =
   | "CONTRACT_JSON_ITEM_LIMIT"
   | "CONTRACT_SCHEMA_INVALID";
 
+/**
+ * Construction-time identity set for contract errors. Recognition never walks a
+ * prototype chain, never reads a property, and never `in`-tests a foreign
+ * value: `WeakSet.prototype.has` is total over primitives and triggers no Proxy
+ * trap, so a hostile thrown value stays unobserved.
+ */
+const contractErrorIdentities = new WeakSet<WeakKey>();
+
 export class ContractError extends Error {
   constructor(public readonly code: ContractErrorCode) {
     super(code);
     this.name = "ContractError";
+    contractErrorIdentities.add(this);
   }
 }
 
+function isContractError(value: unknown): value is ContractError {
+  return contractErrorIdentities.has(value as WeakKey);
+}
+
 export type IngressProfile = Readonly<{ bytes: number; depth: number; nodes: number; items: number }>;
-export type DescriptorAdmissionHook = (absolutePath: string) => void | Promise<void>;
+/**
+ * An admission hook is synchronous. The exported type returns `void`, so an
+ * asynchronous hook is a compile-time error, and whatever an untypechecked
+ * caller returns is discarded unexamined: the value is never awaited, never
+ * assimilated, never property-probed, and never rejected, so the receipt of a
+ * hook that returned a promise, a thenable, a primitive, or a Proxy is identical
+ * to the receipt of a hook that returned nothing.
+ *
+ * The guarantee is by construction, not by inspection: this module awaits no
+ * mediator-supplied value anywhere, so there is no adoption job whose async
+ * context a mediator could pick at registration time, no suspension window
+ * between the sealed admission and its verification, and no retained descriptor
+ * that a returned value which never settles could strand.
+ */
+export type DescriptorAdmissionHook = (absolutePath: string) => void;
 export type DescriptorIngressOperation = Readonly<{
   phase: "admission" | "post_admission";
   operation: "open_root" | "open_relative" | "read_retained";
@@ -44,6 +73,62 @@ export type DescriptorIngressHooks = Readonly<{
 }> & CapabilityHooks;
 
 const NO_RAW_CLOSE_ATTEMPTS = 2;
+
+/**
+ * Every ingress-owned mediator seam (the `observe`, `afterAdmission`, and
+ * `beforeCleanup` callbacks, and the `authorityFault` lookup together with its
+ * validation) shares the capability callback latch for its whole execution, so
+ * reentry from any mediator seam is rejected on every descriptor seam and at the
+ * public ingress entry alike. Every seam is synchronous and no mediator-supplied
+ * value is awaited, so no seam suspends while the latch is armed. The latch's
+ * async-context arm still earns its place: work a synchronous hook merely
+ * schedules (`setTimeout`, `queueMicrotask`) inherits the armed context and stays
+ * reentry-rejected even after the operation that ran the hook has settled. An
+ * operation started outside every callback carries no latch and is unaffected.
+ */
+function assertNoCallbackReentry(): void {
+  if (capabilityCallbackActive()) throw new ContractError("CONTRACT_SCHEMA_INVALID");
+}
+
+/**
+ * The single ingress observation seam: the hook property is looked up and
+ * called inside one latch, so an accessor-form `observe` cannot reenter the
+ * boundary from its getter either, and the caller keeps its own receiver.
+ */
+function observeIngress(hooks: DescriptorIngressHooks, operation: DescriptorIngressOperation): void {
+  withCapabilityCallback(() => hooks.observe?.(operation));
+}
+
+/**
+ * The frozen authority-fault vocabulary, restated as data so the ingress can
+ * admit a mediator-supplied fault without leaving the latch. Its literal keys
+ * are checked against `ContractAuthorityFault` by construction, so the two
+ * vocabularies cannot drift apart.
+ */
+const CONTRACT_AUTHORITY_FAULTS = Object.freeze({
+  ambient_absolute_open: true,
+  replacement_object_read: true,
+  file_write: true,
+  child_spawn: true
+} satisfies Readonly<Record<ContractAuthorityFault, true>>);
+
+/**
+ * The single ingress authority-fault seam: the mediator value is looked up and
+ * validated inside one latch, and only one of the four frozen literals leaves
+ * it. A foreign value is never coerced - not by this seam and not by the
+ * rejection it would otherwise reach - because a non-member is a contract
+ * failure here, and a valid literal is a primitive with no `Symbol.toPrimitive`
+ * or `toString` of its own. Absence is the only accepted non-fault: any other
+ * value, falsy or not, is outside the vocabulary.
+ */
+function admittedAuthorityFault(hooks: DescriptorIngressHooks): ContractAuthorityFault | undefined {
+  const requested: unknown = hooks.authorityFault;
+  if (requested === undefined) return undefined;
+  if (typeof requested !== "string" || !Object.hasOwn(CONTRACT_AUTHORITY_FAULTS, requested)) {
+    throw new ContractError("CONTRACT_SCHEMA_INVALID");
+  }
+  return requested as ContractAuthorityFault;
+}
 
 class IngressOwnerNode {
   #next: IngressOwnerNode | undefined;
@@ -123,22 +208,21 @@ class ActiveIngressContext {
   readonly #attemptsByPublicAttempt = new WeakMap<CloseAttempt, IngressCloseAttempt>();
 
   constructor(private readonly hooks: DescriptorIngressHooks) {
+    // Every caller hook is looked up lazily on the caller's own object and its
+    // result is forwarded untouched, so inherited hooks keep their receiver and
+    // no returned mediator value is inspected on the way out.
     const guardedHooks: CapabilityHooks = Object.freeze({
       closeFault: (attempt) => {
         this.#attemptsByPublicAttempt.get(attempt)?.markRawStarted();
         return hooks.closeFault?.(attempt) ?? false;
       },
-      onAuthorityViolation: (fault) => {
-        hooks.onAuthorityViolation?.(fault);
-      },
+      onAuthorityViolation: (fault) => hooks.onAuthorityViolation?.(fault),
       onCloseAttempt: (attempt) => {
         const active = this.#activeCloseAttempts.at(-1);
         if (active?.bind(attempt)) this.#attemptsByPublicAttempt.set(attempt, active);
-        hooks.onCloseAttempt?.(attempt);
+        return hooks.onCloseAttempt?.(attempt);
       },
-      onDescriptorAuthorityDenial: (denial) => {
-        hooks.onDescriptorAuthorityDenial?.(denial);
-      }
+      onDescriptorAuthorityDenial: (denial) => hooks.onDescriptorAuthorityDenial?.(denial)
     });
     this.#capabilities = new ContractCapabilities(guardedHooks);
   }
@@ -371,7 +455,7 @@ function assertExpectedType(stats: BigIntStats, final: boolean): void {
 function openDescriptorBoundPath(
   path: string,
   context: ActiveIngressContext,
-  observe?: DescriptorOperationObserver
+  hooks: DescriptorIngressHooks
 ): DescriptorAdmission {
   assertIngressWorkAvailable();
   if (hasForbiddenRawPathComponent(path)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
@@ -381,7 +465,7 @@ function openDescriptorBoundPath(
   if (segments.length === 0) throw new ContractError("CONTRACT_SCHEMA_INVALID");
   const components: RetainedComponent[] = [];
   try {
-    observe?.({ phase: "admission", operation: "open_root", path: root });
+    observeIngress(hooks, { phase: "admission", operation: "open_root", path: root });
     assertIngressWorkAvailable();
     const rootDescriptor = context.openRoot(root, "admission");
     context.trackOwner(rootDescriptor, "unretained");
@@ -406,11 +490,7 @@ function openDescriptorBoundPath(
       const childName = segments[index]!;
       const final = index === segments.length - 1;
       const parentDescriptor = components.at(-1)!.descriptor;
-      observe?.({
-        phase: "admission",
-        operation: "open_relative",
-        path: childName
-      });
+      observeIngress(hooks, { phase: "admission", operation: "open_relative", path: childName });
       assertIngressWorkAvailable();
       const descriptor = context.openRelative(
         parentDescriptor,
@@ -438,7 +518,7 @@ function openDescriptorBoundPath(
     return { logicalAbsolutePath: resolve(path), components: Object.freeze(components) };
   } catch (error) {
     closeAll(context, components);
-    if (error instanceof ContractError) throw error;
+    if (isContractError(error)) throw error;
     throw new ContractError("CONTRACT_SCHEMA_INVALID");
   }
 }
@@ -446,7 +526,7 @@ function openDescriptorBoundPath(
 function verifyRetainedChain(
   admission: DescriptorAdmission,
   context: ActiveIngressContext,
-  observe?: DescriptorOperationObserver,
+  hooks: DescriptorIngressHooks,
   deferCleanup = false
 ): boolean {
   let cleanupFailed = false;
@@ -459,7 +539,7 @@ function verifyRetainedChain(
     if (index === 0) continue;
 
     const parent = admission.components[index - 1]!;
-    observe?.({
+    observeIngress(hooks, {
       phase: "post_admission",
       operation: "open_relative",
       path: retained.childName!
@@ -479,7 +559,7 @@ function verifyRetainedChain(
       assertExpectedType(verificationStats, retained.final);
       if (!sameEntry(retained.stats, verificationStats)) throw new ContractError("CONTRACT_SCHEMA_INVALID");
     } catch (error) {
-      verificationPrimary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
+      verificationPrimary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
     } finally {
       let closeFailed = false;
       try {
@@ -594,7 +674,7 @@ class StrictJsonParser {
           if (!hasOnlyUnicodeScalars(decoded)) this.fail("CONTRACT_JSON_MALFORMED");
           return decoded;
         } catch (error) {
-          if (error instanceof ContractError) throw error;
+          if (isContractError(error)) throw error;
           this.fail("CONTRACT_JSON_MALFORMED");
         }
       }
@@ -663,27 +743,32 @@ export async function readBoundedFile(
   hooks: DescriptorIngressHooks = {},
   beforeCleanup?: (bytes: Uint8Array) => void
 ): Promise<Uint8Array> {
+  assertNoCallbackReentry();
   const context = registerIngressContext(hooks);
   let admission: DescriptorAdmission | undefined;
   let primary: ContractError | undefined;
   let result: Uint8Array | undefined;
   let verificationCleanupFailed = false;
   try {
-    admission = openDescriptorBoundPath(path, context, hooks.observe);
+    admission = openDescriptorBoundPath(path, context, hooks);
     context.sealAdmission();
     const final = admission.components.at(-1)!;
-    await hooks.afterAdmission?.(admission.logicalAbsolutePath);
+    // The hook is synchronous and whatever it returns is discarded here,
+    // unexamined and unawaited, so its receipt is identical to a hook that
+    // returned nothing.
+    withCapabilityCallback(() => hooks.afterAdmission?.(admission!.logicalAbsolutePath));
     assertIngressWorkAvailable();
-    if (hooks.authorityFault) context.rejectForbidden(hooks.authorityFault, "post_admission");
+    const authorityFault = withCapabilityCallback(() => admittedAuthorityFault(hooks));
+    if (authorityFault) context.rejectForbidden(authorityFault, "post_admission");
     assertIngressWorkAvailable();
-    verificationCleanupFailed = verifyRetainedChain(admission, context, hooks.observe, true);
+    verificationCleanupFailed = verifyRetainedChain(admission, context, hooks, true);
     assertIngressWorkAvailable();
     if (final.stats.size <= maximum) {
       const buffer = Buffer.alloc(maximum + 1);
       let length = 0;
       while (length < buffer.length) {
         assertIngressWorkAvailable();
-        hooks.observe?.({
+        observeIngress(hooks, {
           phase: "post_admission",
           operation: "read_retained",
           path: final.childName!
@@ -703,11 +788,12 @@ export async function readBoundedFile(
       if (length <= maximum) result = buffer.subarray(0, length);
     }
     assertIngressWorkAvailable();
-    verificationCleanupFailed = verifyRetainedChain(admission, context, hooks.observe, true) || verificationCleanupFailed;
+    verificationCleanupFailed = verifyRetainedChain(admission, context, hooks, true) || verificationCleanupFailed;
     if (!result) throw new ContractError("CONTRACT_BYTES_LIMIT");
-    beforeCleanup?.(result);
+    const admittedBytes = result;
+    withCapabilityCallback(() => beforeCleanup?.(admittedBytes));
   } catch (error) {
-    primary = error instanceof ContractError ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
+    primary = isContractError(error) ? error : new ContractError("CONTRACT_SCHEMA_INVALID");
   } finally {
     const cleanupFailed = admission ? closeAll(context, admission.components) : false;
     unregisterIngressContext(context);
