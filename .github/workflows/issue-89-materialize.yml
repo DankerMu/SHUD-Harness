@@ -1,0 +1,132 @@
+# temporary materializer; excluded from the final issue branch
+name: Issue 89 schema materializer
+
+on:
+  push:
+    branches:
+      - automation/issue-89-schema-materialize
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout scratch branch
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - name: Init zero submodule only
+        run: git submodule update --init zero
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Apply issue 89 implementation
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file_path = Path(path)
+              text = file_path.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected one replacement in {path}, found {text.count(old)}")
+              file_path.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          artifact_path = "packages/core/src/domain/schemas/artifact.ts"
+          replace_once(artifact_path, "export const ArtifactSchema = z.object({", "export const ArtifactSchema = z.strictObject({")
+          replace_once(
+              artifact_path,
+              "  evidence_usable: z.boolean(),\n  retention_class:",
+              "  evidence_usable: z.boolean(),\n  llm_generated: z.boolean().default(false),\n  retention_class:"
+          )
+
+          Path("packages/core/src/domain/schemas/research-context.ts").write_text('import { z } from "zod";\n\nimport { ArtifactSchema } from "./artifact";\n\nconst UUID_SUFFIX_PATTERN =\n  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";\n\nfunction prefixedUuid(prefix: "STACK" | "DATA" | "MANIFEST") {\n  return z.string().regex(new RegExp(`^${prefix}-${UUID_SUFFIX_PATTERN}$`, "u"));\n}\n\nfunction nonEmptyString() {\n  return z.string().min(1);\n}\n\nfunction repositoryRevision() {\n  return z.strictObject({\n    commit: nonEmptyString(),\n    branch: nonEmptyString()\n  });\n}\n\nfunction contentDigestReference() {\n  return z.strictObject({\n    path: nonEmptyString(),\n    sha256: nonEmptyString()\n  });\n}\n\nexport const StackLockSchema = z.strictObject({\n  stack_id: prefixedUuid("STACK"),\n  repos: z.strictObject({\n    SHUD: repositoryRevision(),\n    rSHUD: repositoryRevision(),\n    AutoSHUD: repositoryRevision(),\n    zero: repositoryRevision()\n  }),\n  runtime: z.strictObject({\n    os: nonEmptyString(),\n    r_version: nonEmptyString(),\n    r_packages_lock: contentDigestReference().nullable(),\n    python_version: nonEmptyString(),\n    sundials_version: nonEmptyString(),\n    gcc_version: nonEmptyString(),\n    gdal_version: nonEmptyString()\n  }),\n  harness: z.strictObject({\n    version: nonEmptyString(),\n    cli_version: nonEmptyString(),\n    prompt_pack: nonEmptyString(),\n    skills_version: nonEmptyString()\n  }),\n  llm: z.strictObject({\n    provider: nonEmptyString(),\n    model_id: nonEmptyString(),\n    base_url: nonEmptyString(),\n    params_digest: nonEmptyString(),\n    prompt_pack_digest: nonEmptyString()\n  }),\n  fingerprint: nonEmptyString(),\n  created_at: nonEmptyString()\n});\n\nfunction provenanceSource() {\n  return z.strictObject({\n    path: nonEmptyString(),\n    sha256: nonEmptyString()\n  });\n}\n\nfunction observationSource() {\n  return z.strictObject({\n    variable: nonEmptyString(),\n    station: nonEmptyString(),\n    path: nonEmptyString(),\n    sha256: nonEmptyString()\n  });\n}\n\nexport const DataProvenanceSchema = z.strictObject({\n  data_id: prefixedUuid("DATA"),\n  basin: nonEmptyString(),\n  event_window: z.strictObject({\n    start: nonEmptyString(),\n    end: nonEmptyString()\n  }),\n  sources: z.strictObject({\n    terrain: provenanceSource(),\n    mesh: provenanceSource(),\n    forcing: provenanceSource(),\n    observations: z.array(observationSource())\n  }),\n  preprocess: z\n    .strictObject({\n      script: nonEmptyString(),\n      params: z.record(z.string(), z.unknown()),\n      output_sha256: nonEmptyString()\n    })\n    .optional(),\n  uncertainty_notes: nonEmptyString().optional()\n});\n\nexport const ArtifactManifestSchema = z.strictObject({\n  manifest_id: prefixedUuid("MANIFEST"),\n  task_id: nonEmptyString(),\n  run_id: nonEmptyString().optional(),\n  report_id: nonEmptyString().optional(),\n  superseded_by: prefixedUuid("MANIFEST").optional(),\n  artifacts: z.array(ArtifactSchema),\n  generated_at: nonEmptyString(),\n  generator: nonEmptyString(),\n  manifest_sha256: nonEmptyString().optional()\n});\n\nexport type StackLock = z.infer<typeof StackLockSchema>;\nexport type DataProvenance = z.infer<typeof DataProvenanceSchema>;\nexport type ArtifactManifest = z.infer<typeof ArtifactManifestSchema>;\n', encoding="utf-8")
+
+          replace_once(
+              "packages/core/src/domain/schemas/index.ts",
+              'export * from "./lock";\nexport * from "./task";',
+              'export * from "./lock";\nexport * from "./research-context";\nexport * from "./task";'
+          )
+
+          test_path = "packages/core/src/domain/schemas/core-schemas.test.ts"
+          replace_once(test_path, '  ArtifactSchema,\n  ErrorRecordSchema,\n  IdempotencyRecordSchema,\n  LockRecordSchema,\n  TaskCardSchema', '  ArtifactManifestSchema,\n  ArtifactSchema,\n  DataProvenanceSchema,\n  ErrorRecordSchema,\n  IdempotencyRecordSchema,\n  LockRecordSchema,\n  StackLockSchema,\n  TaskCardSchema')
+          replace_once(test_path, '  test("Artifact accepts a valid object and rejects missing required fields", () => {\n    const parsed = ArtifactSchema.safeParse(validArtifact());\n    expect(parsed.success).toBe(true);\n\n    const missingPath = ArtifactSchema.safeParse(removeKey(validArtifact(), "path"));\n    expect(missingPath.success).toBe(false);\n    expect(issuePaths(missingPath)).toContain("path");\n  });\n', '  test("Artifact accepts a valid object, defaults llm_generated, and stays strict", () => {\n    const parsed = ArtifactSchema.safeParse(validArtifact());\n    expect(parsed.success).toBe(true);\n    if (parsed.success) {\n      expect(parsed.data.llm_generated).toBe(false);\n    }\n\n    const explicitLlmArtifact = ArtifactSchema.safeParse({\n      ...validArtifact(),\n      llm_generated: true\n    });\n    expect(explicitLlmArtifact.success).toBe(true);\n    if (explicitLlmArtifact.success) {\n      expect(explicitLlmArtifact.data.llm_generated).toBe(true);\n    }\n\n    const missingPath = ArtifactSchema.safeParse(removeKey(validArtifact(), "path"));\n    expect(missingPath.success).toBe(false);\n    expect(issuePaths(missingPath)).toContain("path");\n\n    const unknownField = ArtifactSchema.safeParse({\n      ...validArtifact(),\n      legacy_evidence_flag: true\n    });\n    expect(unknownField.success).toBe(false);\n  });\n')
+          replace_once(
+              test_path,
+              "\n});\n\nfunction validTaskCard()",
+              '\n  test("StackLock accepts the complete four-repository record and rejects deprecated shapes", () => {\n    const parsed = StackLockSchema.safeParse(validStackLock());\n    expect(parsed.success).toBe(true);\n    if (parsed.success) {\n      expect(parsed.data.repos.zero.commit).toHaveLength(40);\n      expect(parsed.data.runtime.r_packages_lock?.path).toBe("renv.lock");\n    }\n\n    expect(\n      StackLockSchema.safeParse({\n        ...validStackLock(),\n        runtime: {\n          ...validStackLock().runtime,\n          r_packages_lock: null\n        }\n      }).success\n    ).toBe(true);\n\n    const missingBaseUrl = StackLockSchema.safeParse({\n      ...validStackLock(),\n      llm: removeKey(validStackLock().llm, "base_url")\n    });\n    expect(missingBaseUrl.success).toBe(false);\n    expect(issuePaths(missingBaseUrl)).toContain("llm.base_url");\n\n    for (const deprecated of [\n      {\n        ...validStackLock(),\n        runtime: { ...validStackLock().runtime, container: "docker" }\n      },\n      { ...validStackLock(), limits: { max_retries: 2 } },\n      { ...validStackLock(), policy_version: "legacy-v1" }\n    ]) {\n      expect(StackLockSchema.safeParse(deprecated).success).toBe(false);\n    }\n\n    expect(\n      StackLockSchema.safeParse({\n        ...validStackLock(),\n        repos: removeKey(validStackLock().repos, "zero")\n      }).success\n    ).toBe(false);\n    expect(\n      StackLockSchema.safeParse({\n        ...validStackLock(),\n        stack_id: "STACK-0001"\n      }).success\n    ).toBe(false);\n  });\n\n  test("DataProvenance accepts object windows and hashed sources while rejecting legacy inputs", () => {\n    const parsed = DataProvenanceSchema.safeParse(validDataProvenance());\n    expect(parsed.success).toBe(true);\n    if (parsed.success) {\n      expect(parsed.data.basin).toBe("cache_creek");\n      expect(parsed.data.sources.observations[0]?.station).toBe("USGS-11451100");\n    }\n\n    const missingBasin = DataProvenanceSchema.safeParse(\n      removeKey(validDataProvenance(), "basin")\n    );\n    expect(missingBasin.success).toBe(false);\n    expect(issuePaths(missingBasin)).toContain("basin");\n\n    expect(\n      DataProvenanceSchema.safeParse({\n        ...validDataProvenance(),\n        event_window: ["2008-01-01", "2008-02-28"]\n      }).success\n    ).toBe(false);\n\n    expect(\n      DataProvenanceSchema.safeParse({\n        ...validDataProvenance(),\n        sources: {\n          ...validDataProvenance().sources,\n          terrain: { path: "data/raw/ccw/dem.tif" }\n        }\n      }).success\n    ).toBe(false);\n\n    expect(\n      DataProvenanceSchema.safeParse({\n        ...validDataProvenance(),\n        sources: {\n          ...validDataProvenance().sources,\n          observations: [\n            removeKey(validDataProvenance().sources.observations[0]!, "sha256")\n          ]\n        }\n      }).success\n    ).toBe(false);\n\n    expect(\n      DataProvenanceSchema.safeParse({\n        ...validDataProvenance(),\n        data_id: "DATA-0001"\n      }).success\n    ).toBe(false);\n    expect(\n      DataProvenanceSchema.safeParse({\n        ...validDataProvenance(),\n        legacy_source: "data/raw/ccw"\n      }).success\n    ).toBe(false);\n  });\n\n  test("ArtifactManifest requires complete Artifact records and canonical manifest ids", () => {\n    const parsed = ArtifactManifestSchema.safeParse(validArtifactManifest());\n    expect(parsed.success).toBe(true);\n    if (parsed.success) {\n      expect(parsed.data.artifacts[0]?.llm_generated).toBe(false);\n      expect(parsed.data.superseded_by).toBe(\n        "MANIFEST-44444444-4444-4444-8444-444444444444"\n      );\n    }\n\n    const missingGenerator = ArtifactManifestSchema.safeParse(\n      removeKey(validArtifactManifest(), "generator")\n    );\n    expect(missingGenerator.success).toBe(false);\n    expect(issuePaths(missingGenerator)).toContain("generator");\n\n    expect(\n      ArtifactManifestSchema.safeParse({\n        ...validArtifactManifest(),\n        artifacts: [\n          {\n            artifact_id: "ART-0001",\n            type: "report_markdown",\n            path: "reports/TASK-0001_report.md"\n          }\n        ]\n      }).success\n    ).toBe(false);\n\n    expect(\n      ArtifactManifestSchema.safeParse({\n        ...validArtifactManifest(),\n        manifest_id: "MANIFEST-0001"\n      }).success\n    ).toBe(false);\n    expect(\n      ArtifactManifestSchema.safeParse({\n        ...validArtifactManifest(),\n        superseded_by: "MANIFEST-0002"\n      }).success\n    ).toBe(false);\n    expect(\n      ArtifactManifestSchema.safeParse({\n        ...validArtifactManifest(),\n        artifact_ids: ["ART-0001"]\n      }).success\n    ).toBe(false);\n  });\n\n});\n\nfunction validTaskCard()'
+          )
+          replace_once(
+              test_path,
+              "\nfunction removeKey<T extends Record<string, unknown>",
+              '\nfunction validStackLock() {\n  return {\n    stack_id: "STACK-11111111-1111-4111-8111-111111111111",\n    repos: {\n      SHUD: { commit: "a".repeat(40), branch: "master" },\n      rSHUD: { commit: "b".repeat(40), branch: "master" },\n      AutoSHUD: { commit: "c".repeat(40), branch: "master" },\n      zero: { commit: "13e25c116c62411e6ee8a0ad67a6c53dc7c376c6", branch: "main" }\n    },\n    runtime: {\n      os: "Darwin 24.6.0",\n      r_version: "4.4.1",\n      r_packages_lock: {\n        path: "renv.lock",\n        sha256: `sha256:${"d".repeat(64)}`\n      },\n      python_version: "3.12.4",\n      sundials_version: "6.0.0",\n      gcc_version: "14.1.0",\n      gdal_version: "3.9.0"\n    },\n    harness: {\n      version: "0.8.0",\n      cli_version: "unknown",\n      prompt_pack: "promptpack-unset",\n      skills_version: "skills-unset"\n    },\n    llm: {\n      provider: "openai_compatible",\n      model_id: "glm-5.2",\n      base_url: "https://example.invalid/v1",\n      params_digest: `sha256:${"e".repeat(64)}`,\n      prompt_pack_digest: `sha256:${"f".repeat(64)}`\n    },\n    fingerprint: `sha256:${"0".repeat(64)}`,\n    created_at: "2026-07-23T13:00:00Z"\n  };\n}\n\nfunction validDataProvenance() {\n  return {\n    data_id: "DATA-22222222-2222-4222-8222-222222222222",\n    basin: "cache_creek",\n    event_window: {\n      start: "2008-01-01",\n      end: "2008-02-28"\n    },\n    sources: {\n      terrain: {\n        path: "data/raw/ccw/dem.tif",\n        sha256: "sha256:terrain"\n      },\n      mesh: {\n        path: "repos/SHUD/input/ccw/ccw.sp.mesh",\n        sha256: "sha256:mesh"\n      },\n      forcing: {\n        path: "data/raw/ccw/forcing",\n        sha256: "sha256:forcing"\n      },\n      observations: [\n        {\n          variable: "discharge",\n          station: "USGS-11451100",\n          path: "data/raw/ccw/obs_q.csv",\n          sha256: "sha256:observations"\n        }\n      ]\n    },\n    preprocess: {\n      script: "scripts/prep_ccw.R",\n      params: {\n        interpolation: "IDW",\n        resolution: "200m"\n      },\n      output_sha256: "sha256:preprocessed"\n    },\n    uncertainty_notes: "降水空间插值可能低估高海拔降水量"\n  };\n}\n\nfunction validArtifactManifest() {\n  return {\n    manifest_id: "MANIFEST-33333333-3333-4333-8333-333333333333",\n    task_id: "TASK-0001",\n    run_id: "RUN-0001",\n    report_id: "REPORT-0001",\n    superseded_by: "MANIFEST-44444444-4444-4444-8444-444444444444",\n    artifacts: [validArtifact()],\n    generated_at: "2026-07-23T13:05:00Z",\n    generator: "@shud-harness/core",\n    manifest_sha256: "sha256:manifest"\n  };\n}\n\nfunction removeKey<T extends Record<string, unknown>'
+          )
+
+          generator_path = "scripts/schema/generate.ts"
+          replace_once(
+              generator_path,
+              'import { ArtifactSchema } from "../../packages/core/src/domain/schemas/artifact";\n',
+              'import { ArtifactSchema } from "../../packages/core/src/domain/schemas/artifact";\n'
+              'import {\n'
+              '  ArtifactManifestSchema,\n'
+              '  DataProvenanceSchema,\n'
+              '  StackLockSchema\n'
+              '} from "../../packages/core/src/domain/schemas/research-context";\n'
+          )
+          replace_once(generator_path, '  {\n    name: "Artifact",\n    slug: "artifact",\n    sourcePath: "packages/core/src/domain/schemas/artifact.ts",\n    exportName: "ArtifactSchema",\n    schema: ArtifactSchema\n  },', '  {\n    name: "Artifact",\n    slug: "artifact",\n    sourcePath: "packages/core/src/domain/schemas/artifact.ts",\n    exportName: "ArtifactSchema",\n    schema: ArtifactSchema\n  },\n  {\n    name: "StackLock",\n    slug: "stack-lock",\n    sourcePath: "packages/core/src/domain/schemas/research-context.ts",\n    exportName: "StackLockSchema",\n    schema: StackLockSchema\n  },\n  {\n    name: "DataProvenance",\n    slug: "data-provenance",\n    sourcePath: "packages/core/src/domain/schemas/research-context.ts",\n    exportName: "DataProvenanceSchema",\n    schema: DataProvenanceSchema\n  },\n  {\n    name: "ArtifactManifest",\n    slug: "artifact-manifest",\n    sourcePath: "packages/core/src/domain/schemas/research-context.ts",\n    exportName: "ArtifactManifestSchema",\n    schema: ArtifactManifestSchema\n  },')
+
+          tasks_path = Path("openspec/changes/m2-research-context/tasks.md")
+          task_lines = tasks_path.read_text(encoding="utf-8").splitlines()
+          for index, line in enumerate(task_lines):
+              if line.startswith("- [ ] 2.1 StackLock + DataProvenance"):
+                  task_lines[index] = line.replace("- [ ]", "- [x]", 1)
+                  task_lines[index + 1:index + 1] = ['  - Fixture (#89): expanded / high；持久化 schema、public core exports、strict/默认值语义与生成物 drift 触发 mandatory expanded。', '  - Invariant Matrix (#89): identity = `STACK-/DATA-/MANIFEST-<uuid>`；producers = 三个 strict record schema + Artifact default；validators = nested strict objects、required LLM/source/manifest fields；storage/service/routes = none；consumers = 后续 4.x/5.x/6.x；failure = deprecated/unknown/missing/compact forms fail before service wiring；evidence = schema tests + generated drift。', '  - Risk packs (#89): Schema / fields、Public API、Legacy compatibility、Error handling、Release / packaging、Documentation 与 Scientific evidence lineage selected；Config、File IO、Auth、Concurrency、Resource limits、Hydrology runtime、Zero governance not selected。', '  - Boundary-surface checklist (#89): core schema barrel + generator registry/generated outputs only；Artifact M1 正例继续通过并默认 `llm_generated=false`；ArtifactManifest 嵌入完整 Artifact；零 service/route/workspace writer/package/lock/submodule 变更。', '  - Evidence floor (#89): `npx --yes bun@1.2.19 run test:schemas`；`npx --yes bun@1.2.19 run test:schema-generation`；`npx --yes bun@1.2.19 run schema:check`；`npx --yes bun@1.2.19 run typecheck`；`npx --yes bun@1.2.19 run check`；`npx --yes openspec validate m2-research-context --strict --no-interactive`；`git diff --check`；package/lock、zero、workspace hygiene。']
+                  break
+          else:
+              raise SystemExit("task 2.1 line not found")
+          tasks_path.write_text("\n".join(task_lines) + "\n", encoding="utf-8")
+
+          Path("openspec/changes/m2-research-context/evidence/issue-89.md").write_text('# Issue #89 — M2 core schema delivery evidence\n\n- Workflow: `subagent-workflow`\n- Fixture: expanded\n- Repair intensity: high\n- Scope: `packages/core` Zod schemas, schema tests, generator registry, and generated schema drift outputs\n- Parent task: `openspec/changes/m2-research-context/tasks.md` 2.1\n\n## Invariant matrix\n\n| Invariant | Boundary | Evidence |\n|---|---|---|\n| Persisted M2 research-context records accept only the canonical field set. | StackLock, DataProvenance, ArtifactManifest root and nested objects | All new record objects use strict Zod objects; tests cover deprecated StackLock fields, legacy event windows, unhashed sources, compact manifest artifacts, and unknown keys. |\n| Record identity follows the D5 UUID prefixes. | `stack_id`, `data_id`, `manifest_id`, `superseded_by` | Prefix-specific UUID regexes reject the old `NNNN` examples while accepting UUID-backed IDs. |\n| Stack identity includes all four pinned repositories and the complete LLM endpoint identity. | `repos` and `llm` | Schema requires SHUD/rSHUD/AutoSHUD/zero and rejects a missing `llm.base_url`. |\n| Provenance records bind every source description to a server-computed digest. | terrain/mesh/forcing/observations/preprocess | Positive fixtures include every digest; negative fixtures remove source and observation digests and are rejected. |\n| Manifest entries are complete Artifact records, not compact references. | `ArtifactManifest.artifacts` | The manifest schema embeds `ArtifactSchema`; a compact `{artifact_id,type,path}` row is rejected. |\n| Existing Artifact inputs remain accepted while normalized records carry an explicit LLM marker. | `ArtifactSchema` input/output boundary | Missing `llm_generated` parses to `false`, explicit `true` is preserved, and strict unknown-field rejection remains active. |\n| Generated JSON Schema and Markdown exactly match the executable Zod registry. | `scripts/schema/generate.ts` and `docs/generated` | Registry coverage, generation self-test, drift check, and committed generated outputs run on the same PR head. |\n\n## Risk packs\n\n- Public API / CLI / script entry: selected — exported core schema API and generator registry expand.\n- Config / project setup: not selected — no environment, workspace initialization, or deployment behavior changes.\n- File IO / path safety / overwrite: not selected — only deterministic generated documentation is written by the existing generator.\n- Schema / columns / units / field names: selected — this issue defines three persisted record contracts and one additive Artifact field.\n- Auth / permissions / secrets: not selected — no credential or authorization surface changes.\n- Concurrency / shared state / ordering: not selected — schemas are pure validation objects with no mutable shared state.\n- Resource limits / large input / discovery: not selected — no discovery or unbounded read surface is introduced.\n- Legacy compatibility / examples: selected — M1 Artifact positive/negative behavior is retained and deprecated M2 shapes fail explicitly.\n- Error handling / rollback / partial outputs: selected — malformed records fail at schema boundaries before any service or route exists.\n- Release / packaging / dependency compatibility: selected — no dependency or lockfile change; Bun 1.2.19 and schema drift gates remain authoritative.\n- Documentation / migration notes: selected — generated JSON Schema/Markdown are synchronized with D5a/D6 deviations.\n- Scientific governance / PI gate / evidence lineage: selected — StackLock, DataProvenance, and ArtifactManifest are evidence identity records.\n- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility: not selected — no solver, R package, or pipeline runtime behavior changes.\n- Zero adapter / tool registry / agent role governance: not selected — zero and tool/role surfaces are unchanged.\n\n## Boundary-surface checklist\n\n- [x] New public schemas are exported from the core schema barrel.\n- [x] Nested record objects are strict; deprecated and unknown keys do not get silently stripped.\n- [x] `llm_generated` defaults only at schema parsing and is present in normalized Artifact output.\n- [x] ArtifactManifest consumes complete `ArtifactSchema` entries.\n- [x] Generator discovery has one registry entry for every exported object schema.\n- [x] Generated JSON Schema and Markdown are committed; package manifests and lockfiles remain unchanged.\n- [x] No services, routes, workspace record writers, or submodules are modified.\n\n## Verification gates\n\n- `npx --yes bun@1.2.19 run test:schemas`\n- `npx --yes bun@1.2.19 run test:schema-generation`\n- `npx --yes bun@1.2.19 run schema:check`\n- `npx --yes bun@1.2.19 run typecheck`\n- `npx --yes bun@1.2.19 run check`\n- `npx --yes openspec validate m2-research-context --strict --no-interactive`\n- `git diff --check`\n- package/lock, zero submodule, tracked-workspace, and stash hygiene\n', encoding="utf-8")
+          PY
+
+      - name: Generate and verify schemas
+        run: |
+          bun run test:schemas
+          bun run test:schema-generation
+          bun run schema:generate
+          bun run schema:check
+          bun run typecheck
+          bun run check
+          npx --yes openspec validate m2-research-context --strict --no-interactive
+          git diff --check
+          git diff --exit-code HEAD -- package.json packages/core/package.json bun.lock
+          git -C zero diff --quiet
+          test -z "$(git ls-files workspace)"
+
+      - name: Commit exact generated outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            packages/core/src/domain/schemas/artifact.ts \
+            packages/core/src/domain/schemas/research-context.ts \
+            packages/core/src/domain/schemas/index.ts \
+            packages/core/src/domain/schemas/core-schemas.test.ts \
+            scripts/schema/generate.ts \
+            docs/generated/json-schema \
+            docs/generated/schema \
+            openspec/changes/m2-research-context/tasks.md \
+            openspec/changes/m2-research-context/evidence/issue-89.md
+          git commit -m "feat(core-schemas): materialize issue 89 [materialized]"
+          git push origin HEAD
