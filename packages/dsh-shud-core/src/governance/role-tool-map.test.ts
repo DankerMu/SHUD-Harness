@@ -8,7 +8,7 @@ import {
   isRoleToolIdAllowed,
   isRoleToolIdSubset,
   type CanonicalHarnessRole,
-  type RoleToolIdsSnapshot
+  type RoleToolIdsSnapshot,
 } from "./role-tool-map.ts";
 
 const EXPECTED_CANONICAL_ROLES = [
@@ -16,7 +16,7 @@ const EXPECTED_CANONICAL_ROLES = [
   "repo_explorer",
   "worker",
   "coder",
-  "reviewer"
+  "reviewer",
 ] as const satisfies readonly CanonicalHarnessRole[];
 
 const EXPECTED_ROLE_TOOL_IDS = [
@@ -41,7 +41,7 @@ const EXPECTED_ROLE_TOOL_IDS = [
   "spawn_agent",
   "validator.run",
   "wait_agent",
-  "write"
+  "write",
 ] as const;
 
 const EXPECTED_TOOL_IDS = {
@@ -52,7 +52,7 @@ const EXPECTED_TOOL_IDS = {
     "harness.report.generate",
     "read",
     "spawn_agent",
-    "wait_agent"
+    "wait_agent",
   ],
   repo_explorer: ["git.inspect", "read", "repo.glob", "repo.grep", "repo.search"],
   worker: [
@@ -63,10 +63,10 @@ const EXPECTED_TOOL_IDS = {
     "rshud.read_output",
     "sandbox.exec",
     "shud.build",
-    "shud.run"
+    "shud.run",
   ],
   coder: ["bash", "edit", "harness.memory.propose", "patch.apply", "read", "write"],
-  reviewer: ["harness.memory.propose", "read", "validator.run"]
+  reviewer: ["harness.memory.propose", "read", "validator.run"],
 } as const satisfies RoleToolIdsSnapshot;
 
 const WRITE_CLASS_TOOL_IDS = [
@@ -75,7 +75,7 @@ const WRITE_CLASS_TOOL_IDS = [
   "patch.apply",
   "artifact.write",
   "sandbox.exec",
-  "bash"
+  "bash",
 ] as const;
 
 const REPOSITORY_SOURCE_EDIT_TOOL_IDS = ["write", "edit", "patch.apply"] as const;
@@ -117,8 +117,9 @@ describe("canonical role to tool id map", () => {
   });
 
   test("keeps coordinator free of bash and repository source edit tools", () => {
-    expect(intersect(getRoleToolIds("coordinator"), ["bash", ...REPOSITORY_SOURCE_EDIT_TOOL_IDS]))
-      .toEqual([]);
+    expect(
+      intersect(getRoleToolIds("coordinator"), ["bash", ...REPOSITORY_SOURCE_EDIT_TOOL_IDS]),
+    ).toEqual([]);
   });
 
   test("keeps worker free of repository source edit tools", () => {
@@ -126,18 +127,20 @@ describe("canonical role to tool id map", () => {
   });
 
   test("keeps coder as the only role with write, edit, or patch.apply", () => {
-    expect(getRoleToolIds("coder")).toEqual(expect.arrayContaining(REPOSITORY_SOURCE_EDIT_TOOL_IDS));
+    expect(getRoleToolIds("coder")).toEqual(
+      expect.arrayContaining(REPOSITORY_SOURCE_EDIT_TOOL_IDS),
+    );
     expect(rolesContainingAny(REPOSITORY_SOURCE_EDIT_TOOL_IDS)).toEqual(["coder"]);
   });
 
   test("checks subset semantics against toolIds only", () => {
     expect(isRoleToolIdSubset("coordinator", EXPECTED_TOOL_IDS.coordinator)).toBe(true);
     expect(isRoleToolIdAllowed("worker", "artifact.write")).toBe(true);
-    expect(isRoleToolIdSubset("reviewer", ["validator.run", "harness.memory.propose"]))
-      .toBe(true);
+    expect(isRoleToolIdSubset("reviewer", ["validator.run", "harness.memory.propose"])).toBe(true);
     expect(isRoleToolIdSubset("reviewer", ["memory"])).toBe(false);
-    expect(isRoleToolIdSubset("reviewer", ["harness.memory.propose is draft/proposal-only."]))
-      .toBe(false);
+    expect(isRoleToolIdSubset("reviewer", ["harness.memory.propose is draft/proposal-only."])).toBe(
+      false,
+    );
   });
 
   test("keeps proposal memory adapter explicit and excludes raw harness memory", () => {
@@ -145,7 +148,7 @@ describe("canonical role to tool id map", () => {
       "coordinator",
       "worker",
       "coder",
-      "reviewer"
+      "reviewer",
     ]);
     expect(isRoleToolIdAllowed("reviewer", "harness.memory.propose")).toBe(true);
     expect(isRoleToolIdAllowed("reviewer", "memory")).toBe(false);
@@ -155,7 +158,7 @@ describe("canonical role to tool id map", () => {
 
 function rolesContainingAny(toolIds: readonly string[]): CanonicalHarnessRole[] {
   return EXPECTED_CANONICAL_ROLES.filter(
-    (role) => intersect(getRoleToolIds(role), toolIds).length > 0
+    (role) => intersect(getRoleToolIds(role), toolIds).length > 0,
   );
 }
 

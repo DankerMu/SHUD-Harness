@@ -6,7 +6,7 @@ Entry surfaces:
 - `packages/dsh-shud-*/` TypeScript plugin packages (pnpm workspace, `tsc` → `lib/`, vitest). Present: `dsh-shud-core` (8 object Zod schemas, policy-gate-core, role-tool-map). Planned per `docs/04_IMPLEMENTATION/Repository_Layout.md`: `raw-guard`, `jobs`, `tools`, `records`, `presets`.
 - `profile/shud/` dsh bundle (`package.json` + `cordis.patch.yml`): model routing, outbound channel switches, plugin mounts by file path. The product is `dsh --profile shud`; there is no app of our own.
 - `scripts/schema/` (Zod → `docs/generated/{schema,json-schema}`), `scripts/docs/` (link checker); `skills/`, `scripts/` (R/bash), `templates/` to come with M3.
-- Contract sources: `docs/adr/0004-dsh-kernel.md`, `docs/04_IMPLEMENTATION/Phased_Plan.md` (M1–M6, sole truth for gates), `docs/03_SPEC/*`, `docs/00_INDEX/CANONICAL_CONTRACTS.md`, `openspec/changes/*`.
+- Contract sources: `docs/adr/implemented/0004-dsh-kernel.md`, `docs/04_IMPLEMENTATION/Phased_Plan.md` (M1–M6, sole truth for gates), `docs/03_SPEC/*`, `docs/00_INDEX/CANONICAL_CONTRACTS.md`, `openspec/changes/*`.
 - Host: dsh checkout `../deepseek-harness` pinned `dsh-v0.2.1-rc.2` — runtime and type source only, never modified, never imported from loop internals. Spike evidence: `../dsh-spike/runs/1.1–1.5`.
 - Read-only submodules: `SHUD/`, `rSHUD/`, `AutoSHUD/`.
 
@@ -28,27 +28,27 @@ Risk axes:
 - Ported >1000-line files (`policy-gate-core.ts` + test) are guard-excluded; new code must not hide behind that exclusion.
 
 Typical evidence:
-- `pnpm run check` (typecheck + vitest + `schema:check` + docs link check); focused `pnpm vitest run <file>`.
+- `pnpm run check` (typecheck, lint, format, coverage, dup, deadcode, naming, schema drift, docs gate); focused `pnpm vitest run <file>`; `pnpm run test-guardrails` after touching any gate.
 - `openspec validate <change> --strict --no-interactive`; `git diff --check`; `git status --short` clean of `lib/`, `node_modules/`, workspace output.
 - dsh boot: `node ../deepseek-harness/apps/cli/lib/bin.js --patch profile/shud/cordis.patch.yml headless --dump-config` from a workspace dir with `DSH_HOME` set; session log (`session.v4.jsonl.zstd`) inspection for `approval/asked|decided`, `job/settled`, `tool/result`.
 - Spike probes as regression after any dsh upgrade: `../dsh-spike/runs/*/NOTES.md` procedures.
 
 Command entry points:
 - Toolchain: Node ≥ 24 (runs `.ts` directly for `scripts/schema/generate.ts`), `pnpm@11.28.5` (brew). `ALL_PROXY` must be unset for dsh/gh runs on this machine.
-- Default local/CI check: `pnpm run check`; parts: `pnpm run typecheck`, `pnpm run test`, `pnpm run schema:check`, `pnpm run docs:links`; build: `pnpm run build`.
+- Default local/CI check: `pnpm run check`; full command surface and levels in `AGENTS.md` ## Verification Matrix; build: `pnpm run build`.
 - Schema regeneration after a Zod change: `pnpm run schema:generate` then commit `docs/generated/`.
 - Host run: `DSH_HOME=<home> node ../deepseek-harness/apps/cli/lib/bin.js --patch <overlay> headless|web --no-open --port <p>`; `pnpm dsh` inside the dsh repo fixes cwd to that repo, so use the bin path from the workspace dir.
 - Browser probes: `agent-browser` with `--executable-path` to cached chromium 1243; avoid `wait --load networkidle` (long-lived WS connection hangs it).
 - Fixture/hygiene: `openspec validate <change> --strict --no-interactive`; `git diff --check`.
 
 Verification matrix:
-- Schema surface (`packages/dsh-shud-core/src/schemas`) → focused vitest + `schema:check` → zero drift, positive/negative parse cases named.
-- Governance surface (policy-gate-core, role-tool-map, wording rules) → focused vitest + `typecheck` → decision table rows asserted, reserved rule ids intact.
-- Plugin seam surface (`tools/pre-execute`, `ctx.jobs`, `ctx.storage`, presets) → unit tests with a fake `ctx` + one headless dsh boot with the profile patch + session-log assertions → seam contract honoured, no loop internals imported.
-- Job durability surface → SIGTERM and SIGKILL restart cases against a real `./shud ccw` (END=30 tiny fixture) → `job/settled` persisted, RunRecord produced.
-- Profile/config surface → `--dump-config` shows routed model, disabled channels, mounted plugins → boot succeeds without overlays.
-- Docs/spec surface → `scripts/docs/check_links.sh` + Zero/Hono/WebSocket grep outside `99_ARCHIVE` → 0 broken links, only historical mentions.
-- Dependency/CI surface → `pnpm install --frozen-lockfile` + CI green → lockfile unchanged, no dsh pulled from npm (`autoInstallPeers: false`).
+- Canonical home is `AGENTS.md` ## Verification Matrix (mirrored in `constraints.yaml` verification); this profile only adds the per-surface evidence expectations below.
+- Schema surface → focused vitest + schema drift → zero drift, positive/negative parse cases named.
+- Governance surface → focused vitest + typecheck → decision table rows asserted, reserved rule ids intact.
+- Plugin seam surface → unit tests with a fake `ctx` + one headless dsh boot with the profile patch + session-log assertions.
+- Job durability surface → SIGTERM and SIGKILL restart cases against a real ccw tiny run → `job/settled` persisted, RunRecord produced.
+- Profile/config surface → `pnpm run profile:smoke` (routed model, disabled channel, no secret material).
+- Docs/spec surface → `pnpm run docs:check` → 0 broken links/path claims, generated instructions and decision records in sync.
 
 Domain risk packs:
 - Scientific governance / PI gate / evidence lineage.

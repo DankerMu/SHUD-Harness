@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+# Installed by `pnpm run prepare` (core.hooksPath=.git-hooks). Bypassing with --no-verify is forbidden
+# (AGENTS.md ## Agent Operating Rules) and blocked by the agent-runtime no-bypass hook.
+set -eu
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+echo "pre-commit: naming guard"
+sh .git-hooks/check-naming.sh
+echo "pre-commit: lint-staged (eslint + prettier on staged files)"
+pnpm exec lint-staged
+echo "pre-commit: gitleaks (staged)"
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --pre-commit --staged --no-banner --redact
+else
+  echo "pre-commit: gitleaks is not installed (brew install gitleaks); secrets gate cannot run — refusing to commit" >&2
+  exit 1
+fi

@@ -1,0 +1,188 @@
+# constraints.yaml — Machine-readable engineering constraints (eng-init, SHUD-Harness)
+# THIS FILE IS THE CANONICAL SOURCE for thresholds, patterns and the verification mirror.
+# Scripts read it at runtime: .git-hooks/check-naming.sh, scripts/guardrails/pr-size.sh,
+# scripts/docs/check_paths.py. Config files that cannot read YAML (eslint.config.mjs, .jscpd.json,
+# vitest.config.ts) carry the same number with a comment pointing here — change here first.
+
+strictness_profile:
+  schema_version: "3.6.1"
+  level: "L3"
+  chosen_by_user: true
+  downgrades: [] # none; project-specific review-only rows are listed under review_only below
+
+generated_sections:
+  preserve_unknown_sections: true
+  agents_md:
+    - title: "Code Canonicality"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Project Identity"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Stack & Versions"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Directory Map"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Development Workflow"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Verification Matrix"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Runtime Lifecycle"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Conventions"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Code Review Self-Check"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Architecture Discipline"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Critical Paths"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Observability"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Agent Operating Rules"
+      owner: "eng-init"
+      template_version: "3.6.1"
+    - title: "Enforcement Index"
+      owner: "eng-init"
+      template_version: "3.6.1"
+  # User-owned sections (never regenerated): Agent Roles, Governance Rules, 已装能力,
+  # 项目本地适配, 反熵约定, Observable Completion, Codex Notes / Claude Code Notes.
+
+command_entrypoint: "pnpm run check"
+
+thresholds:
+  max_file_lines: 1000 # eslint max-lines (block); .large-file-guard.json uses the same number
+  duplication_percent_max: 3 # .jscpd.json threshold (block); measured 0.57% at init
+  coverage_percent_min: 80 # vitest.config.ts thresholds (block); measured 90.9% lines at init
+  pr_diff_lines_max: 400 # scripts/guardrails/pr-size.sh (CI block, label size-exempt logged)
+  agents_md_max_lines: 320 # rendered AGENTS.md budget (eng-init checker)
+
+naming:
+  forbidden_pattern: '(_v[0-9]+|_new|_old|_backup|_temp|_copy|_final)(\.|/|$)'
+  exempt_prefixes:
+    - "docs/99_ARCHIVE/"
+    - "SHUD/"
+    - "rSHUD/"
+    - "AutoSHUD/"
+    - ".agents/"
+    - ".codex/"
+    - ".claude/"
+
+pr_size:
+  exclude_paths:
+    - "pnpm-lock.yaml"
+    - "docs/generated/**"
+    - "AGENTS.md"
+    - "CLAUDE.md"
+
+doc_gate:
+  path_claim_files:
+    - "AGENTS.md"
+    - "CONTEXT.md"
+    - "openspec/project-profile.md"
+
+no_bypass: # scripts/guardrails/no-bypass.sh (wired in .claude/settings.json and .codex/hooks.json)
+  - "skipping the commit hooks with the no-verify flag"
+  - "core.hooksPath other than .git-hooks"
+  - "force-push to main"
+  - "delete tag archive/zero-v0.8.3"
+  - "write-ish command or edit touching ../deepseek-harness"
+  - "write-ish command or edit touching data/raw"
+  - "session-log-deepseek disabled: false"
+  - "hand-edit AGENTS.md / CLAUDE.md / docs/generated/ / docs/adr/archived/"
+
+# Q1.4b legacy disposition: freeze baseline + ratchet per milestone. Removal trigger is the target.
+baseline:
+  max_file_lines:
+    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.ts"
+      lines: 1482
+      target: "M3 ≤1000 (split by rule family, same batch as StackLock llm three fields)"
+    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.test.ts"
+      lines: 1675
+      target: "M3 follows the source split"
+    - path: "scripts/schema/generate.ts"
+      lines: 1304
+      target: "M2 ≤1000 (extract renderers)"
+  eslint_type_safety:
+    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.ts"
+      rules: ["@typescript-eslint/no-unsafe-assignment"]
+      findings: 2
+      target: "M3 split"
+    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.test.ts"
+      rules: ["@typescript-eslint/no-unsafe-return"]
+      findings: 2
+      target: "M3 split"
+    - path: "scripts/schema/generate.ts"
+      rules: ["@typescript-eslint/no-base-to-string", "preserve-caught-error"]
+      findings: 3
+      target: "M2 split"
+  knip_duplicates:
+    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.ts"
+      symbol: "isReservedAuthorityPolicyEvidenceId (alias of isReservedAuthorityPolicyErrorId)"
+      rule_level: "warn"
+      target: "M3: drop the alias, set knip rules.duplicates to error"
+
+review_only: # project invariants without mechanical enforcement yet; each has a trigger
+  - rule: "no import of dsh loop internals — only documented seams"
+    trigger: "M1 first plugin importing dsh → extend eslint no-restricted-imports with the seam allowlist"
+  - rule: "docs change with code (Q6.11 ②)"
+    trigger: "PR template checkbox + reviewer; user chose review-only"
+  - rule: "dsh upgrades only via chore(dsh-upgrade) issue"
+    trigger: "process; no-bypass hook blocks direct writes to ../deepseek-harness"
+  - rule: "runtime invariant companions beyond tests (reviewer checklist)"
+    trigger: "M2 ctx.jobs plugin → invariant tests enter the matrix"
+  - rule: "scientific wording rules in prose"
+    trigger: "M3 EvidenceReport language guard → tested constants"
+
+# Mirror of AGENTS.md ## Verification Matrix — harnesses execute from here.
+verification:
+  - surface: "everything (default local/CI gate)"
+    command: "pnpm run check"
+  - surface: "types"
+    command: "pnpm run typecheck"
+  - surface: "lint (type-aware eslint, max-lines, import bans)"
+    command: "pnpm run lint"
+  - surface: "format"
+    command: "pnpm run format:check"
+  - surface: "unit tests"
+    command: "pnpm run test"
+  - surface: "unit tests + coverage floor"
+    command: "pnpm run test:coverage"
+  - surface: "duplication"
+    command: "pnpm run dup"
+  - surface: "dead code / unused deps"
+    command: "pnpm run deadcode"
+  - surface: "naming guard"
+    command: "pnpm run naming:check"
+  - surface: "schema drift (Zod → docs/generated)"
+    command: "pnpm run schema:check"
+  - surface: "docs gate (links, path claims, generated instructions, decision records)"
+    command: "pnpm run docs:check"
+  - surface: "secrets"
+    command: "pnpm run security:secrets"
+  - surface: "SAST (CI; local needs semgrep)"
+    command: "pnpm run security:sast"
+  - surface: "PR size"
+    command: "pnpm run pr:size"
+  - surface: "dsh profile boot (local only)"
+    command: "pnpm run profile:smoke"
+  - surface: "SHUD ccw tiny run (local only)"
+    command: "pnpm run shud:tiny"
+  - surface: "guardrail self-test"
+    command: "pnpm run test-guardrails"
+
+readiness_gaps:
+  - "CI cannot run dsh or SHUD: profile:smoke and shud:tiny are local-only block gates"
+  - "eng-init rendered-harness checker lives in gitignored .claude/skills; repo-side equivalents are instructions:check + docs:paths"
+  - "semgrep not installed locally; CI job sast runs it"
+  - "6 installed skill projections hard-code docs/adr/NNNN-slug.md; adr:check rejects root-level records"

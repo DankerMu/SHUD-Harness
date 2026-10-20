@@ -4,7 +4,7 @@ status: frozen
 
 # 轻量 Memory 与 Skills
 
-> **MVP 不做记忆**（[ADR-0004 K11](../adr/0004-dsh-kernel.md)）：本文 Memory 部分为首任务跑通后的评估输入，MVP 不实现。
+> **MVP 不做记忆**（[ADR-0004 K11](../adr/implemented/0004-dsh-kernel.md)）：本文 Memory 部分为首任务跑通后的评估输入，MVP 不实现。
 
 ## 1. Memory 不再走重审批
 

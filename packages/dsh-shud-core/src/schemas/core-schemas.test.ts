@@ -10,7 +10,7 @@ import {
   IdempotencyRecordSchema,
   LockRecordSchema,
   StackLockSchema,
-  TaskCardSchema
+  TaskCardSchema,
 } from "./index.ts";
 
 const STACK_ID = "STACK-11111111-1111-4111-8111-111111111111";
@@ -35,7 +35,7 @@ describe("core Zod schemas", () => {
   test("TaskCard rejects status values outside the coarse state machine", () => {
     const invalid = TaskCardSchema.safeParse({
       ...validTaskCard(),
-      status: "revised"
+      status: "revised",
     });
 
     expect(invalid.success).toBe(false);
@@ -51,7 +51,7 @@ describe("core Zod schemas", () => {
 
     const llmGenerated = ArtifactSchema.safeParse({
       ...validArtifact(),
-      llm_generated: true
+      llm_generated: true,
     });
     expect(llmGenerated.success).toBe(true);
     if (llmGenerated.success) {
@@ -60,7 +60,7 @@ describe("core Zod schemas", () => {
 
     const explicitlyNotLlmGenerated = ArtifactSchema.safeParse({
       ...validArtifact(),
-      llm_generated: false
+      llm_generated: false,
     });
     expect(explicitlyNotLlmGenerated.success).toBe(true);
     if (explicitlyNotLlmGenerated.success) {
@@ -78,13 +78,13 @@ describe("core Zod schemas", () => {
         allowImportingTsExtensions: true,
         noEmit: true,
         skipLibCheck: true,
-        target: ts.ScriptTarget.ES2022
-      }
+        target: ts.ScriptTarget.ES2022,
+      },
     });
     expect(
-      ts.getPreEmitDiagnostics(program).map((diagnostic) =>
-        ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")
-      )
+      ts
+        .getPreEmitDiagnostics(program)
+        .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")),
     ).toEqual([]);
 
     const source = program.getSourceFile(barrelPath);
@@ -95,7 +95,7 @@ describe("core Zod schemas", () => {
     const exportsByName = new Map(
       moduleSymbol
         ? checker.getExportsOfModule(moduleSymbol).map((symbol) => [symbol.getName(), symbol])
-        : []
+        : [],
     );
 
     for (const inputTypeName of ["Artifact", "ArtifactInput"] as const) {
@@ -106,7 +106,7 @@ describe("core Zod schemas", () => {
         : undefined;
       const marker = inputType?.getProperty("llm_generated");
       expect(marker).toBeDefined();
-      expect(Boolean(marker && (marker.flags & ts.SymbolFlags.Optional))).toBe(true);
+      expect(Boolean(marker && marker.flags & ts.SymbolFlags.Optional)).toBe(true);
     }
 
     const storedTypeSymbol = exportsByName.get("StoredArtifact");
@@ -116,17 +116,17 @@ describe("core Zod schemas", () => {
       : undefined;
     const storedMarker = storedType?.getProperty("llm_generated");
     expect(storedMarker).toBeDefined();
-    expect(Boolean(storedMarker && (storedMarker.flags & ts.SymbolFlags.Optional))).toBe(false);
+    expect(Boolean(storedMarker && storedMarker.flags & ts.SymbolFlags.Optional)).toBe(false);
     expect(
       storedMarker && source
         ? checker.typeToString(checker.getTypeOfSymbolAtLocation(storedMarker, source))
-        : undefined
+        : undefined,
     ).toBe("boolean");
 
     for (const manifestTypeName of [
       "ArtifactManifest",
       "ArtifactManifestInput",
-      "StoredArtifactManifest"
+      "StoredArtifactManifest",
     ] as const) {
       const manifestTypeSymbol = exportsByName.get(manifestTypeName);
       expect(manifestTypeSymbol).toBeDefined();
@@ -139,22 +139,22 @@ describe("core Zod schemas", () => {
         "task_id",
         "artifacts",
         "generated_at",
-        "generator"
+        "generator",
       ] as const) {
         const field = manifestType?.getProperty(requiredField);
         expect(field).toBeDefined();
-        expect(Boolean(field && (field.flags & ts.SymbolFlags.Optional))).toBe(false);
+        expect(Boolean(field && field.flags & ts.SymbolFlags.Optional)).toBe(false);
       }
 
       for (const optionalField of [
         "run_id",
         "report_id",
         "superseded_by",
-        "manifest_sha256"
+        "manifest_sha256",
       ] as const) {
         const field = manifestType?.getProperty(optionalField);
         expect(field).toBeDefined();
-        expect(Boolean(field && (field.flags & ts.SymbolFlags.Optional))).toBe(true);
+        expect(Boolean(field && field.flags & ts.SymbolFlags.Optional)).toBe(true);
       }
     }
   });
@@ -166,13 +166,13 @@ describe("core Zod schemas", () => {
 
     const unknownField = ArtifactSchema.safeParse({
       ...validArtifact(),
-      legacy_evidence_flag: true
+      legacy_evidence_flag: true,
     });
     expect(unknownField.success).toBe(false);
 
     const nonBooleanMarker = ArtifactSchema.safeParse({
       ...validArtifact(),
-      llm_generated: "false"
+      llm_generated: "false",
     });
     expect(nonBooleanMarker.success).toBe(false);
     expect(issuePaths(nonBooleanMarker)).toContain("llm_generated");
@@ -185,7 +185,7 @@ describe("core Zod schemas", () => {
       expect(Object.keys(parsed.data.repos)).toEqual(["SHUD", "rSHUD", "AutoSHUD"]);
       expect(parsed.data.runtime.r_packages_lock).toEqual({
         path: "renv.lock",
-        sha256: "sha256:renv-lock"
+        sha256: "sha256:renv-lock",
       });
       expect(parsed.data.llm.base_url).toBe("https://models.example/v1");
     }
@@ -194,8 +194,8 @@ describe("core Zod schemas", () => {
       ...validStackLock(),
       runtime: {
         ...validStackLock().runtime,
-        r_packages_lock: null
-      }
+        r_packages_lock: null,
+      },
     });
     expect(withoutRPackagesLock.success).toBe(true);
   });
@@ -203,7 +203,7 @@ describe("core Zod schemas", () => {
   test("StackLock requires llm.base_url and every canonical repository", () => {
     const withoutBaseUrl = StackLockSchema.safeParse({
       ...validStackLock(),
-      llm: removeKey(validStackLock().llm, "base_url")
+      llm: removeKey(validStackLock().llm, "base_url"),
     });
     expect(withoutBaseUrl.success).toBe(false);
     expect(issuePaths(withoutBaseUrl)).toContain("llm.base_url");
@@ -214,8 +214,8 @@ describe("core Zod schemas", () => {
       ...validStackLock(),
       runtime: {
         ...validStackLock().runtime,
-        r_packages_lock: "renv.lock"
-      }
+        r_packages_lock: "renv.lock",
+      },
     });
 
     expect(legacyRPackagesLock.success).toBe(false);
@@ -227,26 +227,26 @@ describe("core Zod schemas", () => {
       ...validStackLock(),
       runtime: {
         ...validStackLock().runtime,
-        container: "docker"
-      }
+        container: "docker",
+      },
     });
     expect(runtimeContainer.success).toBe(false);
 
     const limits = StackLockSchema.safeParse({
       ...validStackLock(),
-      limits: { max_wall_minutes: 30 }
+      limits: { max_wall_minutes: 30 },
     });
     expect(limits.success).toBe(false);
 
     const policyVersion = StackLockSchema.safeParse({
       ...validStackLock(),
-      policy_version: "legacy"
+      policy_version: "legacy",
     });
     expect(policyVersion.success).toBe(false);
 
     const degraded = StackLockSchema.safeParse({
       ...validStackLock(),
-      degraded: ["renv_lock_missing"]
+      degraded: ["renv_lock_missing"],
     });
     expect(degraded.success).toBe(false);
   });
@@ -254,7 +254,7 @@ describe("core Zod schemas", () => {
   test("StackLock rejects ids outside STACK-<uuid>", () => {
     const invalid = StackLockSchema.safeParse({
       ...validStackLock(),
-      stack_id: "STACK-0001"
+      stack_id: "STACK-0001",
     });
 
     expect(invalid.success).toBe(false);
@@ -268,13 +268,13 @@ describe("core Zod schemas", () => {
       expect(parsed.data.basin).toBe("cache_creek");
       expect(parsed.data.event_window).toEqual({
         start: "2008-01-01",
-        end: "2008-02-28"
+        end: "2008-02-28",
       });
       expect(parsed.data.sources.observations[0]).toEqual({
         variable: "discharge",
         station: "USGS-11451100",
         path: "data/raw/ccw/obs_q.csv",
-        sha256: "sha256:observations"
+        sha256: "sha256:observations",
       });
     }
   });
@@ -282,14 +282,12 @@ describe("core Zod schemas", () => {
   test("DataProvenance rejects the deprecated event window array and missing basin", () => {
     const arrayWindow = DataProvenanceSchema.safeParse({
       ...validDataProvenance(),
-      event_window: ["2008-01-01", "2008-02-28"]
+      event_window: ["2008-01-01", "2008-02-28"],
     });
     expect(arrayWindow.success).toBe(false);
     expect(issuePaths(arrayWindow)).toContain("event_window");
 
-    const missingBasin = DataProvenanceSchema.safeParse(
-      removeKey(validDataProvenance(), "basin")
-    );
+    const missingBasin = DataProvenanceSchema.safeParse(removeKey(validDataProvenance(), "basin"));
     expect(missingBasin.success).toBe(false);
     expect(issuePaths(missingBasin)).toContain("basin");
   });
@@ -300,9 +298,9 @@ describe("core Zod schemas", () => {
       sources: {
         ...validDataProvenance().sources,
         forcing: {
-          path: "data/raw/ccw/forcing/"
-        }
-      }
+          path: "data/raw/ccw/forcing/",
+        },
+      },
     });
     expect(sourceWithoutHash.success).toBe(false);
     expect(issuePaths(sourceWithoutHash)).toContain("sources.forcing.sha256");
@@ -311,10 +309,8 @@ describe("core Zod schemas", () => {
       ...validDataProvenance(),
       sources: {
         ...validDataProvenance().sources,
-        observations: [
-          removeKey(validDataProvenance().sources.observations[0]!, "station")
-        ]
-      }
+        observations: [removeKey(validDataProvenance().sources.observations[0], "station")],
+      },
     });
     expect(observationWithoutStation.success).toBe(false);
     expect(issuePaths(observationWithoutStation)).toContain("sources.observations.0.station");
@@ -323,7 +319,7 @@ describe("core Zod schemas", () => {
   test("DataProvenance enforces DATA-<uuid> and strict nested records", () => {
     const invalidId = DataProvenanceSchema.safeParse({
       ...validDataProvenance(),
-      data_id: "DATA-0001"
+      data_id: "DATA-0001",
     });
     expect(invalidId.success).toBe(false);
     expect(issuePaths(invalidId)).toContain("data_id");
@@ -334,9 +330,9 @@ describe("core Zod schemas", () => {
         ...validDataProvenance().sources,
         terrain: {
           ...validDataProvenance().sources.terrain,
-          checksum: "legacy"
-        }
-      }
+          checksum: "legacy",
+        },
+      },
     });
     expect(unexpectedSourceField.success).toBe(false);
   });
@@ -347,8 +343,8 @@ describe("core Zod schemas", () => {
       artifacts: [
         validArtifact(),
         { ...validArtifact(), artifact_id: "ART-0002", llm_generated: true },
-        { ...validArtifact(), artifact_id: "ART-0003", llm_generated: false }
-      ]
+        { ...validArtifact(), artifact_id: "ART-0003", llm_generated: false },
+      ],
     });
     expect(parsed.success).toBe(true);
     if (parsed.success) {
@@ -366,8 +362,8 @@ describe("core Zod schemas", () => {
         "run_id",
         "report_id",
         "superseded_by",
-        "manifest_sha256"
-      ])
+        "manifest_sha256",
+      ]),
     );
 
     expect(parsed.success).toBe(true);
@@ -382,7 +378,7 @@ describe("core Zod schemas", () => {
 
   test("ArtifactManifest requires generator and full Artifact entries", () => {
     const missingGenerator = ArtifactManifestSchema.safeParse(
-      removeKey(validArtifactManifest(), "generator")
+      removeKey(validArtifactManifest(), "generator"),
     );
     expect(missingGenerator.success).toBe(false);
     expect(issuePaths(missingGenerator)).toContain("generator");
@@ -393,9 +389,9 @@ describe("core Zod schemas", () => {
         {
           artifact_id: "ART-0001",
           type: "report_markdown",
-          path: "reports/TASK-0001_report.md"
-        }
-      ]
+          path: "reports/TASK-0001_report.md",
+        },
+      ],
     });
     expect(compactArtifact.success).toBe(false);
     expect(issuePaths(compactArtifact)).toContain("artifacts.0.task_id");
@@ -404,21 +400,21 @@ describe("core Zod schemas", () => {
   test("ArtifactManifest enforces MANIFEST-<uuid> references and strict fields", () => {
     const invalidId = ArtifactManifestSchema.safeParse({
       ...validArtifactManifest(),
-      manifest_id: "MANIFEST-0001"
+      manifest_id: "MANIFEST-0001",
     });
     expect(invalidId.success).toBe(false);
     expect(issuePaths(invalidId)).toContain("manifest_id");
 
     const invalidSuccessor = ArtifactManifestSchema.safeParse({
       ...validArtifactManifest(),
-      superseded_by: "MANIFEST-next"
+      superseded_by: "MANIFEST-next",
     });
     expect(invalidSuccessor.success).toBe(false);
     expect(issuePaths(invalidSuccessor)).toContain("superseded_by");
 
     const unknownField = ArtifactManifestSchema.safeParse({
       ...validArtifactManifest(),
-      artifact_ids: ["ART-0001"]
+      artifact_ids: ["ART-0001"],
     });
     expect(unknownField.success).toBe(false);
   });
@@ -431,8 +427,8 @@ describe("core Zod schemas", () => {
       ...validErrorRecord(),
       remediation: {
         next_action: "fix_and_retry",
-        hint: "Retry after fixing the workspace path."
-      }
+        hint: "Retry after fixing the workspace path.",
+      },
     });
     expect(withoutRef.success).toBe(true);
 
@@ -441,8 +437,8 @@ describe("core Zod schemas", () => {
       remediation: {
         next_action: "try_anyway",
         hint: "Remove the unsupported tool.",
-        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
-      }
+        ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定",
+      },
     });
     expect(invalid.success).toBe(false);
     expect(issuePaths(invalid)).toContain("remediation.next_action");
@@ -453,14 +449,14 @@ describe("core Zod schemas", () => {
     expect(parsed.success).toBe(true);
 
     const missingDigest = IdempotencyRecordSchema.safeParse(
-      removeKey(validIdempotencyRecord(), "request_digest")
+      removeKey(validIdempotencyRecord(), "request_digest"),
     );
     expect(missingDigest.success).toBe(false);
     expect(issuePaths(missingDigest)).toContain("request_digest");
 
     const invalidStatus = IdempotencyRecordSchema.safeParse({
       ...validIdempotencyRecord(),
-      status: "running"
+      status: "running",
     });
     expect(invalidStatus.success).toBe(false);
     expect(issuePaths(invalidStatus)).toContain("status");
@@ -476,7 +472,7 @@ describe("core Zod schemas", () => {
 
     const invalidStatus = LockRecordSchema.safeParse({
       ...validLockRecord(),
-      status: "open"
+      status: "open",
     });
     expect(invalidStatus.success).toBe(false);
     expect(issuePaths(invalidStatus)).toContain("status");
@@ -498,12 +494,12 @@ function validTaskCard() {
       mode: "normal",
       advisory_usd: 1,
       advisory_model_calls: 12,
-      reviewer_enabled: false
+      reviewer_enabled: false,
     },
     linked_jobs: [],
     linked_reports: [],
     created_at: "2026-04-25T10:00:00Z",
-    updated_at: "2026-04-25T10:00:00Z"
+    updated_at: "2026-04-25T10:00:00Z",
   };
 }
 
@@ -519,7 +515,7 @@ function validArtifact() {
     evidence_usable: false,
     retention_class: "debug",
     source_refs: [],
-    redaction_status: "not_needed"
+    redaction_status: "not_needed",
   };
 }
 
@@ -529,44 +525,44 @@ function validStackLock() {
     repos: {
       SHUD: {
         commit: "9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb",
-        branch: "master"
+        branch: "master",
       },
       rSHUD: {
         commit: "d162db3d162db3d162db3d162db3d162db3d162d",
-        branch: "master"
+        branch: "master",
       },
       AutoSHUD: {
         commit: "1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe",
-        branch: "master"
-      }
+        branch: "master",
+      },
     },
     runtime: {
       os: "Darwin 24.6.0",
       r_version: "4.4.1",
       r_packages_lock: {
         path: "renv.lock",
-        sha256: "sha256:renv-lock"
+        sha256: "sha256:renv-lock",
       },
       python_version: "3.12.4",
       sundials_version: "6.0.0",
       gcc_version: "14.1.0",
-      gdal_version: "3.9.0"
+      gdal_version: "3.9.0",
     },
     harness: {
       version: "0.8.0",
       cli_version: "unknown",
       prompt_pack: "promptpack-unset",
-      skills_version: "skills-unset"
+      skills_version: "skills-unset",
     },
     llm: {
       provider: "openai_compatible",
       model_id: "glm-5.2",
       base_url: "https://models.example/v1",
       params_digest: "sha256:params",
-      prompt_pack_digest: "sha256:prompt-pack"
+      prompt_pack_digest: "sha256:prompt-pack",
     },
     fingerprint: "sha256:stack-fingerprint",
-    created_at: "2026-07-23T12:00:00Z"
+    created_at: "2026-07-23T12:00:00Z",
   };
 }
 
@@ -576,39 +572,39 @@ function validDataProvenance() {
     basin: "cache_creek",
     event_window: {
       start: "2008-01-01",
-      end: "2008-02-28"
+      end: "2008-02-28",
     },
     sources: {
       terrain: {
         path: "data/raw/ccw/dem.tif",
-        sha256: "sha256:terrain"
+        sha256: "sha256:terrain",
       },
       mesh: {
         path: "repos/SHUD/input/ccw/ccw.sp.mesh",
-        sha256: "sha256:mesh"
+        sha256: "sha256:mesh",
       },
       forcing: {
         path: "data/raw/ccw/forcing/",
-        sha256: "sha256:forcing"
+        sha256: "sha256:forcing",
       },
       observations: [
         {
           variable: "discharge",
           station: "USGS-11451100",
           path: "data/raw/ccw/obs_q.csv",
-          sha256: "sha256:observations"
-        }
-      ]
+          sha256: "sha256:observations",
+        },
+      ],
     },
     preprocess: {
       script: "scripts/prep_ccw.R",
       params: {
         interpolation: "IDW",
-        resolution: "200m"
+        resolution: "200m",
       },
-      output_sha256: "sha256:preprocess-output"
+      output_sha256: "sha256:preprocess-output",
     },
-    uncertainty_notes: "降水空间插值可能低估高海拔降水量"
+    uncertainty_notes: "降水空间插值可能低估高海拔降水量",
   };
 }
 
@@ -622,7 +618,7 @@ function validArtifactManifest() {
     artifacts: [validArtifact()],
     generated_at: "2026-07-23T12:00:00Z",
     generator: "shud-harness",
-    manifest_sha256: "sha256:manifest"
+    manifest_sha256: "sha256:manifest",
   };
 }
 
@@ -640,9 +636,9 @@ function validErrorRecord() {
     remediation: {
       next_action: "adjust_scope",
       hint: "Use a governed workspace path instead of data/raw.",
-      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定",
     },
-    created_at: "2026-04-25T10:00:00Z"
+    created_at: "2026-04-25T10:00:00Z",
   };
 }
 
@@ -654,7 +650,7 @@ function validIdempotencyRecord() {
     status: "completed",
     result_ref: "TASK-0001",
     created_at: "2026-04-25T10:00:00Z",
-    updated_at: "2026-04-25T10:01:00Z"
+    updated_at: "2026-04-25T10:01:00Z",
   };
 }
 
@@ -667,13 +663,13 @@ function validLockRecord() {
     acquired_at: "2026-04-25T10:00:00Z",
     expires_at: "2026-04-25T10:01:00Z",
     status: "held",
-    reason: "task snapshot write"
+    reason: "task snapshot write",
   };
 }
 
 function removeKey<T extends Record<string, unknown>, K extends keyof T>(
   object: T,
-  key: K
+  key: K,
 ): Omit<T, K> {
   const clone = { ...object };
   delete clone[key];
@@ -682,7 +678,7 @@ function removeKey<T extends Record<string, unknown>, K extends keyof T>(
 
 function removeKeys<T extends Record<string, unknown>, K extends keyof T>(
   object: T,
-  keys: readonly K[]
+  keys: readonly K[],
 ): Omit<T, K> {
   const clone = { ...object };
   for (const key of keys) {
@@ -691,12 +687,16 @@ function removeKeys<T extends Record<string, unknown>, K extends keyof T>(
   return clone;
 }
 
-function issuePaths(result: {
-  success: true;
-} | {
-  success: false;
-  error: { issues: Array<{ path: PropertyKey[] }> };
-}): string[] {
+function issuePaths(
+  result:
+    | {
+        success: true;
+      }
+    | {
+        success: false;
+        error: { issues: Array<{ path: PropertyKey[] }> };
+      },
+): string[] {
   if (result.success) return [];
   return result.error.issues.map((issue) => issue.path.join("."));
 }

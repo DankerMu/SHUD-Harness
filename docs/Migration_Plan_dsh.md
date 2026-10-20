@@ -94,7 +94,7 @@ spike 放在仓库外，不开 openspec change / issue / PR。每项记录：行
 
 | # | 交付物 | 负责 |
 |---|---|---|
-| 3.1 | ADR-0004：内核 = dsh，取代 ADR-0001 基座前提与 ADR-0002 D3/D5/D9；含 K1–K15 | agent 起草，PI 批 | ✅ 草稿 `docs/adr/0004-dsh-kernel.md`，待 PI 批 |
+| 3.1 | ADR-0004：内核 = dsh，取代 ADR-0001 基座前提与 ADR-0002 D3/D5/D9；含 K1–K15 | agent 起草，PI 批 | ✅ 草稿 `docs/adr/implemented/0004-dsh-kernel.md`，待 PI 批 |
 | 3.2 | Phased_Plan v2（一页） | agent | ✅ M1–M6 重切，首任务锚定 |
 | 3.3 | Repository_Layout v2（profile / bundle / `dsh-shud-*`） | agent | ✅ |
 | 3.4 | 从 `instructions/agents/` 重新生成 CLAUDE.md / AGENTS.md | agent | ✅ shared.md 改后按原 header 拼接再生成 |
@@ -129,4 +129,5 @@ spike 放在仓库外，不开 openspec change / issue / PR。每项记录：行
 - 2026-10-20 PI 批准 push：main 7 个提交推到 origin（`4be2ea89..9f61792a`），首个 pnpm 版 CI run 39444257050 success。spec 清账 issue = #200（⑦–⑬ + 顺带两项）；#132 继任 = #199。`openspec/project-profile.md` 重写为 dsh 版（subagent-workflow Phase 0.5 的输入）。 冒烟：`--profile headless --patch profile/shud/cordis.patch.yml --dump-config` 通过，配置里 `agent-default-model = deepseek-flash-guan`、`llm-deepseek.baseURL = https://www.dmxapi.cn`、`session-log-deepseek.disabled = true`。
 - 2026-10-20 #200 spec 清账：⑦–⑬ 全部执行（PR 见 issue）。顺带项：提交计数行已在前一轮改写；`.agents/skills/shud-gov/` 是项目本地 skill（无 pack 上游），其 `zero-seam-guard` 维度已失效——决定：M1 首个插件包落地时改写为 `dsh-seam-guard`（patterns `packages/dsh-shud-*/**`、`profile/**`，keywords `tools/pre-execute`、`ctx.jobs`、`ctx.approval`），在此之前不运行该维度。
 - 2026-10-20 shud-gov 降级完成：skill 目录删除（`.agents/skills/shud-gov/`，本地 `.claude` 投影同删）；保留的领域事实落为 `01_CODEBASE/SHUD_IO_Facts.md`、`01_CODEBASE/rSHUD_AutoSHUD_Quirks.md`，spec 缺口登记为 `03_SPEC/Spec_Gaps_Register.md`（去掉 K2 失效的 GAP-07/08、RACE-02），Park/Resume 审查清单按 `ctx.jobs` 重写入 `Park_Resume_Design.md` 附录 A；zero-seam-guard 维度、三个 checks 脚本与 zero-patterns.md 不搬。project-profile 风险包指向这些文件。
+- 2026-10-20 eng-init（L3 strict，bootstrap）装好 repo 控制面：`AGENTS.md`/`CLAUDE.md` 由 `instructions/agents/` 经 `pnpm run instructions:render` 生成（CI 比对）、新增 `CONTEXT.md` 与 `constraints.yaml`（阈值/基线/校验镜像单源）；闸 = eslint(type-aware, max-lines 1000) + prettier + jscpd ≤3% + knip + naming guard + gitleaks + semgrep(CI) + coverage ≥80% + PR ≤400 行（`size-exempt` label 记录）+ commitlint，本机 git 钩子 `.git-hooks/` + agent `no-bypass` hook；CI 重写为风险分层 + `all-checks-passed` 聚合，分支保护只要求该检查并要求 PR（0 approvals）；`docs/adr/` 升级四区（0001–0004 迁入 `implemented/`，`pnpm run adr:check`）；运行时自检 `profile:smoke`/`shud:tiny`（本机，CI 无 dsh/SHUD）；闸自证 `pnpm run test-guardrails`。Q1.4b 冻结基线：3 个 >1000 行文件、7 条 type-safety finding、1 个 knip 重复导出别名（棘轮 M2/M3，见 `constraints.yaml` baseline）。gitleaks 历史扫描命中 68 条，全部为已删 Zero spike fixture（`spikes/git-status-capability/contracts/fixtures/`）的 64-hex 契约 token，经 `.gitleaks.toml` 路径白名单排除——PI 确认非真实凭据；若是，历史重写另议。
 - **M1 入口**：设计输入 = `04_IMPLEMENTATION/Phased_Plan.md` §1 + `Repository_Layout.md` + `Port_List.md` + ADR-0004 K2/K9/K10；走 `stage-change-pipeline`（grill 凭证可引用 Phase 2 已拍板分支，缺口才补问）→ OpenSpec change `m1-skeleton` → issue；M1 验收门见 Phased_Plan §0 表。前置：#200 可与 M1 代码并行，不阻塞。

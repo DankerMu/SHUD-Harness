@@ -1,0 +1,8 @@
+# gitleaks config: default rules + repo allowlist. Used by .git-hooks/pre-commit, `pnpm run security:secrets`
+# and the CI `secrets` job (gitleaks-action reads this file from the repo root).
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Zero-era spike contract fixtures (deleted in the 2026-10-20 reset; history only). The flagged values are 64-hex digest-shaped `*_root_token` fixture fields of the git-status capability contract, not live credentials. Any new finding outside this path is a real failure."
+paths = ['''spikes/git-status-capability/contracts/fixtures/''']

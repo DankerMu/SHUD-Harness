@@ -1,0 +1,3 @@
+# Frozen manifest for docs/adr/archived/: path → sha256 at archive time. Verified by scripts/adr/verify.sh.
+# Append a line when archiving; never edit an existing line (that is the tamper signal).
+archived:

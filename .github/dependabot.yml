@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    ignore:
+      # dsh is the pinned host checkout (../deepseek-harness); upgrades go through chore(dsh-upgrade) issues.
+      - dependency-name: "@deepseek-ai/*"
+    groups:
+      dev-tooling:
+        dependency-type: development
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

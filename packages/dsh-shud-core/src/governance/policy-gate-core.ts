@@ -1,11 +1,7 @@
 import { types as nodeUtilTypes } from "node:util";
 import { z } from "zod";
 import { RemediationNextActionSchema } from "../schemas/index.ts";
-import {
-  getRoleToolIds,
-  isCanonicalHarnessRole,
-  isRoleToolIdAllowed
-} from "./role-tool-map.ts";
+import { getRoleToolIds, isCanonicalHarnessRole, isRoleToolIdAllowed } from "./role-tool-map.ts";
 
 export type HarnessRole = "coordinator" | "repo_explorer" | "worker" | "coder" | "reviewer";
 
@@ -13,7 +9,7 @@ export type HarnessRole = "coordinator" | "repo_explorer" | "worker" | "coder" |
 export const PolicyGateRemediationSchema = z.object({
   next_action: RemediationNextActionSchema,
   hint: z.string().min(1),
-  ref: z.string().min(1)
+  ref: z.string().min(1),
 });
 
 export type PolicyGateRemediation = z.infer<typeof PolicyGateRemediationSchema>;
@@ -41,7 +37,7 @@ export const RESERVED_AUTHORITY_POLICY_RULE_IDS = Object.freeze([
   SPAWN_PROFILE_SUBSET_RULE_ID,
   SPAWN_DEPTH_LIMIT_RULE_ID,
   SPAWN_CONCURRENCY_LIMIT_RULE_ID,
-  TOOL_PARAMETER_SCHEMA_RULE_ID
+  TOOL_PARAMETER_SCHEMA_RULE_ID,
 ] as const);
 
 export interface PolicyGateToolCall {
@@ -129,9 +125,7 @@ type PolicyGuardClassAliasRead =
   | { state: "valid"; guardClass: PolicyGuardClass; field: string };
 
 type PolicyGuardClassAliasValueRead =
-  | { state: "missing" }
-  | { state: "invalid" }
-  | { state: "valid"; guardClass: PolicyGuardClass };
+  { state: "missing" } | { state: "invalid" } | { state: "valid"; guardClass: PolicyGuardClass };
 
 type ValidatedPolicyRuleMetadata = {
   rule: PolicyRule;
@@ -156,7 +150,7 @@ export interface PolicyGateContext {
 }
 
 export const EMPTY_POLICY_GATE_CONTEXT: PolicyGateContext = {
-  rules: []
+  rules: [],
 };
 
 const KNOWN_AUTHORITY_POLICY_RULE_IDS = new Set<string>(RESERVED_AUTHORITY_POLICY_RULE_IDS);
@@ -169,7 +163,7 @@ export class PolicyGateDecisionValidationError extends Error {
 }
 
 export function isPolicyGateDecisionValidationError(
-  error: unknown
+  error: unknown,
 ): error is PolicyGateDecisionValidationError {
   return error instanceof PolicyGateDecisionValidationError;
 }
@@ -196,18 +190,18 @@ export function isReservedAuthorityPolicyErrorId(errorId: string | undefined): b
   return (
     errorId !== undefined &&
     RESERVED_AUTHORITY_POLICY_RULE_IDS.some(
-      (ruleId) => errorId === ruleId || errorId.startsWith(`${ruleId}:`)
+      (ruleId) => errorId === ruleId || errorId.startsWith(`${ruleId}:`),
     )
   );
 }
 
 export function isReservedAuthorityPolicyRuleIdPrefixImpersonation(
-  ruleId: string | undefined
+  ruleId: string | undefined,
 ): boolean {
   return (
     ruleId !== undefined &&
-    RESERVED_AUTHORITY_POLICY_RULE_IDS.some(
-      (reservedRuleId) => ruleId.startsWith(`${reservedRuleId}:`)
+    RESERVED_AUTHORITY_POLICY_RULE_IDS.some((reservedRuleId) =>
+      ruleId.startsWith(`${reservedRuleId}:`),
     )
   );
 }
@@ -216,7 +210,7 @@ export const isReservedAuthorityPolicyEvidenceId = isReservedAuthorityPolicyErro
 
 export function evaluatePolicyGate(
   call: PolicyGateToolCall,
-  context: PolicyGateContext = EMPTY_POLICY_GATE_CONTEXT
+  context: PolicyGateContext = EMPTY_POLICY_GATE_CONTEXT,
 ): PolicyGateDecision {
   const metadata = validatePolicyGateContextMetadata(context);
 
@@ -231,17 +225,13 @@ export function evaluatePolicyGate(
 
     const reason = validatePolicyRuleDenyReason(ruleId, result.reason);
     const remediation = validatePolicyGateRemediation(ruleId, result.remediation);
-    const normalizedGuardClass = normalizePolicyRuleDenyGuardClass(
-      ruleId,
-      guardClass,
-      result
-    );
+    const normalizedGuardClass = normalizePolicyRuleDenyGuardClass(ruleId, guardClass, result);
     return {
       decision: "deny",
       ruleId,
       reason,
       remediation,
-      guardClass: normalizedGuardClass
+      guardClass: normalizedGuardClass,
     };
   }
 
@@ -252,23 +242,23 @@ const POLICY_RULE_DENY_DECISION_SNAPSHOT_KEYS = Object.freeze([
   "reason",
   "remediation",
   "guardClass",
-  "guard_class"
+  "guard_class",
 ] as const);
 const POLICY_RULE_REMEDIATION_SNAPSHOT_KEYS = Object.freeze([
   "next_action",
   "hint",
-  "ref"
+  "ref",
 ] as const);
 
 function snapshotPolicyRuleDecisionResult(
   ruleId: string,
-  result: unknown
+  result: unknown,
 ): PolicyRuleDecisionSnapshot {
   if (result === null || typeof result !== "object") {
     throw invalidPolicyRuleDecisionSnapshot(ruleId, "decision");
   }
 
-  const objectResult = result as object;
+  const objectResult = result;
   if (nodeUtilTypes.isProxy(objectResult)) {
     throw invalidPolicyRuleDecisionSnapshot(ruleId, "decision");
   }
@@ -286,10 +276,7 @@ function snapshotPolicyRuleDecisionResult(
   }
 
   if (Object.prototype.hasOwnProperty.call(snapshot, "remediation")) {
-    snapshot.remediation = snapshotPolicyRuleRemediationCandidate(
-      ruleId,
-      snapshot.remediation
-    );
+    snapshot.remediation = snapshotPolicyRuleRemediationCandidate(ruleId, snapshot.remediation);
   }
 
   return snapshot;
@@ -307,7 +294,7 @@ function snapshotPolicyRuleDecisionField(
   source: object,
   snapshot: PolicyRuleDecisionSnapshot | Record<string, unknown>,
   key: string,
-  fieldPath: string
+  fieldPath: string,
 ): void {
   const descriptor = readPolicyRuleDecisionOwnDescriptor(ruleId, source, key, fieldPath);
   if (!descriptor) {
@@ -322,20 +309,14 @@ function snapshotPolicyRuleRemediationCandidate(ruleId: string, remediation: unk
     return remediation;
   }
 
-  const objectRemediation = remediation as object;
+  const objectRemediation = remediation;
   if (nodeUtilTypes.isProxy(objectRemediation)) {
     throw invalidPolicyRuleDecisionSnapshot(ruleId, "remediation");
   }
 
   const snapshot = Object.create(null) as Record<string, unknown>;
   for (const key of POLICY_RULE_REMEDIATION_SNAPSHOT_KEYS) {
-    snapshotPolicyRuleDecisionField(
-      ruleId,
-      objectRemediation,
-      snapshot,
-      key,
-      `remediation.${key}`
-    );
+    snapshotPolicyRuleDecisionField(ruleId, objectRemediation, snapshot, key, `remediation.${key}`);
   }
   return snapshot;
 }
@@ -344,7 +325,7 @@ function readPolicyRuleDecisionOwnDescriptor(
   ruleId: string,
   source: object,
   key: string,
-  fieldPath: string
+  fieldPath: string,
 ): PropertyDescriptor | undefined {
   try {
     return Object.getOwnPropertyDescriptor(source, key);
@@ -356,13 +337,9 @@ function readPolicyRuleDecisionOwnDescriptor(
 function assertPolicyRuleDecisionDataDescriptor(
   ruleId: string,
   descriptor: PropertyDescriptor,
-  fieldPath: string
+  fieldPath: string,
 ): asserts descriptor is PolicyRuleDecisionDataDescriptor {
-  if (
-    !("value" in descriptor) ||
-    descriptor.get !== undefined ||
-    descriptor.set !== undefined
-  ) {
+  if (!("value" in descriptor) || descriptor.get !== undefined || descriptor.set !== undefined) {
     throw invalidPolicyRuleDecisionSnapshot(ruleId, fieldPath);
   }
 }
@@ -376,17 +353,17 @@ function validatePolicyRuleDenyReason(ruleId: string, reason: unknown): string {
 
 function invalidPolicyRuleDecisionSnapshot(
   ruleId: string,
-  fieldPath: string
+  fieldPath: string,
 ): PolicyGateDecisionValidationError {
   return policyGateDecisionValidationError(
-    `Invalid policy gate decision for ${ruleId}: ${fieldPath}`
+    `Invalid policy gate decision for ${ruleId}: ${fieldPath}`,
   );
 }
 
 function normalizePolicyRuleDenyGuardClass(
   ruleId: string,
   ruleGuardClass: PolicyGuardClass,
-  result: Pick<PolicyRuleDecisionSnapshot, "guardClass" | "guard_class">
+  result: Pick<PolicyRuleDecisionSnapshot, "guardClass" | "guard_class">,
 ): PolicyGuardClass {
   const resultGuardClass = readPolicyGuardClassAliases(result);
   if (resultGuardClass.state === "missing") {
@@ -394,17 +371,17 @@ function normalizePolicyRuleDenyGuardClass(
   }
   if (resultGuardClass.state === "invalid") {
     throw policyGateDecisionValidationError(
-      `Policy gate guard_class lint failed: ${ruleId}: invalid result ${resultGuardClass.fields.join(", ")}.`
+      `Policy gate guard_class lint failed: ${ruleId}: invalid result ${resultGuardClass.fields.join(", ")}.`,
     );
   }
   if (resultGuardClass.state === "conflicting") {
     throw policyGateDecisionValidationError(
-      `Policy gate guard_class lint failed: ${ruleId}: conflicting result ${resultGuardClass.fields.join(", ")}.`
+      `Policy gate guard_class lint failed: ${ruleId}: conflicting result ${resultGuardClass.fields.join(", ")}.`,
     );
   }
   if (resultGuardClass.guardClass !== ruleGuardClass) {
     throw policyGateDecisionValidationError(
-      `Policy gate guard_class lint failed: ${ruleId}: result ${resultGuardClass.field} ${resultGuardClass.guardClass} conflicts with rule guardClass ${ruleGuardClass}.`
+      `Policy gate guard_class lint failed: ${ruleId}: result ${resultGuardClass.field} ${resultGuardClass.guardClass} conflicts with rule guardClass ${ruleGuardClass}.`,
     );
   }
 
@@ -425,17 +402,17 @@ export function snapshotPolicyGateContext(context: PolicyGateContext): PolicyGat
       guardClass,
       evaluate(call: PolicyGateToolCall, snapshotContext: PolicyGateContext): PolicyRuleDecision {
         return evaluate(call, snapshotContext);
-      }
+      },
     });
   });
 
   return Object.freeze({
-    rules: Object.freeze(rules)
+    rules: Object.freeze(rules),
   });
 }
 
 function validatePolicyGateContextMetadata(
-  context: PolicyGateContext
+  context: PolicyGateContext,
 ): ValidatedPolicyRuleMetadata[] {
   const ruleIdFailures: string[] = [];
   const guardClassFailures: string[] = [];
@@ -450,15 +427,13 @@ function validatePolicyGateContextMetadata(
     } else {
       const previousRuleLabel = seenRuleIds.get(ruleId);
       if (previousRuleLabel) {
-        ruleIdFailures.push(
-          `${ruleId}: duplicate ruleId also used by ${previousRuleLabel}`
-        );
+        ruleIdFailures.push(`${ruleId}: duplicate ruleId also used by ${previousRuleLabel}`);
       } else {
         seenRuleIds.set(ruleId, ruleLabel);
       }
       if (isReservedAuthorityPolicyRuleIdPrefixImpersonation(ruleId)) {
         ruleIdFailures.push(
-          `${ruleId}: reserved authority policy rule prefixes are reserved for error_id`
+          `${ruleId}: reserved authority policy rule prefixes are reserved for error_id`,
         );
       }
     }
@@ -479,7 +454,7 @@ function validatePolicyGateContextMetadata(
       guardClass.guardClass !== "authority"
     ) {
       guardClassFailures.push(
-        `${ruleId}: known authority rule cannot be classified as ${guardClass.guardClass}`
+        `${ruleId}: known authority rule cannot be classified as ${guardClass.guardClass}`,
       );
       return;
     }
@@ -491,13 +466,13 @@ function validatePolicyGateContextMetadata(
 
   if (ruleIdFailures.length > 0) {
     throw policyGateDecisionValidationError(
-      `Policy gate ruleId lint failed: ${ruleIdFailures.join("; ")}.`
+      `Policy gate ruleId lint failed: ${ruleIdFailures.join("; ")}.`,
     );
   }
 
   if (guardClassFailures.length > 0) {
     throw policyGateDecisionValidationError(
-      `Policy gate guard_class lint failed: ${guardClassFailures.join("; ")}.`
+      `Policy gate guard_class lint failed: ${guardClassFailures.join("; ")}.`,
     );
   }
 
@@ -528,21 +503,21 @@ function readPolicyGuardClassAliases(carrier: {
     return {
       state: "valid",
       guardClass: camelGuardClass.guardClass,
-      field: "guardClass/guard_class"
+      field: "guardClass/guard_class",
     };
   }
   if (camelGuardClass.state === "valid") {
     return {
       state: "valid",
       guardClass: camelGuardClass.guardClass,
-      field: "guardClass"
+      field: "guardClass",
     };
   }
   if (snakeGuardClass.state === "valid") {
     return {
       state: "valid",
       guardClass: snakeGuardClass.guardClass,
-      field: "guard_class"
+      field: "guard_class",
     };
   }
 
@@ -554,9 +529,7 @@ function parsePolicyRuleGuardClassValue(value: unknown): PolicyGuardClassAliasVa
     return { state: "missing" };
   }
   const parsed = PolicyGuardClassSchema.safeParse(value);
-  return parsed.success
-    ? { state: "valid", guardClass: parsed.data }
-    : { state: "invalid" };
+  return parsed.success ? { state: "valid", guardClass: parsed.data } : { state: "invalid" };
 }
 
 function normalizePolicyRuleId(ruleId: unknown): string | undefined {
@@ -580,7 +553,7 @@ export const SPAWN_PROFILE_SUBSET_RULE: PolicyRule = Object.freeze({
   guardClass: "authority",
   evaluate(call: PolicyGateToolCall): PolicyRuleDecision {
     return evaluateSpawnProfileSubset(call);
-  }
+  },
 });
 
 export const SPAWN_DEPTH_LIMIT_RULE: PolicyRule = Object.freeze({
@@ -589,7 +562,7 @@ export const SPAWN_DEPTH_LIMIT_RULE: PolicyRule = Object.freeze({
   guardClass: "authority",
   evaluate(call: PolicyGateToolCall): PolicyRuleDecision {
     return evaluateSpawnDepthLimit(call);
-  }
+  },
 });
 
 export const SPAWN_CONCURRENCY_LIMIT_RULE: PolicyRule = Object.freeze({
@@ -599,12 +572,16 @@ export const SPAWN_CONCURRENCY_LIMIT_RULE: PolicyRule = Object.freeze({
   guardClass: "authority",
   evaluate(call: PolicyGateToolCall): PolicyRuleDecision {
     return evaluateSpawnConcurrencyLimit(call);
-  }
+  },
 });
 
 /** Canonical SHUD rule set mounted by the policy gate (ported from the Zero-era registry; pure data). */
 export const DEFAULT_SHUD_POLICY_GATE_CONTEXT: PolicyGateContext = Object.freeze({
-  rules: Object.freeze([SPAWN_PROFILE_SUBSET_RULE, SPAWN_DEPTH_LIMIT_RULE, SPAWN_CONCURRENCY_LIMIT_RULE])
+  rules: Object.freeze([
+    SPAWN_PROFILE_SUBSET_RULE,
+    SPAWN_DEPTH_LIMIT_RULE,
+    SPAWN_CONCURRENCY_LIMIT_RULE,
+  ]),
 });
 
 export function evaluateSpawnProfileSubset(call: PolicyGateToolCall): PolicyRuleDecision {
@@ -658,9 +635,7 @@ export function evaluateSpawnConcurrencyLimit(call: PolicyGateToolCall): PolicyR
   return buildSpawnConcurrencyLimitDeny(activeSubagentCount.value);
 }
 
-export function normalizeSpawnAgentInput(
-  call: PolicyGateToolCall
-): PolicyGateInputNormalization {
+export function normalizeSpawnAgentInput(call: PolicyGateToolCall): PolicyGateInputNormalization {
   if (call.toolId !== "spawn_agent") {
     return { decision: "allow", input: call.input, changed: false };
   }
@@ -678,7 +653,7 @@ export function normalizeSpawnAgentInput(
   return {
     decision: "allow",
     input: buildSpawnExecutionInput(parsed.snapshot),
-    changed: true
+    changed: true,
   };
 }
 
@@ -689,14 +664,14 @@ const SPAWN_AGENT_STRING_FIELDS = Object.freeze([
   "label",
   "mode",
   "agentInstruction",
-  "model"
+  "model",
 ] as const);
 
 const SPAWN_AGENT_SNAPSHOT_FIELDS = Object.freeze([
   ...SPAWN_AGENT_STRING_FIELDS,
   "role",
   "tools",
-  "allowed_tools"
+  "allowed_tools",
 ] as const);
 
 type SpawnAgentStringField = (typeof SPAWN_AGENT_STRING_FIELDS)[number];
@@ -815,11 +790,11 @@ function parseSpawnAgentInputSnapshot(input: unknown): SpawnAgentInputSnapshotRe
     snapshot: {
       fields: new Map<SpawnAgentStringField, string>([
         ["instruction", instruction.instruction],
-        ...fields.fields
+        ...fields.fields,
       ]),
       role: role.role,
-      allowlist
-    }
+      allowlist,
+    },
   };
 }
 
@@ -871,13 +846,14 @@ function snapshotSpawnDataFields(input: unknown): SpawnFieldSnapshotResult {
   return {
     decision: "allow",
     values,
-    presentFields
+    presentFields,
   };
 }
 
 function snapshotSpawnStringFields(
-  snapshot: SpawnFieldSnapshot
-): { decision: "allow"; fields: ReadonlyMap<SpawnAgentStringField, string> } | SpawnProfileRuleDeny {
+  snapshot: SpawnFieldSnapshot,
+):
+  { decision: "allow"; fields: ReadonlyMap<SpawnAgentStringField, string> } | SpawnProfileRuleDeny {
   const fields = new Map<SpawnAgentStringField, string>();
   for (const field of SPAWN_AGENT_STRING_FIELDS) {
     if (!snapshot.presentFields.has(field)) {
@@ -895,7 +871,7 @@ function snapshotSpawnStringFields(
 
     if (value.length > SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS) {
       return buildSpawnProfileMalformedInputDeny(
-        `spawn_agent ${field} exceeds the ${SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS} character budget`
+        `spawn_agent ${field} exceeds the ${SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS} character budget`,
       );
     }
 
@@ -905,9 +881,7 @@ function snapshotSpawnStringFields(
   return { decision: "allow", fields };
 }
 
-function validateSpawnMode(
-  fields: ReadonlyMap<SpawnAgentStringField, string>
-): PolicyRuleDecision {
+function validateSpawnMode(fields: ReadonlyMap<SpawnAgentStringField, string>): PolicyRuleDecision {
   const mode = fields.get("mode");
   if (mode === undefined || mode === "standard" || mode === "interactive") {
     return { decision: "allow" };
@@ -917,7 +891,7 @@ function validateSpawnMode(
 }
 
 function snapshotSpawnInstruction(
-  snapshot: SpawnFieldSnapshot
+  snapshot: SpawnFieldSnapshot,
 ): { decision: "allow"; instruction: string } | SpawnProfileRuleDeny {
   const value = snapshot.values.instruction;
   if (!snapshot.presentFields.has("instruction") || value === undefined) {
@@ -930,7 +904,7 @@ function snapshotSpawnInstruction(
 
   if (value.length > SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS) {
     return buildSpawnProfileMalformedInputDeny(
-      `spawn_agent instruction exceeds the ${SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS} character budget`
+      `spawn_agent instruction exceeds the ${SPAWN_PROFILE_TEXT_FIELD_MAX_CHARS} character budget`,
     );
   }
 
@@ -942,28 +916,28 @@ function snapshotSpawnInstruction(
 }
 
 function snapshotSpawnRole(
-  snapshot: SpawnFieldSnapshot
+  snapshot: SpawnFieldSnapshot,
 ): { decision: "allow"; role: SpawnRoleSnapshot } | SpawnProfileRuleDeny {
   if (!snapshot.presentFields.has("role") || snapshot.values.role === undefined) {
     return {
       decision: "allow",
       role: {
         kind: "omitted",
-        label: "unspecified role"
-      }
+        label: "unspecified role",
+      },
     };
   }
 
   const value = snapshot.values.role;
   if (typeof value !== "string") {
     return buildSpawnProfileMalformedInputDeny(
-      "spawn_agent role must be a primitive string when provided"
+      "spawn_agent role must be a primitive string when provided",
     );
   }
 
   if (value.length > SPAWN_PROFILE_TOOL_ID_MAX_CHARS) {
     return buildSpawnProfileMalformedInputDeny(
-      `spawn_agent role exceeds the ${SPAWN_PROFILE_TOOL_ID_MAX_CHARS} character budget`
+      `spawn_agent role exceeds the ${SPAWN_PROFILE_TOOL_ID_MAX_CHARS} character budget`,
     );
   }
 
@@ -971,7 +945,7 @@ function snapshotSpawnRole(
   const role: SpawnRoleSnapshot = {
     kind: "present",
     value: trimmedRole,
-    label: formatSpawnRoleLabel(trimmedRole)
+    label: formatSpawnRoleLabel(trimmedRole),
   };
   if (isCanonicalHarnessRole(trimmedRole)) {
     role.canonicalRole = trimmedRole;
@@ -979,7 +953,7 @@ function snapshotSpawnRole(
 
   return {
     decision: "allow",
-    role
+    role,
   };
 }
 
@@ -1002,10 +976,7 @@ function readSpawnAllowlist(snapshot: SpawnFieldSnapshot): SpawnAllowlistRead {
 
   let allowedToolsAllowlist: SpawnAllowlistRead | undefined;
   if (allowedToolsPresent) {
-    allowedToolsAllowlist = readSpawnAllowlistField(
-      "allowed_tools",
-      snapshot.values.allowed_tools
-    );
+    allowedToolsAllowlist = readSpawnAllowlistField("allowed_tools", snapshot.values.allowed_tools);
     if (allowedToolsAllowlist.kind !== "valid") {
       return allowedToolsAllowlist;
     }
@@ -1016,17 +987,14 @@ function readSpawnAllowlist(snapshot: SpawnFieldSnapshot): SpawnAllowlistRead {
       kind: "dual",
       toolsToolIds: toolsAllowlist.toolIds,
       allowedToolsToolIds: allowedToolsAllowlist.toolIds,
-      toolIds: uniqueStrings([...toolsAllowlist.toolIds, ...allowedToolsAllowlist.toolIds])
+      toolIds: uniqueStrings([...toolsAllowlist.toolIds, ...allowedToolsAllowlist.toolIds]),
     };
   }
 
   return toolsAllowlist ?? allowedToolsAllowlist ?? { kind: "omitted" };
 }
 
-function readSpawnAllowlistField(
-  field: SpawnAllowlistField,
-  value: unknown
-): SpawnAllowlistRead {
+function readSpawnAllowlistField(field: SpawnAllowlistField, value: unknown): SpawnAllowlistRead {
   let isArrayValue: boolean;
   try {
     isArrayValue = Array.isArray(value);
@@ -1057,7 +1025,7 @@ function readSpawnAllowlistField(
       field,
       budget: "item_count",
       limit: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS,
-      actual: length
+      actual: length,
     };
   }
 
@@ -1087,7 +1055,7 @@ function readSpawnAllowlistField(
         field,
         budget: "tool_id_length",
         limit: SPAWN_PROFILE_TOOL_ID_MAX_CHARS,
-        actual: entry.length
+        actual: entry.length,
       };
     }
     totalCharacters += entry.length;
@@ -1097,7 +1065,7 @@ function readSpawnAllowlistField(
         field,
         budget: "total_characters",
         limit: SPAWN_PROFILE_ALLOWLIST_MAX_TOTAL_CHARS,
-        actual: totalCharacters
+        actual: totalCharacters,
       };
     }
     rawToolIds.push(entry);
@@ -1115,9 +1083,7 @@ function readSpawnAllowlistField(
   return { kind: "valid", field, toolIds: uniqueStrings(toolIds) };
 }
 
-function evaluateSpawnProfileSubsetSnapshot(
-  snapshot: SpawnAgentInputSnapshot
-): PolicyRuleDecision {
+function evaluateSpawnProfileSubsetSnapshot(snapshot: SpawnAgentInputSnapshot): PolicyRuleDecision {
   const allowlist = snapshot.allowlist;
   if (allowlist.kind === "omitted") {
     const role = snapshot.role.kind === "present" ? snapshot.role.canonicalRole : undefined;
@@ -1132,7 +1098,7 @@ function evaluateSpawnProfileSubsetSnapshot(
     return buildSpawnProfileAmbiguousAllowlistDeny(
       snapshot.role.label,
       snapshot.role.kind === "present" ? snapshot.role.canonicalRole : undefined,
-      allowlist
+      allowlist,
     );
   }
 
@@ -1146,7 +1112,7 @@ function evaluateSpawnProfileSubsetSnapshot(
   }
 
   const excessToolIds = uniqueStrings(
-    allowlist.toolIds.filter((toolId) => !isRoleToolIdAllowed(role, toolId))
+    allowlist.toolIds.filter((toolId) => !isRoleToolIdAllowed(role, toolId)),
   );
 
   if (excessToolIds.length === 0) {
@@ -1179,19 +1145,19 @@ function buildSpawnExecutionInput(snapshot: SpawnAgentInputSnapshot): Record<str
 }
 
 function toSpawnProfileGateDeny(
-  decision: SpawnProfileRuleDeny
+  decision: SpawnProfileRuleDeny,
 ): Extract<PolicyGateDecision, { decision: "deny" }> {
   return {
     decision: "deny",
     ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
     reason: decision.reason,
     remediation: decision.remediation,
-    guardClass: decision.guardClass ?? "authority"
+    guardClass: decision.guardClass ?? "authority",
   };
 }
 
 function readTrustedSpawnLimitCount(
-  value: number | undefined
+  value: number | undefined,
 ): { kind: "missing" } | { kind: "invalid" } | { kind: "valid"; value: number } {
   if (value === undefined) {
     return { kind: "missing" };
@@ -1207,7 +1173,7 @@ function uniqueStrings(values: readonly string[]): string[] {
 }
 
 function buildSpawnDepthLimitDeny(
-  currentDepth: number
+  currentDepth: number,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   const requestedDepth = currentDepth + 1;
   return {
@@ -1216,14 +1182,14 @@ function buildSpawnDepthLimitDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: "Do not chain spawn_agent from an existing subagent; return the work to the coordinator or handle it within the current delegated scope.",
-      ref: SPAWN_LIMITS_POLICY_REF
+      ref: SPAWN_LIMITS_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnConcurrencyLimitDeny(
-  activeSubagentCount: number
+  activeSubagentCount: number,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
@@ -1231,15 +1197,15 @@ function buildSpawnConcurrencyLimitDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: "Wait for an active subagent to finish before spawning another one; M1 denies instead of scheduling a queue.",
-      ref: SPAWN_LIMITS_POLICY_REF
+      ref: SPAWN_LIMITS_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnProfileMalformedDeny(
   role: string,
-  field: SpawnAllowlistField
+  field: SpawnAllowlistField,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
@@ -1247,15 +1213,15 @@ function buildSpawnProfileMalformedDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: `Provide ${field} as a non-empty array containing only tool ids from the ${role} canonical profile.`,
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnProfileEmptyDeny(
   role: string,
-  field: SpawnAllowlistField
+  field: SpawnAllowlistField,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
@@ -1263,15 +1229,15 @@ function buildSpawnProfileEmptyDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: `Specify a non-empty subset of the ${role} canonical profile instead of an empty ${field} allowlist.`,
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnProfileBudgetDeny(
   role: string,
-  allowlist: Extract<SpawnAllowlistRead, { kind: "budget_exceeded" }>
+  allowlist: Extract<SpawnAllowlistRead, { kind: "budget_exceeded" }>,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   const budgetLabel = formatSpawnAllowlistBudget(allowlist);
   return {
@@ -1280,14 +1246,14 @@ function buildSpawnProfileBudgetDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: `Reduce ${allowlist.field} to fit within the ${budgetLabel} budget before spawning ${role}.`,
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnProfileMissingProfileDeny(
-  role: string
+  role: string,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
@@ -1295,14 +1261,14 @@ function buildSpawnProfileMissingProfileDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: `Provide a canonical SHUD spawn role and, when constraining tools, a non-empty tools/allowed_tools subset of that role's profile before spawning ${role}.`,
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnProfileUnsafeInputDeny(
-  detail: string
+  detail: string,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
@@ -1310,14 +1276,14 @@ function buildSpawnProfileUnsafeInputDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: "Provide spawn_agent input as a plain data object with explicit tool ids when constraining sub-agent tools.",
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnProfileMalformedInputDeny(
-  detail: string
+  detail: string,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   return {
     decision: "deny",
@@ -1325,9 +1291,9 @@ function buildSpawnProfileMalformedInputDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: "Provide spawn_agent input as plain JSON-compatible data matching the spawn_agent tool schema.",
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
@@ -1341,14 +1307,14 @@ function buildSpawnProfileMissingInstructionDeny(): Extract<
     remediation: {
       next_action: "adjust_scope",
       hint: "Provide a non-empty spawn_agent instruction before spawning a SHUD role.",
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnProfileInvalidModeDeny(
-  mode: string
+  mode: string,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   const modeLabel = formatToolIdSample(mode);
   return {
@@ -1357,9 +1323,9 @@ function buildSpawnProfileInvalidModeDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: "Use spawn_agent mode standard or interactive, or omit mode, before spawning a SHUD role.",
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
@@ -1376,7 +1342,7 @@ function formatSpawnRoleLabel(role: string): string {
 }
 
 function formatSpawnAllowlistBudget(
-  allowlist: Extract<SpawnAllowlistRead, { kind: "budget_exceeded" }>
+  allowlist: Extract<SpawnAllowlistRead, { kind: "budget_exceeded" }>,
 ): string {
   if (allowlist.budget === "item_count") {
     return `tool count (${allowlist.actual}/${allowlist.limit})`;
@@ -1390,7 +1356,7 @@ function formatSpawnAllowlistBudget(
 function buildSpawnProfileAmbiguousAllowlistDeny(
   roleLabel: string,
   role: HarnessRole | undefined,
-  allowlist: Extract<SpawnAllowlistRead, { kind: "dual" }>
+  allowlist: Extract<SpawnAllowlistRead, { kind: "dual" }>,
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   const excessToolIds = role
     ? uniqueStrings(allowlist.toolIds.filter((toolId) => !isRoleToolIdAllowed(role, toolId)))
@@ -1406,15 +1372,15 @@ function buildSpawnProfileAmbiguousAllowlistDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: `Provide exactly one spawn allowlist field, either tools or allowed_tools, after removing any excess tool ids.${excessClause}`,
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function buildSpawnProfileExcessDeny(
   role: HarnessRole,
-  excessToolIds: readonly string[]
+  excessToolIds: readonly string[],
 ): Extract<PolicyRuleDecision, { decision: "deny" }> {
   const excessSummary = formatToolIdSummary(excessToolIds, { alwaysIncludeTotal: true });
   const canonicalSummary = formatToolIdSummary(getRoleToolIds(role));
@@ -1424,15 +1390,15 @@ function buildSpawnProfileExcessDeny(
     remediation: {
       next_action: "adjust_scope",
       hint: `Remove excess spawn tools for ${role}; examples: ${excessSummary}. Use a non-empty subset of canonical profile: ${canonicalSummary}.`,
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
     },
-    guardClass: "authority"
+    guardClass: "authority",
   };
 }
 
 function formatToolIdSummary(
   toolIds: readonly string[],
-  options: { alwaysIncludeTotal?: boolean } = {}
+  options: { alwaysIncludeTotal?: boolean } = {},
 ): string {
   const samples = selectToolIdSamples(toolIds).map(formatToolIdSample);
   const suffix =
@@ -1464,7 +1430,7 @@ function formatToolIdSample(toolId: string): string {
 
 function validatePolicyGateRemediation(
   ruleId: string,
-  remediation: unknown
+  remediation: unknown,
 ): PolicyGateRemediation {
   const parsed = PolicyGateRemediationSchema.safeParse(remediation);
   if (parsed.success) {
@@ -1477,6 +1443,6 @@ function validatePolicyGateRemediation(
     .join(", ");
 
   throw policyGateDecisionValidationError(
-    `Invalid policy gate remediation for ${ruleId}: ${fieldPaths || "remediation"}`
+    `Invalid policy gate remediation for ${ruleId}: ${fieldPaths || "remediation"}`,
   );
 }

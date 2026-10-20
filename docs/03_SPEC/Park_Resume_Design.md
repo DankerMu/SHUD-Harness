@@ -139,7 +139,7 @@ workspace/tasks/<task_id>/parked_state.yaml
 
 Job watcher 是非 LLM 后台进程，负责轮询或订阅 job 状态。它不做科学解释，只做状态转换和事件推送。
 
-实现缝 = dsh `ctx.jobs`（JobRegistry 契约），由本项目自写的 durable backend 承载（[ADR-0004 K8](../adr/0004-dsh-kernel.md)）。
+实现缝 = dsh `ctx.jobs`（JobRegistry 契约），由本项目自写的 durable backend 承载（[ADR-0004 K8](../adr/implemented/0004-dsh-kernel.md)）。
 
 ### 4.1 本地 job
 

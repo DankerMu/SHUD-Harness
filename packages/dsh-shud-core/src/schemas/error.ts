@@ -11,7 +11,7 @@ export const ErrorCategorySchema = z.enum([
   "parser_error",
   "report_error",
   "agent_error",
-  "notification_error"
+  "notification_error",
 ]);
 
 export const ErrorSeveritySchema = z.enum(["info", "warn", "error", "critical"]);
@@ -21,13 +21,13 @@ export const RemediationNextActionSchema = z.enum([
   "open_gate",
   "adjust_scope",
   "fix_and_retry",
-  "abort"
+  "abort",
 ]);
 
 export const ErrorRemediationSchema = z.object({
   next_action: RemediationNextActionSchema,
   hint: z.string().min(1),
-  ref: z.string().min(1).optional()
+  ref: z.string().min(1).optional(),
 });
 
 export const ErrorRecordSchema = z.object({
@@ -44,7 +44,7 @@ export const ErrorRecordSchema = z.object({
   retryable: z.boolean(),
   recommended_next_actions: z.array(z.string()),
   remediation: ErrorRemediationSchema.optional(),
-  created_at: z.string().min(1)
+  created_at: z.string().min(1),
 });
 
 export type ErrorCategory = z.infer<typeof ErrorCategorySchema>;

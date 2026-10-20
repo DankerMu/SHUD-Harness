@@ -1,0 +1,17 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignoreWorkspaces": ["profile/shud"],
+  "rules": {
+    "duplicates": "warn"
+  },
+  "workspaces": {
+    ".": {
+      "project": ["scripts/**/*.ts"]
+    },
+    "packages/dsh-shud-core": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    }
+  },
+  "ignoreBinaries": ["gitleaks", "semgrep"]
+}

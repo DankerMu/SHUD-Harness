@@ -13,7 +13,7 @@ export const ArtifactManifestSchema = z.strictObject({
   artifacts: z.array(ArtifactSchema),
   generated_at: z.string().min(1),
   generator: z.string().min(1),
-  manifest_sha256: z.string().min(1).optional()
+  manifest_sha256: z.string().min(1).optional(),
 });
 
 export type ArtifactManifestInput = z.input<typeof ArtifactManifestSchema>;

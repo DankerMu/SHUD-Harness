@@ -5,7 +5,7 @@ supersedes: Zero 时代 monorepo 布局（tag archive/zero-v0.8.3）
 
 # 仓库结构 v2（dsh profile + 插件）
 
-决策依据 [ADR-0004](../adr/0004-dsh-kernel.md) K2/K10。SHUD-Harness 不再是独立应用，而是一个 dsh profile 及其插件包。
+决策依据 [ADR-0004](../adr/implemented/0004-dsh-kernel.md) K2/K10。SHUD-Harness 不再是独立应用，而是一个 dsh profile 及其插件包。
 
 ## 1. 代码仓库
 

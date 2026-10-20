@@ -1,5 +1,15 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -82,7 +92,7 @@ const schemaDefinitions: SchemaDefinition[] = [
     slug: "task-card",
     sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
     exportName: "TaskCardSchema",
-    schema: TaskCardSchema
+    schema: TaskCardSchema,
   },
   {
     name: "StackLock",
@@ -92,8 +102,8 @@ const schemaDefinitions: SchemaDefinition[] = [
     schema: StackLockSchema,
     strictInput: true,
     exampleOverrides: {
-      stack_id: "STACK-11111111-1111-4111-8111-111111111111"
-    }
+      stack_id: "STACK-11111111-1111-4111-8111-111111111111",
+    },
   },
   {
     name: "DataProvenance",
@@ -103,8 +113,8 @@ const schemaDefinitions: SchemaDefinition[] = [
     schema: DataProvenanceSchema,
     strictInput: true,
     exampleOverrides: {
-      data_id: "DATA-22222222-2222-4222-8222-222222222222"
-    }
+      data_id: "DATA-22222222-2222-4222-8222-222222222222",
+    },
   },
   {
     name: "Artifact",
@@ -112,7 +122,7 @@ const schemaDefinitions: SchemaDefinition[] = [
     sourcePath: "packages/dsh-shud-core/src/schemas/artifact.ts",
     exportName: "ArtifactSchema",
     schema: ArtifactSchema,
-    strictInput: true
+    strictInput: true,
   },
   {
     name: "ArtifactManifest",
@@ -123,54 +133,54 @@ const schemaDefinitions: SchemaDefinition[] = [
     strictInput: true,
     exampleOverrides: {
       manifest_id: "MANIFEST-33333333-3333-4333-8333-333333333333",
-      superseded_by: "MANIFEST-44444444-4444-4444-8444-444444444444"
-    }
+      superseded_by: "MANIFEST-44444444-4444-4444-8444-444444444444",
+    },
   },
   {
     name: "ErrorRecord",
     slug: "error-record",
     sourcePath: "packages/dsh-shud-core/src/schemas/error.ts",
     exportName: "ErrorRecordSchema",
-    schema: ErrorRecordSchema
+    schema: ErrorRecordSchema,
   },
   {
     name: "IdempotencyRecord",
     slug: "idempotency-record",
     sourcePath: "packages/dsh-shud-core/src/schemas/idempotency.ts",
     exportName: "IdempotencyRecordSchema",
-    schema: IdempotencyRecordSchema
+    schema: IdempotencyRecordSchema,
   },
   {
     name: "LockRecord",
     slug: "lock-record",
     sourcePath: "packages/dsh-shud-core/src/schemas/lock.ts",
     exportName: "LockRecordSchema",
-    schema: LockRecordSchema
-  }
+    schema: LockRecordSchema,
+  },
 ];
 
 const intentionalOpenRecordBoundary = {
   name: "DataProvenance",
   exportName: "DataProvenanceSchema",
   schema: DataProvenanceSchema,
-  path: "DataProvenance.preprocess.params"
+  path: "DataProvenance.preprocess.params",
 } as const;
 
 const ignoredNestedObjectSchemaExports: IgnoredObjectSchemaExport[] = [
   {
     exportName: "ErrorRemediationSchema",
     sourcePath: "packages/dsh-shud-core/src/schemas/error.ts",
-    reason: "nested helper for ErrorRecordSchema.remediation"
+    reason: "nested helper for ErrorRecordSchema.remediation",
   },
   {
     exportName: "InferenceBudgetSchema",
     sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
-    reason: "nested helper for TaskCardSchema.inference_budget"
-  }
+    reason: "nested helper for TaskCardSchema.inference_budget",
+  },
 ];
 
 const generatedPathContext: GeneratedPathContext = {
-  generatedRootPath: generatedRoot
+  generatedRootPath: generatedRoot,
 };
 
 async function main(): Promise<void> {
@@ -190,20 +200,31 @@ async function main(): Promise<void> {
     await writeGeneratedFile(
       join(jsonSchemaDir, `${definition.slug}.json`),
       `${JSON.stringify(jsonSchema, null, 2)}\n`,
-      generatedPathContext
+      generatedPathContext,
     );
-    await writeGeneratedFile(join(markdownDir, `${definition.slug}.md`), markdown, generatedPathContext);
+    await writeGeneratedFile(
+      join(markdownDir, `${definition.slug}.md`),
+      markdown,
+      generatedPathContext,
+    );
   }
 }
 
-async function recreateGeneratedDirectory(path: string, context = generatedPathContext): Promise<void> {
+async function recreateGeneratedDirectory(
+  path: string,
+  context = generatedPathContext,
+): Promise<void> {
   await assertGeneratedPathSafe(path, context);
   await rm(path, { recursive: true, force: true });
   await assertGeneratedPathSafe(path, context);
   await mkdir(path, { recursive: true });
 }
 
-async function writeGeneratedFile(path: string, content: string, context = generatedPathContext): Promise<void> {
+async function writeGeneratedFile(
+  path: string,
+  content: string,
+  context = generatedPathContext,
+): Promise<void> {
   await assertGeneratedPathSafe(path, context);
   await writeFile(path, content, "utf8");
 }
@@ -216,7 +237,7 @@ function buildJsonSchema(definition: SchemaDefinition): JsonSchema {
     $schema: $schema ?? "https://json-schema.org/draft/2020-12/schema",
     $id: `https://shud-harness.local/generated/json-schema/${definition.slug}.json`,
     title: definition.name,
-    ...schemaBody
+    ...schemaBody,
   };
 }
 
@@ -242,9 +263,9 @@ function buildMarkdown(definition: SchemaDefinition, jsonSchema: JsonSchema): st
     ...fields.map(
       (field) =>
         `| ${cell(field.field)} | ${cell(field.required)} | ${cell(field.nullable)} | ${cell(
-          field.type
-        )} | ${cell(field.constraints)} |`
-    )
+          field.type,
+        )} | ${cell(field.constraints)} |`,
+    ),
   ];
 
   if (enumFields.length > 0) {
@@ -254,7 +275,9 @@ function buildMarkdown(definition: SchemaDefinition, jsonSchema: JsonSchema): st
       "",
       "| Field | Values |",
       "|---|---|",
-      ...enumFields.map((field) => `| ${cell(field.field)} | ${cell(stripValuesPrefix(field.constraints))} |`)
+      ...enumFields.map(
+        (field) => `| ${cell(field.field)} | ${cell(stripValuesPrefix(field.constraints))} |`,
+      ),
     );
   }
 
@@ -270,7 +293,7 @@ function buildMarkdown(definition: SchemaDefinition, jsonSchema: JsonSchema): st
     "",
     "```diff",
     ...changelogLines,
-    "```"
+    "```",
   );
 
   return `${lines.join("\n")}\n`;
@@ -278,7 +301,11 @@ function buildMarkdown(definition: SchemaDefinition, jsonSchema: JsonSchema): st
 
 async function assertSchemaRegistryComplete(): Promise<void> {
   const sourceExports = await discoverObjectSchemaExports();
-  validateSchemaRegistryCoverage(sourceExports, schemaDefinitions, ignoredNestedObjectSchemaExports);
+  validateSchemaRegistryCoverage(
+    sourceExports,
+    schemaDefinitions,
+    ignoredNestedObjectSchemaExports,
+  );
 }
 
 async function discoverObjectSchemaExports(): Promise<ObjectSchemaExport[]> {
@@ -289,7 +316,10 @@ async function discoverObjectSchemaExports(): Promise<ObjectSchemaExport[]> {
 
   for (const file of files) {
     const sourcePath = `packages/dsh-shud-core/src/schemas/${file}`;
-    const moduleExports = (await import(pathToFileURL(join(schemaSourceDir, file)).href)) as Record<string, unknown>;
+    const moduleExports = (await import(pathToFileURL(join(schemaSourceDir, file)).href)) as Record<
+      string,
+      unknown
+    >;
 
     exports.push(...discoverObjectSchemaExportsFromModule(sourcePath, moduleExports));
   }
@@ -299,7 +329,7 @@ async function discoverObjectSchemaExports(): Promise<ObjectSchemaExport[]> {
 
 function discoverObjectSchemaExportsFromModule(
   sourcePath: string,
-  moduleExports: Record<string, unknown>
+  moduleExports: Record<string, unknown>,
 ): ObjectSchemaExport[] {
   const discovered: ObjectSchemaExport[] = [];
 
@@ -319,19 +349,21 @@ function isZodObjectSchema(value: unknown): value is ZodType {
 function validateSchemaRegistryCoverage(
   sourceExports: ObjectSchemaExport[],
   definitions: SchemaDefinition[],
-  ignoredNestedExports: IgnoredObjectSchemaExport[]
+  ignoredNestedExports: IgnoredObjectSchemaExport[],
 ): void {
   const details: string[] = [];
   const sourceByName = new Map<string, ObjectSchemaExport>();
   const sourceKeys = new Set(sourceExports.map((sourceExport) => objectExportKey(sourceExport)));
-  const ignoredKeys = new Set(ignoredNestedExports.map((sourceExport) => objectExportKey(sourceExport)));
+  const ignoredKeys = new Set(
+    ignoredNestedExports.map((sourceExport) => objectExportKey(sourceExport)),
+  );
   const definitionsByName = new Map<string, SchemaDefinition>();
 
   for (const sourceExport of sourceExports) {
     const existing = sourceByName.get(sourceExport.exportName);
     if (existing !== undefined) {
       details.push(
-        `duplicate exported object schema name ${sourceExport.exportName} in ${existing.sourcePath} and ${sourceExport.sourcePath}`
+        `duplicate exported object schema name ${sourceExport.exportName} in ${existing.sourcePath} and ${sourceExport.sourcePath}`,
       );
       continue;
     }
@@ -342,32 +374,37 @@ function validateSchemaRegistryCoverage(
     const existing = definitionsByName.get(definition.exportName);
     if (existing !== undefined) {
       details.push(
-        `duplicate generated schema registry entry ${definition.exportName} in ${existing.sourcePath} and ${definition.sourcePath}`
+        `duplicate generated schema registry entry ${definition.exportName} in ${existing.sourcePath} and ${definition.sourcePath}`,
       );
       continue;
     }
     definitionsByName.set(definition.exportName, definition);
 
     if (!isZodObjectSchema(definition.schema)) {
-      details.push(`generated schema registry entry ${definition.exportName} is not a Zod object schema`);
+      details.push(
+        `generated schema registry entry ${definition.exportName} is not a Zod object schema`,
+      );
     }
   }
 
   const missing = sourceExports.filter(
     (sourceExport) =>
-      !ignoredKeys.has(objectExportKey(sourceExport)) && !definitionsByName.has(sourceExport.exportName)
+      !ignoredKeys.has(objectExportKey(sourceExport)) &&
+      !definitionsByName.has(sourceExport.exportName),
   );
-  const staleIgnored = ignoredNestedExports.filter((ignoredExport) => !sourceKeys.has(objectExportKey(ignoredExport)));
+  const staleIgnored = ignoredNestedExports.filter(
+    (ignoredExport) => !sourceKeys.has(objectExportKey(ignoredExport)),
+  );
 
   details.push(
     ...missing.map(
       (sourceExport) =>
-        `missing generated schema registry entry for ${sourceExport.exportName} from ${sourceExport.sourcePath}`
+        `missing generated schema registry entry for ${sourceExport.exportName} from ${sourceExport.sourcePath}`,
     ),
     ...staleIgnored.map(
       (ignoredExport) =>
-        `stale ignored nested schema entry ${ignoredExport.exportName} from ${ignoredExport.sourcePath}`
-    )
+        `stale ignored nested schema entry ${ignoredExport.exportName} from ${ignoredExport.sourcePath}`,
+    ),
   );
 
   for (const definition of definitions) {
@@ -380,13 +417,13 @@ function validateSchemaRegistryCoverage(
 
     if (sourceExport.sourcePath !== definition.sourcePath) {
       details.push(
-        `wrong sourcePath for ${definition.exportName}: registry has ${definition.sourcePath}, actual export is ${sourceExport.sourcePath}`
+        `wrong sourcePath for ${definition.exportName}: registry has ${definition.sourcePath}, actual export is ${sourceExport.sourcePath}`,
       );
     }
 
     if (sourceExport.schema !== definition.schema) {
       details.push(
-        `schema object mismatch for ${definition.exportName}: registry schema is not identical to ${sourceExport.sourcePath} export`
+        `schema object mismatch for ${definition.exportName}: registry schema is not identical to ${sourceExport.sourcePath} export`,
       );
     }
   }
@@ -396,11 +433,16 @@ function validateSchemaRegistryCoverage(
   }
 }
 
-function objectExportKey(sourceExport: Pick<ObjectSchemaExport, "sourcePath" | "exportName">): string {
+function objectExportKey(
+  sourceExport: Pick<ObjectSchemaExport, "sourcePath" | "exportName">,
+): string {
   return `${sourceExport.sourcePath}#${sourceExport.exportName}`;
 }
 
-async function assertGeneratedPathSafe(path: string, context = generatedPathContext): Promise<void> {
+async function assertGeneratedPathSafe(
+  path: string,
+  context = generatedPathContext,
+): Promise<void> {
   const rootPath = resolve(context.generatedRootPath);
   const targetPath = resolve(path);
 
@@ -421,7 +463,9 @@ async function assertGeneratedPathSafe(path: string, context = generatedPathCont
   const realExistingTargetPath = await realpath(existingTargetPath);
 
   if (!isPathInsideOrEqual(realExistingTargetPath, realRootPath)) {
-    throw new Error(`Generated output path is unsafe: ${realExistingTargetPath} resolves outside ${realRootPath}`);
+    throw new Error(
+      `Generated output path is unsafe: ${realExistingTargetPath} resolves outside ${realRootPath}`,
+    );
   }
 }
 
@@ -478,7 +522,10 @@ async function nearestExistingPath(path: string): Promise<string> {
 
 function isPathInsideOrEqual(path: string, rootPath: string): boolean {
   const pathRelativeToRoot = relative(rootPath, path);
-  return pathRelativeToRoot === "" || (!pathRelativeToRoot.startsWith("..") && !isAbsolute(pathRelativeToRoot));
+  return (
+    pathRelativeToRoot === "" ||
+    (!pathRelativeToRoot.startsWith("..") && !isAbsolute(pathRelativeToRoot))
+  );
 }
 
 function isNotFoundError(error: unknown): boolean {
@@ -504,7 +551,7 @@ function flattenFields(schema: JsonSchema, parentPath = ""): FieldRow[] {
       required: required.has(propertyName) ? "yes" : "no",
       nullable: isNullable(propertySchema) ? "yes" : "no",
       type: typeLabel(propertySchema),
-      constraints: constraintLabel(propertySchema)
+      constraints: constraintLabel(propertySchema),
     });
 
     const nestedObject = nestedObjectSchema(propertyWithoutNull, fieldPath);
@@ -518,7 +565,7 @@ function flattenFields(schema: JsonSchema, parentPath = ""): FieldRow[] {
 
 function nestedObjectSchema(
   schema: JsonSchema,
-  fieldPath: string
+  fieldPath: string,
 ): { schema: JsonSchema; path: string } | undefined {
   let candidate = nonNullSchema(schema);
   let candidatePath = fieldPath;
@@ -598,7 +645,9 @@ function constraintLabel(schema: JsonSchema): string {
   const constraints: string[] = [];
 
   if (schemaWithoutNull.enum !== undefined) {
-    constraints.push(`values: ${schemaWithoutNull.enum.map((value) => `\`${String(value)}\``).join(", ")}`);
+    constraints.push(
+      `values: ${schemaWithoutNull.enum.map((value) => `\`${String(value)}\``).join(", ")}`,
+    );
   }
 
   if (schemaWithoutNull.minLength !== undefined) {
@@ -646,7 +695,7 @@ function constraintLabel(schema: JsonSchema): string {
 function buildExample(
   schema: JsonSchema,
   overrides: Readonly<Record<string, unknown>> = {},
-  path = ""
+  path = "",
 ): unknown {
   if (path !== "" && Object.prototype.hasOwnProperty.call(overrides, path)) {
     return overrides[path];
@@ -660,7 +709,9 @@ function buildExample(
 
   if (schemaWithoutNull.type === "object") {
     const example: Record<string, unknown> = {};
-    for (const [propertyName, propertySchema] of Object.entries(schemaWithoutNull.properties ?? {})) {
+    for (const [propertyName, propertySchema] of Object.entries(
+      schemaWithoutNull.properties ?? {},
+    )) {
       const propertyPath = path === "" ? propertyName : `${path}.${propertyName}`;
       example[propertyName] = buildExample(propertySchema, overrides, propertyPath);
     }
@@ -671,7 +722,7 @@ function buildExample(
     return [
       schemaWithoutNull.items === undefined
         ? "example"
-        : buildExample(schemaWithoutNull.items, overrides, `${path}[]`)
+        : buildExample(schemaWithoutNull.items, overrides, `${path}[]`),
     ];
   }
 
@@ -742,7 +793,7 @@ function parseGeneratedYaml(lines: string[]): unknown {
     return {
       content,
       indent: line.length - content.length,
-      lineNumber: index + 1
+      lineNumber: index + 1,
     };
   });
 
@@ -750,9 +801,9 @@ function parseGeneratedYaml(lines: string[]): unknown {
     throw new Error("empty YAML document");
   }
 
-  const [value, nextIndex] = parseGeneratedYamlBlock(tokens, 0, tokens[0]!.indent);
+  const [value, nextIndex] = parseGeneratedYamlBlock(tokens, 0, tokens[0].indent);
   if (nextIndex !== tokens.length) {
-    throw new Error(`unexpected content at line ${tokens[nextIndex]!.lineNumber}`);
+    throw new Error(`unexpected content at line ${tokens[nextIndex].lineNumber}`);
   }
   return value;
 }
@@ -766,7 +817,7 @@ type GeneratedYamlToken = {
 function parseGeneratedYamlBlock(
   tokens: GeneratedYamlToken[],
   startIndex: number,
-  indent: number
+  indent: number,
 ): [unknown, number] {
   const first = tokens[startIndex];
   if (first === undefined || first.indent !== indent) {
@@ -781,13 +832,13 @@ function parseGeneratedYamlBlock(
 function parseGeneratedYamlObject(
   tokens: GeneratedYamlToken[],
   startIndex: number,
-  indent: number
+  indent: number,
 ): [Record<string, unknown>, number] {
   const value: Record<string, unknown> = {};
   let index = startIndex;
 
-  while (index < tokens.length && tokens[index]!.indent === indent) {
-    const token = tokens[index]!;
+  while (index < tokens.length && tokens[index].indent === indent) {
+    const token = tokens[index];
     if (token.content.startsWith("-")) break;
     const separator = token.content.indexOf(":");
     if (separator <= 0) {
@@ -815,13 +866,13 @@ function parseGeneratedYamlObject(
 function parseGeneratedYamlArray(
   tokens: GeneratedYamlToken[],
   startIndex: number,
-  indent: number
+  indent: number,
 ): [unknown[], number] {
   const value: unknown[] = [];
   let index = startIndex;
 
-  while (index < tokens.length && tokens[index]!.indent === indent) {
-    const token = tokens[index]!;
+  while (index < tokens.length && tokens[index].indent === indent) {
+    const token = tokens[index];
     if (!token.content.startsWith("-")) break;
     const scalar = token.content.slice(1).trim();
     index += 1;
@@ -857,14 +908,18 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function buildChangelogDiff(definition: SchemaDefinition, jsonSchema: JsonSchema, fields: FieldRow[]): string[] {
+function buildChangelogDiff(
+  definition: SchemaDefinition,
+  jsonSchema: JsonSchema,
+  fields: FieldRow[],
+): string[] {
   const fingerprint = createHash("sha256").update(JSON.stringify(jsonSchema)).digest("hex");
   return [
     `+ schema ${definition.name} sha256:${fingerprint}`,
     ...fields.map(
       (field) =>
-        `+ field ${field.field} required=${field.required} nullable=${field.nullable} type=${field.type} constraints=${field.constraints}`
-    )
+        `+ field ${field.field} required=${field.required} nullable=${field.nullable} type=${field.type} constraints=${field.constraints}`,
+    ),
   ];
 }
 
@@ -877,28 +932,32 @@ async function runSelfTest(): Promise<void> {
       slug: "task-card",
       sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
       exportName: "TaskCardSchema",
-      schema: mockSchema
-    }
+      schema: mockSchema,
+    },
   ];
   const ignored: IgnoredObjectSchemaExport[] = [
     {
       exportName: "InferenceBudgetSchema",
       sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
-      reason: "nested helper for TaskCardSchema.inference_budget"
-    }
+      reason: "nested helper for TaskCardSchema.inference_budget",
+    },
   ];
 
   validateSchemaRegistryCoverage(
     [
-      { exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema },
+      {
+        exportName: "TaskCardSchema",
+        sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
+        schema: mockSchema,
+      },
       {
         exportName: "InferenceBudgetSchema",
         sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
-        schema: z.object({})
-      }
+        schema: z.object({}),
+      },
     ],
     mockDefinitions,
-    ignored
+    ignored,
   );
 
   const discoveredFromSyntheticModule = discoverObjectSchemaExportsFromModule(
@@ -906,80 +965,107 @@ async function runSelfTest(): Promise<void> {
     {
       RunJobSchema: z.object({ run_id: z.string() }).extend({ status: z.string() }),
       helperObject: z.object({ ignored: z.string() }),
-      RunJobStatusSchema: z.enum(["created"])
-    }
+      RunJobStatusSchema: z.enum(["created"]),
+    },
   );
   if (
     discoveredFromSyntheticModule.length !== 1 ||
     discoveredFromSyntheticModule[0]?.exportName !== "RunJobSchema"
   ) {
-    throw new Error("object schema discovery should include composed *Schema exports and ignore non-schema helpers");
+    throw new Error(
+      "object schema discovery should include composed *Schema exports and ignore non-schema helpers",
+    );
   }
 
   assertThrows(
     () =>
       validateSchemaRegistryCoverage(
         [
-          { exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema },
-          { exportName: "RunJobSchema", sourcePath: "packages/dsh-shud-core/src/schemas/run-job.ts", schema: z.object({}) }
+          {
+            exportName: "TaskCardSchema",
+            sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
+            schema: mockSchema,
+          },
+          {
+            exportName: "RunJobSchema",
+            sourcePath: "packages/dsh-shud-core/src/schemas/run-job.ts",
+            schema: z.object({}),
+          },
         ],
         mockDefinitions,
-        ignored
+        ignored,
       ),
-    "missing generated schema registry entry for RunJobSchema"
+    "missing generated schema registry entry for RunJobSchema",
   );
 
   assertThrows(
-    () =>
-      validateSchemaRegistryCoverage([], mockDefinitions, []),
-    "stale generated schema registry entry TaskCardSchema"
+    () => validateSchemaRegistryCoverage([], mockDefinitions, []),
+    "stale generated schema registry entry TaskCardSchema",
   );
 
   assertThrows(
     () =>
       validateSchemaRegistryCoverage(
-        [{ exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema }],
+        [
+          {
+            exportName: "TaskCardSchema",
+            sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
+            schema: mockSchema,
+          },
+        ],
         [
           {
             ...mockDefinitions[0],
-            sourcePath: "packages/dsh-shud-core/src/schemas/wrong.ts"
-          }
+            sourcePath: "packages/dsh-shud-core/src/schemas/wrong.ts",
+          },
         ],
-        []
+        [],
       ),
-    "wrong sourcePath for TaskCardSchema"
+    "wrong sourcePath for TaskCardSchema",
   );
 
   assertThrows(
     () =>
       validateSchemaRegistryCoverage(
-        [{ exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema }],
+        [
+          {
+            exportName: "TaskCardSchema",
+            sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
+            schema: mockSchema,
+          },
+        ],
         [
           {
             ...mockDefinitions[0],
-            schema: wrongMockSchema
-          }
+            schema: wrongMockSchema,
+          },
         ],
-        []
+        [],
       ),
-    "schema object mismatch for TaskCardSchema"
+    "schema object mismatch for TaskCardSchema",
   );
 
   assertThrows(
     () =>
       validateSchemaRegistryCoverage(
-        [{ exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema }],
+        [
+          {
+            exportName: "TaskCardSchema",
+            sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
+            schema: mockSchema,
+          },
+        ],
         [
           mockDefinitions[0],
           {
             ...mockDefinitions[0],
             name: "TaskCardDuplicate",
-            slug: "task-card-duplicate"
-          }
+            slug: "task-card-duplicate",
+          },
         ],
-        []
+        [],
       ),
-    "duplicate generated schema registry entry TaskCardSchema"
+    "duplicate generated schema registry entry TaskCardSchema",
   );
 
   await assertGeneratedPathRejectsSymlinkAncestor();
@@ -1011,7 +1097,7 @@ function assertGeneratorSemanticContracts(): void {
       failures.push(
         `${definition.name} generated example YAML did not parse: ${
           error instanceof Error ? error.message : String(error)
-        }`
+        }`,
       );
       continue;
     }
@@ -1025,25 +1111,25 @@ function assertGeneratorSemanticContracts(): void {
   }
 
   const dataProvenanceSchema = buildJsonSchema(
-    schemaDefinitions.find((definition) => definition.name === "DataProvenance")!
+    schemaDefinitions.find((definition) => definition.name === "DataProvenance")!,
   );
   const dataProvenanceFields = flattenFields(dataProvenanceSchema).map((field) => field.field);
   if (!dataProvenanceFields.includes("sources.observations[].station")) {
     failures.push("DataProvenance fields omit sources.observations[].station");
   }
   const dataProvenanceDefinition = schemaDefinitions.find(
-    (definition) => definition.name === "DataProvenance"
+    (definition) => definition.name === "DataProvenance",
   )!;
   if (
     !yamlLines(
-      buildExample(dataProvenanceSchema, dataProvenanceDefinition.exampleOverrides)
+      buildExample(dataProvenanceSchema, dataProvenanceDefinition.exampleOverrides),
     ).includes("  params: {}")
   ) {
     failures.push("DataProvenance empty params record is not rendered as {}");
   }
 
   const artifactManifestSchema = buildJsonSchema(
-    schemaDefinitions.find((definition) => definition.name === "ArtifactManifest")!
+    schemaDefinitions.find((definition) => definition.name === "ArtifactManifest")!,
   );
   const artifactManifestFields = flattenFields(artifactManifestSchema).map((field) => field.field);
   if (!artifactManifestFields.includes("artifacts[].llm_generated")) {
@@ -1056,9 +1142,9 @@ function assertGeneratorSemanticContracts(): void {
       () =>
         assertStrictInputClosed(
           z.toJSONSchema(looseRootSchema, { io: "input" }) as JsonSchema,
-          syntheticStrictDefinition("SyntheticLooseRoot", looseRootSchema)
+          syntheticStrictDefinition("SyntheticLooseRoot", looseRootSchema),
         ),
-      "additionalProperties must be false"
+      "additionalProperties must be false",
     );
   } catch {
     failures.push("strict closure accepts a synthetic loose root object");
@@ -1066,15 +1152,15 @@ function assertGeneratorSemanticContracts(): void {
 
   try {
     const looseNestedSchema = z.strictObject({
-      nested: z.looseObject({ value: z.string() })
+      nested: z.looseObject({ value: z.string() }),
     });
     assertThrows(
       () =>
         assertStrictInputClosed(
           z.toJSONSchema(looseNestedSchema, { io: "input" }) as JsonSchema,
-          syntheticStrictDefinition("SyntheticLooseNested", looseNestedSchema)
+          syntheticStrictDefinition("SyntheticLooseNested", looseNestedSchema),
         ),
-      "additionalProperties must be false"
+      "additionalProperties must be false",
     );
   } catch {
     failures.push("strict closure accepts a synthetic loose nested object");
@@ -1086,7 +1172,7 @@ function assertGeneratorSemanticContracts(): void {
     failures.push(
       `intentional DataProvenance preprocess.params record was rejected: ${
         error instanceof Error ? error.message : String(error)
-      }`
+      }`,
     );
   }
 
@@ -1112,7 +1198,7 @@ function syntheticStrictDefinition(name: string, schema: ZodType): SchemaDefinit
     sourcePath: "<synthetic>",
     exportName: `${name}Schema`,
     schema,
-    strictInput: true
+    strictInput: true,
   };
 }
 
@@ -1132,9 +1218,9 @@ async function assertGeneratedPathRejectsSymlinkAncestor(): Promise<void> {
     await assertRejects(
       () =>
         recreateGeneratedDirectory(join(fakeRepoRoot, "docs/generated/schema"), {
-          generatedRootPath: join(fakeRepoRoot, "docs/generated")
+          generatedRootPath: join(fakeRepoRoot, "docs/generated"),
         }),
-      "must not be a symlink"
+      "must not be a symlink",
     );
 
     const sentinel = await readFile(sentinelPath, "utf8");
@@ -1162,13 +1248,13 @@ function assertTaskCardUnknownKeyParity(): void {
       advisory_usd: 1,
       advisory_model_calls: 1,
       reviewer_enabled: false,
-      nested_trace: "accepted then stripped"
+      nested_trace: "accepted then stripped",
     },
     linked_jobs: [],
     linked_reports: [],
     created_at: "2026-07-06T00:00:00Z",
     updated_at: "2026-07-06T00:00:00Z",
-    client_trace_id: "accepted then stripped"
+    client_trace_id: "accepted then stripped",
   };
   const parsed = TaskCardSchema.safeParse(candidate);
 
@@ -1188,7 +1274,7 @@ function assertTaskCardUnknownKeyParity(): void {
 function assertStrictInputClosed(
   schema: JsonSchema,
   definition: SchemaDefinition,
-  path = definition.name
+  path = definition.name,
 ): void {
   const schemaWithoutNull = nonNullSchema(schema);
 
@@ -1200,7 +1286,7 @@ function assertStrictInputClosed(
       throw new Error(`${path} strict JSON Schema additionalProperties must be false`);
     }
     for (const [propertyName, propertySchema] of Object.entries(
-      schemaWithoutNull.properties ?? {}
+      schemaWithoutNull.properties ?? {},
     )) {
       assertStrictInputClosed(propertySchema, definition, `${path}.${propertyName}`);
     }
@@ -1213,7 +1299,7 @@ function assertStrictInputClosed(
   for (const [label, members] of [
     ["anyOf", schemaWithoutNull.anyOf],
     ["oneOf", schemaWithoutNull.oneOf],
-    ["allOf", schemaWithoutNull.allOf]
+    ["allOf", schemaWithoutNull.allOf],
   ] as const) {
     members?.forEach((member, index) => {
       assertStrictInputClosed(member, definition, `${path}.${label}[${index}]`);
@@ -1224,7 +1310,7 @@ function assertStrictInputClosed(
 function isIntentionalOpenRecordBoundary(
   schema: JsonSchema,
   definition: SchemaDefinition,
-  path: string
+  path: string,
 ): boolean {
   return (
     definition.name === intentionalOpenRecordBoundary.name &&
@@ -1244,7 +1330,9 @@ function assertNoAdditionalPropertiesFalse(schema: JsonSchema, path: string): vo
   }
 
   if (schemaWithoutNull.type === "object") {
-    for (const [propertyName, propertySchema] of Object.entries(schemaWithoutNull.properties ?? {})) {
+    for (const [propertyName, propertySchema] of Object.entries(
+      schemaWithoutNull.properties ?? {},
+    )) {
       assertNoAdditionalPropertiesFalse(propertySchema, `${path}.${propertyName}`);
     }
   }
@@ -1256,7 +1344,7 @@ function assertNoAdditionalPropertiesFalse(schema: JsonSchema, path: string): vo
   for (const [label, members] of [
     ["anyOf", schemaWithoutNull.anyOf],
     ["oneOf", schemaWithoutNull.oneOf],
-    ["allOf", schemaWithoutNull.allOf]
+    ["allOf", schemaWithoutNull.allOf],
   ] as const) {
     members?.forEach((member, index) => {
       assertNoAdditionalPropertiesFalse(member, `${path}.${label}[${index}]`);
@@ -1277,7 +1365,10 @@ function assertThrows(callback: () => void, expectedMessage: string): void {
   throw new Error(`Expected error containing ${expectedMessage}`);
 }
 
-async function assertRejects(callback: () => Promise<void>, expectedMessage: string): Promise<void> {
+async function assertRejects(
+  callback: () => Promise<void>,
+  expectedMessage: string,
+): Promise<void> {
   try {
     await callback();
   } catch (error) {

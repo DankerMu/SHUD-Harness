@@ -6,7 +6,7 @@ export const IdempotencyScopeSchema = z.enum([
   "report",
   "notification",
   "pi_gate",
-  "export"
+  "export",
 ]);
 
 export const IdempotencyStatusSchema = z.enum(["started", "completed", "failed"]);
@@ -19,7 +19,7 @@ export const IdempotencyRecordSchema = z.object({
   result_ref: z.string().min(1).optional(),
   created_at: z.string().min(1),
   updated_at: z.string().min(1),
-  expires_at: z.string().min(1).optional()
+  expires_at: z.string().min(1).optional(),
 });
 
 export type IdempotencyScope = z.infer<typeof IdempotencyScopeSchema>;

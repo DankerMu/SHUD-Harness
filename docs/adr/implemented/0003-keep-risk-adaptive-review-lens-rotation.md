@@ -1,5 +1,6 @@
 ---
 status: accepted
+kind: process
 ---
 
 # ADR-0003: 保留风险自适应交叉评审的 lens rotation
@@ -43,4 +44,4 @@ status: accepted
 
 ## 参照
 
-[`review-loop-log.jsonl`](../review-loop-log.jsonl) · `subagent-workflow` 的 `risk-adaptive-cross-review` 与 `loop_log_audit.py`
+[`review-loop-log.jsonl`](../../review-loop-log.jsonl) · `subagent-workflow` 的 `risk-adaptive-cross-review` 与 `loop_log_audit.py`
