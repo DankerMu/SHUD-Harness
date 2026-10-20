@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, test } from "vitest";
@@ -27,6 +27,9 @@ symlinkSync(join(cwd, "protected"), join(cwd, "alias"));
 symlinkSync(cwd, join(cwd, "session"));
 afterAll(() => rmSync(cwd, { recursive: true, force: true }));
 const options = normalizeRawDirs({ rawDirs: ["protected/"] });
+function decide(name: string, args: unknown, config = options, sessionCwd = cwd) {
+  return decideRawAccess({ name, arguments: args, cwd: sessionCwd }, config);
+}
 
 test("file mutations use canonical containment, including new files and symlinked cwd", () => {
   for (const name of ["write", "edit", "str_replace_editor"]) {
@@ -36,56 +39,28 @@ test("file mutations use canonical containment, including new files and symlinke
       "alias/nested/../new.csv",
       join(realpathSync(cwd), "protected/new.csv"),
     ]) {
-      const decision = decideRawAccess(
-        {
-          name,
-          cwd: join(cwd, "session"),
-          arguments: {
-            file_path: target,
-            path: target,
-            command: "create",
-            sandbox_permissions: "require_escalated",
-          },
-        },
-        options,
-      );
+      const args = {
+        file_path: target,
+        path: target,
+        command: "create",
+        sandbox_permissions: "require_escalated",
+      };
+      const decision = decide(name, args, options, join(cwd, "session"));
       expect(decision.kind).toBe("deny");
       expect(decision.reason).toMatch(/immutable/);
       expect(decision.reason).toMatch(/read/);
     }
     for (const target of ["protectedx/new.csv", "derived/new.csv"]) {
-      expect(
-        decideRawAccess(
-          { name, cwd, arguments: { file_path: target, path: target, command: "create" } },
-          options,
-        ).kind,
-      ).toBe("next");
+      expect(decide(name, { file_path: target, path: target, command: "create" }).kind).toBe(
+        "next",
+      );
     }
   }
-  expect(
-    decideRawAccess(
-      { name: "str_replace_editor", cwd, arguments: { path: "protected/x", command: "view" } },
-      options,
-    ).kind,
-  ).toBe("next");
+  expect(decide("str_replace_editor", { path: "protected/x", command: "view" }).kind).toBe("next");
 });
 
 test("shell raw reads ask while write verbs deny, including escalation and copy-out", () => {
-  const writes = [
-    "rm",
-    "mv",
-    "cp",
-    "tee",
-    "touch",
-    "mkdir",
-    "chmod",
-    "chown",
-    "truncate",
-    "dd",
-    "install",
-    "rsync",
-    "ln",
-  ];
+  const writes = "rm mv cp tee touch mkdir chmod chown truncate dd install rsync ln".split(" ");
   const commands = [
     ...writes.map((verb) => `${verb} protected/x derived/x`),
     "echo bad > protected/x",
@@ -98,42 +73,31 @@ test("shell raw reads ask while write verbs deny, including escalation and copy-
   ];
   for (const name of ["bash", "pwsh"]) {
     for (const command of commands) {
-      expect(
-        decideRawAccess(
-          { name, cwd, arguments: { command, sandbox_permissions: "require_escalated" } },
-          options,
-        ).kind,
-      ).toBe("deny");
+      expect(decide(name, { command, sandbox_permissions: "require_escalated" }).kind).toBe("deny");
     }
     for (const command of [
       "cat protected/x",
       "ls -la protected",
       `head ${realpathSync(cwd)}/protected/x`,
     ]) {
-      const result = decideRawAccess({ name, cwd, arguments: { command } }, options);
+      const result = decide(name, { command });
       expect(result.kind).toBe("ask");
       expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
       expect(result.displayReason?.en).toMatch(/raw/i);
       expect(result.displayReason?.zh).toMatch(/原始/);
     }
     for (const command of ["echo ok > derived.txt", "rm protectedx/x"]) {
-      expect(decideRawAccess({ name, cwd, arguments: { command } }, options).kind).toBe("next");
+      expect(decide(name, { command }).kind).toBe("next");
     }
     for (const [command, kind] of [
       ["wc -l x", "ask"],
       ["rm x", "deny"],
     ]) {
-      expect(
-        decideRawAccess({ name, cwd, arguments: { command, workdir: "alias" } }, options).kind,
-      ).toBe(kind);
+      expect(decide(name, { command, workdir: "alias" }).kind).toBe(kind);
     }
   }
-  expect(
-    decideRawAccess({ name: "bash", cwd, arguments: { command: "cd protected" } }, options).kind,
-  ).toBe("ask");
-  expect(decideRawAccess({ name: "bash", cwd, arguments: { command: "rm x" } }, options).kind).toBe(
-    "next",
-  );
+  expect(decide("bash", { command: "cd protected" }).kind).toBe("ask");
+  expect(decide("bash", { command: "rm x" }).kind).toBe("next");
 });
 
 test("missing paths, defaults, absolute and multiple roots retain decision boundaries", () => {
@@ -141,36 +105,16 @@ test("missing paths, defaults, absolute and multiple roots retain decision bound
   const roots = normalizeRawDirs({ rawDirs: ["elsewhere", join(cwd, "protected")] });
   for (const config of [future, roots, normalizeRawDirs()]) {
     const raw = config.rawDirs.at(-1)!;
-    expect(
-      decideRawAccess({ name: "write", cwd, arguments: { file_path: `${raw}/new.csv` } }, config)
-        .kind,
-    ).toBe("deny");
-    expect(
-      decideRawAccess({ name: "write", cwd, arguments: { file_path: `${raw}x/new.csv` } }, config)
-        .kind,
-    ).toBe("next");
-    expect(
-      decideRawAccess({ name: "bash", cwd, arguments: { command: "echo ok" } }, config).kind,
-    ).toBe("next");
+    expect(decide("write", { file_path: `${raw}/new.csv` }, config).kind).toBe("deny");
+    expect(decide("write", { file_path: `${raw}x/new.csv` }, config).kind).toBe("next");
+    expect(decide("bash", { command: "echo ok" }, config).kind).toBe("next");
   }
-  expect(
-    decideRawAccess(
-      { name: "write", arguments: { file_path: "data/raw/new.csv" } },
-      normalizeRawDirs(),
-    ).kind,
-  ).toBe("deny");
-  expect(
-    decideRawAccess(
-      { name: "write", cwd, arguments: { file_path: "new.csv" } },
-      normalizeRawDirs({ rawDirs: ["/"] }),
-    ).kind,
-  ).toBe("deny");
-  expect(
-    decideRawAccess(
-      { name: "bash", cwd: join(cwd, "protected"), arguments: { command: "cat x" } },
-      roots,
-    ).kind,
-  ).toBe("ask");
+  const call = { name: "write", arguments: { file_path: "data/raw/new.csv" } };
+  expect(decideRawAccess(call, normalizeRawDirs()).kind).toBe("deny");
+  expect(decide("write", { file_path: "new.csv" }, normalizeRawDirs({ rawDirs: ["/"] })).kind).toBe(
+    "deny",
+  );
+  expect(decide("bash", { command: "cat x" }, roots, join(cwd, "protected")).kind).toBe("ask");
 });
 
 test("unrelated tools and malformed arguments delegate without touching paths", () => {
@@ -184,15 +128,47 @@ test("unrelated tools and malformed arguments delegate without touching paths", 
       {},
       { file_path: 7, command: false, workdir: {} },
     ]) {
-      expect(decideRawAccess({ name, cwd, arguments: args }, options).kind).toBe("next");
+      expect(decide(name, args).kind).toBe("next");
     }
   }
   for (const name of ["read", "run_code", "present"]) {
-    expect(
-      decideRawAccess(
-        { name, cwd, arguments: { file_path: "protected/x", command: "rm protected/x" } },
-        options,
-      ).kind,
-    ).toBe("next");
+    expect(decide(name, { file_path: "protected/x", command: "rm protected/x" }).kind).toBe("next");
   }
 });
+
+test("physical symlink-parent traversal agrees across targets, roots and workdirs", () => {
+  symlinkSync(join(cwd, "protected/nested"), join(cwd, "deep-link"));
+  mkdirSync(join(cwd, "outside/nested"), { recursive: true });
+  symlinkSync(join(cwd, "outside/nested"), join(cwd, "protected/out-link"));
+  writeFileSync(join(cwd, "protected/existing.csv"), "fixture");
+  for (const name of ["write", "edit", "str_replace_editor"]) {
+    for (const leaf of ["existing.csv", "new.csv"]) {
+      const path = `deep-link/../${leaf}`;
+      expect(decide(name, { file_path: path, path, command: "create" }).kind).toBe("deny");
+    }
+    const path = "protected/out-link/../new.csv";
+    expect(decide(name, { file_path: path, path, command: "create" }).kind).toBe("next");
+  }
+  const physicalRoot = normalizeRawDirs({ rawDirs: ["deep-link/.."] });
+  expect(decide("write", { file_path: "protected/new.csv" }, physicalRoot).kind).toBe("deny");
+  expect(decide("write", { file_path: "outside/new.csv" }, physicalRoot).kind).toBe("next");
+  for (const [command, kind] of [
+    ["cat existing.csv", "ask"],
+    ["rm existing.csv", "deny"],
+  ]) {
+    expect(decide("bash", { command, workdir: "deep-link/.." }).kind).toBe(kind);
+    const config = normalizeRawDirs({ rawDirs: [join(cwd, "protected")] });
+    expect(decide("bash", { command }, config, `${cwd}/deep-link/..`).kind).toBe(kind);
+  }
+});
+
+test.runIf(process.platform === "darwin")(
+  "macOS var alias and private spelling share raw identity",
+  () => {
+    const physical = realpathSync.native(cwd);
+    expect(physical.startsWith("/private/var/")).toBe(true);
+    const aliasCwd = physical.replace(/^\/private/, "");
+    const config = normalizeRawDirs({ rawDirs: [join(physical, "protected")] });
+    expect(decide("write", { file_path: "protected/new.csv" }, config, aliasCwd).kind).toBe("deny");
+  },
+);

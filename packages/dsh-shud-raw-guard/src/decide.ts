@@ -50,7 +50,8 @@ function canonical(target: string, cwd: string): string {
   const missing: string[] = [];
   for (;;) {
     try {
-      return resolve(realpathSync(candidate), ...missing.reverse());
+      // Native realpath preserves physical symlink/.. traversal, like the host.
+      return resolve(realpathSync.native(candidate), ...missing.reverse());
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
       const split = candidate.lastIndexOf("/");
