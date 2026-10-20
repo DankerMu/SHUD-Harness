@@ -297,3 +297,37 @@ workspace/jobs/*/job.yaml
 - [ ] Batch analysis 默认只发送一次 summary notification，不逐 job 打扰 PI。
 - [ ] NotificationRecord 有 dedupe_key，服务重启或 retry 不重复发送。
 - [ ] notification 失败不回滚 RunRecord 或 EvidenceReport。
+
+## 附录 A. 审查清单（durable JobRegistry / `ctx.jobs` 版）
+
+供 M2 实现与 review 使用；原载 `.agents/skills/shud-gov/reviews/park-resume-audit.md`（Zero SessionDB/AgentLoop 版，2026-10-20 按 ADR-0004 K8 重写）。任何可能导致状态丢失的问题标 critical。
+
+### Job 提交阶段
+- [ ] 作业记录（id / cmd / cwd / pid / started / log 路径）**先落盘**，再返回工具结果让 turn 结束；不得只存在 `jobs-local` 内存 ring。
+- [ ] 子进程 detach（独立进程组），`./shud` 不被 dsh 的 SIGTERM 连带杀死（spike 1.3 反例）。
+- [ ] 提交后 agent 没有 pending LLM 调用：turn 以工具结果收尾，唤醒只来自 `job/settled` 完成通知。
+- [ ] 子代理在 park 前已结束或其结果已持久化（`ctx.subagents`）。
+
+### Collect 阶段
+- [ ] 检查 SHUD 退出码（0 成功，10 NaN，12 文件 IO，13 数据输入，19 CVODE，20 一致性检查；见 `../01_CODEBASE/SHUD_IO_Facts.md`）。
+- [ ] 二进制输出完整性：文件大小按 header + N×(NumVar+1)×8 字节对齐；部分写入判 failed 而非 succeeded。
+- [ ] NaN 扫描（SHUD 不做 NaN 检查）。
+- [ ] collect 幂等：同一 job 重复 collect 产生同一 RunRecord；digest 不用内容 hash（日志追加会改变它，`Spec_Gaps_Register.md` GAP-05 / RACE-03）。
+- [ ] 失败 job 写最小 RunRecord + FailureRecord，不伪造成功。
+
+### Resume / 唤醒阶段
+- [ ] 唤醒 turn 从 `ctx.storage` 读回 RunJob/RunRecord，而不是依赖上一 turn 的内存。
+- [ ] 引用的 artifact 仍存在（retention 可能已清理，GAP-10）。
+
+### 并发安全
+- [ ] 同时只有一个 SHUD 进程（OpenMP 全局状态不支持多仿真并行）。
+- [ ] RunJob 状态转换原子（timeout 与 cancel 竞态，RACE-01）。
+- [ ] stale job 检测：running 超时无心跳 → timed_out（GAP-09）。
+
+### 重启恢复（K8 对账）
+- [ ] 启动时扫描作业记录：pid 存活 → 重新接管输出；已退出 → 补 `job/settled` 并投递完成通知；SIGTERM 与 SIGKILL 各一条重启用例（Phased_Plan M2 验收门）。
+- [ ] 失败时恢复 last-good StackLock。
+
+### SHUD 运行时特有
+- [ ] stdout/stderr 落到 `runs/<run_id>/`，便于事后诊断。
+- [ ] SUNDIALS 路径（Makefile 硬编码 `$(HOME)/sundials`）与 OpenMP 线程数可配置，不在工具里再硬编码。

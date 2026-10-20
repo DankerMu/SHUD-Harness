@@ -1,7 +1,12 @@
-# rSHUD / AutoSHUD 已知问题与接口细节
+---
+status: living
+canonical_for: [rshud-autoshud-quirks]
+---
 
-以下事实从 R 源码提取。每条标注出处。
-如果代码已更新导致以下描述不准确，以代码为准并更新本文件。
+# rSHUD / AutoSHUD 已知问题与接口细节（审查用）
+
+从 R 源码提取的硬事实，供包装 rSHUD 调用（`shud_collect`、水量平衡、前处理脚本）的 implementer 和 reviewer 子代理读取；对应 `openspec/project-profile.md` 的 "Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility" 风险包。
+每条标注出处；代码与本文矛盾时以代码为准并更新本文。原载 `.agents/skills/shud-gov/knowledge/rshud-quirks.md`（2026-10-20 降级为文档，skill 删除）。
 
 ## read_output() — 二进制输出解析
 
@@ -51,7 +56,7 @@
 - 无水量平衡计算验证测试 — Verified: 2026-04-26
 - 无端到端模型构建测试 — Verified: 2026-04-26
 
-## rSHUD 关键函数签名（TS 包装参考）
+## rSHUD 关键函数签名（工具包装参考）
 
 - `shud.triangle(wb, q=30, a=5, S=NULL, riv=NULL, hole=NULL, pts=NULL)` → list(P, T) — Source: rSHUD/R/mesh_generation.R
 - `shud.mesh(tri, dem, AqDepth=10, r.aq=NULL)` → S4 对象 — Source: rSHUD/R/mesh_generation.R
@@ -77,3 +82,27 @@
 - `shud.triangle()`, `shud.mesh()`, `sp.mesh2Shape()` — Source: AutoSHUD/Step3_BuidModel.R
 - `crs.Albers()`, `days_in_year()`, `getArea()` — Source: AutoSHUD/ReadProject.R
 - AutoSHUD 使用 legacy raster/sp，但调用的 rSHUD 函数需要 terra/sf — Source: AutoSHUD/GetReady.R
+
+## 审查清单（涉及 rSHUD 调用 / AutoSHUD pipeline 的 diff）
+
+reviewer 只标注需要确认的接口假设；无法从代码确认的标 `[UNCERTAIN]` 并要求对照 R 源码。
+
+### rSHUD 接口
+
+- [ ] 如果调用 read_output()，验证是否传入正确的 version 参数（决定头格式）
+- [ ] 如果调用 wb.all()，注意 getOutlets() 在 rSHUD 中未定义——验证替代方案
+- [ ] 如果依赖 read_df()，注意 100-block 硬编码上限
+- [ ] 验证是否处理了 xts 返回值在 ncol=1 时的结构差异
+
+### rSHUD 已知问题（包装层不应复制）
+
+- [ ] 不要复制按列号访问的 pattern——用列名
+- [ ] 不要假设 crs.Albers() 适用于所有区域
+- [ ] 不要依赖 .shud 全局环境——包装层应显式传参
+
+### AutoSHUD Pipeline
+
+- [ ] 如果实现 pipeline 调度，验证步骤执行顺序是否严格 0.1→1→2→3→4→5
+- [ ] 验证数据源 code 解析是否覆盖所有变体（soil 0.1/0.2/0.3, landuse 0.1/0.2, forcing 0.1-0.6/1.1/1.2）
+- [ ] 检查各数据源的区域限制（SSURGO/NLCD 仅美国，ISRIC 需联网）
+

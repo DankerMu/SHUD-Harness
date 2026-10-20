@@ -52,7 +52,7 @@ Verification matrix:
 
 Domain risk packs:
 - Scientific governance / PI gate / evidence lineage.
-- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility (SUNDIALS at `~/sundials`, ccw full run ≈ 4m45s, tiny END=30 < 2 min).
+- Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility (SUNDIALS at `~/sundials`, ccw full run ≈ 4m45s, tiny END=30 < 2 min). Facts and review checklists: `docs/01_CODEBASE/SHUD_IO_Facts.md`, `docs/01_CODEBASE/rSHUD_AutoSHUD_Quirks.md`; Park/Resume checklist: `docs/03_SPEC/Park_Resume_Design.md` 附录 A; spec ambiguities: `docs/03_SPEC/Spec_Gaps_Register.md`.
 - dsh seam / profile / outbound-channel governance.
 
 Domain expanded-triggers:
