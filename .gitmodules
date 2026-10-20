@@ -10,7 +10,3 @@
 	path = AutoSHUD
 	url = https://github.com/SHUD-System/AutoSHUD.git
 	branch = master
-[submodule "zero"]
-	path = zero
-	url = https://github.com/V1ki/zero.git
-	branch = development

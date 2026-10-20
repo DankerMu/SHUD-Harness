@@ -1,9 +1,0 @@
-{
-  "extends": "../../../tsconfig.base.json",
-  "compilerOptions": {
-    "noEmit": true
-  },
-  "files": [
-    "tests/authority-descriptor-typeproof.ts"
-  ]
-}
