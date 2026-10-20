@@ -225,7 +225,7 @@ sandbox.exec 按发起 agent 的角色施加确定性写策略，不靠 prompt �
 
 ### 9.4 Streaming 策略
 
-执行器将日志分片推送至 WebSocket：
+执行器将日志分片写入 `runs/<run_id>/stdout.log`，并经 `ctx.jobs` 的输出流由 dsh 作业卡实时展示（事件语义如下）：
 
 ```text
 tool.started

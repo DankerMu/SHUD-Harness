@@ -116,6 +116,8 @@ dsh 审批 seam 的词汇是封闭、单次的（源：`../deepseek-harness` `do
 | 卡片展示的申请理由 | `ApprovalRequest.reason` / `displayReason` | 由发起方（策略门/agent）填写，**不是** PI comment |
 | `comment` | 无字段 | `approval/decided` 只有 `{ id, outcome }`；PI comment 的承载方式（对话 turn 或 user-interaction seam）为开放设计项 |
 
+**开放设计项（M3 审批接线前定）**：PI comment 与 `request_revision` 在该 seam 上无字段。候选：(a) 审批卡只承载放行/拒绝，comment 由 PI 在同一会话的下一轮对话给出，coordinator 以 `approval/decided` 的 `id` 关联写入 `PiGateDecision.comment`，并把"拒绝 + 有 comment"映射为 `request_revision`；(b) dsh 升级若提供 user-interaction / form seam，则在卡片上直接收 comment；(c) 提供 PI 专用 `pi_decide` 工具（agent 身份被策略门 deny），决定与 comment 一次写入。MVP 硬约束不变：reject / request_revision / high-risk approve 没有 comment 时 gate 不得关闭（GR-003）——按 (a) 实现时 coordinator 必须先索要 comment 再落 PiGateDecision。
+
 MVP 不做行级批注。
 
 ## 8. 审计

@@ -9,7 +9,7 @@ status: snapshot
 
 ## 1. 背景
 
-当前 SHUD-Harness 已经具备较完整的工程规格：TaskCard、RunJob、RunRecord、Artifact、EvidenceReport、PI gate、WebSocket、Park/Resume、BatchProgress、ReportExport、Observability、NFR、Runbook、Traceability 等。
+当前 SHUD-Harness 已经具备较完整的工程规格：TaskCard、RunJob、RunRecord、Artifact、EvidenceReport、PI gate、Park/Resume、BatchProgress、ReportExport、Observability、NFR、Runbook、Traceability 等。
 
 这些设计已经能支持“运行—记录—报告—审批”的科研工程闭环。但对于 SHUD 这样的物理模型，仍缺一个更上游的 PRD/spec 层：
 

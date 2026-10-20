@@ -27,10 +27,9 @@ docs/generated/json-schema/*.json
 ## 2. 推荐脚本
 
 ```bash
-bun run schema:generate
-bun run schema:check
-bun run docs:links
-bun run docs:lint
+pnpm run schema:generate
+pnpm run schema:check
+pnpm run docs:links
 ```
 
 ## 3. 生成内容
@@ -48,7 +47,7 @@ bun run docs:lint
 CI 执行：
 
 ```bash
-bun run schema:generate
+pnpm run schema:generate
 git diff --exit-code docs/generated/schema docs/generated/json-schema
 ```
 

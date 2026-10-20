@@ -208,27 +208,23 @@ Language guard 是**枚举短语的确定性 lint**，必须清楚它能做什�
 EvidenceReport 生成时应同时生成可分享的静态导出 artifact：
 
 ```text
-artifacts/reports/REPORT-001.md
-artifacts/reports/REPORT-001.standalone.html
-artifacts/reports/REPORT-001.export_manifest.yaml
+<workspace>/reports/<report_id>.md
+<workspace>/reports/<report_id>.export_manifest.yaml
 ```
 
-MVP 支持：
+报告唯一产出格式是 standalone Markdown 文件（ADR-0004 K7；HTML 导出随 Report_Export_Spec 删除）。PI 在 dsh 聊天中阅读，或复制到论文草稿/协作工具。
 
-- `html`: 单文件 standalone HTML，可离线阅读，可用浏览器 print to PDF。
-- `markdown`: 原始 Markdown，适合复制到论文草稿或协作工具。
+**水印表（canonical，原 Report_Export_Spec §4 并入）**——按报告状态查表，7 态各有标记；布尔判据 `status != accepted` 已废除，它会把 accepted 后归档的报告误标为草稿（对抗审查 A06-6）：
 
-导出 API：
+| status | 文件内可见标记 |
+|---|---|
+| `draft` / `reviewed` / `awaiting_pi` | `DRAFT — not accepted by PI` |
+| `accepted` | 无水印；首部一行 `Accepted by PI · <decision_at> · <decision_id>` |
+| `revision_requested` | `REVISION REQUESTED — not accepted by PI` |
+| `rejected` | `REJECTED — not accepted by PI` |
+| `archived` | 按归档前终态显示（accepted → 接受标记；其余 → 对应水印），另加 `ARCHIVED` |
 
-```http
-GET /api/reports/:reportId/export?format=html
-GET /api/reports/:reportId/export?format=markdown
-```
-
-水印按报告状态查表显示（7 态各有对应标记，权威表见 Report_Export_Spec §4（已删，见 tag archive/zero-v0.8.3）——
-布尔判据 `status != accepted` 已废除，它会把 accepted 后归档的报告误标为草稿，对抗审查 A06-6）。
-
-HTML 可内联小型 PNG/SVG 图表和 metrics summary，但不得内联完整 stdout/stderr、raw SHUD binary output、大型 timeseries 或 secrets。
+规则：水印是正文的一部分（标题下第一行 + 文末最后一行），不得仅靠样式/注释承载；报告只引用 `evidence_usable` 的 artifact；可引用 `figures/` 下的小型 PNG/SVG 与 metrics summary，但不得内联完整 stdout/stderr、raw SHUD binary output、大型 timeseries 或 secrets。
 
 Export manifest 应记录 included/excluded artifacts，说明哪些图表被内联、哪些大型日志或数据只保留引用。
 
@@ -316,8 +312,8 @@ report:
 - [ ] PI questions 必须非空，除非任务类型为纯 ops。
 - [ ] accepted 状态需要权限。
 - [ ] 报告引用的 artifact 均存在：生成时逐一解析校验，幻觉引用导致生成失败而非流入 draft（负例测试）。
-- [ ] 每个 EvidenceReport 可导出 standalone HTML。
-- [ ] draft/reviewed/awaiting_pi 状态的 HTML 导出有可见 watermark。
-- [ ] HTML 导出不包含 secrets、完整日志或 raw binary output。
+- [ ] 每个 EvidenceReport 落为 standalone Markdown 文件。
+- [ ] 非 accepted 状态的报告文件正文带可见水印（水印表 7 态逐一测试，含 archived 的终态继承）。
+- [ ] 报告文件不包含 secrets、完整日志或 raw binary output。
 - [ ] export manifest 记录 included/excluded artifacts。
 - [ ] PI decision comments 出现在 report decision history 中。

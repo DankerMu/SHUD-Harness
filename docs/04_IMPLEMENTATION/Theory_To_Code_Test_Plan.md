@@ -30,15 +30,15 @@ canonical_for: [t2c-test-plan]
 | TC-SCHEMA-002 | missing scientific_question | Zod parse fail |
 | TC-EQ-001 | symbol missing unit | cannot enter reviewed |
 | TC-EQ-002 | dimension_check fail | bundle cannot enter implementation_review |
-| TC-GATE-001 | physical_equation CR without bundle | API 422 |
-| TC-GATE-002 | agent attempts accept bundle | API 403 |
-| TC-GATE-003 | high-risk approve without comment | API 400 |
-| TC-MAP-001 | high-risk code target without equation_id | API 422 |
+| TC-GATE-001 | physical_equation CR without bundle | 策略门 deny，remediation=open_gate |
+| TC-GATE-002 | agent attempts accept bundle | 策略门 deny（agent 身份不得持 pi 角色） |
+| TC-GATE-003 | high-risk approve without comment | PiGateDecision 校验拒绝（GR-003） |
+| TC-MAP-001 | high-risk code target without equation_id | 策略门 deny |
 | TC-VER-001 | passed verification missing artifact | cannot enter reviewed |
 | TC-VER-002 | failed verification retains logs/artifacts | artifact query pass |
 | TC-REPORT-001 | high-risk report missing Theory-to-Code Evidence | cannot enter reviewed |
 | TC-REPORT-002 | calibration-as-validation phrase | language guard fail |
-| TC-SEARCH-001 | search before accepted_for_search | API 409 |
+| TC-SEARCH-001 | search before accepted_for_search | 策略门 deny（bundle 状态不满足） |
 | TC-SEARCH-002 | improvement claim without baseline | report guard fail |
 | TC-TRACE-001 | equation_id → code_target → verification_case → run_record → report | traceability check pass |
 

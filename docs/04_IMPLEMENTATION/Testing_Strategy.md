@@ -8,7 +8,7 @@ status: frozen
 **适用范围：** schema、dsh 插件（策略门 / 作业后端 / 工具）、sandbox、SHUD fixture、report  
 **目标：** 用分层测试保证 v0.8 端到端闭环可复盘。
 
-> **排期语义（2026-10-20）**：本文 W0–W7 周标签仅作依赖顺序参考，现行排期以 [Phased_Plan v2](Phased_Plan.md) 的里程碑 M1–M6 为准（ADR-0004）。
+> **排期语义（2026-10-20）**：测试按 [Phased_Plan v2](Phased_Plan.md) 的里程碑 M1–M6 分层，无日历周（ADR-0004）。
 > **测试工具**：单元与集成测试用 vitest，类型检查用 `tsc`（各 `dsh-shud-*` 包，见 [Repository_Layout v2](Repository_Layout.md)）；SHUD/rSHUD fixture 用 bash/R 确定性脚本。
 
 ## 1. 测试分层
@@ -21,18 +21,16 @@ status: frozen
 | report | EvidenceReport 生成和 language guard |
 | e2e | 在 `dsh --profile shud` 对话中创建 task、运行 job、生成 report |
 
-### 阶段测试矩阵
+### 里程碑测试矩阵
 
-| Week | 必须新增的自动化测试 | Fixture | CI 级别 |
-|---:|---|---|---|
-| W0 | gitmodules parse, docs link, readiness YAML | none | PR |
-| W1 | core schema | schema-only | PR |
-| W2 | submodule discovery, data sha256, artifact manifest | schema-only | PR |
-| W3 | dummy job submit/log/collect, restart recovery smoke | dummy-runner | PR |
-| W4 | SHUD build/run tiny, RunRecord, hydrograph, WB residual | ccw tiny | nightly/manual |
-| W5 | rSHUD roundtrip, old-output fixture, patch bundle | old-output | PR/nightly |
-| W6 | batch progress, failed cell, heatmap aggregation | dummy-batch | PR |
-| W7 | report guard, PI decision | report fixture | PR |
+| 里程碑 | 必须新增的自动化测试 | Fixture | CI 级别 |
+|---|---|---|---|
+| M1 | core schema 正反例、policy-gate 决策表、raw-guard 单测 + 5 探针、profile `--dump-config` 自检、docs link | schema-only | PR |
+| M2 | `shud_run`/`shud_collect`、durable JobRegistry 落盘与对账、SIGTERM/SIGKILL 重启用例、RunRecord 产出 | dummy-runner + ccw tiny | PR（dummy）/ nightly·manual（ccw） |
+| M3 | TaskCard 状态机、StackLock 三仓库 + llm 三字段、EvidenceReport 语言护栏与水印、PI decision 负例 | report fixture | PR |
+| M4 | ChangeRequest/VerificationCase、openMP RHS 回放与 serial baseline 一致性、故意注入错误 patch 被拦截 | old-output | PR/nightly |
+| M5 | AnalysisPlan OAT 批次、失败参数集可见、汇总表可复算 | dummy-batch | PR |
+| M6 | 各项评估的一页文档链接检查 | none | PR |
 
 Fixture 与命令矩阵见 [Test_Fixtures_And_Command_Matrix.md](Test_Fixtures_And_Command_Matrix.md)。原阶段测试计划 Phase_By_Phase_Test_Plan 与 CI 映射 CICD_Release 已删（见 tag archive/zero-v0.8.3）；CI 内容以 Phased_Plan v2 M1 为准。
 
@@ -49,9 +47,9 @@ Fixture 与命令矩阵见 [Test_Fixtures_And_Command_Matrix.md](Test_Fixtures_A
 - EvidenceReport；
 - ChangeRequest。
 
-## 3. WebSocket 测试
+## 3. 传输层测试
 
-（已删：自建 WebSocket 传输退场，ADR-0004 K2。）
+（已删：自建实时传输层退场，ADR-0004 K2；dsh 会话流由基座测试。）
 
 ## 4. Sandbox 测试
 
@@ -106,8 +104,9 @@ ccw tiny 验收：
 - [ ] request_revision 无 comment 被拒绝。
 - [ ] high-risk approve 无 comment 被拒绝。
 - [ ] agent 身份无法提交 PI decision。
-- [ ] 成功 decision 写 audit log、MemoryNote 和 report decision history。
-- [ ] MemoryNote(type=pi_decision) 的 `generalization_allowed=false`。
+- [ ] 成功 decision 写 audit log 和 report decision history。
+
+（MemoryNote 相关用例随 ADR-0004 K11 后移到记忆评估之后。）
 
 ### 补充测试类别
 
@@ -124,7 +123,7 @@ ccw tiny 验收：
 - requirement IDs unique；
 - P0/P1 requirements have acceptance criteria；
 - P0 requirements have test_ids before release；
-- Traceability matrix references valid requirement IDs。
+- 文档内引用的 requirement ID 均存在于 Requirements_Catalog（Traceability_Matrix 已删，矩阵在 dsh 实现期按新模块重建）。
 
 ## 12. Theory-to-Code Tests
 
@@ -152,21 +151,21 @@ ccw tiny 验收：
 | TC-SCHEMA-002 | missing scientific_question | Zod parse fail |
 | TC-EQ-001 | symbol missing unit | cannot enter reviewed |
 | TC-EQ-002 | dimension_check fail | bundle cannot enter implementation_review |
-| TC-GATE-001 | physical_equation CR without bundle | API 422 |
-| TC-GATE-002 | agent attempts accept bundle | API 403 |
-| TC-GATE-003 | high-risk approve without comment | API 400 |
-| TC-MAP-001 | high-risk code target without equation_id | API 422 |
+| TC-GATE-001 | physical_equation CR without bundle | 策略门 deny，remediation=open_gate |
+| TC-GATE-002 | agent attempts accept bundle | 策略门 deny（agent 身份不得持 pi 角色） |
+| TC-GATE-003 | high-risk approve without comment | PiGateDecision 校验拒绝（GR-003） |
+| TC-MAP-001 | high-risk code target without equation_id | 策略门 deny |
 | TC-VER-001 | passed verification missing artifact | cannot enter reviewed |
 | TC-VER-002 | failed verification retains logs/artifacts | artifact query pass |
 | TC-REPORT-001 | high-risk report missing Theory-to-Code Evidence | cannot enter reviewed |
 | TC-REPORT-002 | calibration-as-validation phrase | language guard fail |
-| TC-SEARCH-001 | search before accepted_for_search | API 409 |
+| TC-SEARCH-001 | search before accepted_for_search | 策略门 deny（bundle 状态不满足） |
 | TC-SEARCH-002 | improvement claim without baseline | report guard fail |
 | TC-TRACE-001 | equation_id → code_target → verification_case → run_record → report | traceability check pass |
 
 ### Fixture Strategy
 
-- **schema-only fixture**: 用于 W1/W2，不依赖 SHUD。
+- **schema-only fixture**: 用于 M1，不依赖 SHUD。
 - **dummy verification fixture**: 模拟 VerificationCase run/collect（VC-DUMMY-001）。
 - **ccw tiny verification fixture**: 真实 SHUD tiny case，case_type=tiny_basin。
 
