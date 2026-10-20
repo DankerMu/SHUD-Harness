@@ -6,7 +6,7 @@ status: frozen
 
 **状态：** v0.8.1 P0 补充规范  
 **适用范围：** RunJob submit/collect、report generation、report export、notification、PI decision、batch analysis、workspace locks。  
-**目标：** 防止服务重启、WebSocket 重连、用户重复点击、watcher retry 或并发 worker 导致重复运行、重复 collect、重复通知或状态回退。
+**目标：** 防止 dsh 重启、会话重连、用户重复下达、watcher retry 或并发 worker 导致重复运行、重复 collect、重复通知或状态回退。
 
 ## 1. 原则
 

@@ -5,8 +5,8 @@ status: frozen
 # SHUD 输出变量注册表
 
 **状态：** P1 设计规范  
-**适用范围：** rSHUD 解析、HydrographChart、ResultsOverview、水量平衡、numerical health  
-**目标：** 为前端和指标计算提供稳定变量目录，同时允许 runtime discovery 发现不同 SHUD 版本的输出差异。
+**适用范围：** rSHUD 解析、报告图表与指标、水量平衡、numerical health  
+**目标：** 为报告图表和指标计算提供稳定变量目录，同时允许 runtime discovery 发现不同 SHUD 版本的输出差异。
 
 ## 1. 命名规则
 
@@ -53,7 +53,6 @@ interface ShudOutputVariable {
   description: string;
   unit: string;
   default_priority: "primary" | "secondary" | "advanced";
-  frontend_default: boolean;
   water_balance_role?: "input" | "output" | "storage" | "diagnostic";
   rshud_aliases?: string[];
 }
@@ -61,13 +60,13 @@ interface ShudOutputVariable {
 
 ## 3. Element 状态变量
 
-| variable_id | Identifier | 中文含义 | 单位 | 优先级 | 默认展示 |
-|---|---|---|---|---|---:|
-| `eleyic` | `.eleyic.` | 冠层截留水量 | m | advanced | 否 |
-| `eleysnow` | `.eleysnow.` | 雪水当量 | m | secondary | 否 |
-| `eleysurf` | `.eleysurf.` | 地表积水/地表水深 | m | primary | 是 |
-| `eleyunsat` | `.eleyunsat.` | 非饱和带水量 | m | primary | 是 |
-| `eleygw` | `.eleygw.` | 地下水位或地下水储量深度 | m | primary | 是 |
+| variable_id | Identifier | 中文含义 | 单位 | 优先级 |
+|---|---|---|---|---|
+| `eleyic` | `.eleyic.` | 冠层截留水量 | m | advanced |
+| `eleysnow` | `.eleysnow.` | 雪水当量 | m | secondary |
+| `eleysurf` | `.eleysurf.` | 地表积水/地表水深 | m | primary |
+| `eleyunsat` | `.eleyunsat.` | 非饱和带水量 | m | primary |
+| `eleygw` | `.eleygw.` | 地下水位或地下水储量深度 | m | primary |
 
 ## 4. Element 面通量变量
 
@@ -93,32 +92,32 @@ interface ShudOutputVariable {
 
 ## 6. River 变量
 
-| variable_id | Identifier | 中文含义 | 单位 | 优先级 | 默认展示 |
-|---|---|---|---|---|---:|
-| `rivystage` | `.rivystage.` | 河道水位 | m | primary | 是 |
-| `rivqup` | `.rivqup.` | 向上游方向流量 | m3/day | secondary | 否 |
-| `rivqdown` | `.rivqdown.` | 向下游方向流量 | m3/day | primary | 是 |
-| `rivqsurf` | `.rivqsurf.` | 河道与坡面地表交换总量 | m3/day | primary | 否 |
-| `rivqsurf1` | `.rivqsurf1.` | 地表交换方向 1 | m3/day | advanced | 否 |
-| `rivqsurf2` | `.rivqsurf2.` | 地表交换方向 2 | m3/day | advanced | 否 |
-| `rivqsurf3` | `.rivqsurf3.` | 地表交换方向 3 | m3/day | advanced | 否 |
-| `rivqsub` | `.rivqsub.` | 河道与地下水交换总量 | m3/day | primary | 否 |
-| `rivqsub1` | `.rivqsub1.` | 地下交换方向 1 | m3/day | advanced | 否 |
-| `rivqsub2` | `.rivqsub2.` | 地下交换方向 2 | m3/day | advanced | 否 |
-| `rivqsub3` | `.rivqsub3.` | 地下交换方向 3 | m3/day | advanced | 否 |
+| variable_id | Identifier | 中文含义 | 单位 | 优先级 |
+|---|---|---|---|---|
+| `rivystage` | `.rivystage.` | 河道水位 | m | primary |
+| `rivqup` | `.rivqup.` | 向上游方向流量 | m3/day | secondary |
+| `rivqdown` | `.rivqdown.` | 向下游方向流量 | m3/day | primary |
+| `rivqsurf` | `.rivqsurf.` | 河道与坡面地表交换总量 | m3/day | primary |
+| `rivqsurf1` | `.rivqsurf1.` | 地表交换方向 1 | m3/day | advanced |
+| `rivqsurf2` | `.rivqsurf2.` | 地表交换方向 2 | m3/day | advanced |
+| `rivqsurf3` | `.rivqsurf3.` | 地表交换方向 3 | m3/day | advanced |
+| `rivqsub` | `.rivqsub.` | 河道与地下水交换总量 | m3/day | primary |
+| `rivqsub1` | `.rivqsub1.` | 地下交换方向 1 | m3/day | advanced |
+| `rivqsub2` | `.rivqsub2.` | 地下交换方向 2 | m3/day | advanced |
+| `rivqsub3` | `.rivqsub3.` | 地下交换方向 3 | m3/day | advanced |
 
 ## 7. Lake 变量
 
-湖泊变量在没有湖泊的项目中可能不存在。缺失时 parser 应返回 `not_available`，不应导致 UI 崩溃。
+湖泊变量在没有湖泊的项目中可能不存在。缺失时 parser 应返回 `not_available`，不应导致报告生成崩溃。
 
-| variable_id | Identifier | 中文含义 | 单位 | 优先级 | 默认展示 |
-|---|---|---|---|---|---:|
-| `lakystage` | `.lakystage.` | 湖泊水位 | m | secondary | 否 |
-| `lakarea` | `.lakarea.` | 湖面面积 | m2 | advanced | 否 |
-| `lakqrivin` | `.lakqrivin.` | 河流入湖流量 | m3/day | secondary | 否 |
-| `lakqrivout` | `.lakqrivout.` | 湖泊出流到河道 | m3/day | secondary | 否 |
-| `lakqsurf` | `.lakqsurf.` | 湖泊与地表交换 | m3/day | advanced | 否 |
-| `lakqsub` | `.lakqsub.` | 湖泊与地下水交换 | m3/day | advanced | 否 |
+| variable_id | Identifier | 中文含义 | 单位 | 优先级 |
+|---|---|---|---|---|
+| `lakystage` | `.lakystage.` | 湖泊水位 | m | secondary |
+| `lakarea` | `.lakarea.` | 湖面面积 | m2 | advanced |
+| `lakqrivin` | `.lakqrivin.` | 河流入湖流量 | m3/day | secondary |
+| `lakqrivout` | `.lakqrivout.` | 湖泊出流到河道 | m3/day | secondary |
+| `lakqsurf` | `.lakqsurf.` | 湖泊与地表交换 | m3/day | advanced |
+| `lakqsub` | `.lakqsub.` | 湖泊与地下水交换 | m3/day | advanced |
 
 ## 8. 前端默认展示
 

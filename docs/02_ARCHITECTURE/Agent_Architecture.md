@@ -199,7 +199,7 @@ event:
       - log_summary
 ```
 
-所有用户可见内容应通过 WebSocket 推送到 AgentActivityFeed；内部操作可以记录在 session log 中，但仍需可审计。
+所有用户可见内容应进入 dsh 会话流（聊天 / 作业卡 / 审批卡）；内部操作可以记录在 session log 中，但仍需可审计。
 
 ## 6. 工具调用规则
 

@@ -15,14 +15,12 @@ canonical_for: [requirements-catalog]
 
 | ID | 角色 | 用户故事 | 优先级 | 验收标准 |
 |---|---|---|---:|---|
-| US-001 | PI | 作为 PI，我希望通过 Web workbench 创建 SHUD 建模任务，并查看执行进度与结果报告。 | P0 | 能创建 TaskCard；能看到 RunJob 状态；能打开 EvidenceReport |
+| US-001 | PI | 作为 PI，我希望在 dsh 对话中创建 SHUD 建模任务，并查看执行进度与结果报告。 | P0 | 能创建 TaskCard；能看到 RunJob 状态；能打开 EvidenceReport |
 | US-002 | PI | 作为 PI，我希望长时间任务完成后即使浏览器关闭也能收到通知。 | P1 | collect/report/analysis 完成后产生 NotificationRecord；邮件失败不影响主流程 |
-| US-003 | PI | 作为 PI，我希望报告可以导出为 standalone HTML/Markdown，便于分享和离线阅读。 | P0 | `GET /api/reports/:id/export` 可返回导出文件；draft 有 watermark |
-| US-004 | PI | 作为 PI，我希望敏感性分析运行中能看到每个参数集的状态。 | P1 | BatchProgressGrid 显示 queued/running/succeeded/failed 等状态 |
-| US-005 | PI | 作为 PI，我希望审批时能留下科学判断批注，并纳入审计和 MemoryNote。 | P0 | PI decision 可带 comment；reject/revision/high-risk approve 必填 |
-| US-006 | 工程师 | 作为工程师，我希望系统有健康检查和结构化日志，便于诊断服务是否可用。 | P0 | `/api/health/live` 和 `/api/health/ready` 可用；日志有 request_id/task_id |
-| US-007 | 系统管理员 | 作为管理员，我希望有运维 dashboard 查看磁盘、任务、错误、通知和版本状态。 | P1 | Ops dashboard 至少包含 System、Jobs、Storage、Errors、Notifications、Dependencies |
+| US-005 | PI | 作为 PI，我希望审批时能留下科学判断批注，并纳入审计。 | P0 | PI decision 可带 comment；reject/revision/high-risk approve 必填 |
 | US-008 | 系统管理员 | 作为管理员，我希望依赖版本被锁定并可审计，避免环境漂移。 | P0 | package manager 版本、lockfile、dependency audit、StackLock dependency summary 可用 |
+
+> 已废弃（2026-10-20，ADR-0004 K2/K7）：US-003（HTML 导出——Markdown 报告文件是唯一产出，水印规则见 Report_Generation_Spec）、US-004（批进度 UI——由 dsh 作业卡 + AnalysisProgressPayload 承载）、US-006（健康端点——无自建服务）、US-007（运维 dashboard）。编号不复用；原文见 tag archive/zero-v0.8.3。
 
 ---
 
@@ -65,8 +63,8 @@ canonical_for: [requirements-catalog]
 | GR-002 | Governance | Scientific language guard | EvidenceReport 禁止使用“模型机制已验证”“普遍改进”等越权表述。 | P0 |
 | GR-003 | Governance | PI decision comments | revision/reject/high-risk approve 必须有 comment。 | P0 |
 | IR-001 | Integration | SHUD/rSHUD/AutoSHUD submodule lock | StackLock 必须记录三个 submodule commit 与 dirty state。 | P0 |
-| IR-002 | Integration | SMTP optional integration | Notification 可以通过 SMTP/SendGrid，但失败不能回滚主流程。 | P1 |
-| IR-003 | Integration | DuckDB warehouse | DuckDB 用作指标索引和运维聚合时必须可备份、恢复、重建。 | P1 |
+
+> 已废弃（2026-10-20）：IR-002（SMTP 通知，ADR-0002 D7 转开放项，M6 评估）、IR-003（DuckDB warehouse，运维聚合面退场，K2）。编号不复用。
 
 ---
 
@@ -77,10 +75,10 @@ canonical_for: [requirements-catalog]
 | TR-001 | Schema validation tests | FR-001, FR-002, DR-001 | P0 |
 | TR-003 | Report guard tests | FR-004, GR-002 | P0 |
 | TR-004 | PI decision negative tests | FR-006, GR-001, GR-003 | P0 |
-| TR-007 | Runbook drill tests | NFR-OPS-001 | P1 |
 | TR-008 | Dependency lock tests | NFR-REL-001 | P0 |
 | TR-009 | Secret redaction tests | NFR-SEC-001 | P0 |
-| TR-010 | Requirements coverage tests | GAP-REQ-001 | P1 |
+
+> 已废弃（2026-10-20）：TR-007（Runbook 演练，Operations_Runbook 已删）、TR-010（覆盖对象 GAP_ANALYSIS 已删；需求覆盖改由 Testing_Strategy §11 承担）。编号不复用。
 
 ---
 

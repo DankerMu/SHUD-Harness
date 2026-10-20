@@ -8,7 +8,7 @@ status: accepted
 **来源**：grill-me 方案压测——spec 冻结后、实施记录重建前，对"只有 PI 能回答的现实假设"做 9 问对抗压测，全部分支收敛。
 **背景**：v0.8.3 规格体系经 4 轮文档级对抗审查后冻结，但方案对 PI 现实（部署环境、首个任务、用户面、开发模式、模型预算）的假设从未被验证。旧 openspec changes（4 月产物，9 个 bundle）因漂移已整体清理，重建实施记录前需先锚定这些决策。
 
-**取代记录**：2026-10-20 [ADR-0004](0004-dsh-kernel.md) 取代 D3（首任务改为 ccw 运行→RunRecord→报告，openMP 回放为第二任务）、D5（MVP 主链改为 TaskCard→RunJob→RunRecord→EvidenceReport）、D9（模型改为 DeepSeek Flash via DMXAPI）；D7 转开放项；D1/D2/D4/D6/D8 继续有效。
+**取代记录**：2026-10-20 [ADR-0004](0004-dsh-kernel.md) 取代 D3（首任务改为 ccw 运行→RunRecord→报告，openMP 回放为第二任务）、D5（MVP 主链改为 TaskCard→RunJob→RunRecord→EvidenceReport）、D9（模型改为 DeepSeek Flash via DMXAPI）；D7 转开放项；D1/D2/D4/D6/D8 继续有效（D1 正文的"Hono 服务"形态随 K2 改为 `dsh --profile shud`，全本机部署本身不变）。
 
 ## 决策（D1–D9）
 

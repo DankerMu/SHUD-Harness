@@ -35,11 +35,12 @@ bash scripts/fixtures/dummy-job.sh --duration-ms 500 --exit-code 0 --lines 10
 ### 预期输出
 
 ```text
-workspace/jobs/JOB-*/job.yaml
-workspace/artifacts/JOB-*/stdout.log
-workspace/artifacts/JOB-*/stderr.log
-workspace/runs/RUN-*/run_record.yaml
-workspace/artifacts/RUN-*/metrics.yaml
+<workspace>/runs/<run_id>/job.yaml          # 作业记录（id/cmd/cwd/pid/started/log 路径）
+<workspace>/runs/<run_id>/stdout.log
+<workspace>/runs/<run_id>/stderr.log
+<workspace>/runs/<run_id>/run_record.yaml
+<workspace>/runs/<run_id>/metrics.yaml
+# RunJob/RunRecord 记录另经 ctx.storage 域持久化（$DSH_HOME/storages/，Repository_Layout §2）
 ```
 
 ### 用例
@@ -66,10 +67,10 @@ bash scripts/fixtures/dummy-batch.sh --params ksat=0.5,1,2 --params roughness=0.
 ### 预期输出
 
 ```text
-workspace/analysis_plans/PLAN-*/analysis_plan.yaml
-workspace/artifacts/PLAN-*/analysis_progress.json
-workspace/artifacts/PLAN-*/sensitivity_results.parquet
-workspace/artifacts/PLAN-*/heatmap.json
+<workspace>/runs/<plan_id>/analysis_plan.yaml
+<workspace>/runs/<plan_id>/analysis_progress.json
+<workspace>/runs/<plan_id>/sensitivity_results.parquet
+<workspace>/runs/<plan_id>/heatmap.json
 ```
 
 ### 用例
@@ -93,20 +94,21 @@ workspace/artifacts/PLAN-*/heatmap.json
 ### 命令草案
 
 ```bash
-bash scripts/shud/build.sh --repo workspace/repos/SHUD
-bash scripts/shud/run_tiny_ccw.sh --repo workspace/repos/SHUD --task TASK-001 --days 30
+bash scripts/shud/build.sh --repo <workspace>/shud
+bash scripts/shud/run_tiny_ccw.sh --repo <workspace>/shud --task TASK-001 --days 30
 Rscript scripts/rshud/water_balance.R --run RUN-001
 ```
 
 ### 预期输出
 
 ```text
-workspace/runs/RUN-001/run_record.yaml
-workspace/runs/RUN-001/output/*.dat
-workspace/artifacts/RUN-001/stdout.log
-workspace/artifacts/RUN-001/stderr.log
-workspace/artifacts/RUN-001/metrics.yaml
-workspace/artifacts/RUN-001/hydrograph.json
+<workspace>/runs/RUN-001/run_record.yaml
+<workspace>/runs/RUN-001/output/*.dat
+<workspace>/runs/RUN-001/stdout.log
+<workspace>/runs/RUN-001/stderr.log
+<workspace>/runs/RUN-001/metrics.yaml
+<workspace>/runs/RUN-001/hydrograph.json
+<workspace>/reports/<report_id>.md          # M3 起
 ```
 
 ### 验收
@@ -138,7 +140,7 @@ one AnalysisPlan progress artifact
 - report 包含 pi_questions；
 - missing artifact 被标注，不崩溃；
 - forbidden language guard 生效；
-- HTML export 有 watermark 或 accepted 标记。
+- Markdown 报告文件按状态带可见水印或 accepted 标记（Report_Generation_Spec §水印）。
 
 ---
 
@@ -146,9 +148,9 @@ one AnalysisPlan progress artifact
 
 | Fixture | 触发方式 | 预期 |
 |---|---|---|
-| schema_error | 缺 required field | API 400 envelope |
-| permission_error | agent 调 PI decision | API 403 envelope |
-| lock_conflict | 两个 collect 同时执行 | 一个成功，一个 409 或同 idempotent result |
+| schema_error | 缺 required field | Zod 校验拒绝 + ErrorRecord(category=schema_error) |
+| permission_error | agent 调 PI decision | 策略门 deny（agent 身份不得持 pi 角色）+ ErrorRecord |
+| lock_conflict | 两个 collect 同时执行 | 一个成功，一个 ErrorRecord(lock_conflict) 或同 idempotent result |
 | timeout | dummy job sleep 超时 | RunJob.timed_out + ErrorRecord |
 | parser_error | 删除 required output | ErrorRecord + report limitation |
 | secret_leak_attempt | env 中放 fake secret | artifact/log/report 不包含 secret |

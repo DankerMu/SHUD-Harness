@@ -6,7 +6,7 @@ canonical_for: [llm-error-degradation]
 # 错误处理规范
 
 **状态：** P1 设计规范  
-**适用范围：** API、WebSocket、Sandbox、RunJob、Collect、Report、AgentLoop  
+**适用范围：** 工具调用、dsh 会话、Sandbox、RunJob、Collect、Report、agent loop（基座）  
 **目标：** 统一错误分类、严重性、重试策略和用户提示，使失败可复盘、可恢复、不可伪装。
 
 ## 1. 错误分类
@@ -83,8 +83,7 @@ RunJob 失败不等于 TaskCard 失败。TaskCard 可以进入：
 
 | 错误 | 自动重试 | 条件 |
 |---|---:|---|
-| WebSocket 短暂断线 | ✓ | 前端重连 |
-| API transient 5xx | ✓ | 幂等 GET 或明确 idempotency key |
+| LLM 端点 transient 5xx | ✓ | 幂等请求或明确 idempotency key |
 | Sandbox timeout |  | 需要用户或 Coordinator 调整 timeout |
 | SHUD 编译失败 |  | 不自动修改依赖或源码 |
 | rSHUD parser 缺少可选变量 | ✓ | 标记 not_available 后继续 |
@@ -101,7 +100,7 @@ LLM 故障只影响 agent loop，**不影响运行中 RunJob**——job 是独�
 | 故障 | 处理 |
 |---|---|
 | rate_limit / timeout / server_error | 指数退避重试 ≤2；仍失败 → TaskCard blocked，ErrorRecord(retryable=true)，工程师/PI 可一键恢复（恢复 = 从 plan_cursor 重新进入当前阶段） |
-| quota_exhausted / auth_error | 不重试；TaskCard blocked，critical NotificationRecord（此时 WebSocket 之外的通知通道是唯一可达路径） |
+| quota_exhausted / auth_error | 不重试；TaskCard blocked，critical NotificationRecord（此时会话之外的通知通道是唯一可达路径） |
 | context_overflow（请求超出上下文窗口） | 不原样重试；按 [Context_Trust §5](Context_Trust_And_Injection_Spec.md) 预算**确定性重组**上下文后重试一次（禁止用 LLM 压缩兜底），仍超限 → blocked + 工程师检查组装配置 |
 | model_not_found / model_deprecated | 不重试、**不静默换模型**；TaskCard blocked + critical 通知。换 model 是 StackLock.llm 变更，须 PI/工程师确认并触发 behavior eval（见 Dependency_Versioning_Policy） |
 | mid-turn 崩溃（回复到一半进程死亡） | 该轮丢弃；恢复按 Workspace_Snapshot 的 service restart recovery：领域对象状态为准，从 plan_cursor 重放当前步骤（LLM 步骤重放=重新采样，可接受，因为副作用都有幂等保护） |

@@ -18,7 +18,7 @@ Plan → Submit RunJob → Park TaskCard → Watch Job → Collect RunRecord →
 
 ## 1.1 Out-of-band notification after Resume/Report
 
-WebSocket 只覆盖浏览器打开时的实时体验。Park/Resume 的核心场景是长任务运行期间 PI 可能关闭浏览器，因此 long job 完成后的通知不能完全依赖 WebSocket。
+dsh Web 会话只覆盖浏览器打开时的实时体验。Park/Resume 的核心场景是长任务运行期间 PI 可能关闭浏览器，因此 long job 完成后的唤醒必须由落盘的 `job/settled` 记录驱动（ADR-0004 K8），不能只依赖活动连接。
 
 通知触发点应在结果可读之后，而不是进程刚退出时：
 
@@ -187,7 +187,7 @@ Collect 操作包括：
 6. 生成 artifact manifest；
 7. 写入 RunRecord；
 8. 更新 TaskCard；
-9. 发送 `runrecord.created` WebSocket 事件。
+9. 记录 `runrecord.created` 事件（session log），由 dsh 作业卡/完成通知呈现。
 
 如果 collect 失败，应写入 `collect_error.yaml`，而不是覆盖 RunJob 状态。
 
