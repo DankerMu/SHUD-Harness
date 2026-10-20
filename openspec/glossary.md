@@ -52,7 +52,7 @@ status: living
 | 恢复 | resume | 作业完成通知后恢复 agent 上下文续跑 | 同上 |
 | 收集 | collect | 作业 terminal 后解析产物、生成 RunRecord（job 级 `collect.lock`） | [Execution_Jobs_Runs](../docs/03_SPEC/Execution_Jobs_Runs.md) |
 | 看护进程 | watcher | 监视 RunJob 状态变迁并触发 collect 的进程 | 同上 |
-| 后台工具汇 | `BackgroundToolTaskSink` | Zero 原生长工具后台化接缝（park/resume 落点） | Zero_Reuse_Matrix + Park_Resume_Design §4 |
+| 作业注册表 | `JobRegistry` / `ctx.jobs` | dsh 后台作业 seam；SHUD 自写 durable backend（detach + pid 对账）替换 `jobs-local` | [ADR-0004](../docs/adr/0004-dsh-kernel.md) K8 + 上游 `docs/subsystems/jobs.md` |
 | 发件箱 | outbox | 通知先落盘后发送的事务化模式（防蒸发） | [Notification_Design](../docs/03_SPEC/Notification_Design.md) §8 |
 | 去重键 | `dedupe_key` | 通知幂等键：`task_id + trigger + target_id + recipient` | 同上 §5 + [Idempotency_Concurrency_Locking_Spec](../docs/03_SPEC/Idempotency_Concurrency_Locking_Spec.md) §4 |
 | 快照 | snapshot | workspace 状态快照（`latest_seq` 必填，事件回放锚点） | [Workspace_Snapshot_And_Recovery_Spec](../docs/03_SPEC/Workspace_Snapshot_And_Recovery_Spec.md) |
@@ -61,7 +61,7 @@ status: living
 
 | 中文 | 标识符 | 定义 | 权威出处 |
 |---|---|---|---|
-| 策略门 | policy gate | 工具注册层自建的集中拦截闸（Zero hooks 仅观测，不能否决） | [Control_Kernel](../docs/02_ARCHITECTURE/Control_Kernel.md) §5 + ADR-0001 |
+| 策略门 | policy gate | `tools/pre-execute` waterfall 监听器返回 `deny`/`ask`/`allow`；`ctx.tools.guard()` 作单调终局拒绝 | [ADR-0004](../docs/adr/0004-dsh-kernel.md) + 上游 `docs/tool-execution-pipeline.md` |
 | 语义级别 | `semantic_level` | 科学变更风险分级（决定是否触发 PI gate） | [Scientific_Change_Gating_Spec](../docs/03_SPEC/Scientific_Change_Gating_Spec.md) |
 | 输出语义下限 | output_semantics floor | 特定类别变更的最低语义级别地板 | 同上 |
 | PI 门 | PI gate | 高风险动作阻塞等待 PI 显式决策的状态 | 同上 + [PI_Decision_Comments_Spec](../docs/03_SPEC/PI_Decision_Comments_Spec.md) |
@@ -122,3 +122,20 @@ status: living
 | 水量平衡 | water balance | 质量守恒校验，rSHUD `wb.all()` | rSHUD_Codebase_Report |
 | 敏感性分析 | sensitivity analysis | AnalysisPlan 一等模式（`mode=sensitivity`） | [Sensitivity_Calibration_Benchmark](../docs/03_SPEC/Sensitivity_Calibration_Benchmark.md) |
 | 示例流域 | ccw / heihe / qhh | SHUD 自带示例工程；ccw tiny 为 Phase 3 最小验证床 | SHUD_Codebase_Report |
+
+## 10. dsh 运行时（内核术语）
+
+| 中文 | 标识符 | 定义 | 权威出处 |
+|---|---|---|---|
+| 内核 | dsh / DeepSeek Harness | Cordis 插件树上的 agent 运行时，钉 tag `dsh-v0.2.1-rc.2` | [ADR-0004](../docs/adr/0004-dsh-kernel.md) K1 |
+| 配置档 | profile | `$DSH_HOME/profiles/<name>` 下按序叠加的 bundle + 用户 patch 组合；本项目 = `shud` | 上游 `docs/architecture.md` Profiles and bundles |
+| 包束 | bundle | 携带 Cordis 配置行与代码的分发单元，`package.json` 的 `dsh.bundle` 指向 patch 文件 | 同上 |
+| 覆盖 | patch / overlay | `cordis.patch.yml` 或 `--patch` 文件：按 id 整体替换某行 config 或 `insert` 新行 | 同上 |
+| 接缝 | seam | 可替换能力的三角：Service Definition + Provider + Consumer；新行为只挂文档化 seam | 上游 `docs/architecture.md` Capability seams |
+| 瀑布事件 | waterfall | 监听器必须调用 `next()` 才向下传递的事件（`agent/pre-step`、`tools/pre-execute` 等） | 上游 `docs/cordis-primer.md` |
+| 代理预设 | agent preset | 给一个 session 不同能力集的组合（角色落点：coordinator/worker/coder/reviewer） | 上游 `docs/subsystems/subagent.md` |
+| 审批接缝 | `ctx.approval` | fail-closed 的一次性审批：`ask` → `approval/asked` → `approval/decided`；Web 卡片现成 | 上游 `docs/subsystems/approval.md` |
+| 沙箱模式 | `read-only` / `workspace-write` / `danger-full-access` | 每次调用解析的文件效应策略；macOS Seatbelt 后端；`data/raw` 置于 root 之外即只读 | 上游 `docs/subsystems/sandbox.md` |
+| 会话日志 | session log（`session.v4.jsonl`） | append-only 事实源，模型可见即已记录；回放 fixture 来源 | 上游 `docs/architecture.md` Session log |
+| 会话日志上报 | `session-log-deepseek` | 把会话日志作为 `dsh_session_log` 随 official-route 请求发往端点；本项目关闭 | ADR-0004 K9 |
+

@@ -8,6 +8,8 @@ status: accepted
 · **决策人**: PI + 工程师 · **方法**: future-aware-architecture 分析
 **事实基线**: zero@13e25c1（development 分支）· SHUD-Harness v0.8.3（97 篇 spec，零代码）
 
+**取代记录**：2026-10-20 [ADR-0004](0004-dsh-kernel.md) 将基座由 Zero 改为 DeepSeek Harness；本 ADR 的拓扑决策（单 Coordinator 星型、任务驱动 + park/resume、领域治理层运行时无关）继续有效，基座决策与 Zero 相关 revisit 记录仅作历史。
+
 ## 背景
 
 三个约束的交集决定架构：**任务时间尺度倒挂**（LLM 秒级回合 vs SHUD 小时/天级运行）、

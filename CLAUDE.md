@@ -18,35 +18,33 @@ through a Coordinator Agent with Web-first interaction, real-time chat, bash san
 ## Repository Layout
 
 ```
-SHUD-Harness/                    ← you are here
-├── SHUD/                        ← C++ 数值模型 (只读参考)
-├── rSHUD/                       ← R 工具包 (只读参考)
-├── AutoSHUD/                    ← R 自动化流水线 (只读参考)
-├── zero/                        ← Agent Runtime 基础实现 (在此基础上扩展)
-├── AGENTS.md                    ← 生成文件（Codex 读），勿手编辑
-├── CLAUDE.md                    ← 生成文件（Claude 读），勿手编辑
-├── docs/                        ← 正式文档体系 (canonical)
-│   ├── 00_INDEX/                ← 主索引 + 差距分析
-│   ├── 01_CODEBASE/             ← 四个 repo 代码现实报告
-│   ├── 02_ARCHITECTURE/         ← 架构决策 + 角色 + 交互模型 + 状态机
-│   ├── 03_SPEC/                 ← 8 个核心对象 + 沙箱 + 记忆 + 成本 + Schema
-│   ├── 04_IMPLEMENTATION/       ← 目录树 + API + 里程碑计划 + DoD + Playbook
-│   └── 99_ARCHIVE/              ← v0.1–v0.5 旧文档 + 图片
+SHUD-Harness/                    ← you are here（dsh profile + 插件，不是独立 app）
+├── SHUD/ rSHUD/ AutoSHUD/       ← 只读参考 submodule
+├── packages/dsh-shud-*/         ← TS 插件包（core / raw-guard / jobs / tools / records / presets）
+├── profile/shud/                ← dsh bundle + cordis.patch.yml（模型路由、出站关闭、插件挂载）
+├── skills/ scripts/ templates/  ← SHUD 专用 SKILL.md / 确定性脚本 / 报告模板
+├── docs/                        ← ADR + 计划 + 精简 spec（adr/、04_IMPLEMENTATION/、Migration_Plan_dsh.md）
+├── openspec/                    ← glossary + changes
+├── AGENTS.md / CLAUDE.md        ← 生成文件，勿手编辑
 └── instructions/agents/         ← 指令源（shared.md + claude.md + codex.md）
 ```
 
-## Key Design Decisions (v0.8)
+dsh 源码 checkout 在 `../deepseek-harness`（钉 tag `dsh-v0.2.1-rc.2`），只作运行宿主，不改源码。spike 记录在 `../dsh-spike`。
+布局细节见 `docs/04_IMPLEMENTATION/Repository_Layout.md`。
+
+## Key Design Decisions (v0.9, ADR-0004)
 
 1. **Coordinator, not Commander**: Agent 是执行协调员，不是科学决策者。PI 做科学判断。
 2. **8 objects, not 20**: TaskCard, StackLock, DataProvenance, RunJob, RunRecord, AnalysisPlan, EvidenceReport, ChangeRequest.
-3. **Web-first, Report-first**: Web 是用户唯一交互渠道（实时对话 + 日志流 + PI 审批 + 报告阅读），产出 Markdown 报告供 PI 决策。
-4. **Park/Resume for long tasks**: SHUD 运行可能几小时，Agent 提交 job 后退出，结果回来再恢复。WebSocket 推送 job 完成通知。
-5. **基于 Zero 扩展**: 复用 Zero 的 AgentLoop/Session/WebSocket/Tool 架构，在其上扩展 SHUD 领域逻辑。
+3. **Web-first, Report-first**: dsh 自带 Web UI 是唯一交互渠道（对话 + 审批卡片 + 作业卡片），MVP 零自定义 UI，产出 Markdown 报告供 PI 决策。
+4. **Park/Resume for long tasks**: SHUD 运行可能几小时，经 `ctx.jobs` 提交后 agent 空闲，完成通知自动唤醒新 turn；作业持久化由自写 durable JobRegistry backend 保证（dsh 重启不丢）。
+5. **基于 dsh 扩展**: 内核 = DeepSeek Harness（Cordis 插件树）；SHUD 逻辑只挂文档化 seam（`tools/pre-execute`、`ctx.approval`、`ctx.jobs`、`ctx.sandbox`、`ctx.storage`、agent preset），永不改 loop、不 fork。
 6. **Inference budget per task**: cheap/normal/deep 三档，仅作 Web Dashboard 软监控，PI 决定是否中止。
-7. **Memory 两级**: 普通笔记直接写 draft; 证据类笔记需 PI review。不搞 4 级审批。
+7. **Memory 两级**（MVP 不做）: 普通笔记直接写 draft; 证据类笔记需 PI review。不搞 4 级审批。
 8. **Skill 三阶段**: draft → active → retired。不搞 6 级生命周期。
 9. **Sensitivity analysis 一等公民**: AnalysisPlan.mode=sensitivity，不是实验规范的子字段。
-10. **TypeScript 全栈**: 基于 Zero (Bun + Hono + React)，Zod 做 schema 验证，前后端共享类型。
+10. **TypeScript 插件包**: pnpm workspace 多包，tsc 构建到 lib/，vitest 测试，Zod 做 schema 验证；profile 以文件路径挂载，不发 npm。
+11. **作用域规则**: 任何 spike 不以首任务的一个用户可见步骤收尾就不准开（ADR-0004 K13）。
 
 ## The Three Repos
 
@@ -83,18 +81,19 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 
 ## Governance Rules
 
-- 改物理方程 / 默认参数 / benchmark baseline → PI 审批 (Web 审批按钮)
+- 改物理方程 / 默认参数 / benchmark baseline → PI 审批（`tools/pre-execute` 返回 `ask`，dsh Web 审批卡片）
 - 改输出格式 (breaking) → PI 审批
-- 删除原始数据 → 禁止或 PI 审批
+- 删除原始数据 → 禁止或 PI 审批；`data/raw` 必须位于 workspace root 之外（Seatbelt 只读）
 - 单流域指标提升 ≠ 模型改进 → Agent 不允许这样表述
 - 校准结果 ≠ 结构验证 → Agent 必须标注为 calibration
 
 ## Current State
 
-- **方案**: v0.8.3 Web-first + TS 全栈，基于 Zero 扩展（root submodule 钉 13e25c1，不 fork），含 Theory-to-Code 治理层
-- **Spec 冻结**: 2026-07-02 起仅收 bug 修正与 ADR 例外——规则与例外批次账见 `docs/Phased_Spec_Activation.md` 头部；架构决策入 `docs/adr/`
-- **MVP 锚定**: 现实假设与运行时选型见 `docs/adr/0002`（全本机 Mac / 单用户 / 首任务 = openMP RHS 已知答案回放 / 运行时模型 GLM 5.2）
-- **实施**: 里程碑制 M1–M9，排期/交付/验收唯一真相源 = `docs/04_IMPLEMENTATION/Phased_Plan.md`；实施记录 = `openspec/changes/` 下的 active change（每里程碑一个，以 subagent-workflow 逐 issue 施工）。当前进度、首序与阻塞以对应 GitHub Epic（label `epic`）与 `docs/adr/` 最新 revisit 记录为准——不在本文件复写状态
+- **方案**: v0.9 dsh 内核（ADR-0004，2026-10-20）：`dsh --profile shud` + `dsh-shud-*` 插件；模型 = DeepSeek Flash via DMXAPI（`deepseek-flash-guan`，原生 Messages adapter）；单用户、全本机 Mac（ADR-0002 D1/D6 继续有效）
+- **首任务**: ccw 运行 → RunRecord → EvidenceReport（MVP-1）；openMP RHS 已知答案回放为 MVP-2
+- **实施**: 里程碑 M1–M6，唯一真相源 = `docs/04_IMPLEMENTATION/Phased_Plan.md`；迁移过程账 = `docs/Migration_Plan_dsh.md`；旧文档处置表 = `docs/00_INDEX/Doc_Disposition_2026-10-20.md`；Zero 时代历史在 tag `archive/zero-v0.8.3`
+- **dsh 升级**: 每个里程碑边界一条 `chore(dsh-upgrade)` issue，以上游 upgrade-guide 为输入；升级后重跑 `../dsh-spike/runs/` 五项探针
+- **出站**: `session-log-deepseek` 在 profile 内固化关闭（ADR-0004 K9），其余 dsh 默认
 
 ## 已装能力
 
@@ -129,7 +128,6 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 ## Observable Completion
 
 完工附一行 `Execution Summary: agents=...; skills=...; tools=...; verification=...; limits=...`；保持事实、不展开隐藏推理。
-
 ## Claude Code Notes
 
 - 知识域类 skill（如调试方法论）自动触发率低，优先显式 `/skill-name` 调用。

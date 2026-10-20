@@ -1,187 +1,60 @@
 ---
-status: frozen
+status: living
+supersedes: Zero 时代 monorepo 布局（tag archive/zero-v0.8.3）
 ---
 
-# 仓库结构 (TypeScript 全栈，基于 Zero)
+# 仓库结构 v2（dsh profile + 插件）
 
-## 1. 代码仓库结构
+决策依据 [ADR-0004](../adr/0004-dsh-kernel.md) K2/K10。SHUD-Harness 不再是独立应用，而是一个 dsh profile 及其插件包。
+
+## 1. 代码仓库
 
 ```text
-shud-harness/                        # TypeScript monorepo (Bun workspace)
-  package.json                       # workspace root
-  bunfig.toml
+SHUD-Harness/
+  package.json                      # pnpm workspace 根；scripts: typecheck / test / build / profile:check
+  pnpm-workspace.yaml               # packages/*
+  tsconfig.base.json
   packages/
-    core/                            # 扩展 Zero 核心
-      src/
-        agent/
-          coordinator.ts             # Coordinator 角色定义 + system prompt
-          explorer.ts                # Repo Explorer 只读仓库上下文探索
-          worker.ts                  # Worker 角色定义
-          reviewer.ts                # Reviewer 角色定义
-          park-resume.ts             # Park/Resume 长任务状态机
-          research-closure.ts        # 科研 Closure Classifier 扩展
-        tools/
-          shud-build.ts              # SHUD 编译工具
-          shud-run.ts                # SHUD 运行工具
-          rshud-parse.ts             # rSHUD 输出解析
-          water-balance.ts           # 水量平衡计算
-        domain/
-          schemas/                   # Zod schemas (前后端共享)
-            task.ts                  # TaskCard
-            stacklock.ts             # StackLock
-            provenance.ts            # DataProvenance
-            job.ts                   # RunJob
-            run-record.ts            # RunRecord
-            analysis.ts              # AnalysisPlan
-            report.ts                # EvidenceReport
-            change.ts                # ChangeRequest
-          services/
-            task-service.ts
-            job-service.ts
-            report-generator.ts
-            sandbox.ts
-            memory-service.ts
-            cost-tracker.ts
-            artifact-registry.ts
-            idempotency-service.ts
-            lock-service.ts
-            snapshot-service.ts
-            notification-service.ts
-            config-service.ts
-            audit-service.ts
-            runner-adapters/
-              local-direct.ts
-              local-job.ts
-              docker-job.ts
-              slurm.ts
-    backend/                         # Hono API 服务
-      src/
-        routes/
-          tasks.ts                   # /api/tasks/*
-          jobs.ts                    # /api/jobs/*
-          reports.ts                 # /api/tasks/:id/report
-          analysis.ts                # /api/analysis/*
-          stacks.ts                  # /api/stacks/*
-          data.ts                    # /api/data/*
-          patches.ts                 # /api/patches/*
-          notes.ts                   # /api/notes/*
-        ws/
-          chat.ts                    # WebSocket: LLM 对话流
-          logs.ts                    # WebSocket: Job 日志流
-          events.ts                  # WebSocket: 全局事件推送
-        middleware/
-          auth.ts
-          sandbox-guard.ts
-    frontend/                        # React Web UI (科研工作台)
-      src/
-        pages/
-          Dashboard.tsx              # 所有任务概览 + 最近活动
-          Workbench.tsx              # 四栏科研工作台 (主工作界面)
-          ReportFullscreen.tsx       # 报告全屏阅读
-          CostAdmin.tsx              # 成本汇总 (按任务/天/Agent)
-        layouts/
-          WorkbenchLayout.tsx        # 四栏布局容器 (SideNav + Feed + Experiment + Results)
-        components/
-          # A. 左侧导航栏
-          SideNav.tsx                # 导航栏容器
-          ConversationHistory.tsx    # 会话历史列表
-          ResearchContext.tsx        # 当前任务上下文 (StackLock/Data/Notes)
-          CostMonitor.tsx            # 底部成本悬浮面板
-          # B. Agent 活动流
-          AgentActivityFeed.tsx      # 多 Agent 消息流 (Coordinator/Repo Explorer/Worker/Coder/Reviewer)
-          AgentMessage.tsx           # 单条 Agent 消息 (角色标识 + 折叠详情)
-          PIInput.tsx                # PI 输入框 (自然语言 + 指令)
-          StreamingText.tsx          # LLM 打字机效果
-          # C. 实验详情面板
-          ExperimentHeader.tsx       # 实验头部 (EXP-ID, basin, event, status)
-          HydrographChart.tsx        # 交互式水文过程线 (观测 vs baseline vs 实验)
-          RuntimeTerminal.tsx        # 嵌入式终端 (实时日志流, 语法高亮)
-          ParameterSetTable.tsx      # 参数集表格 (可排序, 高亮最优)
-          # D. 结果面板
-          ResultsOverview.tsx        # 关键指标卡片 (NSE, Peak Error, Timing, etc.)
-          HydrographComparison.tsx   # baseline vs experiment 对比图 (差异带)
-          SensitivityHeatmap.tsx     # 敏感性热力图 (参数 vs 指标)
-          NextSuggestedAction.tsx    # 下一步建议面板 (建议即草稿, 填入输入框待 PI 确认)
-          # 通用
-          StatusBar.tsx              # 底部状态栏
-          MarkdownRenderer.tsx       # Markdown 报告渲染
-          DiffViewer.tsx             # 代码 diff 预览
-          BatchProgressGrid.tsx      # 批量运行进度网格
-          BatchCellDetailPanel.tsx   # 单 cell 详情面板
-          ReportExportButton.tsx     # 报告导出按钮
-          PIDecisionPanel.tsx        # PI 审批决策面板
-          NotificationStatus.tsx     # 通知状态指示器
-          ArtifactRef.tsx            # Artifact 引用组件
-        api/
-          client.ts                  # API + WebSocket client (共享 Zod schemas)
-        hooks/
-          useWebSocket.ts            # WebSocket 连接管理
-          useAgentStream.ts          # Agent 活动流订阅
-          useHydrograph.ts           # 水文数据加载
-  prompts/
-    coordinator.md, worker.md, reviewer.md
-  skills/
-    run-shud-tiny-case/SKILL.md
-    diagnose-shud-run-failure/SKILL.md
-    rshud-roundtrip-test/SKILL.md
-    summarize-sensitivity-results/SKILL.md
-    build-task-report/SKILL.md
-  scripts/                           # 确定性脚本 (R/bash, 非 LLM)
-    shud/build.sh, run.sh
-    rshud/read_output.R, water_balance.R, roundtrip_test.R
-    metrics/sensitivity_table.ts, tornado_plot.ts
-  templates/
-    task_report.md.j2
-    evidence_report.md.j2
-  tests/
+    dsh-shud-core/                  # 领域层（运行时无关）
+      src/schemas/                  # 8 对象 Zod schema（移植）
+      src/governance/               # 治理常量、policy-gate-core 纯函数（移植）、措辞规则
+      src/index.ts
+    dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
+    dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
+    dsh-shud-tools/                 # shud_run / shud_collect 等模型可见工具
+    dsh-shud-records/               # TaskCard/RunJob/RunRecord/StackLock/EvidenceReport 的 ctx.storage 域
+    dsh-shud-presets/               # coordinator / worker / coder / reviewer agent preset 与 system prompt 段
+  profile/
+    shud/
+      package.json                  # dsh bundle 声明（dsh.bundle.patch）
+      cordis.patch.yml              # 模型路由、session-log-deepseek 关闭、各插件 lib/ 挂载（文件路径）
+      overlays/                     # 可选 --patch 覆盖（本机 / CI）
+  skills/                           # SHUD 专用 SKILL.md（run-shud-tiny-case 等，经 dsh skill-filesystem 加载）
+  scripts/                          # 确定性脚本（R/bash），非 LLM
+  templates/                        # evidence_report.md 模板
+  docs/                             # ADR + 计划 + 精简 spec（处置表执行后）
+  openspec/                         # glossary + changes
+  SHUD/ rSHUD/ AutoSHUD/            # 只读参考 submodule（保留）
 ```
 
-## 2. 工作区结构 (运行时资产，不进代码仓)
+每个 `dsh-shud-*` 包：`src/` TS strict，`tsc` 到 `lib/`，`vitest` 测试，`package.json` 声明 `peerDependencies["@deepseek-ai/dsh"] = "0.2.1-rc.2"`。Host 侧插件入口 `export const name` + `export function apply(ctx, config)`。不发 npm；profile 以绝对/相对文件路径 `insert` 挂载。
+
+## 2. 运行时资产（不进代码仓）
 
 ```text
-  shud-workspace/
-  config.yaml
-  tasks/TASK-*.yaml
-  stacklocks/STACK-*.yaml
-  provenance/DATA-*.json
-  analysis_plans/PLAN-*.yaml
-  jobs/JOB-*.yaml
-  runs/RUN-*/
-    run_record.yaml
-    output/
-  reports/TASK-*_report.md
-  notes/NOTE-*.yaml
-  changes/CHG-*.yaml
-  artifacts/
-  artifacts/manifest-sets/
-  secrets/
-  warehouse/shud_harness.duckdb
-  repos/SHUD/, repos/rSHUD/, repos/AutoSHUD/
-  data/raw/ (只读), data/processed/
-  workspaces/TASK-*/
-    worktrees/, scratch/, artifacts/, traces/
+$DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指定）
+  profiles/shud/                    # 由 profile/shud 初始化的 profile
+  sessions/                         # session.v4.jsonl（回放 fixture 来源）
+  storages/                         # ctx.storage 域（RunRecord 等）
+<workspace>/                        # 每个研究任务的工作区（session cwd = workspace root）
+  shud/                             # SHUD 二进制 + input/ + output/
+  runs/<run_id>/                    # 作业日志、pid 记录、产物清单
+  reports/                          # EvidenceReport Markdown
+<data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```
 
-## 3. 技术栈
+## 3. 与 dsh 的边界
 
-```text
-Runtime:     Bun
-Backend:     Hono (TypeScript)
-Frontend:    React (TypeScript)
-Schemas:     Zod (前后端共享类型)
-Storage:     DuckDB (metrics warehouse)
-Metrics:     Parquet
-Real-time:   WebSocket (对话流 + 日志流 + 事件)
-Scripts:     R/bash (确定性计算脚本, 非 LLM)
-Execution:   Bun subprocess + local job registry
-Foundation:  Zero agent runtime (AgentLoop, Session, Tool, Memory, Skills)
-```
-
-## 4. 为什么选择 TypeScript 全栈
-
-Web 是用户唯一交互渠道。全栈 TypeScript 的优势：
-
-- 前后端共享 Zod schema，一处定义两端使用
-- Zero 提供成熟的 agent 基础设施，直接复用
-- 1.5 人团队维护一种语言，减少认知负担
-- SHUD 的科学计算（水文求解、空间分析）由 C++ 和 R 完成，Harness 只是编排层
+- dsh checkout（`../deepseek-harness`，钉 tag）只作运行宿主与类型来源，不改源码、不作为构建宿主。
+- 本仓库永不 import dsh loop 内部；只挂 `docs/architecture.md` "Where new behavior goes" 列出的 seam。
+- UI 若日后要做：client 插件走手写 JS（`dsh.client` 声明 + `window.__ModuleLoader__.load`），不引入 React 构建链。
