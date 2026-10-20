@@ -1,7 +1,12 @@
-# SHUD 文件格式与运行时行为
+---
+status: living
+canonical_for: [shud-io-facts]
+---
 
-以下事实从 SHUD C++ 源码提取。每条标注出处。
-如果代码已更新导致以下描述不准确，以代码为准并更新本文件。
+# SHUD 文件格式与运行时事实（审查用）
+
+从 SHUD C++ 源码提取的硬事实，供实现 `shud_run` / `shud_collect`（M2）与水量平衡（M3）的 implementer 和 reviewer 子代理读取；对应 `openspec/project-profile.md` 的 "Hydrology runtime / SHUD-rSHUD-AutoSHUD compatibility" 风险包。
+每条标注出处；代码与本文矛盾时以代码为准并更新本文。原载 `.agents/skills/shud-gov/knowledge/shud-formats.md`（2026-10-20 降级为文档，skill 删除）。
 
 ## 时间单位
 
@@ -91,3 +96,51 @@
 ## 退出码
 
 - 0=成功, 10=NaN, 12=文件IO, 13=数据输入, 19=CVODE失败, 20=一致性检查 — Source: SHUD/src/classes.hpp
+
+## 审查清单（涉及 SHUD 解析 / 时间 / 参数 / 二进制输出的 diff）
+
+reviewer 只标注需要人工确认的位置，不下结论；无法确定单位的时间值标 `[UNCERTAIN]`。
+
+### 时间单位
+
+- [ ] 对代码中每个涉及时间值的位置，标注该位置实际使用的单位（天/分钟/秒）
+- [ ] 验证 forcing CSV 读取是否有 `* 1440`（天 → 分钟）转换
+- [ ] 验证 LAI/MF 时序读取是否有同样的 `* 1440` 转换
+- [ ] 验证 .cfg.para 中的时间参数是否直接作为分钟使用（不再转换）
+- [ ] 验证 rSHUD read_output() 的时间是否做了 `* 60`（分钟 → 秒）再加到 POSIXct
+- [ ] 如果代码向报告 / RunRecord 输出时间，标注最终单位是什么
+
+### 校准参数语义
+
+- [ ] 验证代码是否区分乘法参数和加法参数（+后缀）
+- [ ] 检查参数名解析是否处理了尾部 `+` 字符
+- [ ] 验证 KsatV / macKsatV 是否除以 1440（m/day → m/min）
+
+### 二进制输出解析
+
+- [ ] 验证是否处理了两种头格式（version > 1.0 的 1024 字节头 vs version 1.0 的简单头）
+- [ ] 验证 endian 假设是否与目标平台一致
+- [ ] 检查是否有 NaN 检测（SHUD 不做 NaN 检查，输出可能含 NaN）
+- [ ] 验证 flux vs storage 变量的平均方式是否不同（tau=1440 vs tau=1）
+
+### 输出变量
+
+- [ ] 如果代码引用 SHUD 输出变量名，验证拼写与 SHUD 源码一致
+  （如 `eleysurf`, `eleygw`, `rivqdown` — 不是 `ele_y_surf` 或 `river_q_down`）
+
+### SHUD 输入文件解析（文件级）
+
+- [ ] .mesh 解析: 验证是否处理了双段结构（元素表 + 节点表，各有独立 header）
+- [ ] .att 解析: 验证列访问方式（列序固定: INDEX SOIL GEOL LC FORC MF BC SS iLake）
+- [ ] .att: 检查是否处理了 BC 负值（= Dirichlet 边界条件）
+- [ ] .riv 解析: 验证是否处理了双段（河段 + 河型参数）
+- [ ] .riv: 检查是否允许负 slope 值
+- [ ] .cfg.para: 验证 key 比较是否大小写不敏感
+- [ ] .cfg.calib: 验证是否区分乘法/加法（+后缀）参数
+- [ ] forcing.csv: 验证 header 解析（第一行 4 个值: NumRows NumCols StartDate EndDate）
+- [ ] TabularData 通用: 验证是否用空格/tab 分隔（不是逗号）
+
+
+### 数据安全
+
+- [ ] `<data_root>/raw/` 只读：位于 workspace root 之外，由 Seatbelt 拒写（ADR-0004 治理不变式）；任何解析代码不得在该目录下创建临时文件。
