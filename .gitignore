@@ -13,7 +13,7 @@ venv/
 
 # Node
 node_modules/
-.bun/
+
 
 # IDE
 .vscode/
@@ -43,3 +43,6 @@ node_modules/
 
 # OMP runtime skill/agent projections (auto-regenerated per session)
 /.omp/
+
+# Build output of TS plugin packages
+packages/*/lib/

@@ -1,34 +1,23 @@
 {
   "name": "shud-harness",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "private": true,
   "type": "module",
-  "packageManager": "bun@1.2.19",
-  "workspaces": [
-    "packages/*",
-    "zero/packages/*"
-  ],
+  "packageManager": "pnpm@11.28.5",
+  "engines": { "node": ">=24" },
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:policy-gate": "bun test ./packages/core/src/tools/policy-gate-core.test.ts ./packages/core/src/tools/policy-gate-registry.test.ts ./packages/core/src/tools/raw-data-sandbox.test.ts",
-    "test:tool-registry-governance": "bun test ./packages/core/src/tools/role-tool-map.test.ts",
-    "test:backend-api": "bun test ./packages/backend/src/routes/*.test.ts && bun scripts/local-auth/adversarial-matrix.ts",
-    "test:local-auth:adversarial": "bun scripts/local-auth/adversarial-matrix.ts",
-    "test:backend-ws": "bun test ./packages/backend/src/ws/index.test.ts",
-    "test:frontend": "bun test ./packages/frontend/src/**/*.test.ts ./packages/frontend/src/**/*.test.tsx",
-    "test:schemas": "bun test ./packages/core/src/domain/schemas/core-schemas.test.ts",
-    "test:core-services": "bun test ./packages/core/src/domain/services/*.test.ts",
-    "test:glm-provider": "bun test ./scripts/glm-provider/*.test.ts",
-    "smoke:glm-provider": "bun scripts/glm-provider/smoke.ts",
-    "test:perf:api": "bun scripts/perf/api.ts",
-    "schema:generate": "bun scripts/schema/generate.ts",
-    "test:schema-generation": "bun scripts/schema/generate.ts --self-test",
+    "typecheck": "pnpm -r run typecheck",
+    "build": "pnpm -r run build",
+    "test": "vitest run",
+    "schema:generate": "node scripts/schema/generate.ts",
+    "test:schema-generation": "node scripts/schema/generate.ts --self-test",
     "schema:check": "sh scripts/schema/check.sh",
-    "validate:dependency-lock": "node scripts/dependency-lock/validate.mjs",
-    "test:dependency-lock": "sh scripts/dependency-lock/self_test.sh",
-    "check": "bun run typecheck && bun run test:policy-gate && bun run test:tool-registry-governance && bun run test:backend-api && bun run test:backend-ws && bun run test:frontend && bun run test:schemas && bun run test:core-services && bun run test:glm-provider"
+    "docs:links": "sh scripts/docs/check_links.sh",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run schema:check && pnpm run docs:links"
   },
   "devDependencies": {
-    "typescript": "5.8.3"
+    "typescript": "5.8.3",
+    "vitest": "4.1.11",
+    "zod": "4.4.3"
   }
 }

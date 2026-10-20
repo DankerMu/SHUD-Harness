@@ -2,25 +2,20 @@
   "compilerOptions": {
     "target": "ES2022",
     "lib": [
-      "ES2022",
-      "DOM"
+      "ES2022"
     ],
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "strict": true,
     "skipLibCheck": true,
-    "noEmit": true,
-    "types": [
-      "bun-types"
-    ],
+    "declaration": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
-    "baseUrl": ".",
-    "paths": {
-      "@shud-harness/core": [
-        "packages/core/src/index.ts"
-      ]
-    }
+    "types": [
+      "node"
+    ],
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true
   }
 }

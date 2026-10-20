@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+  - profile/*
+
+# The profile declares @deepseek-ai/dsh as a peer only (dsh is the host, pinned checkout in ../deepseek-harness).
+autoInstallPeers: false
+strictPeerDependencies: false

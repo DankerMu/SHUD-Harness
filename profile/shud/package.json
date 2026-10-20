@@ -1,0 +1,17 @@
+{
+  "name": "@shud-harness/dsh-profile-shud",
+  "version": "0.9.0",
+  "description": "SHUD-Harness dsh bundle: model routing via DMXAPI, outbound session-log channel disabled, dsh-shud-* plugin mounts",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" }
+  }
+}

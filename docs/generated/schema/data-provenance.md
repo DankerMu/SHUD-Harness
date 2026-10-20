@@ -2,7 +2,7 @@
 
 # DataProvenance Schema
 
-Source: `packages/core/src/domain/schemas/data-provenance.ts` (`DataProvenanceSchema`)
+Source: `packages/dsh-shud-core/src/schemas/data-provenance.ts` (`DataProvenanceSchema`)
 
 Required is evaluated within the immediate parent object.
 

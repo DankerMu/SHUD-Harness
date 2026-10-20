@@ -2,7 +2,7 @@
 
 # LockRecord Schema
 
-Source: `packages/core/src/domain/schemas/lock.ts` (`LockRecordSchema`)
+Source: `packages/dsh-shud-core/src/schemas/lock.ts` (`LockRecordSchema`)
 
 Required is evaluated within the immediate parent object.
 

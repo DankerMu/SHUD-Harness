@@ -2,7 +2,7 @@
 
 # ArtifactManifest Schema
 
-Source: `packages/core/src/domain/schemas/artifact-manifest.ts` (`ArtifactManifestSchema`)
+Source: `packages/dsh-shud-core/src/schemas/artifact-manifest.ts` (`ArtifactManifestSchema`)
 
 Required is evaluated within the immediate parent object.
 

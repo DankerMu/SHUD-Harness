@@ -2,7 +2,7 @@
 
 # Artifact Schema
 
-Source: `packages/core/src/domain/schemas/artifact.ts` (`ArtifactSchema`)
+Source: `packages/dsh-shud-core/src/schemas/artifact.ts` (`ArtifactSchema`)
 
 Required is evaluated within the immediate parent object.
 

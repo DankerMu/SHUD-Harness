@@ -5,14 +5,14 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z, type ZodType } from "zod";
 
-import { ArtifactSchema } from "../../packages/core/src/domain/schemas/artifact";
-import { ArtifactManifestSchema } from "../../packages/core/src/domain/schemas/artifact-manifest";
-import { DataProvenanceSchema } from "../../packages/core/src/domain/schemas/data-provenance";
-import { ErrorRecordSchema } from "../../packages/core/src/domain/schemas/error";
-import { IdempotencyRecordSchema } from "../../packages/core/src/domain/schemas/idempotency";
-import { LockRecordSchema } from "../../packages/core/src/domain/schemas/lock";
-import { StackLockSchema } from "../../packages/core/src/domain/schemas/stack-lock";
-import { TaskCardSchema } from "../../packages/core/src/domain/schemas/task";
+import { ArtifactSchema } from "../../packages/dsh-shud-core/src/schemas/artifact.ts";
+import { ArtifactManifestSchema } from "../../packages/dsh-shud-core/src/schemas/artifact-manifest.ts";
+import { DataProvenanceSchema } from "../../packages/dsh-shud-core/src/schemas/data-provenance.ts";
+import { ErrorRecordSchema } from "../../packages/dsh-shud-core/src/schemas/error.ts";
+import { IdempotencyRecordSchema } from "../../packages/dsh-shud-core/src/schemas/idempotency.ts";
+import { LockRecordSchema } from "../../packages/dsh-shud-core/src/schemas/lock.ts";
+import { StackLockSchema } from "../../packages/dsh-shud-core/src/schemas/stack-lock.ts";
+import { TaskCardSchema } from "../../packages/dsh-shud-core/src/schemas/task.ts";
 
 type JsonSchema = {
   $schema?: string;
@@ -71,7 +71,7 @@ type GeneratedPathContext = {
 };
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const schemaSourceDir = join(repoRoot, "packages/core/src/domain/schemas");
+const schemaSourceDir = join(repoRoot, "packages/dsh-shud-core/src/schemas");
 const generatedRoot = join(repoRoot, "docs/generated");
 const markdownDir = join(repoRoot, "docs/generated/schema");
 const jsonSchemaDir = join(repoRoot, "docs/generated/json-schema");
@@ -80,14 +80,14 @@ const schemaDefinitions: SchemaDefinition[] = [
   {
     name: "TaskCard",
     slug: "task-card",
-    sourcePath: "packages/core/src/domain/schemas/task.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
     exportName: "TaskCardSchema",
     schema: TaskCardSchema
   },
   {
     name: "StackLock",
     slug: "stack-lock",
-    sourcePath: "packages/core/src/domain/schemas/stack-lock.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/stack-lock.ts",
     exportName: "StackLockSchema",
     schema: StackLockSchema,
     strictInput: true,
@@ -98,7 +98,7 @@ const schemaDefinitions: SchemaDefinition[] = [
   {
     name: "DataProvenance",
     slug: "data-provenance",
-    sourcePath: "packages/core/src/domain/schemas/data-provenance.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/data-provenance.ts",
     exportName: "DataProvenanceSchema",
     schema: DataProvenanceSchema,
     strictInput: true,
@@ -109,7 +109,7 @@ const schemaDefinitions: SchemaDefinition[] = [
   {
     name: "Artifact",
     slug: "artifact",
-    sourcePath: "packages/core/src/domain/schemas/artifact.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/artifact.ts",
     exportName: "ArtifactSchema",
     schema: ArtifactSchema,
     strictInput: true
@@ -117,7 +117,7 @@ const schemaDefinitions: SchemaDefinition[] = [
   {
     name: "ArtifactManifest",
     slug: "artifact-manifest",
-    sourcePath: "packages/core/src/domain/schemas/artifact-manifest.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/artifact-manifest.ts",
     exportName: "ArtifactManifestSchema",
     schema: ArtifactManifestSchema,
     strictInput: true,
@@ -129,21 +129,21 @@ const schemaDefinitions: SchemaDefinition[] = [
   {
     name: "ErrorRecord",
     slug: "error-record",
-    sourcePath: "packages/core/src/domain/schemas/error.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/error.ts",
     exportName: "ErrorRecordSchema",
     schema: ErrorRecordSchema
   },
   {
     name: "IdempotencyRecord",
     slug: "idempotency-record",
-    sourcePath: "packages/core/src/domain/schemas/idempotency.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/idempotency.ts",
     exportName: "IdempotencyRecordSchema",
     schema: IdempotencyRecordSchema
   },
   {
     name: "LockRecord",
     slug: "lock-record",
-    sourcePath: "packages/core/src/domain/schemas/lock.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/lock.ts",
     exportName: "LockRecordSchema",
     schema: LockRecordSchema
   }
@@ -159,12 +159,12 @@ const intentionalOpenRecordBoundary = {
 const ignoredNestedObjectSchemaExports: IgnoredObjectSchemaExport[] = [
   {
     exportName: "ErrorRemediationSchema",
-    sourcePath: "packages/core/src/domain/schemas/error.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/error.ts",
     reason: "nested helper for ErrorRecordSchema.remediation"
   },
   {
     exportName: "InferenceBudgetSchema",
-    sourcePath: "packages/core/src/domain/schemas/task.ts",
+    sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
     reason: "nested helper for TaskCardSchema.inference_budget"
   }
 ];
@@ -288,7 +288,7 @@ async function discoverObjectSchemaExports(): Promise<ObjectSchemaExport[]> {
   const exports: ObjectSchemaExport[] = [];
 
   for (const file of files) {
-    const sourcePath = `packages/core/src/domain/schemas/${file}`;
+    const sourcePath = `packages/dsh-shud-core/src/schemas/${file}`;
     const moduleExports = (await import(pathToFileURL(join(schemaSourceDir, file)).href)) as Record<string, unknown>;
 
     exports.push(...discoverObjectSchemaExportsFromModule(sourcePath, moduleExports));
@@ -875,7 +875,7 @@ async function runSelfTest(): Promise<void> {
     {
       name: "TaskCard",
       slug: "task-card",
-      sourcePath: "packages/core/src/domain/schemas/task.ts",
+      sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
       exportName: "TaskCardSchema",
       schema: mockSchema
     }
@@ -883,17 +883,17 @@ async function runSelfTest(): Promise<void> {
   const ignored: IgnoredObjectSchemaExport[] = [
     {
       exportName: "InferenceBudgetSchema",
-      sourcePath: "packages/core/src/domain/schemas/task.ts",
+      sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
       reason: "nested helper for TaskCardSchema.inference_budget"
     }
   ];
 
   validateSchemaRegistryCoverage(
     [
-      { exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema },
+      { exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema },
       {
         exportName: "InferenceBudgetSchema",
-        sourcePath: "packages/core/src/domain/schemas/task.ts",
+        sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
         schema: z.object({})
       }
     ],
@@ -902,7 +902,7 @@ async function runSelfTest(): Promise<void> {
   );
 
   const discoveredFromSyntheticModule = discoverObjectSchemaExportsFromModule(
-    "packages/core/src/domain/schemas/run-job.ts",
+    "packages/dsh-shud-core/src/schemas/run-job.ts",
     {
       RunJobSchema: z.object({ run_id: z.string() }).extend({ status: z.string() }),
       helperObject: z.object({ ignored: z.string() }),
@@ -920,8 +920,8 @@ async function runSelfTest(): Promise<void> {
     () =>
       validateSchemaRegistryCoverage(
         [
-          { exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema },
-          { exportName: "RunJobSchema", sourcePath: "packages/core/src/domain/schemas/run-job.ts", schema: z.object({}) }
+          { exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema },
+          { exportName: "RunJobSchema", sourcePath: "packages/dsh-shud-core/src/schemas/run-job.ts", schema: z.object({}) }
         ],
         mockDefinitions,
         ignored
@@ -938,11 +938,11 @@ async function runSelfTest(): Promise<void> {
   assertThrows(
     () =>
       validateSchemaRegistryCoverage(
-        [{ exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema }],
+        [{ exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema }],
         [
           {
             ...mockDefinitions[0],
-            sourcePath: "packages/core/src/domain/schemas/wrong.ts"
+            sourcePath: "packages/dsh-shud-core/src/schemas/wrong.ts"
           }
         ],
         []
@@ -953,7 +953,7 @@ async function runSelfTest(): Promise<void> {
   assertThrows(
     () =>
       validateSchemaRegistryCoverage(
-        [{ exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema }],
+        [{ exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema }],
         [
           {
             ...mockDefinitions[0],
@@ -968,7 +968,7 @@ async function runSelfTest(): Promise<void> {
   assertThrows(
     () =>
       validateSchemaRegistryCoverage(
-        [{ exportName: "TaskCardSchema", sourcePath: "packages/core/src/domain/schemas/task.ts", schema: mockSchema }],
+        [{ exportName: "TaskCardSchema", sourcePath: "packages/dsh-shud-core/src/schemas/task.ts", schema: mockSchema }],
         [
           mockDefinitions[0],
           {

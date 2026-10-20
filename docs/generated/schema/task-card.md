@@ -2,7 +2,7 @@
 
 # TaskCard Schema
 
-Source: `packages/core/src/domain/schemas/task.ts` (`TaskCardSchema`)
+Source: `packages/dsh-shud-core/src/schemas/task.ts` (`TaskCardSchema`)
 
 Required is evaluated within the immediate parent object.
 

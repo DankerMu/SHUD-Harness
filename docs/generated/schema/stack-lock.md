@@ -2,7 +2,7 @@
 
 # StackLock Schema
 
-Source: `packages/core/src/domain/schemas/stack-lock.ts` (`StackLockSchema`)
+Source: `packages/dsh-shud-core/src/schemas/stack-lock.ts` (`StackLockSchema`)
 
 Required is evaluated within the immediate parent object.
 
@@ -21,9 +21,6 @@ Required is evaluated within the immediate parent object.
 | repos.AutoSHUD | yes | no | object | additionalProperties=false |
 | repos.AutoSHUD.commit | yes | no | string | minLength=1 |
 | repos.AutoSHUD.branch | yes | no | string | minLength=1 |
-| repos.zero | yes | no | object | additionalProperties=false |
-| repos.zero.commit | yes | no | string | minLength=1 |
-| repos.zero.branch | yes | no | string | minLength=1 |
 | runtime | yes | no | object | additionalProperties=false |
 | runtime.os | yes | no | string | minLength=1 |
 | runtime.r_version | yes | no | string | minLength=1 |
@@ -62,9 +59,6 @@ repos:
   AutoSHUD:
     commit: "example"
     branch: "example"
-  zero:
-    commit: "example"
-    branch: "example"
 runtime:
   os: "example"
   r_version: "example"
@@ -93,7 +87,7 @@ created_at: "example"
 ## Changelog Diff
 
 ```diff
-+ schema StackLock sha256:5206acab112020e948f0faf19ac3c0469a0786f673487bd7924f796a218c3b44
++ schema StackLock sha256:12fa08b816edb34a9a66c91deca5a147a0f2ff1a6ecf7235ced557240d6a4ece
 + field stack_id required=yes nullable=no type=string constraints=pattern=^STACK-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$
 + field repos required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.SHUD required=yes nullable=no type=object constraints=additionalProperties=false
@@ -105,9 +99,6 @@ created_at: "example"
 + field repos.AutoSHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.AutoSHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.AutoSHUD.branch required=yes nullable=no type=string constraints=minLength=1
-+ field repos.zero required=yes nullable=no type=object constraints=additionalProperties=false
-+ field repos.zero.commit required=yes nullable=no type=string constraints=minLength=1
-+ field repos.zero.branch required=yes nullable=no type=string constraints=minLength=1
 + field runtime required=yes nullable=no type=object constraints=additionalProperties=false
 + field runtime.os required=yes nullable=no type=string constraints=minLength=1
 + field runtime.r_version required=yes nullable=no type=string constraints=minLength=1

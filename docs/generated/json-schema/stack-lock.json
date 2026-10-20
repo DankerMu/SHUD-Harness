@@ -64,31 +64,12 @@
             "branch"
           ],
           "additionalProperties": false
-        },
-        "zero": {
-          "type": "object",
-          "properties": {
-            "commit": {
-              "type": "string",
-              "minLength": 1
-            },
-            "branch": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required": [
-            "commit",
-            "branch"
-          ],
-          "additionalProperties": false
         }
       },
       "required": [
         "SHUD",
         "rSHUD",
-        "AutoSHUD",
-        "zero"
+        "AutoSHUD"
       ],
       "additionalProperties": false
     },

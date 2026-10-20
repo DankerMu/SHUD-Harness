@@ -2,7 +2,7 @@
 
 # ErrorRecord Schema
 
-Source: `packages/core/src/domain/schemas/error.ts` (`ErrorRecordSchema`)
+Source: `packages/dsh-shud-core/src/schemas/error.ts` (`ErrorRecordSchema`)
 
 Required is evaluated within the immediate parent object.
 

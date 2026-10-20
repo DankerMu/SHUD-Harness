@@ -1,0 +1,24 @@
+# SHUD-Harness profile patch (ADR-0004 K2/K3/K9). Merged from ../dsh-spike/overlays/dmxapi-flash.patch.yml.
+# Plugin mounts (dsh-shud-raw-guard, dsh-shud-jobs, ...) are added by their milestone issues once the
+# package `lib/` exists — no placeholder rows (Phased_Plan M1/M2).
+
+# K3: DeepSeek Flash via the DMXAPI relay, native Messages adapter. Key comes from env DMXAPI_KEY.
+- id: llm-deepseek
+  config:
+    baseURL: https://www.dmxapi.cn
+    apiKeyEnv: DMXAPI_KEY
+    models:
+      - id: deepseek-flash-guan
+        name: DeepSeek Flash (DMXAPI guan)
+        contextWindow: 1000000
+        systemPromptUpdate: in-history
+        toolUpdate: addition-only
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-flash-guan
+
+# K9: the only outbound channel turned off. It attaches the whole canonical session log as
+# `dsh_session_log` to every official-route request; our endpoint is a third-party relay.
+- id: session-log-deepseek
+  disabled: true

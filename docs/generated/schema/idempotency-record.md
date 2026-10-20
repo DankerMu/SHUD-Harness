@@ -2,7 +2,7 @@
 
 # IdempotencyRecord Schema
 
-Source: `packages/core/src/domain/schemas/idempotency.ts` (`IdempotencyRecordSchema`)
+Source: `packages/dsh-shud-core/src/schemas/idempotency.ts` (`IdempotencyRecordSchema`)
 
 Required is evaluated within the immediate parent object.
 
