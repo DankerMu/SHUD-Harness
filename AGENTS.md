@@ -224,7 +224,7 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 
 **Packs**：`agentic-issue-delivery`、`codebase-stewardship`
 
-**Skills**（投影在 `.claude/skills/`（Claude）或 `.agents/skills/`（Codex））：
+**Skills**（Codex 投影在 `.agents/skills/`，Claude 投影在本机 .claude/skills，gitignored）：
 
 - 核心工作流：`subagent-workflow`（issue 实现全流程）· `stage-change-pipeline`（设计到 issue 全流水线）· `risk-adaptive-cross-review`（审核语义源）
 - 执行编排：由 native 子代理（`implementer`/`reviewer`/`verifier`）执行，编排见 `subagent-workflow`
@@ -232,7 +232,7 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 - 代码质量：`review` · `entropy-review` · `repo-entropy-audit` · `improve-codebase-architecture` · `control-plane-auditor`
 - 工具：`gh-create-issue` · `git-worktree-workflows` · `project-documentation` · `eng-init`（本控制面的生成器，incremental 模式更新）
 
-**Agents**（投影在 `.claude/agents/`（Claude）或 `.codex/agents/`（Codex））：`implementer` · `reviewer` · `verifier` · `explorer` · `monitor`（CI 等 harness 外长等待交它看护，主线不空转）· `issue-scribe`（主线发现 follow-up 事项时调用：只读取证→按关键词和证据路径查重→落一条结构化 issue，绝不顺手修）
+**Agents**（Codex 投影在 `.codex/agents/`，Claude 投影在本机 .claude/agents，gitignored）：`implementer` · `reviewer` · `verifier` · `explorer` · `monitor`（CI 等 harness 外长等待交它看护，主线不空转）· `issue-scribe`（主线发现 follow-up 事项时调用：只读取证→按关键词和证据路径查重→落一条结构化 issue，绝不顺手修）
 
 **Hooks**（脚本在 `.claude/hooks/` 与 `.codex/hooks/`，条目在 `.claude/settings.json` 与 `.codex/hooks.json`，均已跟踪）：
 
