@@ -165,10 +165,16 @@ test("physical symlink-parent traversal agrees across targets, roots and workdir
 test.runIf(process.platform === "darwin")(
   "macOS var alias and private spelling share raw identity",
   () => {
-    const physical = realpathSync.native(cwd);
-    expect(physical.startsWith("/private/var/")).toBe(true);
-    const aliasCwd = physical.replace(/^\/private/, "");
-    const config = normalizeRawDirs({ rawDirs: [join(physical, "protected")] });
-    expect(decide("write", { file_path: "protected/new.csv" }, config, aliasCwd).kind).toBe("deny");
+    const aliasCwd = mkdtempSync("/var/tmp/shud-guard-");
+    try {
+      const physical = realpathSync.native(aliasCwd);
+      expect(physical.startsWith("/private/var/")).toBe(true);
+      const config = normalizeRawDirs({ rawDirs: [join(physical, "protected")] });
+      expect(decide("write", { file_path: "protected/new.csv" }, config, aliasCwd).kind).toBe(
+        "deny",
+      );
+    } finally {
+      rmSync(aliasCwd, { recursive: true, force: true });
+    }
   },
 );
