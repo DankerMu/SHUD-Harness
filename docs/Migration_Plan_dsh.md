@@ -101,15 +101,16 @@ spike 放在仓库外，不开 openspec change / issue / PR。每项记录：行
 | 3.5 | glossary 增补：profile、bundle、seam、waterfall、preset | agent | ✅ §10 新增 11 条；策略门/JobRegistry 两条改写 |
 | 3.6 | 移植清单：8 对象 Zod schema、`policy-gate-core.ts`、治理不变式与提示词措辞规则 | agent | ✅ `docs/04_IMPLEMENTATION/Port_List.md` |
 
-## Phase 4：执行 reset（0.5 天，PI 确认后才动）
+## Phase 4：执行 reset（0.5 天，PI 确认后才动）✅ 2026-10-20
 
-| # | 任务 | 负责 |
-|---|---|---|
-| 4.1 | 同仓库 `main` 原地清理提交（PI 已定，K15） | agent |
-| 4.2 | 移除 `zero` submodule；保留 SHUD / rSHUD / AutoSHUD | agent |
-| 4.3 | 关闭 epic #85、#135 及子 issue，评论指向 ADR-0004；#132 原始需求按路径名 `git status` 语义重开普通任务 | agent，PI 确认范围 |
-| 4.4 | 根目录清理：`SHUD.pptx`、`shud_harness_theory_to_code_addendum_zh`、`spikes/`、`workspace/`；加 `openspec/changes/m1-*`、`m2-*` 与 Bun/GLM 构建残留（处置表末两节） | PI 决定，agent 执行 |
-| 4.5 | 搭 dsh 插件 monorepo 骨架，搬入 3.6 清单 | agent |
+| # | 任务 | 负责 | 结果 |
+|---|---|---|---|
+| 4.1 | 同仓库 `main` 原地清理提交（PI 已定，K15） | agent | ✅ 五个提交：`cf860cc2`（phase3）→ `1cbdcae1` → `2b565bce` → `59659d39` → `50f470a5`；未 push |
+| 4.2 | 移除 `zero` submodule；保留 SHUD / rSHUD / AutoSHUD | agent | ✅ `1cbdcae1` |
+| 4.3 | 关闭 epic #85、#135 及子 issue，评论指向 ADR-0004；#132 原始需求按路径名 `git status` 语义重开普通任务 | agent，PI 确认范围 | ✅ 64 个 issue 全部 closed（not planned，统一评论）；PR #130 关闭并删分支；#132 → **#199**（label m3）|
+| 4.4 | 根目录清理：`SHUD.pptx`、`shud_harness_theory_to_code_addendum_zh`、`spikes/`、`workspace/`；加 `openspec/changes/m1-*`、`m2-*` 与 Bun/GLM 构建残留（处置表末两节） | PI 决定，agent 执行 | ✅ `1cbdcae1`；**表外追加** `.workplans/`（421 个 Zero 时代 issue 工作计划文件）单独提交 `2b565bce`，可一行 revert |
+| 4.5 | 搭 dsh 插件 monorepo 骨架，搬入 3.6 清单 | agent | ✅ `50f470a5`：pnpm workspace + `packages/dsh-shud-core`（92 测试绿）+ `profile/shud` + CI；移植细节与漂移记录见 Port_List |
+| 4.6 | 处置表执行（47 删 + 26 剪 + spec 债 ①–⑥） | agent | ✅ `59659d39`；link check 0 断链；新发现未修的债 ⑦–⑬ 记入 ADR-0004 附录 |
 
 依赖链：0.3 → 1.3；1.x → 2；2 → 3；3.1 批准 → 4。Phase 1 到期未完也进 grill。
 
@@ -124,3 +125,5 @@ spike 放在仓库外，不开 openspec change / issue / PR。每项记录：行
 - 2026-10-20 Phase 3 文档全部起草完毕（未提交，待 PI 审）：ADR-0004（K1–K15 + 附录）、Phased_Plan v2（M1–M6）、Repository_Layout v2、Port_List、glossary §10、CLAUDE/AGENTS 再生成、处置表提案、ADR-0001/0002 取代记录。
 - 2026-10-20 advisor 复核后修正：UI 三份文档改判留（PI 已给 post-MVP 意图）；处置表补 openspec/changes 与根目录残留；ADR-0004 状态改 proposed（决策已定、文本待审）；Phased_Plan 加 M 编号对照说明。
 - 2026-10-20 PI 批准 ADR-0004 与处置表（accepted / approved），Phase 3 以 `docs(phase3)` 提交；开始 Phase 4。
+- 2026-10-20 Phase 4 完成（见上表）。纠偏记录：处置表把 `Phased_Plan.md`/`Repository_Layout.md` 标为 删-记/删（针对 HEAD Zero 内容），机械执行时误删了 v2 版，子代理发现后已 restore，实际删除 47 份；`pnpm` 对 profile 的 `@deepseek-ai/dsh` peer 会自动从 npm 拉整个 dsh（579MB），已以 `autoInstallPeers: false` 关闭。最终树 `pnpm run check` 全绿（typecheck + 92 vitest + schema drift + 300 文件 link check）。
+- 下一步：PI 决定是否 push main（6 个未推送提交）；M1 开工前先开一条 spec 清账 issue 收 ADR-0004 附录 ⑦–⑬。

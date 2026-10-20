@@ -214,6 +214,13 @@ status: approved（PI 2026-10-20）
 | `scripts/local-auth/`、`scripts/perf/`、`scripts/readiness/` | 删 | 绑定 Hono 后端 / 性能测试 / M1 就绪门（对应 spec 已判删） |
 | `scripts/docs/`、`scripts/schema/` | 留，改路径 | 文档链接检查与 schema 生成（Schema_Generation_And_Drift_Control 留） |
 
+## 执行记录（2026-10-20）
+
+- 提交 `59659d39`（docs）、`1cbdcae1`（代码/根目录/openspec changes）、`2b565bce`（`.workplans/`，表外追加）。
+- 实际删除 47 份 md：表中 删/删-记 共 49 行，其中 `04_IMPLEMENTATION/Phased_Plan.md` 与 `Repository_Layout.md` 两行按 Notes 只判 HEAD 内容、路径保留（v2 版在位）。
+- 26 份 留 的"需剪掉"全部执行；执行中发现的未修残留记在 ADR-0004 附录 ⑦–⑬。
+- `generated/schema/*` 由新路径重新生成（`50f470a5`），`repos.zero` 已消失。
+
 ## 删-记 汇总（供 ADR-0004 附录 / 「后果」节吸收）
 
 ### A. 治理与不变量
