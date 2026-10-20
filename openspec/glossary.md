@@ -52,7 +52,7 @@ status: living
 | 恢复 | resume | 作业完成通知后恢复 agent 上下文续跑 | 同上 |
 | 收集 | collect | 作业 terminal 后解析产物、生成 RunRecord（job 级 `collect.lock`） | [Execution_Jobs_Runs](../docs/03_SPEC/Execution_Jobs_Runs.md) |
 | 看护进程 | watcher | 监视 RunJob 状态变迁并触发 collect 的进程 | 同上 |
-| 作业注册表 | `JobRegistry` / `ctx.jobs` | dsh 后台作业 seam；SHUD 自写 durable backend（detach + pid 对账）替换 `jobs-local` | [ADR-0004](../docs/adr/0004-dsh-kernel.md) K8 + 上游 `docs/subsystems/jobs.md` |
+| 作业注册表 | `JobRegistry` / `ctx.jobs` | dsh 后台作业 seam；SHUD 自写 durable backend（detach + pid 对账）替换 `jobs-local` | [ADR-0004](../docs/adr/implemented/0004-dsh-kernel.md) K8 + 上游 `docs/subsystems/jobs.md` |
 | 发件箱 | outbox | 通知先落盘后发送的事务化模式（防蒸发） | [Notification_Design](../docs/03_SPEC/Notification_Design.md) §8 |
 | 去重键 | `dedupe_key` | 通知幂等键：`task_id + trigger + target_id + recipient` | 同上 §5 + [Idempotency_Concurrency_Locking_Spec](../docs/03_SPEC/Idempotency_Concurrency_Locking_Spec.md) §4 |
 | 快照 | snapshot | workspace 状态快照（`latest_seq` 必填，事件回放锚点） | Workspace_Snapshot_And_Recovery_Spec（已删，见 tag archive/zero-v0.8.3） |
@@ -61,7 +61,7 @@ status: living
 
 | 中文 | 标识符 | 定义 | 权威出处 |
 |---|---|---|---|
-| 策略门 | policy gate | `tools/pre-execute` waterfall 监听器返回 `deny`/`ask`/`allow`；`ctx.tools.guard()` 作单调终局拒绝 | [ADR-0004](../docs/adr/0004-dsh-kernel.md) + 上游 `docs/tool-execution-pipeline.md` |
+| 策略门 | policy gate | `tools/pre-execute` waterfall 监听器返回 `deny`/`ask`/`allow`；`ctx.tools.guard()` 作单调终局拒绝 | [ADR-0004](../docs/adr/implemented/0004-dsh-kernel.md) + 上游 `docs/tool-execution-pipeline.md` |
 | 语义级别 | `semantic_level` | 科学变更风险分级（决定是否触发 PI gate） | [Scientific_Change_Gating_Spec](../docs/03_SPEC/Scientific_Change_Gating_Spec.md) |
 | 输出语义下限 | output_semantics floor | 特定类别变更的最低语义级别地板 | 同上 |
 | PI 门 | PI gate | 高风险动作阻塞等待 PI 显式决策的状态 | 同上 + [PI_Decision_Comments_Spec](../docs/03_SPEC/PI_Decision_Comments_Spec.md) |
@@ -88,7 +88,7 @@ status: living
 | 验证用例 | `VerificationCase` | verification/validation/calibration 三界清晰的验证单元 | [Verification_Case_Spec](../docs/03_SPEC/Verification_Case_Spec.md) |
 | 准入搜索 | `accepted_for_search` | bundle 状态：允许下游校准/搜索的前置门 | [Controlled_Search_Boundary_Spec](../docs/03_SPEC/Controlled_Search_Boundary_Spec.md) |
 | 校准 ≠ 结构验证 | calibration vs structural validation | 校准结果必须标注 calibration，不得表述为模型结构改进 | Verification_Case_Spec + CLAUDE.md Governance Rules |
-| 已知答案回放 | known-answer replay | 首任务模式：从兄弟项目 openMP 抽取已完成变更，经 Harness 治理链路重走，用既有 ground truth 评价 Harness 正确性 | [ADR-0002](../docs/adr/0002-mvp-reality-anchoring.md) D3/D4 |
+| 已知答案回放 | known-answer replay | 首任务模式：从兄弟项目 openMP 抽取已完成变更，经 Harness 治理链路重走，用既有 ground truth 评价 Harness 正确性 | [ADR-0002](../docs/adr/implemented/0002-mvp-reality-anchoring.md) D3/D4 |
 
 ## 7. 记忆与技能
 
@@ -127,7 +127,7 @@ status: living
 
 | 中文 | 标识符 | 定义 | 权威出处 |
 |---|---|---|---|
-| 内核 | dsh / DeepSeek Harness | Cordis 插件树上的 agent 运行时，钉 tag `dsh-v0.2.1-rc.2` | [ADR-0004](../docs/adr/0004-dsh-kernel.md) K1 |
+| 内核 | dsh / DeepSeek Harness | Cordis 插件树上的 agent 运行时，钉 tag `dsh-v0.2.1-rc.2` | [ADR-0004](../docs/adr/implemented/0004-dsh-kernel.md) K1 |
 | 配置档 | profile | `$DSH_HOME/profiles/<name>` 下按序叠加的 bundle + 用户 patch 组合；本项目 = `shud` | 上游 `docs/architecture.md` Profiles and bundles |
 | 包束 | bundle | 携带 Cordis 配置行与代码的分发单元，`package.json` 的 `dsh.bundle` 指向 patch 文件 | 同上 |
 | 覆盖 | patch / overlay | `cordis.patch.yml` 或 `--patch` 文件：按 id 整体替换某行 config 或 `insert` 新行 | 同上 |

@@ -26,7 +26,7 @@ import {
   TOOL_PARAMETER_SCHEMA_RULE_ID,
   type PolicyGateToolCall,
   type PolicyRule,
-  DEFAULT_SHUD_POLICY_GATE_CONTEXT
+  DEFAULT_SHUD_POLICY_GATE_CONTEXT,
 } from "./policy-gate-core.ts";
 import { getRoleToolIds } from "./role-tool-map.ts";
 
@@ -58,11 +58,11 @@ describe("policy gate pure evaluator", () => {
             remediation: {
               next_action: "adjust_scope" as const,
               hint: "Write generated files under workspace/tasks instead.",
-              ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
-            }
-          })
-        }
-      ]
+              ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md",
+            },
+          }),
+        },
+      ],
     };
 
     const first = evaluatePolicyGate(call, context);
@@ -76,9 +76,9 @@ describe("policy gate pure evaluator", () => {
       remediation: {
         next_action: "adjust_scope",
         hint: "Write generated files under workspace/tasks instead.",
-        ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md"
+        ref: "openspec/changes/m1-foundation/specs/policy-gate-spike/spec.md",
       },
-      guardClass: "authority"
+      guardClass: "authority",
     });
   });
 
@@ -92,10 +92,10 @@ describe("policy gate pure evaluator", () => {
           evaluate: () => ({
             decision: "deny",
             reason: "padded rule metadata denied",
-            remediation: sampleRemediation()
-          })
-        }
-      ]
+            remediation: sampleRemediation(),
+          }),
+        },
+      ],
     });
 
     expect(decision).toEqual({
@@ -103,7 +103,7 @@ describe("policy gate pure evaluator", () => {
       ruleId: "padded",
       reason: "padded rule metadata denied",
       remediation: sampleRemediation(),
-      guardClass: "authority"
+      guardClass: "authority",
     });
   });
 
@@ -117,9 +117,9 @@ describe("policy gate pure evaluator", () => {
         return {
           decision: "deny",
           reason: "raw data write denied after mutation",
-          remediation: sampleRemediation()
+          remediation: sampleRemediation(),
         };
-      }
+      },
     };
 
     const decision = evaluatePolicyGate(sampleToolCall(), { rules: [rule] });
@@ -130,7 +130,7 @@ describe("policy gate pure evaluator", () => {
       ruleId: RAW_DATA_WRITE_RULE_ID,
       reason: "raw data write denied after mutation",
       remediation: sampleRemediation(),
-      guardClass: "authority"
+      guardClass: "authority",
     });
   });
 
@@ -142,12 +142,12 @@ describe("policy gate pure evaluator", () => {
             ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
             description: "Attempts to downgrade reserved spawn authority.",
             guardClass: "capability",
-            evaluate: () => ({ decision: "allow" })
-          }
-        ]
-      })
+            evaluate: () => ({ decision: "allow" }),
+          },
+        ],
+      }),
     ).toThrow(
-      /Policy gate guard_class lint failed: spawn-profile-subset: known authority rule cannot be classified as capability/
+      /Policy gate guard_class lint failed: spawn-profile-subset: known authority rule cannot be classified as capability/,
     );
   });
 
@@ -162,14 +162,14 @@ describe("policy gate pure evaluator", () => {
             ruleId: TOOL_PARAMETER_SCHEMA_RULE_ID,
             description: "Attempts to downgrade built-in Zod parameter schema authority.",
             guardClass: "capability",
-            evaluate: () => ({ decision: "allow" })
-          }
-        ]
-      })
+            evaluate: () => ({ decision: "allow" }),
+          },
+        ],
+      }),
     ).toThrow(
       new RegExp(
-        `Policy gate guard_class lint failed: ${TOOL_PARAMETER_SCHEMA_RULE_ID}: known authority rule cannot be classified as capability`
-      )
+        `Policy gate guard_class lint failed: ${TOOL_PARAMETER_SCHEMA_RULE_ID}: known authority rule cannot be classified as capability`,
+      ),
     );
   });
 
@@ -185,12 +185,12 @@ describe("policy gate pure evaluator", () => {
                 ruleId: impersonatedRuleId,
                 description: "Attempts to mint a reserved authority rule prefix.",
                 guardClass,
-                evaluate: () => ({ decision: "allow" })
-              }
-            ]
-          })
+                evaluate: () => ({ decision: "allow" }),
+              },
+            ],
+          }),
         ).toThrow(
-          `Policy gate ruleId lint failed: ${impersonatedRuleId}: reserved authority policy rule prefixes are reserved for error_id`
+          `Policy gate ruleId lint failed: ${impersonatedRuleId}: reserved authority policy rule prefixes are reserved for error_id`,
         );
       }
     }
@@ -208,12 +208,12 @@ describe("policy gate pure evaluator", () => {
                 ruleId: impersonatedRuleId,
                 description: "Attempts to mint a reserved authority rule prefix.",
                 guardClass,
-                evaluate: () => ({ decision: "allow" })
-              }
-            ]
-          })
+                evaluate: () => ({ decision: "allow" }),
+              },
+            ],
+          }),
         ).toThrow(
-          `Policy gate ruleId lint failed: ${impersonatedRuleId}: reserved authority policy rule prefixes are reserved for error_id`
+          `Policy gate ruleId lint failed: ${impersonatedRuleId}: reserved authority policy rule prefixes are reserved for error_id`,
         );
       }
     }
@@ -224,9 +224,7 @@ describe("policy gate pure evaluator", () => {
       expect(isReservedAuthorityPolicyRuleId(ruleId)).toBe(true);
       expect(isReservedAuthorityPolicyErrorId(ruleId)).toBe(true);
       expect(isReservedAuthorityPolicyErrorId(`${ruleId}:failed:tool-call-1`)).toBe(true);
-      expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation(`${ruleId}:failed`)).toBe(
-        true
-      );
+      expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation(`${ruleId}:failed`)).toBe(true);
       expect(isReservedAuthorityPolicyRuleId(`${ruleId}:failed`)).toBe(false);
     }
 
@@ -234,22 +232,18 @@ describe("policy gate pure evaluator", () => {
     expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation(undefined)).toBe(false);
     expect(isReservedAuthorityPolicyErrorId("spawn-profile-subset-extra")).toBe(false);
     expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("spawn-profile-subset-extra")).toBe(
-      false
+      false,
     );
-    expect(isReservedAuthorityPolicyErrorId("tool-parameter-schema-validation-extra")).toBe(
-      false
-    );
+    expect(isReservedAuthorityPolicyErrorId("tool-parameter-schema-validation-extra")).toBe(false);
     expect(
-      isReservedAuthorityPolicyRuleIdPrefixImpersonation(
-        "tool-parameter-schema-validation-extra"
-      )
+      isReservedAuthorityPolicyRuleIdPrefixImpersonation("tool-parameter-schema-validation-extra"),
     ).toBe(false);
     expect(isReservedAuthorityPolicyErrorId("raw-data-writeish")).toBe(false);
     expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("raw-data-writeish")).toBe(false);
     expect(isReservedAuthorityPolicyErrorId("workspace-quota:raw-data-write")).toBe(false);
-    expect(isReservedAuthorityPolicyRuleIdPrefixImpersonation("workspace-quota:raw-data-write")).toBe(
-      false
-    );
+    expect(
+      isReservedAuthorityPolicyRuleIdPrefixImpersonation("workspace-quota:raw-data-write"),
+    ).toBe(false);
   });
 
   test("guard_class lint rejects unclassified hard guard rules", () => {
@@ -259,12 +253,12 @@ describe("policy gate pure evaluator", () => {
           {
             ruleId: "unclassified-hard-guard",
             description: "Missing guard_class metadata.",
-            evaluate: () => ({ decision: "allow" })
-          } as never
-        ]
-      })
+            evaluate: () => ({ decision: "allow" }),
+          } as never,
+        ],
+      }),
     ).toThrow(
-      /Policy gate guard_class lint failed: unclassified-hard-guard: missing or invalid guardClass\/guard_class/
+      /Policy gate guard_class lint failed: unclassified-hard-guard: missing or invalid guardClass\/guard_class/,
     );
   });
 
@@ -276,12 +270,12 @@ describe("policy gate pure evaluator", () => {
             ruleId: "invalid-guard-class",
             description: "Invalid guard_class metadata.",
             guardClass: "temporary",
-            evaluate: () => ({ decision: "allow" })
-          } as never
-        ]
-      })
+            evaluate: () => ({ decision: "allow" }),
+          } as never,
+        ],
+      }),
     ).toThrow(
-      /Policy gate guard_class lint failed: invalid-guard-class: missing or invalid guardClass\/guard_class/
+      /Policy gate guard_class lint failed: invalid-guard-class: missing or invalid guardClass\/guard_class/,
     );
   });
 
@@ -299,15 +293,15 @@ describe("policy gate pure evaluator", () => {
               remediation: {
                 next_action: "adjust_scope",
                 hint: "Use a valid guard class.",
-                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md",
               },
-              guardClass: "temporary"
-            })
-          } as never
-        ]
-      })
+              guardClass: "temporary",
+            }),
+          } as never,
+        ],
+      }),
     ).toThrow(
-      /Policy gate guard_class lint failed: invalid-result-guard-class: invalid result guardClass/
+      /Policy gate guard_class lint failed: invalid-result-guard-class: invalid result guardClass/,
     );
   });
 
@@ -325,15 +319,15 @@ describe("policy gate pure evaluator", () => {
               remediation: {
                 next_action: "adjust_scope",
                 hint: "Align the result guard class with the owning rule.",
-                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+                ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md",
               },
-              guardClass: "capability"
-            })
-          }
-        ]
-      })
+              guardClass: "capability",
+            }),
+          },
+        ],
+      }),
     ).toThrow(
-      /Policy gate guard_class lint failed: conflicting-result-guard-class: result guardClass capability conflicts with rule guardClass authority/
+      /Policy gate guard_class lint failed: conflicting-result-guard-class: result guardClass capability conflicts with rule guardClass authority/,
     );
   });
 
@@ -348,16 +342,16 @@ describe("policy gate pure evaluator", () => {
             decision: "deny",
             reason: "snake_case result guard denied",
             remediation: sampleRemediation(),
-            guard_class: "authority"
-          })
-        }
-      ]
+            guard_class: "authority",
+          }),
+        },
+      ],
     });
 
     expect(decision).toMatchObject({
       decision: "deny",
       ruleId: "result-snake-case-guard",
-      guardClass: "authority"
+      guardClass: "authority",
     });
   });
 
@@ -373,13 +367,13 @@ describe("policy gate pure evaluator", () => {
               decision: "deny",
               reason: "result guard_class is invalid",
               remediation: sampleRemediation(),
-              guard_class: "temporary"
-            })
-          } as never
-        ]
-      })
+              guard_class: "temporary",
+            }),
+          } as never,
+        ],
+      }),
     ).toThrow(
-      /Policy gate guard_class lint failed: invalid-result-snake-guard-class: invalid result guard_class/
+      /Policy gate guard_class lint failed: invalid-result-snake-guard-class: invalid result guard_class/,
     );
   });
 
@@ -395,13 +389,13 @@ describe("policy gate pure evaluator", () => {
               decision: "deny",
               reason: "result guard_class conflicts with the rule source of truth",
               remediation: sampleRemediation(),
-              guard_class: "capability"
-            })
-          }
-        ]
-      })
+              guard_class: "capability",
+            }),
+          },
+        ],
+      }),
     ).toThrow(
-      /Policy gate guard_class lint failed: conflicting-result-snake-guard-class: result guard_class capability conflicts with rule guardClass authority/
+      /Policy gate guard_class lint failed: conflicting-result-snake-guard-class: result guard_class capability conflicts with rule guardClass authority/,
     );
   });
 
@@ -417,16 +411,16 @@ describe("policy gate pure evaluator", () => {
             reason: "matching result guard aliases denied",
             remediation: sampleRemediation(),
             guardClass: "capability",
-            guard_class: "capability"
-          })
-        }
-      ]
+            guard_class: "capability",
+          }),
+        },
+      ],
     });
 
     expect(decision).toMatchObject({
       decision: "deny",
       ruleId: "matching-result-guard-aliases",
-      guardClass: "capability"
+      guardClass: "capability",
     });
   });
 
@@ -443,13 +437,13 @@ describe("policy gate pure evaluator", () => {
               reason: "conflicting result guard aliases denied",
               remediation: sampleRemediation(),
               guardClass: "authority",
-              guard_class: "capability"
-            })
-          }
-        ]
-      })
+              guard_class: "capability",
+            }),
+          },
+        ],
+      }),
     ).toThrow(
-      /Policy gate guard_class lint failed: conflicting-result-guard-aliases: conflicting result guardClass, guard_class/
+      /Policy gate guard_class lint failed: conflicting-result-guard-aliases: conflicting result guardClass, guard_class/,
     );
   });
 
@@ -461,10 +455,10 @@ describe("policy gate pure evaluator", () => {
             ruleId: " ",
             description: "Missing stable identity.",
             guardClass: "authority",
-            evaluate: () => ({ decision: "allow" })
-          }
-        ]
-      })
+            evaluate: () => ({ decision: "allow" }),
+          },
+        ],
+      }),
     ).toThrow(/Policy gate ruleId lint failed: <rule-0>: ruleId must be a non-empty string/);
   });
 
@@ -476,18 +470,18 @@ describe("policy gate pure evaluator", () => {
             ruleId: "duplicate-rule",
             description: "First identity.",
             guardClass: "authority",
-            evaluate: () => ({ decision: "allow" })
+            evaluate: () => ({ decision: "allow" }),
           },
           {
             ruleId: " duplicate-rule ",
             description: "Duplicate identity.",
             guardClass: "authority",
-            evaluate: () => ({ decision: "allow" })
-          }
-        ]
-      })
+            evaluate: () => ({ decision: "allow" }),
+          },
+        ],
+      }),
     ).toThrow(
-      /Policy gate ruleId lint failed: duplicate-rule: duplicate ruleId also used by duplicate-rule/
+      /Policy gate ruleId lint failed: duplicate-rule: duplicate ruleId also used by duplicate-rule/,
     );
   });
 
@@ -504,11 +498,11 @@ describe("policy gate pure evaluator", () => {
             remediation: {
               next_action: "adjust_scope",
               hint: "Use a governed scope.",
-              ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
-            }
-          })
-        }
-      ]
+              ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md",
+            },
+          }),
+        },
+      ],
     });
 
     expect(decision).toEqual({
@@ -518,9 +512,9 @@ describe("policy gate pure evaluator", () => {
       remediation: {
         next_action: "adjust_scope",
         hint: "Use a governed scope.",
-        ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+        ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md",
       },
-      guardClass: "authority"
+      guardClass: "authority",
     });
   });
 
@@ -528,21 +522,21 @@ describe("policy gate pure evaluator", () => {
     const valid = PolicyGateRemediationSchema.safeParse({
       next_action: "fix_and_retry",
       hint: "Fix the path and retry.",
-      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定"
+      ref: "docs/02_ARCHITECTURE/Control_Kernel.md#5-stop-conditions-与策略门校验约定",
     });
     expect(valid.success).toBe(true);
 
     const invalid = PolicyGateRemediationSchema.safeParse({
       next_action: "try_anyway",
       hint: "",
-      ref: ""
+      ref: "",
     });
     expect(invalid.success).toBe(false);
     if (!invalid.success) {
       expect(invalid.error.issues.map((issue) => issue.path.join("."))).toEqual([
         "next_action",
         "hint",
-        "ref"
+        "ref",
       ]);
     }
   });
@@ -561,12 +555,12 @@ describe("policy gate pure evaluator", () => {
               remediation: {
                 next_action: "try_anyway",
                 hint: "No route.",
-                ref: "spec"
-              } as never
-            })
-          }
-        ]
-      })
+                ref: "spec",
+              } as never,
+            }),
+          },
+        ],
+      }),
     ).toThrow("next_action");
   });
 
@@ -578,7 +572,7 @@ describe("policy gate pure evaluator", () => {
       {
         decision: "deny" as const,
         reason: "proxy-backed rule decisions should be rejected",
-        remediation: sampleRemediation()
+        remediation: sampleRemediation(),
       },
       {
         get() {
@@ -588,8 +582,8 @@ describe("policy gate pure evaluator", () => {
         getOwnPropertyDescriptor() {
           descriptorCalls += 1;
           throw new Error(sentinel);
-        }
-      }
+        },
+      },
     );
 
     const error = capturePolicyGateError(() =>
@@ -599,15 +593,15 @@ describe("policy gate pure evaluator", () => {
             ruleId: "proxy-rule-decision",
             description: "Returns a proxy-backed decision.",
             guardClass: "capability",
-            evaluate: () => proxyDecision as never
-          }
-        ]
-      })
+            evaluate: () => proxyDecision,
+          },
+        ],
+      }),
     );
 
     expect(error).toBeInstanceOf(PolicyGateDecisionValidationError);
     expect((error as Error).message).toBe(
-      "Invalid policy gate decision for proxy-rule-decision: decision"
+      "Invalid policy gate decision for proxy-rule-decision: decision",
     );
     expect((error as Error).message).not.toContain(sentinel);
     expect(getCalls).toBe(0);
@@ -619,14 +613,14 @@ describe("policy gate pure evaluator", () => {
     let decisionReads = 0;
     const accessorDecision: Record<string, unknown> = {
       reason: "accessor-backed decision fields should be rejected",
-      remediation: sampleRemediation()
+      remediation: sampleRemediation(),
     };
     Object.defineProperty(accessorDecision, "decision", {
       enumerable: true,
       get() {
         decisionReads += 1;
         throw new Error(sentinel);
-      }
+      },
     });
 
     const error = capturePolicyGateError(() =>
@@ -636,15 +630,15 @@ describe("policy gate pure evaluator", () => {
             ruleId: "accessor-rule-decision",
             description: "Returns an accessor-backed decision.",
             guardClass: "capability",
-            evaluate: () => accessorDecision as never
-          }
-        ]
-      })
+            evaluate: () => accessorDecision as never,
+          },
+        ],
+      }),
     );
 
     expect(error).toBeInstanceOf(PolicyGateDecisionValidationError);
     expect((error as Error).message).toBe(
-      "Invalid policy gate decision for accessor-rule-decision: decision"
+      "Invalid policy gate decision for accessor-rule-decision: decision",
     );
     expect((error as Error).message).not.toContain(sentinel);
     expect(decisionReads).toBe(0);
@@ -660,7 +654,7 @@ describe("policy gate pure evaluator", () => {
       toJSON() {
         toJsonCalls += 1;
         throw new Error(sentinel);
-      }
+      },
     };
 
     const error = capturePolicyGateError(() =>
@@ -670,15 +664,15 @@ describe("policy gate pure evaluator", () => {
             ruleId: "tojson-rule-decision",
             description: "Returns a decision with enumerable toJSON.",
             guardClass: "capability",
-            evaluate: () => decision
-          }
-        ]
-      })
+            evaluate: () => decision,
+          },
+        ],
+      }),
     );
 
     expect(error).toBeInstanceOf(PolicyGateDecisionValidationError);
     expect((error as Error).message).toBe(
-      "Invalid policy gate decision for tojson-rule-decision: toJSON"
+      "Invalid policy gate decision for tojson-rule-decision: toJSON",
     );
     expect((error as Error).message).not.toContain(sentinel);
     expect(toJsonCalls).toBe(0);
@@ -696,7 +690,7 @@ describe("policy gate pure evaluator", () => {
       getOwnPropertyDescriptor() {
         proxyDescriptorCalls += 1;
         throw new Error(proxySentinel);
-      }
+      },
     });
 
     const proxyError = capturePolicyGateError(() =>
@@ -709,16 +703,16 @@ describe("policy gate pure evaluator", () => {
             evaluate: () => ({
               decision: "deny",
               reason: "proxy remediation should be rejected",
-              remediation: proxyRemediation
-            })
-          }
-        ]
-      })
+              remediation: proxyRemediation,
+            }),
+          },
+        ],
+      }),
     );
 
     expect(proxyError).toBeInstanceOf(PolicyGateDecisionValidationError);
     expect((proxyError as Error).message).toBe(
-      "Invalid policy gate decision for proxy-remediation-rule-decision: remediation"
+      "Invalid policy gate decision for proxy-remediation-rule-decision: remediation",
     );
     expect((proxyError as Error).message).not.toContain(proxySentinel);
     expect(proxyGetCalls).toBe(0);
@@ -728,14 +722,14 @@ describe("policy gate pure evaluator", () => {
     let nextActionReads = 0;
     const accessorRemediation: Record<string, unknown> = {
       hint: "Use data descriptors for remediation fields.",
-      ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+      ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md",
     };
     Object.defineProperty(accessorRemediation, "next_action", {
       enumerable: true,
       get() {
         nextActionReads += 1;
         throw new Error(accessorSentinel);
-      }
+      },
     });
 
     const accessorError = capturePolicyGateError(() =>
@@ -748,16 +742,16 @@ describe("policy gate pure evaluator", () => {
             evaluate: () => ({
               decision: "deny",
               reason: "accessor remediation should be rejected",
-              remediation: accessorRemediation
-            })
-          }
-        ]
-      })
+              remediation: accessorRemediation,
+            }),
+          },
+        ],
+      }),
     );
 
     expect(accessorError).toBeInstanceOf(PolicyGateDecisionValidationError);
     expect((accessorError as Error).message).toBe(
-      "Invalid policy gate decision for accessor-remediation-rule-decision: remediation.next_action"
+      "Invalid policy gate decision for accessor-remediation-rule-decision: remediation.next_action",
     );
     expect((accessorError as Error).message).not.toContain(accessorSentinel);
     expect(nextActionReads).toBe(0);
@@ -771,8 +765,8 @@ describe("spawn profile subset policy rule", () => {
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: "worker", tools: ["read", "edit"] }),
       {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      }
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      },
     );
 
     expect(decision).toMatchObject({
@@ -781,15 +775,15 @@ describe("spawn profile subset policy rule", () => {
       guardClass: "authority",
       remediation: {
         next_action: "adjust_scope",
-        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-      }
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+      },
     });
     if (decision.decision === "deny") {
       expect(decision.reason).toContain("edit");
       expect(decision.remediation.hint).toContain("(1 total)");
       expect(decision.remediation.hint).toContain("edit");
       expect(decision.remediation.ref).toContain(
-        "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry"
+        "docs/02_ARCHITECTURE/Roles_and_Boundaries.md#0-canonical-agent-role-registry",
       );
     }
   });
@@ -798,8 +792,8 @@ describe("spawn profile subset policy rule", () => {
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: " reviewer ", tools: ["read", "bash"] }),
       {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      }
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      },
     );
 
     expect(decision).toMatchObject({
@@ -808,8 +802,8 @@ describe("spawn profile subset policy rule", () => {
       guardClass: "authority",
       remediation: {
         next_action: "adjust_scope",
-        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-      }
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+      },
     });
     if (decision.decision === "deny") {
       expect(decision.reason).toContain("reviewer");
@@ -822,8 +816,8 @@ describe("spawn profile subset policy rule", () => {
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: "worker", allowed_tools: ["read", "edit"] }),
       {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      }
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      },
     );
 
     expect(decision.decision).toBe("deny");
@@ -838,7 +832,7 @@ describe("spawn profile subset policy rule", () => {
       instruction: "Run worker",
       role: "worker",
       tools: ["read"],
-      mode: "detached"
+      mode: "detached",
     };
     const context = { rules: [SPAWN_PROFILE_SUBSET_RULE] };
 
@@ -852,8 +846,8 @@ describe("spawn profile subset policy rule", () => {
         guardClass: "authority",
         remediation: {
           next_action: "adjust_scope",
-          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-        }
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+        },
       });
       if (result.decision === "deny") {
         expect(result.reason).toContain("mode");
@@ -871,7 +865,7 @@ describe("spawn profile subset policy rule", () => {
       { role: "worker", tools: ["read"] },
       { instruction: undefined, role: "worker", tools: ["read"] },
       { instruction: "   ", role: "worker", tools: ["read"] },
-      { role: "worker", tools: ["read"], mode: 1 }
+      { role: "worker", tools: ["read"], mode: 1 },
     ];
 
     for (const input of inputs) {
@@ -885,8 +879,8 @@ describe("spawn profile subset policy rule", () => {
           guardClass: "authority",
           remediation: {
             next_action: "adjust_scope",
-            ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-          }
+            ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+          },
         });
         if (result.decision === "deny") {
           expect(result.reason).toContain("instruction");
@@ -903,18 +897,18 @@ describe("spawn profile subset policy rule", () => {
       spawnToolCallRaw({
         instruction: "Run the delegated task.",
         role: "worker",
-        tools: undefined
-      })
+        tools: undefined,
+      }),
     );
     expect(omittedTools).toMatchObject({
       decision: "allow",
-      changed: true
+      changed: true,
     });
     if (omittedTools.decision === "allow") {
       expect(omittedTools.input).toMatchObject({
         instruction: "Run the delegated task.",
         role: "worker",
-        tools: getRoleToolIds("worker")
+        tools: getRoleToolIds("worker"),
       });
     }
     expect(
@@ -922,10 +916,10 @@ describe("spawn profile subset policy rule", () => {
         spawnToolCallRaw({
           instruction: "Run the delegated task.",
           role: "worker",
-          allowed_tools: undefined
+          allowed_tools: undefined,
         }),
-        context
-      )
+        context,
+      ),
     ).toEqual({ decision: "allow" });
 
     const alias = normalizeSpawnAgentInput(
@@ -933,18 +927,18 @@ describe("spawn profile subset policy rule", () => {
         instruction: "Run the delegated task.",
         role: "worker",
         tools: undefined,
-        allowed_tools: ["read"]
-      })
+        allowed_tools: ["read"],
+      }),
     );
     expect(alias).toMatchObject({
       decision: "allow",
-      changed: true
+      changed: true,
     });
     if (alias.decision === "allow") {
       expect(alias.input).toEqual({
         instruction: "Run the delegated task.",
         role: "worker",
-        tools: ["read"]
+        tools: ["read"],
       });
     }
   });
@@ -956,7 +950,7 @@ describe("spawn profile subset policy rule", () => {
     input.tools = ["edit"];
 
     const decision = evaluatePolicyGate(spawnToolCallRaw(input), {
-      rules: [SPAWN_PROFILE_SUBSET_RULE]
+      rules: [SPAWN_PROFILE_SUBSET_RULE],
     });
 
     expect(decision).toMatchObject({
@@ -965,8 +959,8 @@ describe("spawn profile subset policy rule", () => {
       guardClass: "authority",
       remediation: {
         next_action: "adjust_scope",
-        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-      }
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+      },
     });
   });
 
@@ -974,33 +968,33 @@ describe("spawn profile subset policy rule", () => {
     const target: Record<string, unknown> = {
       instruction: "Run the delegated task.",
       role: "worker",
-      tools: ["read"]
+      tools: ["read"],
     };
     Object.defineProperty(target, "ignoredHostile", {
       enumerable: true,
       get() {
         throw new Error("ignored sibling getter should not run");
-      }
+      },
     });
     let enumerated = false;
     const input = new Proxy(target, {
       ownKeys() {
         enumerated = true;
         throw new Error("ignored sibling keys should not be enumerated");
-      }
+      },
     });
 
     const normalized = normalizeSpawnAgentInput(spawnToolCallRaw(input));
 
     expect(normalized).toMatchObject({
       decision: "allow",
-      changed: true
+      changed: true,
     });
     if (normalized.decision === "allow") {
       expect(normalized.input).toEqual({
         instruction: "Run the delegated task.",
         role: "worker",
-        tools: ["read"]
+        tools: ["read"],
       });
       expect(normalized.input).not.toHaveProperty("ignoredHostile");
     }
@@ -1016,21 +1010,21 @@ describe("spawn profile subset policy rule", () => {
       get() {
         accessorReads += 1;
         return "read";
-      }
+      },
     });
 
     const accessorDecision = normalizeSpawnAgentInput(
       spawnToolCallRaw({
         instruction: "Run the delegated task.",
         role: "worker",
-        tools: accessorTools
-      })
+        tools: accessorTools,
+      }),
     );
 
     expect(accessorDecision).toMatchObject({
       decision: "deny",
       ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
-      guardClass: "authority"
+      guardClass: "authority",
     });
     expect(accessorReads).toBe(0);
 
@@ -1042,26 +1036,26 @@ describe("spawn profile subset policy rule", () => {
       },
       getOwnPropertyDescriptor(target, property) {
         return Reflect.getOwnPropertyDescriptor(target, property);
-      }
+      },
     });
 
     const proxyDecision = normalizeSpawnAgentInput(
       spawnToolCallRaw({
         instruction: "Run the delegated task.",
         role: "worker",
-        tools: proxyTools
-      })
+        tools: proxyTools,
+      }),
     );
 
     expect(proxyDecision).toMatchObject({
       decision: "allow",
-      changed: true
+      changed: true,
     });
     if (proxyDecision.decision === "allow") {
       expect(proxyDecision.input).toEqual({
         instruction: "Run the delegated task.",
         role: "worker",
-        tools: ["read"]
+        tools: ["read"],
       });
     }
     expect(proxyElementReads).toBe(0);
@@ -1071,8 +1065,8 @@ describe("spawn profile subset policy rule", () => {
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: new String("worker"), tools: ["edit"] }),
       {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      }
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      },
     );
 
     expect(decision).toMatchObject({
@@ -1081,8 +1075,8 @@ describe("spawn profile subset policy rule", () => {
       guardClass: "authority",
       remediation: {
         next_action: "adjust_scope",
-        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-      }
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+      },
     });
     if (decision.decision === "deny") {
       expect(decision.reason).toContain("primitive string");
@@ -1093,8 +1087,8 @@ describe("spawn profile subset policy rule", () => {
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: "worker", tools: ["read"], allowed_tools: ["edit"] }),
       {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      }
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      },
     );
 
     expect(decision).toMatchObject({
@@ -1103,8 +1097,8 @@ describe("spawn profile subset policy rule", () => {
       guardClass: "authority",
       remediation: {
         next_action: "adjust_scope",
-        ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-      }
+        ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+      },
     });
     if (decision.decision === "deny") {
       expect(decision.reason).toContain("both tools and allowed_tools");
@@ -1115,16 +1109,16 @@ describe("spawn profile subset policy rule", () => {
   test("allows worker spawn when tools are a canonical subset", () => {
     expect(
       evaluatePolicyGate(spawnToolCall({ role: "worker", tools: ["read", "sandbox.exec"] }), {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      })
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      }),
     ).toEqual({ decision: "allow" });
   });
 
   test("allows canonical-role spawn without an explicit allowlist at pure rule level", () => {
     expect(
       evaluatePolicyGate(spawnToolCall({ role: "worker" }), {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      })
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      }),
     ).toEqual({ decision: "allow" });
   });
 
@@ -1141,8 +1135,8 @@ describe("spawn profile subset policy rule", () => {
         guardClass: "authority",
         remediation: {
           next_action: "adjust_scope",
-          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-        }
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+        },
       });
       expect(normalized).toMatchObject({
         decision: "deny",
@@ -1150,8 +1144,8 @@ describe("spawn profile subset policy rule", () => {
         guardClass: "authority",
         remediation: {
           next_action: "adjust_scope",
-          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-        }
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+        },
       });
       if (decision.decision === "deny") {
         expect(decision.reason).toContain("no canonical SHUD role profile");
@@ -1165,12 +1159,12 @@ describe("spawn profile subset policy rule", () => {
 
     expect(normalized).toMatchObject({
       decision: "allow",
-      changed: true
+      changed: true,
     });
     if (normalized.decision === "allow") {
       expect(normalized.input).toMatchObject({
         role: "reviewer",
-        tools: [...getRoleToolIds("reviewer")]
+        tools: [...getRoleToolIds("reviewer")],
       });
     }
   });
@@ -1180,29 +1174,29 @@ describe("spawn profile subset policy rule", () => {
 
     expect(normalized).toMatchObject({
       decision: "allow",
-      changed: true
+      changed: true,
     });
     if (normalized.decision === "allow") {
       expect(normalized.input).toMatchObject({
         role: "reviewer",
-        tools: [...getRoleToolIds("reviewer")]
+        tools: [...getRoleToolIds("reviewer")],
       });
     }
   });
 
   test("normalizes the allowed_tools alias to harness tools", () => {
     const normalized = normalizeSpawnAgentInput(
-      spawnToolCall({ role: "worker", allowed_tools: [" read ", "sandbox.exec", "read"] })
+      spawnToolCall({ role: "worker", allowed_tools: [" read ", "sandbox.exec", "read"] }),
     );
 
     expect(normalized).toMatchObject({
       decision: "allow",
-      changed: true
+      changed: true,
     });
     if (normalized.decision === "allow") {
       expect(normalized.input).toMatchObject({
         role: "worker",
-        tools: ["read", "sandbox.exec"]
+        tools: ["read", "sandbox.exec"],
       });
       expect(normalized.input).not.toHaveProperty("allowed_tools");
     }
@@ -1216,7 +1210,7 @@ describe("spawn profile subset policy rule", () => {
       { role: "worker", tools: "edit" },
       { role: "worker", tools: ["read", 1] },
       { role: "worker", allowed_tools: [] },
-      { role: "worker", allowed_tools: "read" }
+      { role: "worker", allowed_tools: "read" },
     ]) {
       const decision = evaluatePolicyGate(spawnToolCall(input), context);
 
@@ -1225,8 +1219,8 @@ describe("spawn profile subset policy rule", () => {
         ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
         guardClass: "authority",
         remediation: {
-          next_action: "adjust_scope"
-        }
+          next_action: "adjust_scope",
+        },
       });
     }
   });
@@ -1241,25 +1235,25 @@ describe("spawn profile subset policy rule", () => {
         },
         getOwnPropertyDescriptor(target, property) {
           return Reflect.getOwnPropertyDescriptor(target, property);
-        }
+        },
       });
       const input = { role: "worker", [field]: allowlist };
 
       const decision = evaluatePolicyGate(spawnToolCall(input), {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
       });
       const normalized = normalizeSpawnAgentInput(spawnToolCall(input));
 
       expect(decision).toEqual({ decision: "allow" });
       expect(normalized).toMatchObject({
         decision: "allow",
-        changed: true
+        changed: true,
       });
       if (normalized.decision === "allow") {
         expect(normalized.input).toEqual({
           instruction: "Run the delegated task.",
           role: "worker",
-          tools: ["read"]
+          tools: ["read"],
         });
       }
       expect(propertyGets).toBe(0);
@@ -1271,7 +1265,7 @@ describe("spawn profile subset policy rule", () => {
     const tailSentinel = "tail-sentinel-that-must-not-appear";
     const overCountTools = [
       ...Array.from({ length: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS }, () => "read"),
-      tailSentinel
+      tailSentinel,
     ];
     const overLengthToolId = `${"x".repeat(SPAWN_PROFILE_TOOL_ID_MAX_CHARS + 1)}${tailSentinel}`;
 
@@ -1279,7 +1273,7 @@ describe("spawn profile subset policy rule", () => {
       { tools: "read" },
       { tools: ["read", 1] },
       { tools: [] },
-      { allowed_tools: "read" }
+      { allowed_tools: "read" },
     ]) {
       const decision = evaluatePolicyGate(spawnToolCall(input), context);
 
@@ -1288,20 +1282,20 @@ describe("spawn profile subset policy rule", () => {
         ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
         guardClass: "authority",
         remediation: {
-          next_action: "adjust_scope"
-        }
+          next_action: "adjust_scope",
+        },
       });
     }
 
     expectSpawnBudgetDeny(
       evaluatePolicyGate(spawnToolCall({ tools: overCountTools }), context),
       "tool count",
-      tailSentinel
+      tailSentinel,
     );
     expectSpawnBudgetDeny(
       evaluatePolicyGate(spawnToolCall({ allowed_tools: [overLengthToolId] }), context),
       "per-tool id length",
-      tailSentinel
+      tailSentinel,
     );
   });
 
@@ -1310,13 +1304,13 @@ describe("spawn profile subset policy rule", () => {
     const tailSentinel = "tail-sentinel-that-must-not-appear";
     const overCountTools = [
       ...Array.from({ length: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS }, () => "read"),
-      tailSentinel
+      tailSentinel,
     ];
 
     for (const input of [
       { role: "not_a_harness_role", tools: "read" },
       { role: "not_a_harness_role", tools: [] },
-      { role: "not_a_harness_role", allowed_tools: ["read", 1] }
+      { role: "not_a_harness_role", allowed_tools: ["read", 1] },
     ]) {
       const decision = evaluatePolicyGate(spawnToolCall(input), context);
 
@@ -1325,18 +1319,18 @@ describe("spawn profile subset policy rule", () => {
         ruleId: SPAWN_PROFILE_SUBSET_RULE_ID,
         guardClass: "authority",
         remediation: {
-          next_action: "adjust_scope"
-        }
+          next_action: "adjust_scope",
+        },
       });
     }
 
     expectSpawnBudgetDeny(
       evaluatePolicyGate(
         spawnToolCall({ role: "not_a_harness_role", tools: overCountTools }),
-        context
+        context,
       ),
       "tool count",
-      tailSentinel
+      tailSentinel,
     );
   });
 
@@ -1347,7 +1341,7 @@ describe("spawn profile subset policy rule", () => {
       { tools: ["read", "edit"] },
       { allowed_tools: [" read ", "edit", "read"] },
       { role: "not_a_harness_role", tools: ["read", "edit"] },
-      { role: "not_a_harness_role", allowed_tools: ["read"] }
+      { role: "not_a_harness_role", allowed_tools: ["read"] },
     ]) {
       const decision = evaluatePolicyGate(spawnToolCall(input), context);
       const normalized = normalizeSpawnAgentInput(spawnToolCall(input));
@@ -1358,8 +1352,8 @@ describe("spawn profile subset policy rule", () => {
         guardClass: "authority",
         remediation: {
           next_action: "adjust_scope",
-          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-        }
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+        },
       });
       expect(normalized).toMatchObject({
         decision: "deny",
@@ -1367,8 +1361,8 @@ describe("spawn profile subset policy rule", () => {
         guardClass: "authority",
         remediation: {
           next_action: "adjust_scope",
-          ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-        }
+          ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+        },
       });
       if (decision.decision === "deny") {
         expect(decision.reason).toContain("no canonical SHUD role profile");
@@ -1387,14 +1381,14 @@ describe("spawn profile subset policy rule", () => {
       "extra-4",
       "edit",
       "extra-5",
-      farTailSentinel
+      farTailSentinel,
     ];
 
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: "worker", tools: ["read", ...excessTools] }),
       {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      }
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      },
     );
 
     expect(decision.decision).toBe("deny");
@@ -1403,9 +1397,9 @@ describe("spawn profile subset policy rule", () => {
       expect(combined).toContain("edit");
       expect(combined).toContain(`${excessTools.length} total`);
       expect(combined).not.toContain(farTailSentinel);
-      expect(
-        excessTools.filter((toolId) => combined.includes(toolId)).length
-      ).toBeLessThanOrEqual(SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES);
+      expect(excessTools.filter((toolId) => combined.includes(toolId)).length).toBeLessThanOrEqual(
+        SPAWN_PROFILE_MAX_EXCESS_TOOL_SAMPLES,
+      );
       expect(combined.length).toBeLessThan(900);
     }
   });
@@ -1414,11 +1408,11 @@ describe("spawn profile subset policy rule", () => {
     const tailSentinel = "tail-sentinel-that-must-not-appear";
     const tools = [
       ...Array.from({ length: SPAWN_PROFILE_ALLOWLIST_MAX_ITEMS }, () => "read"),
-      tailSentinel
+      tailSentinel,
     ];
 
     const decision = evaluatePolicyGate(spawnToolCall({ role: "worker", tools }), {
-      rules: [SPAWN_PROFILE_SUBSET_RULE]
+      rules: [SPAWN_PROFILE_SUBSET_RULE],
     });
 
     expectSpawnBudgetDeny(decision, "tool count", tailSentinel);
@@ -1431,8 +1425,8 @@ describe("spawn profile subset policy rule", () => {
     const decision = evaluatePolicyGate(
       spawnToolCall({ role: "worker", allowed_tools: ["read", overLengthToolId] }),
       {
-        rules: [SPAWN_PROFILE_SUBSET_RULE]
-      }
+        rules: [SPAWN_PROFILE_SUBSET_RULE],
+      },
     );
 
     expectSpawnBudgetDeny(decision, "per-tool id length", tailSentinel);
@@ -1449,11 +1443,11 @@ describe("spawn profile subset policy rule", () => {
     const tools = Array.from({ length: toolCount }, (_, index) =>
       index === toolCount - 1
         ? `${"z".repeat(chunkLength - tailSentinel.length)}${tailSentinel}`
-        : "x".repeat(chunkLength)
+        : "x".repeat(chunkLength),
     );
 
     const decision = evaluatePolicyGate(spawnToolCall({ role: "worker", tools }), {
-      rules: [SPAWN_PROFILE_SUBSET_RULE]
+      rules: [SPAWN_PROFILE_SUBSET_RULE],
     });
 
     expectSpawnBudgetDeny(decision, "total tool-id characters", tailSentinel);
@@ -1482,9 +1476,9 @@ describe("spawn limit policy rules", () => {
     const decision = evaluatePolicyGate(
       {
         ...spawnToolCall({ role: "worker", tools: ["read"] }),
-        spawnDepth: MAX_SPAWN_DEPTH
+        spawnDepth: MAX_SPAWN_DEPTH,
       },
-      DEFAULT_SHUD_POLICY_GATE_CONTEXT
+      DEFAULT_SHUD_POLICY_GATE_CONTEXT,
     );
 
     expect(decision).toMatchObject({
@@ -1493,8 +1487,8 @@ describe("spawn limit policy rules", () => {
       guardClass: "authority",
       remediation: {
         next_action: "adjust_scope",
-        ref: SPAWN_LIMITS_POLICY_REF
-      }
+        ref: SPAWN_LIMITS_POLICY_REF,
+      },
     });
     if (decision.decision === "deny") {
       expect(decision.reason).toContain(`max_spawn_depth=${MAX_SPAWN_DEPTH}`);
@@ -1508,9 +1502,9 @@ describe("spawn limit policy rules", () => {
     const decision = evaluatePolicyGate(
       {
         ...spawnToolCall({ role: "worker", tools: ["read"] }),
-        activeSubagentCount: MAX_CONCURRENT_SUBAGENTS
+        activeSubagentCount: MAX_CONCURRENT_SUBAGENTS,
       },
-      DEFAULT_SHUD_POLICY_GATE_CONTEXT
+      DEFAULT_SHUD_POLICY_GATE_CONTEXT,
     );
 
     expect(decision).toMatchObject({
@@ -1519,13 +1513,11 @@ describe("spawn limit policy rules", () => {
       guardClass: "authority",
       remediation: {
         next_action: "adjust_scope",
-        ref: SPAWN_LIMITS_POLICY_REF
-      }
+        ref: SPAWN_LIMITS_POLICY_REF,
+      },
     });
     if (decision.decision === "deny") {
-      expect(decision.reason).toContain(
-        `max_concurrent_subagents=${MAX_CONCURRENT_SUBAGENTS}`
-      );
+      expect(decision.reason).toContain(`max_concurrent_subagents=${MAX_CONCURRENT_SUBAGENTS}`);
       expect(decision.remediation.hint).toContain("M1 denies");
       expect(PolicyGateRemediationSchema.safeParse(decision.remediation).success).toBe(true);
     }
@@ -1536,9 +1528,9 @@ describe("spawn limit policy rules", () => {
       {
         ...spawnToolCall({ role: "worker", tools: ["read", "sandbox.exec"] }),
         spawnDepth: MAX_SPAWN_DEPTH - 1,
-        activeSubagentCount: MAX_CONCURRENT_SUBAGENTS - 1
+        activeSubagentCount: MAX_CONCURRENT_SUBAGENTS - 1,
       },
-      DEFAULT_SHUD_POLICY_GATE_CONTEXT
+      DEFAULT_SHUD_POLICY_GATE_CONTEXT,
     );
 
     expect(decision).toEqual({ decision: "allow" });
@@ -1549,9 +1541,9 @@ describe("spawn limit policy rules", () => {
       const decision = evaluatePolicyGate(
         {
           ...spawnToolCall({ role: "worker", tools: ["read"] }),
-          spawnDepth
+          spawnDepth,
         },
-        DEFAULT_SHUD_POLICY_GATE_CONTEXT
+        DEFAULT_SHUD_POLICY_GATE_CONTEXT,
       );
 
       expect(decision).toMatchObject({
@@ -1560,8 +1552,8 @@ describe("spawn limit policy rules", () => {
         guardClass: "authority",
         remediation: {
           next_action: "adjust_scope",
-          ref: SPAWN_LIMITS_POLICY_REF
-        }
+          ref: SPAWN_LIMITS_POLICY_REF,
+        },
       });
     }
   });
@@ -1571,9 +1563,9 @@ describe("spawn limit policy rules", () => {
       const decision = evaluatePolicyGate(
         {
           ...spawnToolCall({ role: "worker", tools: ["read"] }),
-          activeSubagentCount
+          activeSubagentCount,
         },
-        DEFAULT_SHUD_POLICY_GATE_CONTEXT
+        DEFAULT_SHUD_POLICY_GATE_CONTEXT,
       );
 
       expect(decision).toMatchObject({
@@ -1582,8 +1574,8 @@ describe("spawn limit policy rules", () => {
         guardClass: "authority",
         remediation: {
           next_action: "adjust_scope",
-          ref: SPAWN_LIMITS_POLICY_REF
-        }
+          ref: SPAWN_LIMITS_POLICY_REF,
+        },
       });
     }
   });
@@ -1594,9 +1586,9 @@ describe("spawn limit policy rules", () => {
         role: "worker",
         tools: ["read"],
         spawnDepth: MAX_SPAWN_DEPTH,
-        activeSubagentCount: MAX_CONCURRENT_SUBAGENTS
+        activeSubagentCount: MAX_CONCURRENT_SUBAGENTS,
       }),
-      DEFAULT_SHUD_POLICY_GATE_CONTEXT
+      DEFAULT_SHUD_POLICY_GATE_CONTEXT,
     );
 
     expect(decision).toEqual({ decision: "allow" });
@@ -1606,7 +1598,7 @@ describe("spawn limit policy rules", () => {
 function expectSpawnBudgetDeny(
   decision: ReturnType<typeof evaluatePolicyGate>,
   budgetLabel: string,
-  tailSentinel: string
+  tailSentinel: string,
 ): void {
   expect(decision).toMatchObject({
     decision: "deny",
@@ -1614,8 +1606,8 @@ function expectSpawnBudgetDeny(
     guardClass: "authority",
     remediation: {
       next_action: "adjust_scope",
-      ref: SPAWN_PROFILE_SUBSET_POLICY_REF
-    }
+      ref: SPAWN_PROFILE_SUBSET_POLICY_REF,
+    },
   });
   if (decision.decision === "deny") {
     const combined = `${decision.reason}\n${decision.remediation.hint}`;
@@ -1639,9 +1631,9 @@ function sampleToolCall(): PolicyGateToolCall {
     toolId: "bash",
     role: "worker",
     input: {
-      command: "printf nope > data/raw/input.csv"
+      command: "printf nope > data/raw/input.csv",
     },
-    workDir: "/workspace/tasks/TASK-M1-SPIKE"
+    workDir: "/workspace/tasks/TASK-M1-SPIKE",
   };
 }
 
@@ -1649,7 +1641,7 @@ function sampleRemediation() {
   return {
     next_action: "adjust_scope" as const,
     hint: "Use a governed scope.",
-    ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md"
+    ref: "openspec/changes/m1-foundation/specs/tool-registry-governance/spec.md",
   };
 }
 
@@ -1659,9 +1651,9 @@ function spawnToolCall(input: Record<string, unknown>): PolicyGateToolCall {
     role: "coordinator",
     input: {
       instruction: "Run the delegated task.",
-      ...input
+      ...input,
     },
-    workDir: "/workspace/tasks/TASK-M1-SPIKE"
+    workDir: "/workspace/tasks/TASK-M1-SPIKE",
   };
 }
 
@@ -1670,6 +1662,6 @@ function spawnToolCallRaw(input: unknown): PolicyGateToolCall {
     toolId: "spawn_agent",
     role: "coordinator",
     input,
-    workDir: "/workspace/tasks/TASK-M1-SPIKE"
+    workDir: "/workspace/tasks/TASK-M1-SPIKE",
   };
 }

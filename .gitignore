@@ -23,7 +23,10 @@ node_modules/
 *.swo
 
 # Claude runtime projection (regenerate by reinstalling packs; canonical source: instructions/)
-.claude/
+# Claude runtime: skills/agents are projections (ignored); hook settings + hook scripts are versioned (eng-init).
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 
 # Agent issue workplans
 /.workplans/issue-*/
@@ -46,3 +49,6 @@ node_modules/
 
 # Build output of TS plugin packages
 packages/*/lib/
+
+# vitest coverage output
+coverage/

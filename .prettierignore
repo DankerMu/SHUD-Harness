@@ -1,0 +1,14 @@
+node_modules/
+**/lib/
+coverage/
+pnpm-lock.yaml
+SHUD/
+rSHUD/
+AutoSHUD/
+.agents/
+.claude/
+.codex/
+docs/
+openspec/
+templates/
+*.md

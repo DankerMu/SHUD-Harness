@@ -5,7 +5,7 @@ export const CANONICAL_HARNESS_ROLES = Object.freeze([
   "repo_explorer",
   "worker",
   "coder",
-  "reviewer"
+  "reviewer",
 ] as const satisfies readonly HarnessRole[]);
 
 export type CanonicalHarnessRole = (typeof CANONICAL_HARNESS_ROLES)[number];
@@ -32,7 +32,7 @@ export const ROLE_TOOL_IDS = Object.freeze([
   "spawn_agent",
   "validator.run",
   "wait_agent",
-  "write"
+  "write",
 ] as const);
 
 export type RoleToolId = (typeof ROLE_TOOL_IDS)[number];
@@ -59,16 +59,16 @@ export const ROLE_TOOL_MAP = Object.freeze({
       "harness.report.generate",
       "read",
       "spawn_agent",
-      "wait_agent"
+      "wait_agent",
     ],
     [
       "harness.memory.propose is a future proposal-only draft memory adapter; raw harness memory tools are not authorized.",
-      "read is limited to scheduling context."
-    ]
+      "read is limited to scheduling context.",
+    ],
   ),
   repo_explorer: defineRoleToolProfile(
     ["git.inspect", "read", "repo.glob", "repo.grep", "repo.search"],
-    ["git.inspect, repo.search, repo.glob, and repo.grep are read-only diagnostics."]
+    ["git.inspect, repo.search, repo.glob, and repo.grep are read-only diagnostics."],
   ),
   worker: defineRoleToolProfile(
     [
@@ -79,33 +79,33 @@ export const ROLE_TOOL_MAP = Object.freeze({
       "rshud.read_output",
       "sandbox.exec",
       "shud.build",
-      "shud.run"
+      "shud.run",
     ],
     [
       "artifact.write is limited to workspaces/artifacts/runs.",
       "harness.memory.propose is a future proposal-only draft memory adapter; raw harness memory tools are not authorized.",
-      "sandbox.exec is sandbox bash, not repository source editing."
-    ]
+      "sandbox.exec is sandbox bash, not repository source editing.",
+    ],
   ),
   coder: defineRoleToolProfile(
     ["bash", "edit", "harness.memory.propose", "patch.apply", "read", "write"],
     [
       "bash, write, edit, and patch.apply are limited to the task worktree.",
-      "harness.memory.propose is a future proposal-only draft memory adapter; raw harness memory tools are not authorized."
-    ]
+      "harness.memory.propose is a future proposal-only draft memory adapter; raw harness memory tools are not authorized.",
+    ],
   ),
   reviewer: defineRoleToolProfile(
     ["harness.memory.propose", "read", "validator.run"],
     [
       "validator.run is deterministic and read-only.",
-      "harness.memory.propose is a future proposal-only draft memory adapter; raw harness memory tools are not authorized."
-    ]
-  )
+      "harness.memory.propose is a future proposal-only draft memory adapter; raw harness memory tools are not authorized.",
+    ],
+  ),
 } satisfies RoleToolMap);
 
 const CANONICAL_HARNESS_ROLE_SET: ReadonlySet<string> = new Set(CANONICAL_HARNESS_ROLES);
 const ROLE_TOOL_ID_SETS: ReadonlyMap<HarnessRole, ReadonlySet<string>> = new Map(
-  CANONICAL_HARNESS_ROLES.map((role) => [role, new Set(ROLE_TOOL_MAP[role].toolIds)])
+  CANONICAL_HARNESS_ROLES.map((role) => [role, new Set(ROLE_TOOL_MAP[role].toolIds)]),
 );
 
 export function isCanonicalHarnessRole(value: unknown): value is CanonicalHarnessRole {
@@ -125,9 +125,9 @@ export function createRoleToolIdsSnapshot(): RoleToolIdsSnapshot {
     Object.fromEntries(
       CANONICAL_HARNESS_ROLES.map((role) => [
         role,
-        Object.freeze([...ROLE_TOOL_MAP[role].toolIds])
-      ])
-    ) as RoleToolIdsSnapshot
+        Object.freeze([...ROLE_TOOL_MAP[role].toolIds]),
+      ]),
+    ) as RoleToolIdsSnapshot,
   );
 }
 
@@ -142,10 +142,10 @@ export function isRoleToolIdSubset(role: HarnessRole, toolIds: readonly string[]
 
 function defineRoleToolProfile(
   toolIds: readonly RoleToolId[],
-  permissionNotes: readonly string[]
+  permissionNotes: readonly string[],
 ): RoleToolProfile {
   return Object.freeze({
     toolIds: Object.freeze([...toolIds]),
-    permissionNotes: Object.freeze([...permissionNotes])
+    permissionNotes: Object.freeze([...permissionNotes]),
   });
 }

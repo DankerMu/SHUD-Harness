@@ -1,5 +1,6 @@
 ---
 status: accepted
+kind: architecture
 ---
 
 # ADR-0001: Agent 运行时基座与拓扑（Zero + 单 Coordinator 星型）
@@ -65,7 +66,7 @@ status: accepted
 4. 多 PI 需求出现 → ACL 泛化（principal 化设计已留门）。
 5. 模型层注入防护实质突破 → T4 处理可放宽（在此之前不放）。
 6. `StackLock.llm` 升级且行为 eval 全量达标 → 触发能力护栏减重审查
-   （[Control_Kernel §5.2](../02_ARCHITECTURE/Control_Kernel.md)，harness 评审 G5）——
+   （[Control_Kernel §5.2](../../02_ARCHITECTURE/Control_Kernel.md)，harness 评审 G5）——
    capability 类护栏逐项评估退役，authority 类不参与；护栏只增不减是另一种熵。
 
 > **修订（2026-07-02，[ADR-0002](0002-mvp-reality-anchoring.md) D9）**：运行时模型定为 GLM 5.2
@@ -106,8 +107,8 @@ status: accepted
 按上节顺序完成评估，同日结案：
 
 1. **根因是层错位，不是基座缺陷**。冻结 spec 早已分工——preflight 挡提交前可判定的计划性错误，
-   运行期写入由沙箱路径策略拦截（[Preflight_And_Mutation_Boundary_Spec](../03_SPEC/Preflight_And_Mutation_Boundary_Spec.md)
-   "preflight 是 submit 前的门，不是运行期防线"A03-5；[Sandbox_and_Executor §1](../03_SPEC/Sandbox_and_Executor.md)）。
+   运行期写入由沙箱路径策略拦截（[Preflight_And_Mutation_Boundary_Spec](../../03_SPEC/Preflight_And_Mutation_Boundary_Spec.md)
+   "preflight 是 submit 前的门，不是运行期防线"A03-5；[Sandbox_and_Executor §1](../../03_SPEC/Sandbox_and_Executor.md)）。
    #19 将写禁区 authority 误置于 pre-exec 扫描层，是实施记录相对 spec 的漂移。"写哪些文件"是程序语义属性，
    对图灵完备的 shell 不可静态判定——该墙对两个备胎同样存在（任何 pre-exec 字符串门都撞；Claude Code 自身
    在 macOS 亦以 seatbelt 实现 bash 沙箱），故备胎评估关闭：不换基座。
@@ -169,13 +170,13 @@ M1 条 2'、条 3 与其余验收依赖全部合入后，基于 issue #21 的首
 裁决：ADR-0001 触发器 1 结案，Zero 基座由 **Trial** 转为 **Adopt**。2026-07-04 的边界重划继续有效，
 不是回退到静态 shell 判定；预存 hardlink 兜底、可信可观测遥测范围与未来跨平台等价沙箱仍是必须保留的
 架构边界。两备胎评估保持关闭。完整逐条证据与 M1 验收记录见
-[`policy-gate-spike-final-verdict.md`](../../openspec/changes/m1-foundation/policy-gate-spike-final-verdict.md)
-和 [`m1-acceptance-record.md`](../../openspec/changes/m1-foundation/m1-acceptance-record.md)。
+[`policy-gate-spike-final-verdict.md`](../../../openspec/changes/m1-foundation/policy-gate-spike-final-verdict.md)
+和 [`m1-acceptance-record.md`](../../../openspec/changes/m1-foundation/m1-acceptance-record.md)。
 
 ## 参照
 
 Zero_Reuse_Matrix（已删，见 tag archive/zero-v0.8.3）·
-[Control_Kernel §5](../02_ARCHITECTURE/Control_Kernel.md) ·
+[Control_Kernel §5](../../02_ARCHITECTURE/Control_Kernel.md) ·
 Adversarial_Design_Review_v0_8_3（已删，见 tag archive/zero-v0.8.3）·
-[Context_Trust §5.1](../03_SPEC/Context_Trust_And_Injection_Spec.md) ·
+[Context_Trust §5.1](../../03_SPEC/Context_Trust_And_Injection_Spec.md) ·
 外部 2026 框架综述：morphllm / qubittool / developersdigest / alicelabs（检索于 2026-07-02）

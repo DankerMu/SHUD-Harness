@@ -1,0 +1,21 @@
+name: Release
+
+# Milestone tags m1…m6 (Phased_Plan.md) create a GitHub Release with auto-generated notes.
+on:
+  push:
+    tags: ["m[0-9]*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "Milestone $GITHUB_REF_NAME"

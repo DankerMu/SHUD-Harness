@@ -2,12 +2,7 @@ import { z } from "zod";
 
 export const LockScopeSchema = z.enum(["task", "job", "run", "report", "workspace", "worktree"]);
 
-export const LockStatusSchema = z.enum([
-  "held",
-  "released",
-  "expired",
-  "stolen_after_recovery"
-]);
+export const LockStatusSchema = z.enum(["held", "released", "expired", "stolen_after_recovery"]);
 
 export const LockRecordSchema = z.object({
   lock_id: z.string().min(1),
@@ -17,7 +12,7 @@ export const LockRecordSchema = z.object({
   acquired_at: z.string().min(1),
   expires_at: z.string().min(1),
   status: LockStatusSchema,
-  reason: z.string().min(1)
+  reason: z.string().min(1),
 });
 
 export type LockScope = z.infer<typeof LockScopeSchema>;

@@ -12,7 +12,7 @@ export const ArtifactTypeSchema = z.enum([
   "toolcall",
   "manifest",
   "analysis_progress",
-  "error"
+  "error",
 ]);
 
 export const ArtifactCreatedBySchema = z.enum(["system", "agent", "user"]);
@@ -22,7 +22,7 @@ export const ArtifactRetentionClassSchema = z.enum([
   "debug",
   "evidence",
   "accepted_report",
-  "benchmark"
+  "benchmark",
 ]);
 
 export const ArtifactRedactionStatusSchema = z.enum(["not_needed", "redacted", "unsafe"]);
@@ -45,7 +45,7 @@ export const ArtifactSchema = z.strictObject({
   llm_generated: z.boolean().default(false),
   retention_class: ArtifactRetentionClassSchema,
   source_refs: z.array(z.string()),
-  redaction_status: ArtifactRedactionStatusSchema
+  redaction_status: ArtifactRedactionStatusSchema,
 });
 
 export type ArtifactType = z.infer<typeof ArtifactTypeSchema>;

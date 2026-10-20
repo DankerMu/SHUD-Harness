@@ -1,5 +1,6 @@
 ---
 status: accepted
+kind: architecture
 ---
 
 # ADR-0002: MVP 现实锚定（部署 / 首任务 / 模型）
@@ -56,6 +57,6 @@ status: accepted
 ## 参照
 
 [ADR-0001](0001-agent-runtime-and-topology.md) ·
-Phased_Spec_Activation（例外批次 2 + MVP 范围调整；已删，见 tag archive/zero-v0.8.3；迁移后范围见 [Migration_Plan_dsh](../Migration_Plan_dsh.md)）·
-[Minimal_Schemas](../03_SPEC/Minimal_Schemas.md)（StackLock.llm base_url）·
+Phased_Spec_Activation（例外批次 2 + MVP 范围调整；已删，见 tag archive/zero-v0.8.3；迁移后范围见 [Migration_Plan_dsh](../../Migration_Plan_dsh.md)）·
+[Minimal_Schemas](../../03_SPEC/Minimal_Schemas.md)（StackLock.llm base_url）·
 兄弟项目 `../openMP/SHUD_openMP_master_plan.md`（v1.5，P1e COMPLETE / P2a NO-GO）

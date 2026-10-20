@@ -1,0 +1,91 @@
+// ESLint flat config. Thresholds mirror constraints.yaml (`thresholds.max_file_lines`,
+// `exemptions.max_file_lines`); change them there first, then here.
+import js from "@eslint/js";
+import prettier from "eslint-config-prettier";
+import tseslint from "typescript-eslint";
+
+const MAX_FILE_LINES = 1000;
+
+// Q1.4b frozen baseline (constraints.yaml `baseline.max_file_lines`). Ratchet targets:
+// policy-gate-core.ts + its test → M3; scripts/schema/generate.ts → M2. New files get no exemption.
+const FROZEN_OVERSIZED_FILES = [
+  "packages/dsh-shud-core/src/governance/policy-gate-core.ts",
+  "packages/dsh-shud-core/src/governance/policy-gate-core.test.ts",
+  "scripts/schema/generate.ts",
+];
+
+export default tseslint.config(
+  {
+    ignores: [
+      "**/node_modules/**",
+      "**/lib/**",
+      "coverage/**",
+      "SHUD/**",
+      "rSHUD/**",
+      "AutoSHUD/**",
+      ".agents/**",
+      ".claude/**",
+      ".codex/**",
+      ".omp/**",
+      ".obsidian/**",
+      ".github/**",
+      "docs/**",
+      "openspec/**",
+      "profile/**",
+      "templates/**",
+      "skills/**",
+    ],
+  },
+  js.configs.recommended,
+  ...tseslint.configs.recommendedTypeChecked,
+  {
+    files: ["**/*.ts", "**/*.mjs"],
+    languageOptions: {
+      parserOptions: {
+        project: ["./tsconfig.eslint.json"],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      "max-lines": ["error", { max: MAX_FILE_LINES, skipBlankLines: false, skipComments: false }],
+      "@typescript-eslint/consistent-type-imports": "error",
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/deepseek-harness/**"],
+              message:
+                "dsh is the host, not a dependency: import only documented seams via @deepseek-ai/dsh (ADR-0004 K2).",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ["**/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+  },
+  {
+    files: FROZEN_OVERSIZED_FILES,
+    rules: { "max-lines": "off" },
+  },
+  // Q1.4b frozen baseline: pre-existing type-safety findings in ported code
+  // (constraints.yaml `baseline.eslint_type_safety`). Removal trigger: M3 split of
+  // policy-gate-core (+test) and M2 split of scripts/schema/generate.ts.
+  {
+    files: ["packages/dsh-shud-core/src/governance/policy-gate-core.ts"],
+    rules: { "@typescript-eslint/no-unsafe-assignment": "off" },
+  },
+  {
+    files: ["packages/dsh-shud-core/src/governance/policy-gate-core.test.ts"],
+    rules: { "@typescript-eslint/no-unsafe-return": "off" },
+  },
+  {
+    files: ["scripts/schema/generate.ts"],
+    rules: { "@typescript-eslint/no-base-to-string": "off", "preserve-caught-error": "off" },
+  },
+  prettier,
+);

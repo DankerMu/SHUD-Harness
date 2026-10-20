@@ -1,5 +1,6 @@
 ---
 status: accepted
+kind: architecture
 ---
 
 # ADR-0004: 内核切换到 DeepSeek Harness（dsh）与仓库重置
@@ -32,7 +33,7 @@ status: accepted
 | K11 | **MVP 不做记忆**；首任务跑通后再评估 | dsh 无内置 memory 包；跨任务才有价值 |
 | K12 | **治理四条不变式原样继承**：改物理方程/默认参数/benchmark baseline 需 PI 批；单流域指标提升 ≠ 模型改进；校准 ≠ 结构验证；删除原始数据禁止或 PI 批 | 与内核无关的领域规则 |
 | K13 | **作用域规则**：任何 spike 不以首任务的一个用户可见步骤收尾就不准开；写入本 ADR 与 CLAUDE.md | 防止 M2 式失控复发 |
-| K14 | **旧文档处置**：agent 出三列处置表（留 / 删 / 删-记），PI 批后执行；表见 [Doc_Disposition_2026-10-20](../00_INDEX/Doc_Disposition_2026-10-20.md) | PI 决定"有用保留、没用删除" |
+| K14 | **旧文档处置**：agent 出三列处置表（留 / 删 / 删-记），PI 批后执行；表见 [Doc_Disposition_2026-10-20](../../00_INDEX/Doc_Disposition_2026-10-20.md) | PI 决定"有用保留、没用删除" |
 | K15 | **仓库重置机制**：同仓库 `main` 原地清理提交，历史保留，`archive/zero-v0.8.3` tag 已打；64 个 open issue 全部关闭并统一评论指向本 ADR，#132 的需求（StackLock 脏状态观测）按路径名 `git status` 语义重开普通任务；根目录删除 `SHUD.pptx`、`shud_harness_theory_to_code_addendum_zh/`、`spikes/`、`workspace/`（本迁移计划移入 docs/） | PI 决定 |
 
 ## 需求 → dsh 机制映射（spike 实测）
@@ -68,7 +69,7 @@ status: accepted
 
 ## 附录：旧文档携带事实与 spec 更新债
 
-- 旧文档三列处置表（K14）：[Doc_Disposition_2026-10-20](../00_INDEX/Doc_Disposition_2026-10-20.md)，118 份在范围内：留 69 · 删 27 · 删-记 22（三份 UI 文档因 PI 已给 post-MVP UI 意图改判留）；另附 `openspec/changes/` 与根目录构建残留两节。"删-记"条目的携带事实集中在该表末节「删-记 汇总」（A 治理与不变量 / B 对象沿革 / C 执行与运维阈值 / D 测试验收 / E 度量流程），本 ADR 不复制，以该节为准；其中"任何基座必须覆盖的默认行为"（memory 不自动 verified、closure 分类器仅 advisory、bash 无内置安全）与"PI 中途介入三级语义"（append / interrupt / abort）在 dsh 下同样成立，M3 设计时逐条对账。
+- 旧文档三列处置表（K14）：[Doc_Disposition_2026-10-20](../../00_INDEX/Doc_Disposition_2026-10-20.md)，118 份在范围内：留 69 · 删 27 · 删-记 22（三份 UI 文档因 PI 已给 post-MVP UI 意图改判留）；另附 `openspec/changes/` 与根目录构建残留两节。"删-记"条目的携带事实集中在该表末节「删-记 汇总」（A 治理与不变量 / B 对象沿革 / C 执行与运维阈值 / D 测试验收 / E 度量流程），本 ADR 不复制，以该节为准；其中"任何基座必须覆盖的默认行为"（memory 不自动 verified、closure 分类器仅 advisory、bash 无内置安全）与"PI 中途介入三级语义"（append / interrupt / abort）在 dsh 下同样成立，M3 设计时逐条对账。
 - 处置表执行后需同步的 spec 更新债：① ADR-0002 D3/D5/D9 标 superseded（→K5/K3）；② `03_SPEC/Minimal_Schemas.md` StackLock.llm 按 K4 改为三字段；③ `03_SPEC/Config_Secrets_And_Environment_Spec.md` `GLM_API_KEY` → `DMXAPI_KEY`；④ `00_INDEX/CANONICAL_CONTRACTS.md` 剪掉 API/WebSocket/运维注册段；⑤ 保留文件中标注"需剪掉 Zero 段"的行按表执行；⑥ `openspec/glossary.md` 残留 Zero 行随 ⑤ 一并剪掉。
 - 处置表执行记录（2026-10-20，Phase 4）：①–⑥ 已执行；执行中新发现、**未修**的 spec 债：⑦ `Testing_Strategy` W0–W7 周矩阵、§12 "API 422/403" 通过标准、PI 决策测试中的 MemoryNote（与 K11 矛盾）；⑧ `Test_Fixtures_And_Command_Matrix` §5 HTML export 水印（v2 只出 Markdown）、§6 API envelope、`workspace/repos|artifacts` 路径与 Repository_Layout v2 §2 不一致；⑨ `SHUD_Output_Variables` 的 `frontend_default` 字段与"默认展示"列；⑩ `Requirements_Catalog` US-003/004/006/007、TR-007/010、IR-002/003 仍引用已删对象；⑪ `Report_Generation_Spec` 引用的 7 态水印表权威源（Report_Export_Spec）已删，需在 Report_Generation 内重建；⑫ PI 审批批注在 dsh `approval/decided` 上无字段承载（只有 `allowed-once | rejected | cancelled | unavailable`），`request_revision` 与 `rejected` 不可区分——M3 审批接线前设计；⑬ ADR-0002 D1 正文仍写 "Hono 服务"（K2 已取代，历史正文不改）。这些归 M1 开工前的 spec 清账 issue，不阻塞 reset。
 - ccw tiny fixture（来自 SPEC_v0.8_Final §7，留存于 Test_Fixtures_And_Command_Matrix §4）：END=30 天时串行 < 2 分钟；spike 用的是 END=1827 天（4m45s）。M2 的重启用例用 30 天版，完整版留作 M3 报告 fixture。
@@ -76,5 +77,5 @@ status: accepted
 ## 参照
 
 [ADR-0001](0001-agent-runtime-and-topology.md) · [ADR-0002](0002-mvp-reality-anchoring.md) ·
-迁移计划 [Migration_Plan_dsh](../Migration_Plan_dsh.md) · spike 记录 `../dsh-spike/README.md` 与 `runs/1.1–1.5/NOTES.md` ·
+迁移计划 [Migration_Plan_dsh](../../Migration_Plan_dsh.md) · spike 记录 `../dsh-spike/README.md` 与 `runs/1.1–1.5/NOTES.md` ·
 上游 `deepseek-ai/deepseek-harness` `docs/architecture.md`（Where new behavior goes）、`docs/subsystems/jobs.md`、`packages/jobs/jobs-local/README.md`

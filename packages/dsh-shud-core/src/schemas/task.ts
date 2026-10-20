@@ -9,14 +9,14 @@ export const TaskStatusSchema = z.enum([
   "awaiting_pi",
   "done",
   "cancelled",
-  "blocked"
+  "blocked",
 ]);
 
 export const TaskRuntimePhaseSchema = z.enum([
   "running_local",
   "submitted_job",
   "waiting_for_job",
-  "collecting"
+  "collecting",
 ]);
 
 export const TaskTypeSchema = z.enum(["engineering", "science_assist", "ops"]);
@@ -25,7 +25,7 @@ export const InferenceBudgetSchema = z.object({
   mode: z.enum(["cheap", "normal", "deep"]),
   advisory_usd: z.number().nonnegative().optional(),
   advisory_model_calls: z.number().int().nonnegative().optional(),
-  reviewer_enabled: z.boolean().optional()
+  reviewer_enabled: z.boolean().optional(),
 });
 
 export const TaskCardSchema = z.object({
@@ -45,7 +45,7 @@ export const TaskCardSchema = z.object({
   linked_reports: z.array(z.string().min(1)),
   created_at: z.string().min(1),
   updated_at: z.string().min(1),
-  theory_bundle_ids: z.array(z.string().min(1)).optional()
+  theory_bundle_ids: z.array(z.string().min(1)).optional(),
 });
 
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;

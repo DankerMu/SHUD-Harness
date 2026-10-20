@@ -30,6 +30,16 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "exec_command|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/guardrails/no-bypass.sh",
+            "timeout": 15
+          }
+        ]
       }
     ]
   }

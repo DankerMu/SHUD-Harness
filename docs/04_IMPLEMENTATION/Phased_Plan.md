@@ -6,7 +6,7 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 
 # 里程碑计划 v2（dsh 内核）
 
-> 唯一真相源：排期、交付切分、验收门以本文为准。决策依据 [ADR-0004](../adr/0004-dsh-kernel.md)。
+> 唯一真相源：排期、交付切分、验收门以本文为准。决策依据 [ADR-0004](../adr/implemented/0004-dsh-kernel.md)。
 > 弹性里程碑，无日历承诺；上一门全绿才进下一门；issue 按单 agent-PR 尺寸切。
 > **作用域规则（ADR-0004 K13）**：任何 spike 不以首任务的一个用户可见步骤收尾就不准开。
 

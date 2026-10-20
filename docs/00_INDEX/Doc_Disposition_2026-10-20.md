@@ -11,11 +11,11 @@ status: approved（PI 2026-10-20）
 
 **计数**：留 69 · 删 27 · 删-记 22 （合计 118）。另附 `openspec/changes/` 与根目录构建残留两节（不计入 118）。
 
-**判定依据补充（ADR-0004 `adr/0004-dsh-kernel.md`，accepted 2026-10-20）**：
+**判定依据补充（ADR-0004 `adr/implemented/0004-dsh-kernel.md`，accepted 2026-10-20）**：
 1. **K2/K7：自建 Hono 后端与 React 前端退场，MVP 零自定义 UI**（用 dsh 自带聊天/审批卡/作业卡 + Markdown 报告文件）→ 工作台/图表/前端状态/REST/WS 等所有界面与传输层 spec 判删，只把其中的治理细节以 删-记 搬运。**例外**：PI 已在 grill 中给出 post-MVP UI 意图（设置页 / 聊天卡片 / 右侧栏面板 / 可折叠 terminal，见 ADR-0004 开放项），因此 `UX_Design_Spec` / `Interaction_Model` / `UI_Implementation_Spec` 三份改判 **留**，作 post-MVP UI 设计输入，只剪 Hono/React/WS 实现段；`Visualization_Data_Spec` 维持 删-记，因其 §1 报告图纪律属 M3 EvidenceReport 范围、与 UI 无关，已搬运。
 2. **K10：插件 = TypeScript + Zod**（pnpm workspace + tsc）→ Zod schema、`generated/schema`、`Schema_Generation_And_Drift_Control` 直接复用；但 Bun/React/Hono/DuckDB 相关依赖策略作废。
 3. **K5：首任务 = ccw 运行 → RunRecord → EvidenceReport（无代码改动），openMP RHS 回放为第二任务** → ccw tiny 定义（`Test_Fixtures_And_Command_Matrix §4` + `SHUD_Output_Variables §13`）必留；ChangeRequest / VerificationCase 规范留但后移。K11 MVP 不做记忆 → `Memory_Skills_Lite` 留作 post-MVP 设计；K6 单用户维持 → Auth 相关只留 PI gate 语义。
-4. **基线与并行写入**：本表基线 = 盘点时刻 `docs/` 343 份。盘点后工作区新增 3 份 dsh 时代文件不在基线、不处置：`adr/0004-dsh-kernel.md`、`Migration_Plan_dsh.md`、`04_IMPLEMENTATION/Port_List.md`；另 `04_IMPLEMENTATION/Phased_Plan.md` 与 `Repository_Layout.md` 已在工作区被就地重写为 dsh 版（未提交），其行的处置针对 HEAD 版 Zero 内容，路径本身保留。
+4. **基线与并行写入**：本表基线 = 盘点时刻 `docs/` 343 份。盘点后工作区新增 3 份 dsh 时代文件不在基线、不处置：`adr/implemented/0004-dsh-kernel.md`、`Migration_Plan_dsh.md`、`04_IMPLEMENTATION/Port_List.md`；另 `04_IMPLEMENTATION/Phased_Plan.md` 与 `Repository_Layout.md` 已在工作区被就地重写为 dsh 版（未提交），其行的处置针对 HEAD 版 Zero 内容，路径本身保留。
 5. M2 capability-observer spike（git-status-capability / descriptor mediation / fd authority / dirty-state observer）相关关键词在 `docs/` 内 **零命中**——这些材料在 `openspec/`，不在本表范围；仅 ADR-0001 revisit 记录涉及 M1 policy-gate spike，按 ADR 保留。
 
 ---
@@ -159,9 +159,9 @@ status: approved（PI 2026-10-20）
 
 | 文件 | 处置 | 一句理由 | Notes |
 |---|---|---|---|
-| adr/0001-agent-runtime-and-topology.md | 留 | ADR 账本，须标 superseded | 加 "superseded by ADR-0004（基座部分）" 标记；以下与 Zero 无关、**仍有效**，ADR-0004 勿重议：单 Coordinator 星型拓扑 + spawn 深度 1；任务驱动 + park/resume 弃长循环；替代方案否决表（mesh / Claude Agent SDK / LangGraph / 全自研）；2026-07-04 裁决——raw data 写保护 authority 归 OS 沙箱层（seatbelt/landlock）、pre-exec 字符串扫描仅 advisory、raw 字节完整性为验收不变量、预存 hardlink 兜底 |
-| adr/0002-mvp-reality-anchoring.md | 留 | MVP 现实锚定 D1–D9，部分被 K 列取代 | 加 superseded 标注：D3/D5 → K5（首任务改 ccw 运行）、D9 → K3（GLM 5.2 → DeepSeek Flash via DMXAPI）；D1/D2/D4/D6/D7/D8 沿用 |
-| adr/0003-keep-risk-adaptive-review-lens-rotation.md | 留 | 评审流程决策，与运行时无关 | — |
+| adr/implemented/0001-agent-runtime-and-topology.md | 留 | ADR 账本，须标 superseded | 加 "superseded by ADR-0004（基座部分）" 标记；以下与 Zero 无关、**仍有效**，ADR-0004 勿重议：单 Coordinator 星型拓扑 + spawn 深度 1；任务驱动 + park/resume 弃长循环；替代方案否决表（mesh / Claude Agent SDK / LangGraph / 全自研）；2026-07-04 裁决——raw data 写保护 authority 归 OS 沙箱层（seatbelt/landlock）、pre-exec 字符串扫描仅 advisory、raw 字节完整性为验收不变量、预存 hardlink 兜底 |
+| adr/implemented/0002-mvp-reality-anchoring.md | 留 | MVP 现实锚定 D1–D9，部分被 K 列取代 | 加 superseded 标注：D3/D5 → K5（首任务改 ccw 运行）、D9 → K3（GLM 5.2 → DeepSeek Flash via DMXAPI）；D1/D2/D4/D6/D7/D8 沿用 |
+| adr/implemented/0003-keep-risk-adaptive-review-lens-rotation.md | 留 | 评审流程决策，与运行时无关 | — |
 
 ## generated/
 

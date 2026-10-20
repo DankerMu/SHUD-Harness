@@ -370,7 +370,7 @@ _图 10：Zero 时代六阶段建设方案总览（已由上表 M1–M6 取代�
 
 ## 7. 系统架构概览
 
-技术上基于 DeepSeek Harness（dsh）内核：产品形态为 `dsh --profile shud`，SHUD 领域逻辑以 TypeScript 插件包（`dsh-shud-*`）挂在 dsh 的文档化 seam 上（策略门 `tools/pre-execute`、审批 `ctx.approval`、作业 `ctx.jobs`、沙箱 `ctx.sandbox`、存储 `ctx.storage`），不改 dsh 源码（[ADR-0004](../adr/0004-dsh-kernel.md)）。
+技术上基于 DeepSeek Harness（dsh）内核：产品形态为 `dsh --profile shud`，SHUD 领域逻辑以 TypeScript 插件包（`dsh-shud-*`）挂在 dsh 的文档化 seam 上（策略门 `tools/pre-execute`、审批 `ctx.approval`、作业 `ctx.jobs`、沙箱 `ctx.sandbox`、存储 `ctx.storage`），不改 dsh 源码（[ADR-0004](../adr/implemented/0004-dsh-kernel.md)）。
 
 ![[assets/system-architecture-detailed.png]]
 _图 11：系统架构图（Zero 时代架构图，仅示意：其中前端、API 与 Agent runtime 三层已由 dsh 内核与插件取代；控制流与证据流的划分不变）。控制流从 PI 进入对话界面，证据流从 SHUD 运行经 RunRecord / Artifact 回到 EvidenceReport 和 PI Decision。_
@@ -419,7 +419,7 @@ _图 11：系统架构图（Zero 时代架构图，仅示意：其中前端、AP
 
 - **规格文档体系**：v0.8.3 规格冻结；内核切换后按旧文档处置表精简（留 / 删 / 删-记），Zero 时代历史保留在 tag `archive/zero-v0.8.3`
 - **Theory-to-Code 治理层**（v0.8.3）：规范保留，作为 M4 起的设计输入
-- **内核切换**：dsh 可行性 spike 五项探针全部通过，[ADR-0004](../adr/0004-dsh-kernel.md)（K1–K15）经 PI 审核通过
+- **内核切换**：dsh 可行性 spike 五项探针全部通过，[ADR-0004](../adr/implemented/0004-dsh-kernel.md)（K1–K15）经 PI 审核通过
 - **计划重切**：[里程碑计划 v2](../04_IMPLEMENTATION/Phased_Plan.md)（M1–M6）与 [仓库结构 v2](../04_IMPLEMENTATION/Repository_Layout.md)
 
 ### 9.2 M1 启动内容
@@ -508,7 +508,7 @@ _图 12：从研究问题到可复用科研资产的闭环。_
 ## 附：本报告依据
 
 ### 核心文档
-- [ADR-0004 内核切换到 dsh](../adr/0004-dsh-kernel.md)
+- [ADR-0004 内核切换到 dsh](../adr/implemented/0004-dsh-kernel.md)
 - [里程碑计划 v2](../04_IMPLEMENTATION/Phased_Plan.md)
 - [旧文档处置表](../00_INDEX/Doc_Disposition_2026-10-20.md)（v0.8 规格书与分阶段路线图已删，见 tag archive/zero-v0.8.3）
 - [Canonical Contracts Index](../00_INDEX/CANONICAL_CONTRACTS.md)
