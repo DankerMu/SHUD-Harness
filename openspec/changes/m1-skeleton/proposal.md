@@ -36,3 +36,13 @@ Phased_Plan §0 M1 行的用户可见步骤原文是「raw 数据写入被拒并
 - 控制面：`instructions/agents/shared.md`（Verification Matrix 两行、Enforcement Index 三行、Runtime Lifecycle 命令、第 67 行 CI 能力描述）→ 生成 `AGENTS.md`/`CLAUDE.md`；`constraints.yaml`（verification 镜像、readiness_gaps、review_only）；`knip.json` 工作区新增包。
 - 文档：`docs/04_IMPLEMENTATION/{Phased_Plan,Port_List,Repository_Layout}.md`、`docs/adr/implemented/0004-dsh-kernel.md`、`openspec/project-profile.md`、`docs/Migration_Plan_dsh.md`。
 - 运行时：`$DSH_HOME/profiles/shud/` 由脚本创建；部署期 raw 目录由用户 patch 覆写；`data/raw` 字节保护仍由 Seatbelt 承担（raw 位于 workspace 外时）。
+
+## Issue #211 delivery fixture
+
+Issue type: feature
+Fixture level: expanded
+Upstream suggested level: expanded (agree: path safety and permissions)
+Blast radius: incorrect deny/ask/next decisions for raw-data tool calls.
+Selected risk packs: public API; config; file IO/path safety; permissions; error handling; packaging; documentation.
+Evidence floor: decision scenario tests, real symlink/missing-path cases, direct Node smoke, frozen install, `pnpm run check`.
+Only tasks 1.1–1.2 belong to this slice; adapter, profile, probes and CI remain subsequent issues. Keep this shared change unarchived until the entire Epic and PI acceptance are complete.

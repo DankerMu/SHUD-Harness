@@ -44,3 +44,21 @@
 - [ ] 6.2 M1 收口手工 Web 验收：`profile:install` 到真实 `DSH_HOME`，`dsh --profile shud web --no-open --port <p>`，按 shud-profile spec「Manual Web acceptance」两个 scenario 操作，把 session log 路径与 `approval/asked` → `approval/decided{allowed-once}` → `tool/result` 序列摘录、以及写 raw 的 `tool/result` isError 摘录追加到 `docs/Migration_Plan_dsh.md`。验证 Migration_Plan 新行含两段摘录且 raw 文件 md5 前后一致
 - Suggested fixture level: none - 纯文档与一次手工操作，无运行时代码
 - Minimal mergeable slice: 6.1 单独一刀（atomic：三处文字是同一事实源变更，拆开会在合并窗口内出现互相矛盾的里程碑描述；验证路径 `docs:check`）；6.2 为独立切片（验证路径是手工 Web 流程，与 6.1 不同；依赖 3.3 落地），两者按验证路径拆为两个 issue
+
+## Issue #211 risk/evidence map
+
+| Risk pack | Selection and evidence |
+|---|---|
+| Public API / CLI / script entry | Selected: decision/config API scenarios in `decide.test.ts`; direct Node smoke. |
+| Config / project setup | Selected: invalid rawDirs rejects; default, trailing slash and multiple directories covered. |
+| File IO / path safety / overwrite | Selected: real symlink, missing raw/target, macOS alias, sibling-prefix positive/negative cases; no raw writes by the decision core. |
+| Schema / columns / units / field names | Not selected: no core schema changes. |
+| Auth / permissions / secrets | Selected: deny/ask/next and escalation invariance; no key or raw content in reasons. |
+| Concurrency / shared state / ordering | Not selected: no retained call state; persistent cwd tracking is explicitly out of scope. |
+| Resource limits / large input / discovery | Not selected: bounded ancestor walk; no directory discovery. |
+| Legacy compatibility / examples | Not selected: new package, no existing callers migrated. |
+| Error handling / rollback / partial outputs | Selected: malformed arguments delegate; invalid config rejects; missing paths resolve without writing. |
+| Release / packaging / dependency compatibility | Selected: frozen install, recursive typecheck/build, lint and knip; no host auto-install. |
+| Documentation / migration notes | Selected: this fixture documents the slice; K10/plan updates remain #217/#222. |
+
+Verification: `pnpm install --frozen-lockfile`; `pnpm run check`; direct Node invocation of `decideRawAccess` against a temporary symlink and missing target.

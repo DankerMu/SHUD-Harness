@@ -67,6 +67,18 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@24.0.3)(@vitest/coverage-v8@4.1.11)(jiti@2.7.0)(yaml@2.9.1)
 
+  packages/dsh-shud-raw-guard:
+    devDependencies:
+      '@types/node':
+        specifier: 24.0.3
+        version: 24.0.3
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+      vitest:
+        specifier: 4.1.11
+        version: 4.1.11(@types/node@24.0.3)(@vitest/coverage-v8@4.1.11)(jiti@2.7.0)(yaml@2.9.1)
+
   profile/shud: {}
 
 packages:

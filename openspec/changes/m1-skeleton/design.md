@@ -99,3 +99,12 @@
 ## Open Questions
 
 - 无需在本 change 内决定的项已归入 Not yet specified；其余决策已拍板。
+
+## Issue #211 implementation boundary
+
+- Governing invariant: recognized raw mutations return deny, recognized shell reads ask, and unrelated calls next; the decision core never executes a tool or grants approval.
+- Must preserve: core governance/schema behavior, host checkout, raw bytes, and the documented persistent-shell/PowerShell limitations.
+- Sibling surfaces: file-tool targets and shell workdir share realpath containment; shell text checks configured and canonical raw paths; multiple rawDirs are alternatives.
+- Seams under test: `normalizeRawDirs` and `decideRawAccess`; malformed arguments delegate, invalid configuration throws, absent targets resolve through their nearest existing ancestor.
+- Required evidence: real symlink/new-file deny versus sibling-prefix next, shell write deny versus read ask, all listed write verbs, escalation invariance, and frozen workspace install.
+- Non-goals: `apply`, dsh dependencies, profile activation, OS sandbox authority, shell parsing and tracking persistent cwd. Package entry remains the planned `lib/index.js` until #212; this slice is tested through `decide.ts`.

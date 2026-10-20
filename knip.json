@@ -11,6 +11,10 @@
     "packages/dsh-shud-core": {
       "entry": ["src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
+    },
+    "packages/dsh-shud-raw-guard": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
     }
   },
   "ignoreBinaries": ["gitleaks", "semgrep"]
