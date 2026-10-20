@@ -7,20 +7,20 @@ status: frozen
 **状态：** v0.8.1 测试 fixture 补充  
 **目标：** 明确每阶段用哪些 fixture、命令和 expected artifacts，避免测试依赖真实长任务。
 
-> **排期语义（2026-07-02）**：本文 W1+..W7+ 阶段标签仅作依赖参考，按 [Phased_Plan §0 映射表](Phased_Plan.md) 解析为里程碑 M1–M9（ADR-0002 D8 里程碑制）；W6 相关 fixture 按 M6 压缩口径取舍。
+> **排期语义（2026-10-20）**：原 W 周阶段标签已删；fixture 何时启用以 [Phased_Plan v2](Phased_Plan.md) 的里程碑 M1–M6 为准（ADR-0004）。
 
 ---
 
 ## 1. Fixture 层级
 
-| Fixture | 阶段 | 目的 | 是否依赖 SHUD |
-|---|---:|---|---|
-| schema-only | W1+ | core/support schema 校验 | 否 |
-| dummy-runner | W3+ | job submit/log/collect/report | 否 |
-| dummy-batch | W6+ | AnalysisPlan/BatchProgress（Heatmap 出 MVP，见 Phased_Plan M6） | 否 |
-| old-output fixture | W5+ | rSHUD backward compatibility | 部分依赖 rSHUD |
-| ccw tiny | W4+ | 真实 SHUD/rSHUD 闭环 | 是 |
-| report fixture | W7+ | EvidenceReport/export/language guard | 否 |
+| Fixture | 目的 | 是否依赖 SHUD |
+|---|---|---|
+| schema-only | core/support schema 校验 | 否 |
+| dummy-runner | job submit/log/collect/report | 否 |
+| dummy-batch | AnalysisPlan/AnalysisProgressPayload（Heatmap 出 MVP；最小 OAT 见 Phased_Plan M5） | 否 |
+| old-output fixture | rSHUD backward compatibility | 部分依赖 rSHUD |
+| ccw tiny | 真实 SHUD/rSHUD 闭环 | 是 |
+| report fixture | EvidenceReport/export/language guard | 否 |
 
 ---
 
@@ -29,7 +29,7 @@ status: frozen
 ### 命令
 
 ```bash
-bun scripts/fixtures/dummy-job.ts --duration-ms 500 --exit-code 0 --lines 10
+bash scripts/fixtures/dummy-job.sh --duration-ms 500 --exit-code 0 --lines 10
 ```
 
 ### 预期输出
@@ -44,24 +44,23 @@ workspace/artifacts/RUN-*/metrics.yaml
 
 ### 用例
 
-- W3 RunJob；
-- W3 WebSocket log stream；
-- W3 collect idempotency；
-- W7 report generation；
-- W8 Zero tool adapter。
+- RunJob（经 `ctx.jobs` 提交，dsh 重启后对账）；
+- 作业日志落文件与回读；
+- collect idempotency；
+- report generation。
 
 ---
 
 ## 3. Dummy batch
 
-> **MVP 口径（ADR-0002 D5 / Phased_Plan M6）**：MVP 期参数集用最小 OAT（3–5 组），产出用普通 artifact
+> **M5 口径（Phased_Plan M5）**：M5 参数集用最小 OAT（3–5 组），产出用普通 artifact
 > （analysis_progress.json + batch 汇总表），**不产 parquet / heatmap.json**；下述 3×3 命令与 parquet/heatmap
-> 定义保留供 post-MVP（首个真实敏感性研究任务）复用。
+> 定义保留供 M5 之后（首个真实敏感性研究任务）复用。
 
 ### 命令
 
 ```bash
-bun scripts/fixtures/dummy-batch.ts --params ksat=0.5,1,2 --params roughness=0.7,1,1.3 --fail PSET-005
+bash scripts/fixtures/dummy-batch.sh --params ksat=0.5,1,2 --params roughness=0.7,1,1.3 --fail PSET-005
 ```
 
 ### 预期输出
@@ -75,7 +74,7 @@ workspace/artifacts/PLAN-*/heatmap.json
 
 ### 用例
 
-- BatchProgressGrid；
+- AnalysisProgressPayload 计数；
 - failed parameter set 保留；
 - heatmap aggregation；
 - partial report limitations。
@@ -115,7 +114,7 @@ workspace/artifacts/RUN-001/hydrograph.json
 - exit_code=0；
 - RunRecord.status=succeeded；
 - numerical_health.water_balance_residual 小于阈值；
-- HydrographChart 可加载 `rivqdown`；
+- `rivqdown` 序列进入 metrics/figure artifact；
 - StackLock/DataProvenance/RunJob/RunRecord 均可追溯。
 
 ---

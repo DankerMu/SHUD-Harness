@@ -122,15 +122,7 @@ interface ShudOutputVariable {
 
 ## 8. 前端默认展示
 
-MVP Dashboard 默认显示：
-
-1. `rivqdown`：出口流量；
-2. `rivystage`：出口或选定河段水位；
-3. `eleygw`：流域均值；
-4. `eleysurf`：流域均值；
-5. `elevprcp`：流域均值或总量；
-6. `eleveta`：流域均值；
-7. water balance residual 指标。
+（已删：MVP 零自定义 UI，ADR-0004 K7。章节编号保留，§13 阈值位置不变。）
 
 ## 9. Runtime discovery
 

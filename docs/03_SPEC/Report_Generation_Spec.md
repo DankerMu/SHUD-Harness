@@ -225,7 +225,7 @@ GET /api/reports/:reportId/export?format=html
 GET /api/reports/:reportId/export?format=markdown
 ```
 
-水印按报告状态查表显示（7 态各有对应标记，权威表见 [Report_Export_Spec](Report_Export_Spec.md) §4——
+水印按报告状态查表显示（7 态各有对应标记，权威表见 Report_Export_Spec §4（已删，见 tag archive/zero-v0.8.3）——
 布尔判据 `status != accepted` 已废除，它会把 accepted 后归档的报告误标为草稿，对抗审查 A06-6）。
 
 HTML 可内联小型 PNG/SVG 图表和 metrics summary，但不得内联完整 stdout/stderr、raw SHUD binary output、大型 timeseries 或 secrets。

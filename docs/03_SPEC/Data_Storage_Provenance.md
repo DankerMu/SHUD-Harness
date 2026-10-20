@@ -95,7 +95,7 @@ ORDER BY peak_flow_error;
 - 查询走参数化模板，`task_id` 等取值作为绑定参数传入，不拼接 SQL 字符串
   （LLM 生成的标识符是不可信输入）；
 - 禁止 DDL/DML（CREATE/INSERT/UPDATE/DELETE/ATTACH/`COPY TO`）；
-- warehouse 写入只属于确定性 ingest 进程，损坏时可从 NDJSON/Parquet 重建（见 [Log_Aggregation_Spec §4](Log_Aggregation_Spec.md)）。
+- warehouse 写入只属于确定性 ingest 进程，损坏时可从 NDJSON/Parquet 重建（见 Log_Aggregation_Spec §4（已删，见 tag archive/zero-v0.8.3））。
 
 ## 6. Retention policy
 

@@ -5,36 +5,36 @@ status: frozen
 # 测试策略
 
 **状态：** P2 实施规范  
-**适用范围：** schema、API、WebSocket、executor、SHUD fixture、report、UI  
+**适用范围：** schema、dsh 插件（策略门 / 作业后端 / 工具）、sandbox、SHUD fixture、report  
 **目标：** 用分层测试保证 v0.8 端到端闭环可复盘。
 
-> **排期语义（2026-07-02）**：本文 W0–W8 周标签仅作依赖参考，按 [Phased_Plan §0 映射表](Phased_Plan.md) 解析为里程碑 M1–M9（ADR-0002 D8 里程碑制）。
+> **排期语义（2026-10-20）**：本文 W0–W7 周标签仅作依赖顺序参考，现行排期以 [Phased_Plan v2](Phased_Plan.md) 的里程碑 M1–M6 为准（ADR-0004）。
+> **测试工具**：单元与集成测试用 vitest，类型检查用 `tsc`（各 `dsh-shud-*` 包，见 [Repository_Layout v2](Repository_Layout.md)）；SHUD/rSHUD fixture 用 bash/R 确定性脚本。
 
 ## 1. 测试分层
 
 | 层级 | 测试对象 |
 |---|---|
-| unit | Zod schema、reducers、path policy、metric functions |
-| integration | API + filesystem、WebSocket、Sandbox Executor |
+| unit | Zod schema、策略门纯函数、path policy、metric functions |
+| integration | 插件 + filesystem、`ctx.jobs` 作业后端、Sandbox |
 | fixture | ccw tiny 或 dummy SHUD run |
 | report | EvidenceReport 生成和 language guard |
-| e2e | Web UI 创建 task、运行 job、生成 report |
+| e2e | 在 `dsh --profile shud` 对话中创建 task、运行 job、生成 report |
 
 ### 阶段测试矩阵
 
 | Week | 必须新增的自动化测试 | Fixture | CI 级别 |
 |---:|---|---|---|
 | W0 | gitmodules parse, docs link, readiness YAML | none | PR |
-| W1 | core schema, API task, snapshot reload, UI shell smoke | schema-only | PR |
+| W1 | core schema | schema-only | PR |
 | W2 | submodule discovery, data sha256, artifact manifest | schema-only | PR |
-| W3 | dummy job submit/log/collect, WebSocket reconnect, recovery smoke | dummy-runner | PR |
+| W3 | dummy job submit/log/collect, restart recovery smoke | dummy-runner | PR |
 | W4 | SHUD build/run tiny, RunRecord, hydrograph, WB residual | ccw tiny | nightly/manual |
 | W5 | rSHUD roundtrip, old-output fixture, patch bundle | old-output | PR/nightly |
 | W6 | batch progress, failed cell, heatmap aggregation | dummy-batch | PR |
-| W7 | report guard, PI decision, export, notification mock | report fixture | PR |
-| W8 | Zero adapter, LLM stream, natural language e2e | dummy-runner | PR/nightly |
+| W7 | report guard, PI decision | report fixture | PR |
 
-详细阶段测试见 [Phase_By_Phase_Test_Plan.md](Phase_By_Phase_Test_Plan.md)。Fixture 与命令矩阵见 [Test_Fixtures_And_Command_Matrix.md](Test_Fixtures_And_Command_Matrix.md)。CI 映射见 [CICD_Release.md](CICD_Release.md)。
+Fixture 与命令矩阵见 [Test_Fixtures_And_Command_Matrix.md](Test_Fixtures_And_Command_Matrix.md)。原阶段测试计划 Phase_By_Phase_Test_Plan 与 CI 映射 CICD_Release 已删（见 tag archive/zero-v0.8.3）；CI 内容以 Phased_Plan v2 M1 为准。
 
 ## 2. Schema 测试
 
@@ -47,19 +47,11 @@ status: frozen
 - RunRecord；
 - AnalysisPlan；
 - EvidenceReport；
-- ChangeRequest；
-- WebSocket event envelope。
+- ChangeRequest。
 
 ## 3. WebSocket 测试
 
-测试场景：
-
-- seq 单调递增；
-- event 去重；
-- reconnect with `since_seq`；
-- snapshot fallback；
-- job.log streaming；
-- PI gate action 权限失败。
+（已删：自建 WebSocket 传输退场，ADR-0004 K2。）
 
 ## 4. Sandbox 测试
 
@@ -87,7 +79,7 @@ ccw tiny 验收：
 - 30 天运行 exit_code=0；
 - 生成 RunRecord；
 - water_balance_residual 达阈值；
-- HydrographChart 可加载 `rivqdown`。
+- `rivqdown` 序列进入 metrics/figure artifact。
 
 ## 6. Report 测试
 
@@ -101,53 +93,19 @@ ccw tiny 验收：
 
 ## 7. UI 测试
 
-E2E 流程：
+（已删：MVP 零自定义 UI，ADR-0004 K7。）
 
-```text
-打开 workspace
-→ 创建 task
-→ 提交 dummy job
-→ 查看日志流
-→ collect RunRecord
-→ 打开 ResultsPanel
-→ 生成 report
-→ PI approve/revision
-```
+## 7.1 治理与支撑测试
 
-## 7.1 Operational UX tests
-
-### Notification tests
-
-- [ ] RunRecord/report/analysis completed 后创建 NotificationRecord。
-- [ ] SMTP mock 成功后状态为 `sent`。
-- [ ] SMTP mock 失败后状态为 `failed`，不回滚任务主流程。
-- [ ] 同一 dedupe_key 不重复发送。
-- [ ] 无收件人时状态为 `skipped`。
-- [ ] 邮件正文不包含 secrets、完整日志或 raw output。
-
-### Report export tests
-
-- [ ] `GET /api/reports/:id/export?format=html` 返回 standalone HTML。
-- [ ] draft report HTML 有可见 watermark。
-- [ ] accepted report HTML 不显示 draft watermark。
-- [ ] export manifest 记录 included/excluded artifacts。
-- [ ] 缺失图表时导出仍成功，并标注 missing artifact。
-
-### Batch progress tests
-
-- [ ] AnalysisPlan 创建后 progress total 等于 parameter_sets 数量。
-- [ ] job.status 更新能更新对应 cell。
-- [ ] failed cell 不从 grid/table/report 中消失。
-- [ ] `GET /api/analysis/:id/progress` 聚合计数正确。
-- [ ] RuntimeTerminal 不把完整日志塞入 React state。
+（原 Notification / Report export / Batch progress 三组 UI 与 REST 用例已删，ADR-0004 K2/K7；通知随 ADR-0002 D7 转开放项。失败参数集可见性见 Sensitivity_Calibration_Benchmark_Addendum §10。）
 
 ### PI decision comment tests
 
 - [ ] 普通 approve report 可无 comment。
-- [ ] reject 无 comment 返回 400。
-- [ ] request_revision 无 comment 返回 400。
-- [ ] high-risk approve 无 comment 返回 400。
-- [ ] agent 身份调用 PI decision endpoint 返回 403。
+- [ ] reject 无 comment 被拒绝。
+- [ ] request_revision 无 comment 被拒绝。
+- [ ] high-risk approve 无 comment 被拒绝。
+- [ ] agent 身份无法提交 PI decision。
 - [ ] 成功 decision 写 audit log、MemoryNote 和 report decision history。
 - [ ] MemoryNote(type=pi_decision) 的 `generalization_allowed=false`。
 
@@ -156,36 +114,10 @@ E2E 流程：
 - **Support schema 测试**：Artifact、PiGate、NotificationRecord、ReportExport、AnalysisProgressPayload、ErrorRecord、AuditEvent 的 Zod 校验。
 - **Artifact registry 测试**：evidence_usable 判定、retention_class 约束、manifest integrity 校验。
 - **Idempotency 测试**：collect / export / notification / PI decision 重复请求不产生冲突对象。
-- **Snapshot recovery 测试**：since_seq 过期时走 snapshot_required 流程、service restart 后 parked job 恢复。
+- **重启恢复测试**：dsh 重启（SIGTERM / SIGKILL）后 parked job 经 durable JobRegistry 对账恢复（Phased_Plan M2）。
 - **Runner adapter 测试**：local_direct / local_job 的 status mapping 和 collect result 格式。
-- **API error 测试**：400 / 403 / 409 / 422 统一 envelope 返回。
 
-## 8. Observability tests
-
-- `OBS-HEALTH-001`: live endpoint returns 200。
-- `OBS-HEALTH-002`: ready detects workspace not writable。
-- `OBS-HEALTH-003`: disk critical triggers alert and blocks new jobs。
-- `OBS-LOG-001`: API request writes structured NDJSON。
-- `OBS-LOG-002`: secret values redacted。
-- `OBS-ALERT-001`: alert dedupe works。
-- `OBS-DASH-001`: ops dashboard returns health/jobs/storage/errors/dependencies。
-
-## 9. Performance tests
-
-- `PERF-API-001`: metadata API P95 <= 300ms in mock workspace。
-- `PERF-WS-001`: reconnect + replay/snapshot <= 5s。
-- `PERF-REPORT-001`: tiny report generation <= 30s。
-- `PERF-BATCH-001`: batch progress update <= 2s。
-- `PERF-CONC-001`: MVP concurrency smoke。
-
-## 10. Dependency tests
-
-- lockfile exists；
-- frozen install；
-- packageManager fixed；
-- dependency status endpoint；
-- DuckDB client smoke；
-- submodule status captured。
+> §8–10（Observability / Performance / Dependency 测试）已删（运维与性能 spec 退场，ADR-0004；原文见 tag archive/zero-v0.8.3）。后续章节编号不变。
 
 ## 11. Requirements tests
 
@@ -261,6 +193,6 @@ E2E 流程：
 
 - [ ] CI 跑 schema/unit/integration 测试。
 - [ ] 本地可手动跑 ccw tiny fixture。
-- [ ] WebSocket reconnect 有自动测试。
+- [ ] dsh 重启后作业对账有自动测试（SIGTERM / SIGKILL 各一次）。
 - [ ] 报告 language guard 有负例测试。
 - [ ] Sandbox path policy 有越界测试。

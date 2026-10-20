@@ -9,7 +9,7 @@ canonical_for: [support-schemas, t2c-bundle-schemas]
 **适用范围：** Artifact、PI gate、notification、report export、analysis progress、error/audit/session、locks、snapshots、runner result。  
 **目标：** 将分散在各文档中的 support object 固定为统一 schema，避免实现时漂移。
 
-Support schema 不属于 v0.8 的 8 个核心对象，但必须由 Zod 定义并进入 API/WebSocket/文件落盘校验。
+Support schema 不属于 v0.8 的 8 个核心对象，但必须由 Zod 定义并进入工具输入输出与文件落盘校验。
 
 ## 1. Artifact
 
@@ -321,7 +321,7 @@ interface AnalysisProgressPayload {
 
 ## 10. User / Session / AuditEvent
 
-详细定义见 `User_Session_And_Audit_Schema.md`。实现时这些 schema 应从同一个 Zod 包导出。
+详细定义原在 User_Session_And_Audit_Schema（已删，见 tag archive/zero-v0.8.3）。实现时这些 schema 应从同一个 Zod 包导出。
 
 ## 11. LockRecord / IdempotencyRecord / WorkspaceSnapshot
 
@@ -329,7 +329,7 @@ interface AnalysisProgressPayload {
 
 ```text
 Idempotency_Concurrency_Locking_Spec.md
-Workspace_Snapshot_And_Recovery_Spec.md
+Workspace_Snapshot_And_Recovery_Spec（已删，见 tag archive/zero-v0.8.3）
 ```
 
 ## 12. Requirement
@@ -350,120 +350,7 @@ interface Requirement {
 }
 ```
 
-## 13. HealthStatus / HealthCheck
-
-```ts
-interface HealthStatus {
-  status: "ok" | "degraded" | "not_ready" | "failed";
-  service: string;
-  version: string;
-  uptime_seconds: number;
-  checks: HealthCheck[];
-  timestamp: string;
-}
-
-interface HealthCheck {
-  name: string;
-  status: "ok" | "warn" | "fail" | "skipped";
-  message?: string;
-  evidence_refs?: string[];
-}
-```
-
-## 14. MetricSample
-
-```ts
-interface MetricSample {
-  metric: string;
-  value: number;
-  unit?: string;
-  labels: Record<string, string>;
-  timestamp: string;
-}
-```
-
-## 15. AlertRule / AlertRecord
-
-```ts
-interface AlertRule {
-  rule_id: string;
-  metric: string;
-  condition: string;
-  severity: "info" | "warning" | "error" | "critical";
-  threshold: number | string;
-  duration?: string;
-  action: "dashboard_only" | "notify" | "block_new_jobs" | "require_admin";
-}
-
-interface AlertRecord {
-  alert_id: string;
-  rule_id: string;
-  severity: "info" | "warning" | "error" | "critical";
-  status: "active" | "resolved" | "suppressed";
-  message: string;
-  evidence_refs: string[];
-  created_at: string;
-  resolved_at?: string;
-}
-```
-
-## 16. OpsIncident
-
-```ts
-interface OpsIncident {
-  incident_id: string;
-  category:
-    | "disk_full"
-    | "job_stuck"
-    | "duckdb_corruption"
-    | "smtp_failure"
-    | "oom"
-    | "secret_leak"
-    | "websocket_failure"
-    | "artifact_corruption"
-    | "dependency_failure";
-  severity: "warning" | "error" | "critical";
-  status: "open" | "mitigated" | "resolved" | "postmortem_required";
-  task_ids?: string[];
-  job_ids?: string[];
-  evidence_refs: string[];
-  runbook_ref: string;
-  created_at: string;
-  updated_at: string;
-}
-```
-
-## 17. DependencyLock
-
-```ts
-interface DependencyLock {
-  lock_id: string;
-  created_at: string;
-  package_manager: {
-    name: "bun";
-    version: string;
-    lockfile_path: string;
-    lockfile_sha256: string;
-  };
-  packages: Array<{
-    name: string;
-    version: string;
-    dependency_type: "runtime" | "dev" | "peer" | "optional";
-    source: "npm" | "git" | "local";
-  }>;
-  native_dependencies?: Array<{
-    name: string;
-    version: string;
-    source: string;
-    platform: string;
-  }>;
-  submodules: Array<{
-    name: "SHUD" | "rSHUD" | "AutoSHUD" | "zero";
-    commit: string;
-    dirty: boolean;
-  }>;
-}
-```
+> §13–17 已删（运维 schema：HealthStatus / MetricSample / AlertRule / OpsIncident / DependencyLock，ADR-0004；原文见 tag archive/zero-v0.8.3）。后续章节编号不变。
 
 ## 18. Theory-to-Code Support Schemas
 
@@ -505,12 +392,12 @@ BaselineComparisonRef
 ### Canonical source recommendation
 
 ```text
-packages/core/src/domain/schemas/theory-to-code.ts
-packages/core/src/domain/schemas/equation.ts
-packages/core/src/domain/schemas/numerical-scheme.ts
-packages/core/src/domain/schemas/implementation-mapping.ts
-packages/core/src/domain/schemas/verification.ts
-packages/core/src/domain/schemas/controlled-search.ts
+packages/dsh-shud-core/src/schemas/theory-to-code.ts
+packages/dsh-shud-core/src/schemas/equation.ts
+packages/dsh-shud-core/src/schemas/numerical-scheme.ts
+packages/dsh-shud-core/src/schemas/implementation-mapping.ts
+packages/dsh-shud-core/src/schemas/verification.ts
+packages/dsh-shud-core/src/schemas/controlled-search.ts
 ```
 
 Markdown 文档应只解释语义，字段细节以 Zod schema + generated JSON Schema 为准。
@@ -549,7 +436,6 @@ hypothesis
 - [ ] support schema 变更会触发 schema drift CI。
 - [ ] support object 不替代 8 个核心对象。
 - [ ] 所有文件落盘前通过 schema 校验。
-- [ ] 新对象（Requirement、RepoContextBrief、HealthStatus、AlertRule/Record、OpsIncident、DependencyLock）进入 Zod schema。
+- [ ] 新对象（Requirement、RepoContextBrief）进入 Zod schema。
 - [ ] schema generation 覆盖新增对象。
-- [ ] AlertRecord/OpsIncident 必须包含 evidence_refs。
 - [ ] Requirement 编号唯一性有测试。

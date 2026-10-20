@@ -2,8 +2,9 @@
 title: 关于建设 SHUD-Harness 科研工程平台的汇报
 subtitle: 让 SHUD 模型研发从"跑通就行"走向"可追踪、可验证、可复盘"
 date: 2026-04-27
+updated: 2026-10-20
 audience: 博导 / PI / 课题组负责人
-status: draft-v2
+status: draft-v3
 tags:
   - SHUD
   - research-platform
@@ -17,7 +18,7 @@ tags:
 > 拟建设 **SHUD-Harness**：一套让 SHUD 模型研发**每一步都有证据、每一个科学结论都经过 PI 审批**的科研工程平台。平台不替代研究者做科学判断，而是把运行、验证、报告和复盘组织成标准流程，让 PI 和课题组把时间花在提出问题和判断证据上，而不是花在重复性的工程劳动上。
 
 ![[assets/final-workbench-effect.png]]
-_图 1：SHUD-Harness 工作台效果图。研究者在浏览器中创建任务、跟踪运行、查看图表、审阅报告、作出科学决策。_
+_图 1：SHUD-Harness 工作台效果图（Zero 时代效果图，仅示意；MVP 使用 dsh 自带聊天界面）。研究者在浏览器中创建任务、跟踪运行、查看图表、审阅报告、作出科学决策。_
 
 ---
 
@@ -30,7 +31,6 @@ SHUD 模型系统是一套完善的复杂生态：
 | **SHUD** | C++ 水文数值求解核心 | 物理方程、参数、输出格式改动影响全链路，但没有系统性验证 |
 | **rSHUD** | R 工具包：输入输出、分析、可视化 | 与 SHUD 输出格式强耦合，一端改了另一端容易断 |
 | **AutoSHUD** | R 自动建模流水线 | 脚本链长、依赖多，换一台机器经常跑不通 |
-| **Zero** | Agent/Web 运行时基础设施 | 需要改造成带科研证据约束的 runtime |
 
 **核心矛盾**：模型系统越来越复杂，但研发方式还停留在"手工跑命令 + 口头记录 + 零散脚本"的阶段。
 
@@ -85,7 +85,7 @@ PI 审阅证据、留下批注、作出科学判断
 
 | 层 | 面向谁 | 做什么 |
 |----|--------|--------|
-| **Web 工作台** | PI / 研究者 | 浏览器中创建任务、跟踪运行、查看图表、审阅报告、审批高风险操作 |
+| **对话界面** | PI / 研究者 | 在 dsh 自带 Web 聊天中创建任务、跟踪运行（作业卡片）、审阅 Markdown 证据报告、在审批卡片上批准高风险操作 |
 | **Agent 协调层** | 自动执行 | 把研究问题拆解为任务，编排模型运行，生成分析和报告草稿 |
 | **证据治理层** | 保障可信度 | 记录每次运行的版本、数据、环境；生成证据报告；强制 PI 审批高风险操作 |
 | **科学模型栈** | SHUD 体系 | SHUD / rSHUD / AutoSHUD 继续作为科学核心，平台只是它们的编排和验证外壳 |
@@ -117,17 +117,17 @@ Agent 生成的不是最终方案——它是**供 PI 审阅、修改和批准�
 
 #### 能力二：跨仓库代码理解
 
-SHUD 生态有四个仓库、数万行代码，研究者换一个课题方向就需要重新理清代码关系。平台内置 **Repo Explorer**，可以：
+SHUD 生态有三个仓库、数万行代码，研究者换一个课题方向就需要重新理清代码关系。平台内置 **Repo Explorer**，可以：
 
 - 快速定位某个物理过程（比如入渗）在 SHUD 源码中的实现位置
 - 追踪一个输出变量从 SHUD 写出 → rSHUD 读入 → AutoSHUD 使用的完整链路
 - 分析一处代码改动会影响哪些下游函数和输出
 - 为新加入课题组的研究生提供**结构化的代码导览**，而不是让他们从零读代码
 
-这不是代替研究者理解代码，而是把"在四个仓库里翻找半天"变成"几秒钟拿到结构化上下文"。
+这不是代替研究者理解代码，而是把"在三个仓库里翻找半天"变成"几秒钟拿到结构化上下文"。
 
 ![[assets/capability-research-plan-repo-explorer.png]]
-_图 4：从 PI 研究问题到 AnalysisPlan 草案，Repo Explorer 同步给出跨仓库代码上下文和影响面。_
+_图 4（Zero 时代效果图，仅示意；MVP 使用 dsh 自带聊天界面）：从 PI 研究问题到 AnalysisPlan 草案，Repo Explorer 同步给出跨仓库代码上下文和影响面。_
 
 #### 能力三：智能诊断与失败分析
 
@@ -153,7 +153,7 @@ _图 4：从 PI 研究问题到 AnalysisPlan 草案，Repo Explorer 同步给出
 新研究生加入课题组时，可以查阅：这个流域之前做过什么实验、哪些路径被验证、哪些被否定、PI 当时怎么判断的。**从"师兄口述传承"变成"平台记录可查"。**
 
 ![[assets/capability-diagnostics-memory.png]]
-_图 5：运行失败后，工作台把日志、数值健康检查、历史 MemoryNote 和推荐动作放在同一个诊断界面中。_
+_图 5（Zero 时代效果图，仅示意；MVP 使用 dsh 自带聊天界面）：运行失败后，工作台把日志、数值健康检查、历史 MemoryNote 和推荐动作放在同一个诊断界面中。_
 
 ### 第二层：工程执行
 
@@ -185,7 +185,7 @@ _图 5：运行失败后，工作台把日志、数值健康检查、历史 Memo
 - **必须有基线对比**：任何"改善"声明都要说清楚跟谁比、条件是否一致
 
 ![[assets/capability-execution-sensitivity.png]]
-_图 6：批量运行、参数表、过程线对比、敏感性热力图和下一步建议在同一工作台中联动。_
+_图 6（Zero 时代效果图，仅示意；MVP 使用 dsh 自带聊天界面）：批量运行、参数表、过程线对比、敏感性热力图和下一步建议在同一工作台中联动。_
 
 ### 第三层：科研治理
 
@@ -223,7 +223,7 @@ _图 6：批量运行、参数表、过程线对比、敏感性热力图和下�
 PI 的审批不是简单的"同意/拒绝"——可以留下科学批注，这些批注会成为课题组的长期科研记录。
 
 ![[assets/pi-evidence-review.png]]
-_图 7：PI 与研究工程师围绕 EvidenceReport 审阅结果，而不是围绕零散日志做判断。_
+_图 7（Zero 时代效果图，仅示意；MVP 使用 dsh 自带聊天界面）：PI 与研究工程师围绕 EvidenceReport 审阅结果，而不是围绕零散日志做判断。_
 
 ---
 
@@ -310,7 +310,7 @@ PI 提出：
 全程 PI 可以随时介入：调整参数空间、排除失败实验、对报告加批注。
 
 ![[assets/scenario-low-risk-sensitivity.png]]
-_图 8：低风险敏感性分析场景中，PI 可以在批量运行过程中修改参数范围、排除失败实验并选择下一步。_
+_图 8（Zero 时代效果图，仅示意；MVP 使用 dsh 自带聊天界面）：低风险敏感性分析场景中，PI 可以在批量运行过程中修改参数范围、排除失败实验并选择下一步。_
 
 ### 场景二：修改物理方程（高风险）
 
@@ -330,7 +330,7 @@ PI 提出：
 9. 审批通过后，**才允许**进入参数敏感性或校准
 
 ![[assets/scenario-high-risk-physics-gate.png]]
-_图 9：高风险物理方程修改场景中，Theory-to-Code 证据链和 PI gate 会阻止系统直接进入参数搜索。_
+_图 9（Zero 时代效果图，仅示意；MVP 使用 dsh 自带聊天界面）：高风险物理方程修改场景中，Theory-to-Code 证据链和 PI gate 会阻止系统直接进入参数搜索。_
 
 > [!important] 关键区别
 > 场景一（参数搜索）可以直接执行；场景二（修改方程）必须先走完理论审查，PI 同意后才能搜索。这就是"搜索后置于科学正确性"的具体体现。
@@ -339,18 +339,18 @@ _图 9：高风险物理方程修改场景中，Theory-to-Code 证据链和 PI g
 
 ## 6. 整体建设方案
 
-### 6.1 六阶段渐进建设
+### 6.1 里程碑渐进建设（M1–M6）
 
-平台不是一步建完，而是分六个阶段逐步成型。每个阶段只激活该阶段需要的能力，避免一开始就把所有功能都压上去。
+平台不是一步建完，而是按里程碑逐步成型：上一门全绿才进下一门，M1–M5 各以一个用户可见步骤收尾（详见 [里程碑计划 v2](../04_IMPLEMENTATION/Phased_Plan.md)）。首任务 = **ccw 运行 → RunRecord → EvidenceReport**（无代码改动）；openMP RHS 已知答案回放为第二任务。
 
-| 阶段 | 建设重点 | 交付的能力 |
+| 里程碑 | 建设重点 | 用户可见步骤 |
 |------|----------|-----------|
-| **Phase 1** 骨架可运行 | monorepo 基座、共享 schema、task API、Web 壳 | 浏览器可创建任务、刷新可恢复、最小质量门禁 |
-| **Phase 2** 执行闭环 | RunJob 提交、沙箱执行、日志流、Park/Resume | 模型可以在平台中运行，长任务可暂停恢复 |
-| **Phase 3** 科学运行 + 理论治理 | ccw tiny 实跑、**Theory-to-Code 证据链**、VerificationCase、科学变更 gate | 公式→代码可追踪，高风险变更需 PI 审批 |
-| **Phase 4** 分析引擎 + 搜索 gate | 敏感性/校准/benchmark、**搜索前置检查**、实验账本 | 批量分析、基线对比、搜索必须在理论审查后 |
-| **Phase 5** 报告与治理 | EvidenceReport、**语言约束**、PI gate、HTML 导出 | 结构化报告、禁止校准写成验证、审批留痕 |
-| **Phase 6** 集成交付 | 多用户、CI/CD、部署、运维 | 小团队可部署使用的完整平台 |
+| **M1** 骨架 | profile + bundle + 两个薄插件（核心 schema、raw 数据策略门） | 在 `dsh --profile shud` 里对话，raw 数据写入被拒并可审批 |
+| **M2** 运行主链 | `shud_run` 工具 + durable JobRegistry + RunRecord | 一句话跑 ccw，中途重启 dsh，完成后被唤醒并拿到 RunRecord |
+| **M3** MVP-1 | TaskCard + EvidenceReport + StackLock + 审批接线 | 从任务卡到 Markdown 证据报告，含 PI 审批 |
+| **M4** MVP-2 | ChangeRequest + VerificationCase，openMP RHS 已知答案回放 | 提交代码切片变更，经验证用例判定 |
+| **M5** 最小敏感性 | 最小 OAT（3–5 run，AnalysisPlan 对象） | 一次批量运行与汇总表 |
+| **M6** 收口评估 | 记忆、UI 插件、dsh 升级、通知各出一页评估 | —（每项一页评估，PI 决定是否立项） |
 
 ### 6.2 六个始终不变的底线
 
@@ -364,34 +364,34 @@ _图 9：高风险物理方程修改场景中，Theory-to-Code 证据链和 PI g
 6. **失败证据保留**：失败的运行、被拒绝的修改都保留证据，不允许删除。
 
 ![[assets/platform-construction-plan.png]]
-_图 10：SHUD-Harness 六阶段建设方案总览。_
+_图 10：Zero 时代六阶段建设方案总览（已由上表 M1–M6 取代，仅存档示意）。_
 
 ---
 
 ## 7. 系统架构概览
 
-技术上采用 TypeScript 全栈（Bun + Hono + React），在 Zero Agent Runtime 基础上扩展 SHUD 领域逻辑。
+技术上基于 DeepSeek Harness（dsh）内核：产品形态为 `dsh --profile shud`，SHUD 领域逻辑以 TypeScript 插件包（`dsh-shud-*`）挂在 dsh 的文档化 seam 上（策略门 `tools/pre-execute`、审批 `ctx.approval`、作业 `ctx.jobs`、沙箱 `ctx.sandbox`、存储 `ctx.storage`），不改 dsh 源码（[ADR-0004](../adr/0004-dsh-kernel.md)）。
 
 ![[assets/system-architecture-detailed.png]]
-_图 11：系统架构图。控制流从 PI 进入 Web 工作台，证据流从 SHUD 运行经 RunRecord / Artifact 回到 EvidenceReport 和 PI Decision。_
+_图 11：系统架构图（Zero 时代架构图，仅示意：其中前端、API 与 Agent runtime 三层已由 dsh 内核与插件取代；控制流与证据流的划分不变）。控制流从 PI 进入对话界面，证据流从 SHUD 运行经 RunRecord / Artifact 回到 EvidenceReport 和 PI Decision。_
 
 平台内部有两条必须分开的流：
 
 | 流 | 方向 | 作用 |
 |----|------|------|
-| **控制流** | PI → 工作台 → Agent → 模型执行 | 研究者提出任务、审阅计划、跟踪运行、审批报告 |
+| **控制流** | PI → 对话界面 → Agent → 模型执行 | 研究者提出任务、审阅计划、跟踪运行、审批报告 |
 | **证据流** | 模型运行 → 运行记录 → 证据报告 → PI 决策 | 把命令、日志、指标、图表、决策沉淀为可复盘证据 |
 
-关键设计：Web 工作台只承载实时展示，不作为证据源。报告只能引用持久化的运行记录和 artifact。
+关键设计：对话界面只承载实时展示，不作为证据源。报告只能引用持久化的运行记录和 artifact。
 
-### 与四个仓库的关系
+### 与三个仓库及 dsh 内核的关系
 
 | 仓库 | 角色 | 平台如何使用它 |
 |------|------|---------------|
 | SHUD | 水文求解器 | 在沙箱中编译运行，产生水文数据 |
 | rSHUD | 分析工具包 | 读取 SHUD 输出，计算指标和图表 |
 | AutoSHUD | 自动化流水线 | 作为可编排脚本链 |
-| Zero | 运行时基础 | 提供 Agent/Web/Session 基础设施 |
+| dsh | 运行时内核 | 提供对话、审批、作业、沙箱、session 基础设施（钉 tag，不改源码） |
 
 ---
 
@@ -417,33 +417,30 @@ _图 11：系统架构图。控制流从 PI 进入 Web 工作台，证据流从 
 
 ### 9.1 已完成
 
-- **规格文档体系**：102 份规范文档，覆盖架构、对象模型、API、测试、部署和治理
-- **Theory-to-Code 治理层**（v0.8.3）：10 份新规范 + 25 个现有文档补丁，建立完整的理论到代码证据链
-- **OpenSpec 工程计划**：9 个 changeset（Phase 1 × 6 + Phase 3/4/5 × 3），含 proposal、design、tasks 和 spec
-- **GitHub 项目管理**：10 个 issue（#1 Epic + #2-#7 Phase 1 + #8-#10 Phase 3/4/5）
+- **规格文档体系**：v0.8.3 规格冻结；内核切换后按旧文档处置表精简（留 / 删 / 删-记），Zero 时代历史保留在 tag `archive/zero-v0.8.3`
+- **Theory-to-Code 治理层**（v0.8.3）：规范保留，作为 M4 起的设计输入
+- **内核切换**：dsh 可行性 spike 五项探针全部通过，[ADR-0004](../adr/0004-dsh-kernel.md)（K1–K15）经 PI 审核通过
+- **计划重切**：[里程碑计划 v2](../04_IMPLEMENTATION/Phased_Plan.md)（M1–M6）与 [仓库结构 v2](../04_IMPLEMENTATION/Repository_Layout.md)
 
-### 9.2 Phase 1 启动内容
+### 9.2 M1 启动内容
 
-Phase 1 不触碰 SHUD 科学核心，只验证最小骨架：
+M1 不触碰 SHUD 科学核心，只立骨架与治理门：
 
-| GitHub Issue | 内容 | 目标 |
-|---|---|---|
-| #1 | Phase 1 Epic | 总入口 |
-| #2 | monorepo 基座 | TypeScript 项目结构 |
-| #3 | 核心 schema | TaskCard 等核心对象 + Theory-to-Code 占位 |
-| #4 | workspace 快照 | 任务持久化与恢复 |
-| #5 | Task API | 任务创建/读取接口 |
-| #6 | Web 工作台壳 | Dashboard + 四栏布局 |
-| #7 | 质量门禁 | 类型检查、测试、文档校验 |
+| 交付 | 内容 |
+|---|---|
+| `packages/dsh-shud-core` | 8 对象 Zod schema、治理常量、策略门纯函数 |
+| `packages/dsh-shud-raw-guard` | `tools/pre-execute` 策略门插件 + 单测 |
+| `profile/shud/` | bundle + `cordis.patch.yml`：模型路由、`session-log-deepseek` 关闭、插件挂载 |
+| CI | typecheck + vitest + `dsh --profile shud --dump-config` 自检 |
 
-Phase 1 验收标准只有四条：
-1. 浏览器可以创建任务
-2. 后端可以持久化任务
-3. 刷新后可以恢复任务状态
-4. schema / API / UI / 文档检查通过最小质量门禁
+M1 验收门：
+1. `dsh --profile shud` 可启动
+2. 在对话中尝试写入 raw 数据被拒，并可走审批
+3. raw-guard 单测与 spike 五项探针全绿
+4. CI 通过
 
-> [!tip] Phase 1 的意义
-> 如果没有这个骨架，后续直接接入 SHUD、WebSocket 和 AgentLoop，很容易变成不可复盘的演示系统。Phase 1 的价值是先把"骨架、契约和质量门禁"立住。
+> [!tip] M1 的意义
+> 治理先于功能：在接入 SHUD 运行之前，先让策略门与审批在 dsh seam 上立住。作用域规则（ADR-0004 K13）：任何 spike 不以首任务的一个用户可见步骤收尾就不准开。
 
 ---
 
@@ -456,7 +453,8 @@ Phase 1 验收标准只有四条：
 | Agent 自行接受推导 | 绕过 PI 审批 | 系统级禁止：Agent 角色不能设置"已接受" |
 | 结果不可复现 | 换环境跑不出来 | 版本锁定 + 数据溯源 + 运行记录 |
 | 改代码破坏旧输出 | rSHUD / AutoSHUD 断链 | benchmark 对比 + rSHUD roundtrip + 兼容性检查 |
-| 平台过度设计 | 建了用不上 | 按阶段验收，Phase 1 只做骨架 |
+| 平台过度设计 | 建了用不上 | 按里程碑验收，M1 只做骨架；spike 必须以用户可见步骤收尾（K13） |
+| 内核 pre-stable 漂移 | dsh 升级带来 breaking change | 钉 tag，每个里程碑边界评估一次升级（K1） |
 | 长任务消耗资源 | 浪费推理 token | Park/Resume：等待期间不消耗资源 |
 
 ---
@@ -468,7 +466,7 @@ Phase 1 验收标准只有四条：
 拟确认三项原则：
 
 1. 项目定位为 **PI 主导的科研工程平台**，不做自治科研平台
-2. 开发节奏采用 phase gate，按阶段验收，不按自然周硬切
+2. 开发节奏采用里程碑门，按里程碑验收，不按自然周硬切
 3. 坚持 evidence-first 原则：没有版本记录、数据溯源和运行记录支撑的结论，不进入正式科研报告
 
 ### 11.2 资源支持
@@ -479,7 +477,7 @@ Phase 1 验收标准只有四条：
 |------|------|---------|
 | PI / 博导 | 低频但关键 | 定方向、审报告、批准高风险决策 |
 | 研究生 / 领域研究者 | 高频 | 提出任务、修订计划、跟踪运行、补充诊断 |
-| 研究软件工程师 | 主力 | 实现平台、API、UI、runner、验证流程 |
+| 研究软件工程师 | 主力 | 实现 dsh 插件、工具、作业后端、验证流程 |
 
 ### 11.3 试点选择
 
@@ -487,7 +485,7 @@ Phase 1 验收标准只有四条：
 - 数据和示例相对成熟
 - 运行成本可控
 - 可以快速验证运行、图表、报告和兼容性检查
-- 适合作为 Phase 2（执行闭环）和 Phase 3（科学运行）的验证场景
+- 即首任务：M2（运行主链）与 M3（MVP-1 证据报告）的验证场景
 
 ---
 
@@ -510,8 +508,9 @@ _图 12：从研究问题到可复用科研资产的闭环。_
 ## 附：本报告依据
 
 ### 核心文档
-- [SHUD-Harness 实施规格书 v0.8](../SPEC_v0.8_Final.md)
-- [分阶段开发路线图](../Phased_Spec_Activation.md)
+- [ADR-0004 内核切换到 dsh](../adr/0004-dsh-kernel.md)
+- [里程碑计划 v2](../04_IMPLEMENTATION/Phased_Plan.md)
+- [旧文档处置表](../00_INDEX/Doc_Disposition_2026-10-20.md)（v0.8 规格书与分阶段路线图已删，见 tag archive/zero-v0.8.3）
 - [Canonical Contracts Index](../00_INDEX/CANONICAL_CONTRACTS.md)
 - [需求目录](../00_INDEX/Requirements_Catalog.md)
 
@@ -533,15 +532,11 @@ _图 12：从研究问题到可复用科研资产的闭环。_
 - [报告证据链规范](../03_SPEC/Theory_To_Code_Report_Lineage_Spec.md)
 
 ### 工程实施
-- [仓库结构](../04_IMPLEMENTATION/Repository_Layout.md)
-- [API 与 Schema](../04_IMPLEMENTATION/Schemas_APIs_CLIs.md)
-- [阶段实施计划](../04_IMPLEMENTATION/Phased_Plan.md)
+- [仓库结构 v2](../04_IMPLEMENTATION/Repository_Layout.md)
+- [最小 Schema](../03_SPEC/Minimal_Schemas.md)（原 API 与 Schema 文档已删，见 tag archive/zero-v0.8.3）
 - [测试策略](../04_IMPLEMENTATION/Testing_Strategy.md)
 - [科学变更 Playbook](../04_IMPLEMENTATION/Scientific_Change_Playbooks.md)
 
-### OpenSpec 与 GitHub
-- `openspec/changes/phase1-*`（6 个 Phase 1 changeset）
-- `openspec/changes/phase3-theory-to-code-bundle/`
-- `openspec/changes/phase4-search-gate/`
-- `openspec/changes/phase5-theory-report-evidence/`
-- GitHub Issues: #1 - #10
+### 迁移过程
+- [dsh 迁移计划](../Migration_Plan_dsh.md)
+- Zero 时代的 openspec changeset 与 GitHub issue（#1–#10 等）已按 ADR-0004 K15 关闭/归档

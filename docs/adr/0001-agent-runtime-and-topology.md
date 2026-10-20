@@ -174,8 +174,8 @@ M1 条 2'、条 3 与其余验收依赖全部合入后，基于 issue #21 的首
 
 ## 参照
 
-[Zero_Reuse_Matrix](../02_ARCHITECTURE/Zero_Reuse_Matrix.md) ·
+Zero_Reuse_Matrix（已删，见 tag archive/zero-v0.8.3）·
 [Control_Kernel §5](../02_ARCHITECTURE/Control_Kernel.md) ·
-[Adversarial_Design_Review_v0_8_3](../00_INDEX/Adversarial_Design_Review_v0_8_3.md) ·
+Adversarial_Design_Review_v0_8_3（已删，见 tag archive/zero-v0.8.3）·
 [Context_Trust §5.1](../03_SPEC/Context_Trust_And_Injection_Spec.md) ·
 外部 2026 框架综述：morphllm / qubittool / developersdigest / alicelabs（检索于 2026-07-02）

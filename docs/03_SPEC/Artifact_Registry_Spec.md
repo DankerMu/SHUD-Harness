@@ -101,18 +101,6 @@ artifact_manifest:
 - 重新生成时创建新 `artifact_id`，旧 artifact 标记为 superseded。
 - Debug log 可以 append，但 report 引用的 log range 应固定 offset 或 snapshot。
 
-## 7. Artifact API
-
-Canonical data API：
-
-```http
-GET /api/artifacts/:artifactId
-GET /api/artifacts/:artifactId/data
-GET /api/artifacts/:artifactId/download
-```
-
-返回 metadata 时不得包含 secrets。大型 artifact 应支持 range 或分页读取。
-
 ## 8. Retention
 
 | retention_class | 默认策略 |

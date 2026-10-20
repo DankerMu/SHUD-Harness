@@ -1,15 +1,15 @@
 ---
-status: frozen
+status: deferred  # post-MVP UI 设计输入（ADR-0004 开放项），非 MVP 规范
 ---
 
 # UX 设计规格
 
-**状态：** P1 设计规范
+**状态：** post-MVP UI 设计输入（ADR-0004 开放项：设置页 / 聊天卡片 / 右侧栏面板 / 可折叠 terminal）；MVP 使用 dsh 自带聊天、审批卡片与作业卡片，本文不约束 MVP 实现。
 **适用范围：** PI/工程师在 Web 工作台中的完整交互体验
 **目标：** 从用户视角定义交互模式、信息层级、反馈机制、注意力管理和决策支持，使 PI 能高效地驱动科研任务而不被系统复杂性淹没。
 
 **效果图参考：** `docs/05_PROPOSAL/assets/final-workbench-effect.png` 与 `scenario-*.png`（非 canonical，冲突以 spec 为准，见 UI_Implementation_Spec 头部裁决）
-**关联文档与分工（2026-07-02 声明）：** 布局/组件/tokens/响应式 → `UI_Implementation_Spec.md`（canonical）；交互协议（介入语义/事件）→ `Interaction_Model.md`；状态管理 → `Frontend_State_Design.md`；**本文只管流程、信息层级与注意力管理**——与前三者重叠处以它们为准
+**关联文档与分工（2026-07-02 声明）：** 布局/组件/tokens/响应式 → `UI_Implementation_Spec.md`（canonical）；交互协议（介入语义/事件）→ `Interaction_Model.md`；状态管理原见 Frontend_State_Design（已删，见 tag archive/zero-v0.8.3）；**本文只管流程、信息层级与注意力管理**——与前两者重叠处以它们为准
 
 ---
 
@@ -34,7 +34,7 @@ status: frozen
 目标: 用自然语言提问 → 看到可信证据 → 做科学判断
 心智模型: "我在和一个能跑模型的助手对话"
 关注点: 结论是否可信、证据是否充分、下一步怎么做
-不关注: Agent 内部协调、Zod schema、WebSocket seq
+不关注: Agent 内部协调、Zod schema、传输层细节
 ```
 
 ### 2.2 工程师（次要用户）
@@ -52,7 +52,7 @@ status: frozen
 | AgentFeed | 读 Coordinator 摘要，跳过工具调用细节 | 展开每条看完整日志 |
 | RuntimeTerminal | 收起，只在失败时展开 | 常开，实时跟踪 |
 | ResultsPanel | 重点看指标卡和 NextAction | 重点看 heatmap 和参数表 |
-| StatusBar | 看任务状态和预算 | 看 WS 连接和 job 进度 |
+| StatusBar | 看任务状态和预算 | 看连接状态和 job 进度 |
 
 默认视图按 PI 需求优化；工程师通过展开/展开终端/debug 模式获取细节。
 
@@ -156,7 +156,7 @@ Layer 3 — 细节 (两次点击)
 ```text
 Layer 1: Agent 角色 + 一句话摘要 + 时间
 Layer 2: [展开] → 工具调用结果、RunRecord 摘要、diff 预览
-Layer 3: [查看完整日志] → 跳转到 artifact 或分页 API
+Layer 3: [查看完整日志] → 跳转到日志 artifact 文件
 ```
 
 内部事件 (`visibility: internal`) 默认隐藏。Feed 底部提供 toggle: "显示内部事件"。
@@ -432,7 +432,7 @@ PI 可以：
 ```text
 颜色: 绿 (达标) / 黄 (边界) / 红 (不达标)
 箭头: ▲ 改善 / ▼ 恶化 (相对 baseline)
-阈值: 来自 Visualization_Data_Spec 中的 pass/warn 定义
+阈值: 来自 SHUD_Output_Variables §13 的 pass/warn 定义（原 Visualization_Data_Spec 已删，见 tag archive/zero-v0.8.3）
 tooltip: 展示阈值定义、计算方法、来源 artifact
 ```
 
@@ -512,16 +512,9 @@ PI 重新打开浏览器 → 自动恢复上次 session
 ### 11.2 系统错误恢复
 
 ```text
-WebSocket 断线:
-  自动重连 (3 次, 指数退避)
-  UI 不清空状态
-  重连后通过 since_seq 补齐事件
-  StatusBar 显示 "reconnecting..."
-
-API 请求失败:
-  toast 提示 + retry 按钮
-  不自动重试 mutate 操作 (POST/PUT/DELETE)
-  自动重试 GET 操作 (最多 2 次)
+连接断线 / 请求失败:
+  UI 不清空状态；重连、事件补齐与请求重试由 dsh Web UI 宿主负责
+  （原自建实时推送 / REST 重试段已删，ADR-0004 K2）
 
 RunJob 失败:
   Feed 消息 + 日志链接

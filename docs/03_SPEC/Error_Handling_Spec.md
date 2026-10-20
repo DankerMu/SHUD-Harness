@@ -152,22 +152,7 @@ reports/REPORT-001.generation_error.yaml
 
 并允许用户重新生成报告。
 
-## 9. WebSocket 错误事件
-
-```json
-{
-  "type": "error.raised",
-  "payload": {
-    "error_id": "ERR-001",
-    "category": "runtime_error",
-    "severity": "error",
-    "message": "SHUD exited with code 1",
-    "evidence_refs": ["artifacts/logs/RUN-001.stderr"]
-  }
-}
-```
-
-## 9.1 Notification-related errors
+## 9. Notification-related errors
 
 Notification 是辅助通道，不是科研证据链的一部分。通知失败不得回滚 RunRecord、EvidenceReport、AnalysisPlan summary 或 PI gate 状态。
 
@@ -204,7 +189,6 @@ Critical failure notification 仍必须使用 dedupe key，避免同一错误反
 
 ## 10. Observability / Ops 错误规则
 
-- DuckDB/ops dashboard 失败不等于科学运行失败；
 - disk critical 可以 block new jobs；
 - secret leak 可以 quarantine artifact；
 - dependency drift 可以 block release；

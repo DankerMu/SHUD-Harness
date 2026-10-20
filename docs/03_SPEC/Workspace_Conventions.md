@@ -22,7 +22,6 @@ SHUD-Harness/          ← 项目根
   SHUD/                ← submodule, 只读参考
   rSHUD/               ← submodule, 只读参考
   AutoSHUD/            ← submodule, 只读参考
-  zero/                ← submodule, 只读参考
 ```
 
 **规则**: Agent 不得直接修改根 submodule。任何需要改代码的任务，必须在 runtime workspace 中通过 `git worktree` 创建工作副本。
@@ -37,11 +36,10 @@ workspace/
     SHUD/              ← 从 source submodule clone 或 worktree
     rSHUD/
     AutoSHUD/
-    zero/
   stacks/
   provenance/
   secrets/
-  data/
+  data/             ← 仅派生/中间数据；原始数据 raw/ 不在此处（见下）
   tasks/
   jobs/
   runs/
@@ -52,11 +50,13 @@ workspace/
   tmp/
 ```
 
+原始数据目录 `<data_root>/raw/` **必须位于 workspace root 之外**（ADR-0004 治理不变式：dsh `workspace-write` 沙箱下由 Seatbelt 拒写，`data/raw` 字节保护不依赖字符串扫描）。`DataProvenance` 以绝对路径 + sha256 引用它。布局以 `04_IMPLEMENTATION/Repository_Layout.md` §2 为准。
+
 ### 1.3 映射关系
 
 | 层级 | 路径 | 用途 | Agent 写权限 |
 |------|------|------|-------------|
-| Source | `SHUD/`, `rSHUD/`, `AutoSHUD/`, `zero/` | 只读参考、StackLock 基线 | 禁止 |
+| Source | `SHUD/`, `rSHUD/`, `AutoSHUD/` | 只读参考、StackLock 基线 | 禁止 |
 | Runtime repos | `workspace/repos/*` | 编译、运行的工作副本 | 受限（Sandbox policy） |
 | Task worktree | `workspace/tasks/TASK-*/worktrees/*` | 任务特定代码修改 | 允许 |
 | Scratch/tmp | `workspace/tasks/TASK-*/scratch/`, `workspace/tmp/` | 临时文件 | 允许 |
@@ -241,7 +241,7 @@ Standalone HTML export 不得写出 workspace 根目录。Export 中引用的 ar
 
 ### 锁与恢复机制
 
-锁文件和幂等记录见 [Idempotency_Concurrency_Locking_Spec.md](Idempotency_Concurrency_Locking_Spec.md)。Workspace snapshot 和 service restart recovery 见 [Workspace_Snapshot_And_Recovery_Spec.md](Workspace_Snapshot_And_Recovery_Spec.md)。
+锁文件和幂等记录见 [Idempotency_Concurrency_Locking_Spec.md](Idempotency_Concurrency_Locking_Spec.md)。Workspace snapshot 和 service restart recovery 原见 Workspace_Snapshot_And_Recovery_Spec（已删，见 tag archive/zero-v0.8.3）。
 
 ## 10. 清理策略
 
@@ -259,4 +259,4 @@ Standalone HTML export 不得写出 workspace 根目录。Export 中引用的 ar
 - [ ] artifact manifest 可列出报告引用的所有文件。
 - [ ] tmp 文件不能被 EvidenceReport 直接引用。
 - [ ] workspace 外路径写入被拒绝。
-- [ ] StackLock 记录四个 submodule 的 commit 和 dirty state。
+- [ ] StackLock 记录三个 submodule 的 commit 和 dirty state。

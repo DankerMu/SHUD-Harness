@@ -2,7 +2,9 @@
 status: frozen
 ---
 
-# Task Playbooks (Web 交互)
+# Task Playbooks (dsh 对话交互)
+
+> 交互面 = `dsh --profile shud` 自带聊天、审批卡片、作业卡片 + Markdown 报告文件（ADR-0004 K2/K7）；下列步骤中的工具与 seam 名以 [Phased_Plan v2](Phased_Plan.md) 为准。
 
 ## 1. 工程任务：添加输出诊断
 
@@ -10,16 +12,16 @@ status: frozen
 PI 在对话框输入：添加 event_flux 诊断，但不能破坏旧 rSHUD reader。
 
 步骤：
-1. Coordinator 自动 → POST /api/tasks (type=engineering)
-2. 自动 → POST /api/stacks/lock
-3. 自动 → POST /api/tasks/:id/run-tiny (baseline)
-   → 前端 LogViewer 实时展示编译/运行日志
+1. Coordinator 建 TaskCard (type=engineering)，记录经 `ctx.storage` 持久化
+2. Coordinator 生成 StackLock（SHUD/rSHUD/AutoSHUD 版本 + `git status` + llm 三字段）
+3. Coordinator 调用 `shud_run` 工具跑 baseline tiny，经 `ctx.jobs` 提交
+   → dsh 作业卡片展示编译/运行日志
 4. Worker 修改 SHUD output (在 worktree 中)
 5. Worker 修改 rSHUD reader
-6. 自动 → run tiny + rSHUD roundtrip + old-output fixture
-7. 自动 → 生成 ChangeRequest + patch bundle
-8. 自动 → POST /api/tasks/:id/report → 前端展示报告
-9. 前端弹出 ApprovalButtons → PI 点击 Accept/Revise/Reject
+6. `shud_run` 跑 tiny；rSHUD roundtrip + old-output fixture 走 `scripts/` 确定性脚本；`shud_collect` 解析产物 → RunRecord
+7. 生成 ChangeRequest + patch bundle
+8. 生成 EvidenceReport（Markdown 文件写入 workspace `reports/`）→ 对话中给出路径与摘要
+9. 合入动作经 `tools/pre-execute` 返回 ask → dsh 审批卡片 → PI 批准或拒绝（修订意见在对话中回复）
 ```
 
 ## 2. 科学辅助任务：洪峰偏低敏感性分析
@@ -28,15 +30,15 @@ PI 在对话框输入：添加 event_flux 诊断，但不能破坏旧 rSHUD read
 PI 在对话框输入：对 Cache Creek storm，检查 ksat 和 roughness 对洪峰的敏感性。
 
 步骤：
-1. Coordinator 自动 → POST /api/tasks (type=science_assist)
-2. 自动 → POST /api/data/register
-3. 自动 → POST /api/analysis/sensitivity (创建 AnalysisPlan)
-4. 自动 → run baseline → 前端实时日志
-5. 自动 → run parameter sweep (6 组合)
-   → 长任务: park, WebSocket 推送完成通知
-6. 自动 → 汇总 metrics + tornado 图 → 前端图表组件渲染
-7. 自动 → 生成报告 → 前端展示
-8. 前端弹出审批 → PI 选择下一步
+1. Coordinator 建 TaskCard (type=science_assist)
+2. Coordinator 登记 DataProvenance
+3. Coordinator 创建 AnalysisPlan (mode=sensitivity)
+4. 调用 `shud_run` 跑 baseline，经 `ctx.jobs` 提交 → dsh 作业卡片展示日志
+5. 逐参数集调用 `shud_run`（6 组合），每组一个独立作业
+   → 长任务: agent park（空闲），作业完成通知自动唤醒新 turn
+6. `shud_collect` 汇总 metrics；tornado 图作为 figure artifact 写入 run 目录
+7. 生成 EvidenceReport Markdown → 对话中给出路径与摘要
+8. PI 在对话中选择下一步（涉及治理动作时经 `tools/pre-execute` 返回 ask → dsh 审批卡片）
 ```
 
 Agent 不得写："H2 is validated"。
@@ -47,10 +49,11 @@ Agent 可以写："Within this event, peak timing is more sensitive to hillslope
 ```text
 Coordinator 自动记录一次兼容性失败：
 
-1. 自动 → POST /api/tasks (type=ops)
-2. 后端执行诊断，前端展示日志
-3. 自动 → POST /api/notes (type=compatibility_note, tags=["rshud","output-compatibility"])
-4. task done → 前端通知
+1. Coordinator 建 TaskCard (type=ops)
+2. Worker 在 dsh sandbox 中执行诊断，日志在对话 / 作业卡片中可见
+3. 记录 compatibility_note (tags=["rshud","output-compatibility"])：MVP 不做记忆（ADR-0004 K11），
+   先写入 EvidenceReport 的 limitations 段；记忆落点待 M6 评估
+4. task done → 对话中回报
 ```
 
 不需要 Reviewer，不需要 Coordinator approval。
@@ -106,7 +109,7 @@ Coordinator 自动记录一次兼容性失败：
 ```text
 1. semantic_level=output_semantics。
 2. 更新 ImplementationMapping.output_semantics_changes。
-3. 检查 SHUD_Output_Variables、rSHUD reader、Visualization_Data_Spec。
+3. 检查 SHUD_Output_Variables、rSHUD reader（原 Visualization_Data_Spec 已删，见 tag archive/zero-v0.8.3）。
 4. VerificationCase 使用 output_semantics + rSHUD roundtrip。
 5. PI gate 审批是否接受 breaking semantic change。
 ```
@@ -141,5 +144,5 @@ Coordinator 自动记录一次兼容性失败：
 2. Ensure tiny benchmark was run if executable code changed.
 3. Ensure old-output check was run if output/reader changed.
 4. Ensure report lists StackLock and DataProvenance.
-5. If interface breaking, mark needs_pi_approval → 前端弹出审批按钮.
+5. If interface breaking, mark needs_pi_approval → `tools/pre-execute` 返回 ask → dsh 审批卡片.
 ```

@@ -95,13 +95,6 @@ Storage added: 1.2 GB
 
 这让 PI 能判断自动化是否划算，并决定后续任务的 advisory 值是否需要调整。
 
-## 6. 状态栏展示
-
-```text
-[TASK-0001] LLM: $0.72/1.00(adv) | calls: 9/12(adv) | compute: 1.2h
-                                ↑ 超出 advisory 时标黄，PI 可随时 Ctrl-C
-```
-
 ## 7. cost_record 数据结构
 
 每个 session 维护一条 `cost_record`，汇总 LLM token、tool call、RunJob runtime 三类开销：
@@ -164,32 +157,6 @@ CostMonitor UI（SideNav 或顶部状态栏）按 phase 分组展示 token 消�
 - job runtime
 - budget_status 着色状态
 - 最近一次成本提醒的触发原因
-
-## 9. WebSocket 成本事件
-
-成本变化通过 WebSocket 事件 `cost.updated` 推送至前端 CostMonitor：
-
-```jsonc
-{
-  "event": "cost.updated",
-  "payload": {
-    "task_id": "TASK-001",
-    "session_id": "SESSION-001",
-    "budget_status": "warn",
-    "llm_tokens_in": 12000,
-    "llm_tokens_out": 3400,
-    "tool_calls": 8,
-    "job_runtime_seconds": 92,
-    "phase": "execute"          // 当前所处阶段
-  }
-}
-```
-
-推送策略：
-
-- **不逐 token 推送**。按阶段切换或固定时间窗口（建议 5 秒）聚合后推送一次。
-- `budget_status` 从 `ok` 变为 `warn` 或 `exceeded` 时立即推送，不等时间窗口。
-- 前端收到 `exceeded` 状态时高亮提醒，但不阻断操作——中止权始终归 PI。
 
 ## 10. CostMonitor 与 Observability 的关系
 

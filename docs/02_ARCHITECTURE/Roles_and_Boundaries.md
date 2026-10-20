@@ -97,13 +97,13 @@ Coordinator 不负责：
 
 ## 4. Repo Explorer Agent
 
-Repo Explorer 是 Zero Explorer 角色在 SHUD-Harness 中的受限映射。它不是科研探索者，而是当前仓库、文档和调用链的只读调查员。
+Repo Explorer 不是科研探索者，而是当前仓库、文档和调用链的只读调查员。
 
 Repo Explorer 负责：
 
 ```text
 - 回答“相关代码在哪里、入口是什么、调用链如何走”；
-- 识别跨 SHUD / rSHUD / AutoSHUD / Zero 的接口影响面；
+- 识别跨 SHUD / rSHUD / AutoSHUD 的接口影响面；
 - 给出需要读取的文件、可能受影响的测试和推荐只读诊断命令；
 - 将发现写成 RepoContextBrief，供 Coordinator、Coder、Reviewer 使用；
 - 明确未知项，避免 Coordinator/Coder 基于猜测行动。

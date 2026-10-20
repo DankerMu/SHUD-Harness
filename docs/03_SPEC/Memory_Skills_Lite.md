@@ -4,6 +4,8 @@ status: frozen
 
 # 轻量 Memory 与 Skills
 
+> **MVP 不做记忆**（[ADR-0004 K11](../adr/0004-dsh-kernel.md)）：本文 Memory 部分为首任务跑通后的评估输入，MVP 不实现。
+
 ## 1. Memory 不再走重审批
 
 v0.6 将 memory 分为三类：
@@ -34,15 +36,6 @@ reviewed_by: null
 ### PI Decision 类型约束
 
 `pi_decision` 类型 MemoryNote 的详细 schema 见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md) 和 [PI_Decision_Comments_Spec.md](PI_Decision_Comments_Spec.md)。其 `generalization_allowed` 必须为 false，不得自动升级为跨流域科学事实。
-
-### 2.1 Zero 上游状态机映射（zero@13e25c1）
-
-上游 memory 已原生 `draft | verified | archived | conflict` 状态机与 governance/lifecycle 端点。映射与收窄：
-
-- note `draft` ↔ 上游 `draft`；`accepted` ↔ `verified`——**提升动作仅 PI principal**
-  （adapter 收窄上游 authority 允许的 actor 集合，agent 不可自提）；`retired` ↔ `archived`；
-- 上游 `conflict` 态在 SHUD 侧按"待人工裁决的 draft"处理，不进 context 组装白名单；
-- 复用决策由此从"改上游默认行为"收窄为"收权限 + 状态映射"，见 [Zero_Reuse_Matrix §3](../02_ARCHITECTURE/Zero_Reuse_Matrix.md) / §9.1。
 
 ## 3. 什么时候需要 PI review
 
@@ -168,7 +161,7 @@ MVP 先用 keyword + tags，不强依赖 embeddings：
 
 ## 10. 验收标准
 
-- [ ] MemoryTool 不自动把 evidence_note 标记为 accepted（Zero 默认 verified 行为必须改掉）。
+- [ ] MemoryTool 不自动把 evidence_note 标记为 accepted。
 - [ ] pi_decision note 只能由 PI decision flow 产生。
 - [ ] 检索注入的 note 均带 status 标记；draft note 带"未经 PI 确认"前缀（单测）。
 - [ ] draft skill 不被加载进 skill catalog；active skill 的 SKILL.md 有 activated_by 记录。

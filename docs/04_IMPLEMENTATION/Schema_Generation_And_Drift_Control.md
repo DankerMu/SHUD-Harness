@@ -14,7 +14,7 @@ canonical_for: [schema-drift-policy]
 进入实现后，Zod schema 是字段最高事实源：
 
 ```text
-packages/core/src/domain/schemas/*.ts
+packages/dsh-shud-core/src/schemas/*.ts
 ```
 
 Markdown 中的字段表应由脚本生成：

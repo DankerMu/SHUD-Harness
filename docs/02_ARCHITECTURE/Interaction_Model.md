@@ -1,5 +1,5 @@
 ---
-status: frozen
+status: deferred  # post-MVP UI 设计输入（ADR-0004 开放项），非 MVP 规范
 ---
 
 # 交互模型：Web 科研工作台
@@ -11,6 +11,8 @@ Web Console 不是"对话框 + 几个按钮"，而是一个**完整的科研工�
 参考设计：`docs/99_ARCHIVE/images/ChatGPT Image Apr 19, 2026, 10_53_22 PM.png`
 
 ## 2. 四栏布局
+
+> **post-MVP 参考（ADR-0004 开放项）**：MVP 零自定义 UI（ADR-0004 K7），交互走 dsh 自带聊天 / 审批卡片 / 作业卡片 + Markdown 报告；本节至 §5 的四栏布局、状态栏与页面路由仅作 post-MVP UI 插件设计输入。
 
 ```text
 ┌──────────┬─────────────────────┬──────────────────────────────┬──────────────┐
@@ -201,51 +203,6 @@ StackLock: SHUD@9b55b0c + rSHUD@d162db3
 /admin/cost              → 成本汇总 (按任务/按天/按 Agent)
 ```
 
-## 6. API 端点 (Hono 后端)
-
-```text
-# 任务管理
-POST   /api/tasks                    # 创建任务
-GET    /api/tasks                    # 任务列表
-GET    /api/tasks/:id                # 任务详情 (含 RunRecords, AnalysisPlan)
-POST   /api/tasks/:id/plan           # 生成执行计划
-POST   /api/tasks/:id/approve        # PI 审批 (accept/revise/reject)
-DELETE /api/tasks/:id/artifacts      # 清理临时文件
-
-# 版本与数据
-POST   /api/stacks/lock              # 锁版本
-POST   /api/data/register            # 注册数据源
-
-# 执行
-POST   /api/tasks/:id/run-tiny       # 运行 tiny benchmark
-POST   /api/jobs                     # 提交长任务
-GET    /api/jobs/:id                  # 查询 job 状态
-POST   /api/jobs/:id/collect          # 收集结果
-
-# 分析
-POST   /api/analysis/sensitivity     # 敏感性分析
-POST   /api/analysis/calibration     # 校准
-
-# 结果与可视化
-GET    /api/runs/:id/metrics         # RunRecord 指标
-GET    /api/runs/:id/hydrograph      # 水文过程线数据
-GET    /api/analysis/:id/heatmap     # 敏感性热力图数据
-GET    /api/analysis/:id/parameters  # 参数集表格数据
-
-# 报告与变更
-POST   /api/tasks/:id/report         # 生成报告
-GET    /api/reports/:taskId          # 获取报告 (Markdown)
-GET    /api/patches/:id/diff         # 查看 patch diff
-POST   /api/patches/:id/bundle       # 打包 patch
-
-# 笔记
-POST   /api/notes                    # 添加笔记
-GET    /api/notes                    # 笔记列表
-
-# 实时通信
-WS     /ws/session/:sessionId        # 统一 session 通道 (agent 活动流 + 日志 + 事件)
-```
-
 ## 7. 对话驱动工作流
 
 **轻量应答分流（对标 xagent 吸收）**：不是每句输入都值得立卡。Coordinator 收到 PI 消息先做三分类：
@@ -277,7 +234,7 @@ PI: "选方案 1, 补 holdout 验证"
 
 ### 7.1 PI 介入语义（运行中任务）
 
-Agent 执行期间 PI 的输入不是"发出去就没了"，按三级语义处理（协议细节见 [WebSocket_Protocol](../03_SPEC/WebSocket_Protocol.md) §10.1）：
+Agent 执行期间 PI 的输入不是"发出去就没了"，按三级语义处理（协议细节原见 WebSocket_Protocol §10.1（已删，见 tag archive/zero-v0.8.3）；事件 seq/重放要点见 [Doc_Disposition 删-记汇总](../00_INDEX/Doc_Disposition_2026-10-20.md)）：
 
 | PI 行为 | 语义 | 前端呈现 |
 |---|---|---|

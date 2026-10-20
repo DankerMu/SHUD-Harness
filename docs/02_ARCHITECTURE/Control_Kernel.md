@@ -118,12 +118,11 @@ Agent 已暂停，不继续消耗 LLM token。`runtime_phase = waiting_for_job`�
 spawn 上限为运行时校验而非仅靠角色剖面（对标 hermes-agent 吸收）：角色剖面说"不该发生"，
 kernel 校验保证"发生了也过不去"。
 
-**校验注入点（对抗审查 A02-6）**：spawn/wait 是工具调用，上述硬校验全部实现在
-`ZeroHarnessAdapter.beforeToolCall`（Zero_Reuse_Matrix 的 adapter 接口）——spawn 工具执行前对
-depth / 并发数 / allowed_tools 剖面求值，拒绝即返回工具错误，不改 Zero 内核。
-"[E] 直接复用"指复用 spawn 机制本身，不指复用其无校验的默认通路。
-落地事实（zero@13e25c1）：loop 级 `onToolCallStart` 仅观测、不可否决——该接口在**工具注册层**
-以横切包装实现（`ToolBase.beforeExecute` throw 即阻断），见 [Zero_Reuse_Matrix §8](Zero_Reuse_Matrix.md) 与 ADR-0001。
+**校验注入点（对抗审查 A02-6）**：spawn/wait 是工具调用，上述硬校验全部实现在**工具注册层横切点**
+（dsh：`tools/pre-execute` waterfall 返回 `deny`/`ask`，ADR-0004）——spawn 工具执行前对
+depth / 并发数 / allowed_tools 剖面求值，拒绝即返回工具错误，不改基座内核。
+复用基座 spawn 机制本身，不复用其无校验的默认通路。仅观测、不可否决的 loop 级钩子不能作为校验点；
+历史取证见 ADR-0001（原 Zero_Reuse_Matrix §8 已删，见 tag archive/zero-v0.8.3）。
 
 **拒绝载荷约定（harness 评审 G2，2026-07-02）**：策略门与硬校验拒绝时返回的工具错误
 必须携带 `ErrorRecord.remediation` 结构（`next_action` + `hint` + `ref`，权威源
@@ -188,7 +187,7 @@ capability 类逐项评估"新模型是否已不需要"，产出一页 memo 供 
 
 工具是给模型看的产品界面；注册进角色剖面的工具面遵守：
 
-- **数量预算**：单角色可见工具 ≤ 20（Zero 原生 + 领域工具合计）；超出先合并/裁剪再注册——
+- **数量预算**：单角色可见工具 ≤ 20（基座原生 + 领域工具合计）；超出先合并/裁剪再注册——
   工具过多时模型在相似工具间误选的概率显著上升；
 - **单一职责 + 强 schema**：拒绝瑞士军刀工具；参数 Zod 校验，校验失败按 §5 拒绝载荷约定
   回吐给模型自修，不静默吞掉；

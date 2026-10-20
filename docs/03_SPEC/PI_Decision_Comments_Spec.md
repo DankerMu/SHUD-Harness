@@ -6,7 +6,7 @@ canonical_for: [pi-decision-verbs, pi-decision-memory-note]
 # PI Decision Comments 规范
 
 **状态：** v0.8.1 设计补充  
-**适用范围：** PI gate、EvidenceReport、MemoryNote、audit log、Workbench approval UI  
+**适用范围：** PI gate、EvidenceReport、MemoryNote、audit log、dsh 审批卡  
 **目标：** 让 PI 在 approve / reject / request_revision 时留下科学判断和上下文批注，使决策可复盘、可审计、但不被 Agent 自动泛化。
 
 ## 1. 背景
@@ -20,30 +20,6 @@ PI 的判断经常不是简单“接受/拒绝”。例如：
 ```
 
 因此 PI gate decision 必须支持自由文本 comment。
-
-## 2. Canonical endpoint
-
-推荐 canonical API：
-
-```http
-POST /api/pi-gates/:gateId/decision
-```
-
-Body：
-
-```json
-{
-  "decision": "approved",
-  "comment": "同意该结果仅作为 ccw tiny benchmark，不作为模型结构验证。",
-  "next_action": "generate_patch_bundle",
-  "evidence_refs": [
-    "reports/REPORT-001.md",
-    "runs/RUN-001/metrics.yaml"
-  ]
-}
-```
-
-`POST /api/tasks/:id/approve` 可保留为 MVP convenience endpoint，但内部应委托给 canonical PI gate decision handler。
 
 ## 3. Decision enum
 
@@ -125,27 +101,22 @@ Agent 可以在同一任务上下文中引用该决策记录，但不能把它�
 - 论文结论；
 - validated evidence。
 
-## 7. UI
+## 7. dsh 审批卡字段
 
-PI gate card 应包含：
+MVP 用 dsh 自带审批卡（ADR-0004 K7），PI gate 经 `tools/pre-execute` 返回 `ask` 进入 `ctx.approval`。
+dsh 审批 seam 的词汇是封闭、单次的（源：`../deepseek-harness` `docs/persistence-catalog.md` `approval/*`、
+`.agents/notes/implemented/feature/2026-07-06-approval-seam.md`）：
 
-```text
-Decision buttons:
-  Approve
-  Request revision
-  Reject
+| 本规范 | dsh 审批 seam | 说明 |
+|---|---|---|
+| `approved` | `approval/decided` outcome = `allowed-once` | 只放行被询问的那一次调用，不持久授权 |
+| `rejected` | outcome = `rejected` | 调用 fail-closed 拒绝 |
+| `request_revision` | outcome = `rejected`（与 `rejected` 不可区分） | 审批卡只能放行/拒绝；修订要求的承载与 `comment` 同为开放项 |
+| —（非 PI 决定） | outcome = `cancelled` / `unavailable` | 中止或通道缺失，fail-closed 拒绝，不写 PiGateDecision |
+| 卡片展示的申请理由 | `ApprovalRequest.reason` / `displayReason` | 由发起方（策略门/agent）填写，**不是** PI comment |
+| `comment` | 无字段 | `approval/decided` 只有 `{ id, outcome }`；PI comment 的承载方式（对话 turn 或 user-interaction seam）为开放设计项 |
 
-Comment textarea:
-  optional for simple approve
-  required for reject / revision / high-risk approve
-
-Evidence refs:
-  report
-  selected run records
-  selected artifacts
-```
-
-MVP 不做行级批注。后续可扩展为 observation-level comment。
+MVP 不做行级批注。
 
 ## 8. 审计
 
@@ -163,7 +134,7 @@ audit_event:
   timestamp: ...
 ```
 
-Agent 永远不能调用该 endpoint 成功通过权限检查。
+Agent 永远不能自行做出 PI decision。
 
 ## 9. 报告 decision history
 

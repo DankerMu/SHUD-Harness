@@ -68,7 +68,6 @@ repos:
   SHUD:      { commit: 9b55b0c, branch: master }
   rSHUD:     { commit: d162db3, branch: master }
   AutoSHUD:  { commit: 1cbec6f, branch: master }
-  zero:      { commit: 13e25c1, branch: main }
 runtime:
   os: "Darwin 24.6.0"
   r_version: "4.4.1"
@@ -84,22 +83,17 @@ harness:
   cli_version: "0.1.0"                # 领域 CLI semver，见 Domain_CLI_Spec §5（T2 证据可追溯到生产它的 CLI 版本）
   prompt_pack: promptpack-0001
   skills_version: skills-0001
-llm:
-  provider: openai_compatible         # 第三方 OpenAI 兼容服务（ADR-0002 D9）
-  model_id: "glm-5.2"                 # provider 完整模型标识，含版本后缀
-  base_url: "https://<vendor>/v1"     # 第三方端点必锁：同名模型在不同端点可能被静默换版/量化（ADR-0002）
-  params_digest: "sha256:..."         # 采样参数集（temperature/top_p/max_tokens 等）的哈希
-  prompt_pack_digest: "sha256:..."    # prompt_pack 实际内容哈希（防同名不同内容漂移）
-  # 演进备注（harness 评审 G7；2026-07-02 按 zero 实测放宽）：MVP 全角色单模型。Zero 原生支持
-  # 多 provider 模型池与按功能选模型（task_closure_model / context_compaction_model），per-role
-  # 路由无需运行时改造；升级仅涉本 schema（llm → role 映射），仍需先立 ADR + 全量行为 eval 回归。
+llm:                                  # 恰好三字段（ADR-0004 K4）
+  base_url: "https://www.dmxapi.cn"   # string；第三方端点必锁：同名模型在不同端点可能被静默换版/量化
+  request_alias: "deepseek-flash-guan" # string；请求中发送的 model id（ADR-0004 K3）
+  response_model: "<响应体 model 字段原值>"  # string；API 返回的 `model` 字段，仅记录、不强制校验（K4）
 fingerprint: "sha256:..."             # 整体哈希，用于快速比对
 created_at: 2026-04-25T10:00:00Z
 ```
 
-**llm 字段说明**（AGA-P0-1）：agent 行为由 model + params + prompt 共同决定，三者任一变化都视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
+**llm 字段说明**（ADR-0004 K4，取代 AGA-P0-1 的 model + params + prompt 锁）：`base_url` 或 `request_alias` 变化视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。`response_model` 是滚动别名（`deepseek-flash`）在建 lock 时的实际解析结果，只记录不强制：其变化**不**自动使 lock 失效，每条 RunRecord 另记 `llm.response_model`，可比性由 PI 看报告判断。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
 
-**废弃字段**: `runtime.container`（MVP 不强制容器）、`limits`（已移入 RunJob.resources）、`policy_version`（已合并入 harness.version）。
+**废弃字段**: `runtime.container`（MVP 不强制容器）、`limits`（已移入 RunJob.resources）、`policy_version`（已合并入 harness.version）、`repos.zero`（内核改为 dsh，ADR-0004 K1）、`llm.provider` / `llm.model_id` / `llm.params_digest` / `llm.prompt_pack_digest`（K4 收窄为三字段）。
 
 ---
 
@@ -184,6 +178,8 @@ numerical_health:
 resources:
   wall_seconds: 420
   peak_memory_mb: 1830
+llm:
+  response_model: "<响应体 model 字段原值>"  # string，必填；记录响应 model；变化不自动失效 lock（K4）
 ```
 
 **废弃字段**: `status: success`（统一用 `succeeded`，与 RunJob 终态对齐）、`metrics: {}`（改为 `artifacts.metrics_summary` 路径引用）。

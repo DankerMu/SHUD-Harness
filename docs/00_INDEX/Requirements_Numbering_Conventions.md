@@ -19,7 +19,7 @@ canonical_for: [requirements-numbering]
 | `NFR-*` | Non-Functional Requirement | 性能、可靠性、安全、运维、可用性等非功能需求 |
 | `DR-*` | Data Requirement | 数据、artifact、provenance、retention 需求 |
 | `GR-*` | Governance Requirement | PI gate、科研语言边界、审计需求 |
-| `IR-*` | Integration Requirement | SHUD/rSHUD/AutoSHUD/Zero/SMTP/SLURM 等集成需求 |
+| `IR-*` | Integration Requirement | SHUD/rSHUD/AutoSHUD/SMTP/SLURM 等集成需求 |
 | `TR-*` | Test Requirement | 需要在测试计划中覆盖的验收要求 |
 
 ---

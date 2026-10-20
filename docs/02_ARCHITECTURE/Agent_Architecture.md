@@ -6,7 +6,7 @@ canonical_for: [closure-determinism]
 # Agent 架构
 
 **状态：** P0 设计规范  
-**适用范围：** Coordinator、Repo Explorer、Worker、Coder、Reviewer、PI gate、Zero AgentLoop 扩展
+**适用范围：** Coordinator、Repo Explorer、Worker、Coder、Reviewer、PI gate、基座 seam 扩展（dsh：`tools/pre-execute`、`ctx.approval`、`ctx.jobs`、agent preset，ADR-0004）
 **目标：** 将 v0.8 的“PI-led scientific research engineering assistant”落实为可实现的 Agent 实例模型和通信规则。
 
 ## 1. 架构原则
@@ -94,7 +94,7 @@ reporting
 
 Coordinator 在以下场景应先派发 Repo Explorer，再进入 Plan 或 Coder：
 
-- 任务涉及跨仓库影响面，尤其是 SHUD/rSHUD/AutoSHUD/Zero 之间的接口变更；
+- 任务涉及跨仓库影响面，尤其是 SHUD/rSHUD/AutoSHUD 之间的接口变更；
 - 任务类型为 `code_change`、`debugging`，且入口文件、调用链或测试命令不明确；
 - 最近一次 Worker/Coder 失败原因指向“上下文不足”或“改动范围误判”；
 - 需要确认实际代码与 docs/spec 是否一致。
@@ -143,7 +143,7 @@ RepoContextBrief 是工程上下文，不是科学证据。EvidenceReport 可以
 - 目标；
 - 输入数据和依赖；
 - 预计使用的工具；
-- 是否需要 SHUD/rSHUD/AutoSHUD/Zero；
+- 是否需要 SHUD/rSHUD/AutoSHUD；
 - 是否会产生 RunJob；
 - 是否可能触发 PI gate；
 - 预期 artifact；
@@ -225,7 +225,7 @@ tool_call:
 TaskCard 不能仅因为 LLM 认为“完成了”而关闭。closure 由两层组成：
 
 1. **确定性判据（主闸，代码强制）。** 以下谓词由 harness 在状态迁移前求值，不满足则拒绝进入 reporting/done。谓词只引用可查询的对象和字段，不依赖 LLM 输出。每条谓词对应一个可独立测试的 validator 函数。
-2. **LLM closure 分类器（辅助，advisory）。** 沿用 Zero task-closure 的 finish/continue/block 分类，但结果只用于提示 Coordinator 补做遗漏动作，**不作为状态迁移依据，且不可覆盖 validator 的拒绝结果**。Zero 默认分类器 prompt 面向聊天助手场景，必须替换为科研任务版本。
+2. **LLM closure 分类器（辅助，advisory）。** 按 finish/continue/block 三类分类，结果只用于提示 Coordinator 补做遗漏动作，**不作为状态迁移依据，且不可覆盖 validator 的拒绝结果**。分类器 prompt 必须是科研任务版本，不得沿用面向聊天助手场景的通用默认 prompt。
 
 | 任务类型 | 确定性 closure 谓词（全部满足才可进入 reporting） |
 |---|---|

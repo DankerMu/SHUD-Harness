@@ -1,11 +1,11 @@
 ---
-status: frozen
+status: deferred  # post-MVP UI 设计输入（ADR-0004 开放项），非 MVP 规范
 ---
 
 # UI 实现规格
 
-**状态：** P1 设计规范
-**适用范围：** React 前端、四栏工作台、组件库、设计系统
+**状态：** post-MVP UI 设计输入（ADR-0004 开放项）；实现路线 = dsh client 插件（手写 JS，无 React 构建链）；本文仅作组件语义参考。
+**适用范围：** post-MVP dsh client 插件、四栏工作台、组件语义、设计 tokens
 **目标：** 基于效果图，固定设计 tokens、组件规格、状态定义、响应式策略和可访问性要求，使前端开发可并行推进。
 
 **效果图参考：** `docs/05_PROPOSAL/assets/final-workbench-effect.png` 与 `scenario-*.png`（早期稿在 99_ARCHIVE/images）。
@@ -19,16 +19,7 @@ status: frozen
 
 ## 1. 技术栈
 
-| 层级 | 选择 | 理由 |
-|------|------|------|
-| 框架 | React 19 + TypeScript | 基于 Zero 扩展，与后端共享 Zod 类型 |
-| 构建 | Bun + Vite | monorepo 统一 runtime |
-| CSS | Tailwind CSS 4 | 效果图的简洁风格适合 utility-first |
-| 组件基础 | shadcn/ui (Radix primitives) | 无样式 headless + 可定制主题，a11y 内建 |
-| 图表 | Recharts 或 visx | 轻量、React-native、支持 SVG 导出 |
-| 终端 | xterm.js | RuntimeTerminal 深色终端模拟 |
-| 图标 | Lucide Icons | shadcn/ui 默认搭配 |
-| 状态 | Zustand | 5 store 分层（见 Frontend_State_Design.md） |
+（已删：原前端框架、构建链、CSS/组件库与状态库选型随自建前端退场，ADR-0004 K2/K7；实现路线见文首状态注。）
 
 ---
 
@@ -224,8 +215,8 @@ interface AgentActivityFeedProps {
 
 interface ActivityEvent {
   eventId: string;
-  // 类型集合以 WebSocket_Protocol §3 事件注册表为唯一源，本处仅为投影（对抗审查 A08-5：
-  // 此前复写漏掉 plan.created 与 agent.turn.*，按类型实现会渲染不出计划卡片/thinking 指示）
+  // 类型集合原以 WebSocket_Protocol §3 事件注册表为唯一源（已删，见 tag archive/zero-v0.8.3）；
+  // post-MVP 实现时须映射到 dsh session 事件，本处仅作语义参考（须含 plan.created 与 agent.turn.*）
   type: "agent.message" | "agent.turn.started" | "agent.turn.completed" | "agent.no_progress"
       | "plan.created" | "tool.started" | "tool.completed" | "tool.failed"
       | "job.submitted" | "job.status" | "runrecord.created" | "pi_gate.required"
@@ -273,9 +264,9 @@ interface ExperimentDashboardProps {
 | 子组件 | 规格 |
 |--------|------|
 | ExperimentHeader | 白底卡片；标题 `text-xl font-semibold`；basin/event/status 行 `text-sm text-gray-500`；StackLock pill badge |
-| HydrographChart | Recharts LineChart；可交互缩放和 tooltip；多 series 叠加；y 轴标注单位；SVG 可导出 |
-| RuntimeTerminal | xterm.js 嵌入；背景 `terminal-bg`；文字 `terminal-text`；stderr 红色、warning 黄色；可收起至 1 行摘要 |
-| ParameterSetTable | 带表头排序的 shadcn/ui DataTable；最优行高亮 `success/10%` 背景；失败行 `error/10%` 背景 + `failed` badge |
+| HydrographChart | 折线图；可交互缩放和 tooltip；多 series 叠加；y 轴标注单位；SVG 可导出 |
+| RuntimeTerminal | 嵌入式终端；背景 `terminal-bg`；文字 `terminal-text`；stderr 红色、warning 黄色；可收起至 1 行摘要 |
+| ParameterSetTable | 带表头排序的数据表；最优行高亮 `success/10%` 背景；失败行 `error/10%` 背景 + `failed` badge |
 | BatchProgressGrid | v0.8.1 新增；表格或网格视图可切换；cell 颜色按状态映射 |
 
 RuntimeTerminal 高度：
@@ -322,7 +313,7 @@ interface StatusBarProps {
   data: { basin: string; event: string } | null;
   budget: CostSummary;
   jobProgress: { done: number; total: number };
-  wsStatus: "connected" | "reconnecting" | "disconnected";
+  connStatus: "connected" | "reconnecting" | "disconnected";
 }
 ```
 
@@ -330,7 +321,7 @@ interface StatusBarProps {
 
 ```text
 ⚙ TASK-0002 running │ Stack: SHUD@9b55b0c │ Data: ccw/storm_2008_02
-│ Budget: $0.72/1.00 │ Jobs: 4/6 done │ WS: connected (绿点) / reconnecting (黄闪) / disconnected (红点)
+│ Budget: $0.72/1.00 │ Jobs: 4/6 done │ Conn: connected (绿点) / reconnecting (黄闪) / disconnected (红点)
 ```
 
 ---
@@ -344,7 +335,7 @@ interface StatusBarProps {
 | 初始加载 workspace | 四栏骨架屏 (skeleton shimmer)：SideNav 5 行、Feed 3 条消息占位、Dashboard 图表区灰框、Results 4 卡片占位 |
 | 加载单个图表 | 图表区域内 spinner + `text-sm text-gray-500` "加载数据..." |
 | 加载 RunRecord 列表 | 表格区域 skeleton 行（4 行 shimmer） |
-| WebSocket 重连中 | StatusBar WS 状态变黄 + 闪烁；Feed 底部 banner "正在重连..." |
+| 服务连接重连中 | StatusBar 连接状态变黄 + 闪烁；Feed 底部 banner "正在重连..." |
 | 提交 job 等待 | 按钮 disabled + spinner 替换文字 |
 
 骨架屏规则：
@@ -370,7 +361,7 @@ skeleton 元素使用 gray-200 背景 + shimmer 动画
 
 | 场景 | 组件 | 表现 |
 |------|------|------|
-| transient (WebSocket 断线) | StatusBar + Feed banner | 黄色背景 toast "连接中断，正在重连..."，3 次失败后变红 |
+| transient (服务连接断线) | StatusBar + Feed banner | 黄色背景 toast "连接中断，正在重连..."，3 次失败后变红 |
 | task-level (RunJob 失败) | ExperimentHeader + Feed | Header 显示红色 banner "SHUD 运行失败 (exit code 1)"；Feed 中 Worker 消息红色左边框 |
 | critical (workspace 损坏) | Blocking modal | 半透明遮罩 + 居中白底 modal `shadow-lg`；标题红色；描述 + 建议操作 + "联系管理员" |
 | chart 加载失败 | 图表区域 | 替换为错误卡片：红色图标 + "图表加载失败" + retry 链接 |
@@ -438,7 +429,7 @@ RuntimeTerminal 高度也支持上下拖拽：最小 36px (1行)，最大 50vh�
 | 颜色对比度 ≥ 3:1 (大字/UI) | 主按钮 `white` on `primary-500` = 4.5:1 ✓ |
 | 不仅靠颜色传达信息 | 所有状态同时显示文字标签或图标；heatmap cell 内含数值 |
 | 键盘导航 | 所有交互元素可 Tab 聚焦；focus ring `primary-500` 2px outline offset 2px |
-| 屏幕阅读器 | shadcn/ui (Radix) 内建 aria 支持；自定义组件加 aria-label |
+| 屏幕阅读器 | 基础控件须带 aria 支持；自定义组件加 aria-label |
 
 ### 7.2 Keyboard shortcuts
 
@@ -500,7 +491,7 @@ MVP 不实现暗色模式。RuntimeTerminal 始终深色，其余始终浅色。
 
 ## 10. 图表导出
 
-所有 Recharts 图表支持：
+所有图表支持：
 
 - 右键菜单 "导出 PNG" / "导出 SVG"
 - 导出时图表标题、轴标签、图例完整
@@ -509,28 +500,22 @@ MVP 不实现暗色模式。RuntimeTerminal 始终深色，其余始终浅色。
 
 ---
 
-## 11. 组件清单与来源
+## 11. 组件清单
 
-| 组件 | 来源 | 自定义程度 |
-|------|------|-----------|
-| Button, Input, Textarea | shadcn/ui | 仅改色 |
-| Select, Dropdown, Dialog, Sheet | shadcn/ui | 仅改色 |
-| DataTable | shadcn/ui + TanStack Table | 加排序、高亮行 |
-| Tabs | shadcn/ui | 仅改色 |
-| Toast | shadcn/ui (sonner) | 仅改色 |
-| Tooltip | shadcn/ui | 仅改色 |
-| Badge | shadcn/ui | 加状态变体色 |
-| Skeleton | shadcn/ui | 直接使用 |
-| AgentMessage | 自定义 | 头像 + 消息体 + 折叠详情 |
-| HydrographChart | 自定义 (Recharts) | 完整自定义 |
-| HydrographComparison | 自定义 (Recharts) | 完整自定义 |
-| SensitivityHeatmap | 自定义 (SVG/Recharts) | 完整自定义 |
-| MetricsCard | 自定义 | 数值 + 箭头 + 标签 |
-| RuntimeTerminal | 自定义 (xterm.js) | 深色嵌入终端 |
-| BatchProgressGrid | 自定义 | 状态矩阵 + cell detail |
-| PIDecisionPanel | 自定义 | 按钮组 + textarea + refs |
-| StatusBar | 自定义 | 暗底信息条 |
-| CostMonitor | 自定义 | 数值 + 进度条 + 阈值色 |
+通用基础控件（按钮、输入、下拉、对话框、表格、toast、tooltip、badge、skeleton）不在此列；原"来源"列随 §1 删除。
+
+| 组件 | 语义 |
+|------|------|
+| AgentMessage | 头像 + 消息体 + 折叠详情 |
+| HydrographChart | 运行中全量过程线（C 栏） |
+| HydrographComparison | 最优 vs baseline 对比过程线（D 栏） |
+| SensitivityHeatmap | 参数 × 指标矩阵，失败 cell 显式标注 |
+| MetricsCard | 数值 + 箭头 + 标签 |
+| RuntimeTerminal | 深色嵌入终端，可收起至 1 行 |
+| BatchProgressGrid | 状态矩阵 + cell detail |
+| PIDecisionPanel | 按钮组 + textarea + refs |
+| StatusBar | 暗底信息条 |
+| CostMonitor | 数值 + 进度条 + 阈值色 |
 
 ---
 

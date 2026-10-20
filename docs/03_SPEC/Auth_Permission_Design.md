@@ -5,17 +5,12 @@ status: frozen
 # 认证与权限设计
 
 **状态：** P1 设计规范  
-**适用范围：** 本地 MVP、小团队部署、PI gate、API key、session  
+**适用范围：** 本地单用户 MVP（ADR-0002 D6）、PI gate、Agent 权限、审计  
 **目标：** 在不引入过重企业权限系统的前提下，保证科研治理动作不能被误触发或被 Agent 绕过。
 
 ## 1. MVP 模式
 
-建议支持两种模式：
-
-| 模式 | 场景 | 特点 |
-|---|---|---|
-| local_single_user | PI 本机或可信开发机 | 简单登录或本地 token；默认具备 PI 权限 |
-| small_team | 小组服务器 | 用户、角色、session、审批记录、API key vault |
+单用户本机模式（ADR-0002 D6 / ADR-0004 K6）：PI 本机运行，默认具备 PI 权限；多用户不做。
 
 即使是单用户，也应显式记录 PI gate 审批事件，便于复盘。
 
@@ -103,7 +98,7 @@ POST /api/pi-gates/:gateId/decision
 
 ### 关联 Schema 定义
 
-User、Session、PermissionDecision、AuditEvent 和 AgentIdentity 的完整 schema 定义见 [User_Session_And_Audit_Schema.md](User_Session_And_Audit_Schema.md)。
+User、Session、PermissionDecision、AuditEvent 和 AgentIdentity 的完整 schema 定义曾见 User_Session_And_Audit_Schema.md（已删，见 tag archive/zero-v0.8.3）。
 
 ### 4.2 Scientific change gate matrix
 
@@ -145,50 +140,6 @@ PI decision comment 必填规则（补充 4.1 通用规则）：
 | accepted report only | 可选 |
 
 完整 Scientific Change Gating 规范见 [Scientific_Change_Gating_Spec.md](Scientific_Change_Gating_Spec.md)。
-
-## 5. Session 与登录
-
-MVP 可以采用本地密码或一次性 setup token。小团队部署建议：
-
-- HttpOnly session cookie；
-- CSRF token；
-- session 过期时间；
-- 登录失败限速；
-- WebSocket 建连时校验 session；
-- server-side permission check。
-
-## 6. API key 管理
-
-LLM API key、远程服务器凭据和数据库凭据不应进入 Git 或 RunRecord。
-
-建议：
-
-```text
-.env.local             # 本地开发，不提交
-workspace/secrets/     # 加密或权限限制目录
-system keyring         # 可选
-```
-
-### 6.1 Notification secret policy
-
-SMTP / SendGrid / notification provider 凭据只允许来自：
-
-```text
-.env.local
-workspace/secrets/
-system keyring
-```
-
-不得写入 RunRecord、EvidenceReport、artifact manifest、NotificationRecord body 或 git。
-
-EvidenceReport 中只记录使用的 provider/model，不记录 key。
-
-```yaml
-llm_usage:
-  provider: openai
-  model: gpt-5.5-pro
-  api_key_ref: local_env:OPENAI_API_KEY
-```
 
 ### 配置与密钥管理规范
 
@@ -256,8 +207,6 @@ audit_event:
 
 ## 9. 验收标准
 
-- [ ] WebSocket 建连需要有效 session。
-- [ ] 前端按钮隐藏不作为权限依据，服务端重新校验。
 - [ ] Agent 不能调用 approve/reject PI gate。
 - [ ] LLM API key 不进入 RunRecord、report、artifact manifest。
 - [ ] 审批记录包含 actor、decision、comment、evidence_refs。

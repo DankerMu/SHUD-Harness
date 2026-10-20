@@ -40,8 +40,8 @@ status: living
 | 信任分级 | T0–T4 | 上下文内容信任层级（T0 系统指令 → T4 不可信外源） | [Context_Trust_And_Injection_Spec](../docs/03_SPEC/Context_Trust_And_Injection_Spec.md) |
 | 注入防护 | prompt injection defense | T4 内容降权/剥离规则（含 T1 笔记内嵌 T4 的剥离） | 同上 §2/§5.1 |
 | 会话摘要 | session digest | 落盘的对话压缩产物，T3 标记后可重注入 | 同上 + [Park_Resume_Design](../docs/03_SPEC/Park_Resume_Design.md) |
-| 上下文压缩 | `context_compression` | Zero 原生会话压缩机制，仅作 digest 载体复用 | [Zero_Reuse_Matrix](../docs/02_ARCHITECTURE/Zero_Reuse_Matrix.md) |
-| 上下文预算 | `ContextBudget` | Zero 分节上下文预算机制 | 同上 |
+| 上下文压缩 | `ctx.compaction` | 基座机制，MVP 不自定义（dsh compaction seam，默认后端 `dsh-compaction-basic`，见 dsh `docs/subsystems/compaction.md`）；领域侧唯一允许的 LLM 压缩形态是落盘的 session digest | [Context_Trust_And_Injection_Spec](../docs/03_SPEC/Context_Trust_And_Injection_Spec.md) §5.1 |
+| 上下文预算 | context budget | 领域侧分阶段组装预算；基座窗口阈值（dsh `dsh-compaction-basic` 的 `thresholdRatio`/`retainRatio`/`retainTokens`）为基座机制，MVP 不自定义 | Context_Trust_And_Injection_Spec §5 |
 | 上下文组装 | context assembly | 按信任级与预算拼装 agent 输入 | Context_Trust_And_Injection_Spec §5 |
 
 ## 4. 执行与恢复
@@ -55,7 +55,7 @@ status: living
 | 作业注册表 | `JobRegistry` / `ctx.jobs` | dsh 后台作业 seam；SHUD 自写 durable backend（detach + pid 对账）替换 `jobs-local` | [ADR-0004](../docs/adr/0004-dsh-kernel.md) K8 + 上游 `docs/subsystems/jobs.md` |
 | 发件箱 | outbox | 通知先落盘后发送的事务化模式（防蒸发） | [Notification_Design](../docs/03_SPEC/Notification_Design.md) §8 |
 | 去重键 | `dedupe_key` | 通知幂等键：`task_id + trigger + target_id + recipient` | 同上 §5 + [Idempotency_Concurrency_Locking_Spec](../docs/03_SPEC/Idempotency_Concurrency_Locking_Spec.md) §4 |
-| 快照 | snapshot | workspace 状态快照（`latest_seq` 必填，事件回放锚点） | [Workspace_Snapshot_And_Recovery_Spec](../docs/03_SPEC/Workspace_Snapshot_And_Recovery_Spec.md) |
+| 快照 | snapshot | workspace 状态快照（`latest_seq` 必填，事件回放锚点） | Workspace_Snapshot_And_Recovery_Spec（已删，见 tag archive/zero-v0.8.3） |
 
 ## 5. 治理与控制
 
@@ -69,7 +69,7 @@ status: living
 | 停机条件 | stop conditions | Control Kernel 的确定性终止判据集 | Control_Kernel §5 |
 | 无进展判定 | no-progress detector | 停机条件之一：重复无效动作检测 | Control_Kernel §5.1 |
 | 新颖失败预算 | novelty-failure budget | 同类新颖失败 ≤3 次即停 | Control_Kernel §5.1 |
-| 冻结 | spec freeze | 规格面封版（2026-07-02）：仅收 bug 修正与 ADR 例外 | [Phased_Spec_Activation](../docs/Phased_Spec_Activation.md) 头部 |
+| 冻结 | spec freeze | 规格面封版（2026-07-02）：仅收 bug 修正与 ADR 例外 | Phased_Spec_Activation 头部（已删，见 tag archive/zero-v0.8.3） |
 | 投影 | projection | 权威源之外的 schema 副本，只读、改动先落权威源 | [CANONICAL_CONTRACTS](../docs/00_INDEX/CANONICAL_CONTRACTS.md) §3 |
 | 权威源 | canonical source | 每类工程事实的唯一定义处 | 同上 §1 |
 | 推理预算 | `InferenceBudget` | cheap/normal/deep 三档软监控，PI 决定中止 | [Cost_Inference_Budget](../docs/03_SPEC/Cost_Inference_Budget.md) |
@@ -95,7 +95,7 @@ status: living
 | 中文 | 标识符 | 定义 | 权威出处 |
 |---|---|---|---|
 | 记忆两级 | two-tier memory | 普通笔记直写 draft；证据类需 PI review | [Memory_Skills_Lite](../docs/03_SPEC/Memory_Skills_Lite.md) |
-| 记忆状态机 | draft / accepted / retired | 领域侧状态；映射 Zero 原生 draft/verified/archived/conflict | 同上 §2.1 |
+| 记忆状态机 | draft / accepted / retired | 领域侧状态；agent 不可自提 accepted | 同上 §2 |
 | 技能三阶段 | draft → active → retired | Skill 生命周期，不搞 6 级 | 同上 |
 | 周期清扫 | gardening / sweep | 周期 job 提名过时笔记/技能的退休候选，PI 批准 | 同上 §9 |
 | 清扫半衰期 | cleanup half-life | 退休候选产生→处置的中位时长（清扫有效性指标） | 同上 §9 |

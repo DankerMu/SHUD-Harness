@@ -57,7 +57,7 @@ HARNESS_DEFAULT_NOTIFY_EMAIL
 HARNESS_PUBLIC_BASE_URL
 OPENAI_API_KEY
 ANTHROPIC_API_KEY
-GLM_API_KEY
+DMXAPI_KEY
 SMTP_HOST
 SMTP_PORT
 SMTP_USER
@@ -67,8 +67,9 @@ SLURM_SSH_HOST
 SLURM_SSH_USER
 ```
 
-> `GLM_API_KEY` 为运行时模型 GLM 5.2 的 key（`api_key_ref: env:GLM_API_KEY`，purpose=llm）——
-> ADR-0002 D9 / M1 grill 定案补行（2026-07-03，账本例外批次 4）。
+> `DMXAPI_KEY` 为运行时模型 DeepSeek Flash 经 DMXAPI 中转的 key（`api_key_ref: env:DMXAPI_KEY`，purpose=llm；
+> `llm-deepseek` 配置 `apiKeyEnv: DMXAPI_KEY`、`baseURL: https://www.dmxapi.cn`、请求别名 `deepseek-flash-guan`）——
+> ADR-0004 K3（取代 ADR-0002 D9 的 `GLM_API_KEY`）。
 
 ## 5. Redaction policy
 
@@ -102,34 +103,6 @@ harness:
 ```
 
 `renv.lock` 缺失时 `runtime.r_packages_lock` 为 `null`；StackLock 不记录 secret value。
-
-## 7. Observability / Operations 环境变量
-
-```text
-HARNESS_OPS_DASHBOARD_ENABLED
-HARNESS_HEALTH_DEEP_ENABLED
-HARNESS_LOG_DIR
-HARNESS_LOG_RETENTION_DAYS
-HARNESS_ALERT_DISK_WARN_PERCENT
-HARNESS_ALERT_DISK_CRITICAL_PERCENT
-HARNESS_ALERT_DISK_CRITICAL_GB
-HARNESS_MAX_CONCURRENT_LOCAL_JOBS
-HARNESS_MAX_WS_CONNECTIONS
-HARNESS_DUCKDB_PATH
-HARNESS_DUCKDB_BACKUP_DIR
-HARNESS_PACKAGE_MANAGER_VERSION
-```
-
-## 8. Dependency config
-
-```yaml
-dependency_policy:
-  package_manager: bun
-  required_lockfile: true
-  frozen_install_in_ci: true
-  allow_floating_latest: false
-  duckdb_client_decision_required: true
-```
 
 ## 9. Secret leak response
 

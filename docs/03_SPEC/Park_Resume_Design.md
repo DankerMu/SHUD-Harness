@@ -139,9 +139,7 @@ workspace/tasks/<task_id>/parked_state.yaml
 
 Job watcher 是非 LLM 后台进程，负责轮询或订阅 job 状态。它不做科学解释，只做状态转换和事件推送。
 
-实现缝（zero@13e25c1）：上游 `BackgroundToolTaskSink`（thresholdMs 超阈接管执行 +
-`background_tool_completed` 消息回注）即本 watcher 的接入点——local_job 后端实现该 sink，
-完成事件驱动 collect/resume，不必在 loop 外自建通知通道（[Zero_Reuse_Matrix §3](../02_ARCHITECTURE/Zero_Reuse_Matrix.md)）。
+实现缝 = dsh `ctx.jobs`（JobRegistry 契约），由本项目自写的 durable backend 承载（[ADR-0004 K8](../adr/0004-dsh-kernel.md)）。
 
 ### 4.1 本地 job
 

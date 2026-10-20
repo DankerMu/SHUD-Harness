@@ -8,9 +8,9 @@ reset 时只有本表列出的代码资产可以从 `archive/zero-v0.8.3` 搬入
 
 | 资产 | 旧路径（tag archive/zero-v0.8.3） | 新落点 | 处置 | 理由 |
 |---|---|---|---|---|
-| 8 对象 Zod schema | `packages/core/src/domain/schemas/` | `packages/dsh-shud-core/src/schemas/` | 移植，删除 Zero 引用 | 运行时无关 |
-| policy-gate-core 纯函数 + 单测 | `packages/core/src/tools/policy-gate-core.ts`（1.5K 行）+ `.test.ts` | `packages/dsh-shud-core/src/governance/` | 移植，重估体量 | 直接挂 `tools/pre-execute` |
-| role→tool_id 映射与快照 | `packages/core/src/tools/role-tool-map*.ts` | `packages/dsh-shud-presets/` | 移植为 preset 的 `ctx.tools.restrict()` 配置 | 角色工具面 |
+| 8 对象 Zod schema | `packages/core/src/domain/schemas/` | `packages/dsh-shud-core/src/schemas/` | ✅ 已移植（reset 提交）；删除 `StackLock.repos.zero` | 运行时无关。**已记录漂移**：spec 已按 K4 把 `StackLock.llm` 改为三字段并给 RunRecord 加 `llm.response_model`，代码侧 `stack-lock.ts` 仍是旧 llm 字段、RunRecord schema 尚不存在——M3（StackLock/RunRecord 交付）时对齐 |
+| policy-gate-core 纯函数 + 单测 | `packages/core/src/tools/policy-gate-core.ts`（1.5K 行）+ `.test.ts` | `packages/dsh-shud-core/src/governance/` | ✅ 已移植；`DEFAULT_SHUD_POLICY_GATE_CONTEXT`（三条 spawn 规则的纯数据）从 registry 一并搬入；体量重估留 M1 | 直接挂 `tools/pre-execute`。两份文件 >1000 行，已在 `.large-file-guard.json` 显式排除并注明理由 |
+| role→tool_id 映射与快照 | `packages/core/src/tools/role-tool-map*.ts` | `packages/dsh-shud-core/src/governance/`（与 policy-gate-core 互相引用类型，必须同包） | ✅ 已移植；M3 的 presets 包从 core 消费它生成 `ctx.tools.restrict()` 配置 | 角色工具面 |
 | 治理措辞规则 | spec 与 prompt 文本 | `packages/dsh-shud-core/src/governance/wording.ts` | 重写为常量 + 测试 | 校准 ≠ 验证等四条不变式 |
 | Zero 参照、策略门注册层 | `packages/core/src/zero-reference*.ts`、`policy-gate-registry.ts`（2.9K 行） | — | 不搬 | dsh waterfall 取代 |
 | raw-data-sandbox 包装 | `packages/core/src/tools/raw-data-sandbox.ts`（5.7K 行） | — | 不搬 | `data/raw` 置于 root 之外由 Seatbelt 守 |
@@ -19,4 +19,6 @@ reset 时只有本表列出的代码资产可以从 `archive/zero-v0.8.3` 搬入
 | backend（Hono）/ frontend（React） | `packages/backend`、`packages/frontend` | — | 不搬 | ADR-0004 K2 |
 | GLM provider 脚本 | `scripts/glm-provider/` | — | 不搬 | 模型改为 DMXAPI（K3） |
 | spike 插件 `shud-raw-guard` | `../dsh-spike/plugins/shud-raw-guard/index.js` | `packages/dsh-shud-raw-guard/` | TS 化 + 单测 | spike 1.2 已验证 |
-| spike overlay | `../dsh-spike/overlays/*.yml` | `profile/shud/cordis.patch.yml` | 合并 | 模型路由 + 出站关闭 |
+| spike overlay | `../dsh-spike/overlays/*.yml` | `profile/shud/cordis.patch.yml` | ✅ 已合并（仅 dmxapi-flash；raw-guard 挂载行随 M1 包落地时加入，不留占位） | 模型路由 + 出站关闭（只关 `session-log-deepseek`，K9；spike 里关掉的 otel/inventory 两行按 K9 不带入） |
+
+移植时的运行时调整：测试从 `bun:test` 改 `vitest`；包内相对导入带 `.ts` 扩展名（`rewriteRelativeImportExtensions`，Node 24 直接运行 `.ts` 的 `scripts/schema/generate.ts` 与 `tsc` 产出都能解析）；`core-schemas.test.ts` 的 `import.meta.dir` 改为 `fileURLToPath(import.meta.url)`；`tsc --noEmit` 不含 `*.test.ts`（与旧根 tsconfig 一致，测试由 vitest 负责）。
