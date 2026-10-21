@@ -60,7 +60,7 @@
 - **THEN** 不作判定，返回 `next()` 的结果
 
 ### Requirement: Shell command touches raw
-对 `bash`（含 persistent 变体，同 id）与 `pwsh`，"触及 raw" SHALL 定义为：`command` 文本包含任一 raw 目录的配置原文或其解析后绝对路径且该文本的后继字符不是路径名字符（`[A-Za-z0-9._-]`）或已到行尾，**或** 有效工作目录 `realpath(workdir ?? session cwd)` 位于任一 raw 目录内。glob、brace、反引号、逗号等 shell 元字符紧随 raw 文本时 SHALL 视为触及（fail-closed）；兄弟路径（`<raw>x`、`<raw>.bak`、`<raw>_old`）SHALL NOT 视为触及。不触及 raw 时 SHALL 委托下一个监听器。判定只看文本与工作目录，有两处已记录的漏报（raw 位于 workspace 外时由沙箱兜底）：persistent bash 先 `cd` 进 raw 再以相对路径写入不被识别；比 raw 原文更短的 glob 前缀（如 `rm -rf protecte*`）不含原文，不被识别。
+对 `bash`（含 persistent 变体，同 id）与 `pwsh`，"触及 raw" SHALL 定义为：`command` 文本包含任一 raw 目录的配置原文或其解析后绝对路径且该文本的后继字符不是路径名字符（`[A-Za-z0-9._-]`）或已到行尾，**或** `command` 文本经路径等价规范化（连续 `/` 折叠为一个、作为路径段的 `/.` 去除）后满足前一条（比较时配置原文同样做该规范化），**或** 有效工作目录 `realpath(workdir ?? session cwd)` 位于任一 raw 目录内。raw 根所在文件系统大小写不敏感时（探测：raw 根的另一种大小写拼写——含小写字母时取全大写，否则取全小写——能被 realpath 解析回同一路径；根不存在、解析失败或根中无字母时视为敏感；每次判定重新探测，不缓存），原文与绝对路径的匹配 SHALL 不区分大小写；文件系统大小写敏感时大小写变体 SHALL NOT 视为触及（不误伤同名异例目录）。glob、brace、反引号、逗号等 shell 元字符紧随 raw 文本时 SHALL 视为触及（fail-closed）；兄弟路径（`<raw>x`、`<raw>.bak`、`<raw>_old`）SHALL NOT 视为触及。不触及 raw 时 SHALL 委托下一个监听器。判定只看文本与工作目录，有三处已记录的漏报（raw 位于 workspace 外时由沙箱兜底）：persistent bash 先 `cd` 进 raw 再以相对路径写入不被识别；比 raw 原文更短的 glob 前缀（如 `rm -rf protecte*`）不含原文，不被识别；`..` 回溯写法（如 `data/x/../raw`）不做解析，不被识别。
 
 #### Scenario: absolute raw path in command
 - **WHEN** 配置 `rawDirs: ["/data/raw"]`，调用 `bash`，`command` 为 `head /data/raw/obs.csv`
@@ -93,6 +93,22 @@
 #### Scenario: unrelated command passes through
 - **WHEN** 调用 `bash`，`command` 为 `echo ok > derived.txt`
 - **THEN** 不作判定，返回 `next()` 的结果
+
+#### Scenario: dot and double-slash spellings are touching
+- **WHEN** 默认配置，调用 `bash`，`command` 为 `rm -rf data/./raw`、`rm -rf data//raw` 或 `cat data/./raw/x`
+- **THEN** 前两者决策 `kind` 为 `deny`，后者为 `ask`；`rm data/raw-x`、`rm data/rawx/y` 仍返回 `next()` 的结果
+
+#### Scenario: case variant on a case-insensitive filesystem is touching
+- **WHEN** raw 根所在文件系统大小写不敏感（如 macOS 默认 APFS），配置 `rawDirs: ["protected"]`，调用 `bash`，`command` 为 `rm -rf PROTECTED`、`rm -rf Protected/x` 或 `cat Protected/x`；或默认配置下 `command` 为 `rm -rf DATA/RAW`
+- **THEN** `rm` 决策 `kind` 为 `deny`，`cat` 为 `ask`
+
+#### Scenario: case variant on a case-sensitive filesystem is a documented gap
+- **WHEN** raw 根所在文件系统大小写敏感，或 raw 根尚不存在，`command` 为 `rm -rf PROTECTED`（`rawDirs: ["protected"]`）
+- **THEN** 不作判定，返回 `next()` 的结果（敏感文件系统上大写拼写是另一个路径；根不存在时无法确认等价，按敏感处理）；敏感文件系统上另建同名异例目录 `PROTECTED/` 时同样返回 `next()` 的结果
+
+#### Scenario: parent traversal spelling is a documented gap
+- **WHEN** 默认配置，调用 `bash`，`command` 为 `rm -rf data/x/../raw`
+- **THEN** 不作判定，返回 `next()` 的结果（已记录漏报；仅当 raw 在 workspace 外时由沙箱兜底）
 
 ### Requirement: Shell write under raw is denied
 触及 raw 且命令含写动词时策略门 SHALL 返回 `deny`，`reason` 含 `immutable` 并指向 `read` 工具。写动词 SHALL 包括：POSIX 动词 `rm mv cp tee touch mkdir chmod chown chgrp truncate dd install rsync ln unlink rmdir shred gzip gunzip bzip2 xz unzip`（不区分大小写；动词前允许任意路径前缀、反斜杠转义、引号或 `sudo` 等前导词，即动词前一个字符不是 `[A-Za-z0-9_.-]` 即可——`.` 排除使 `x.xz`、`x.dd` 这类文件名后缀不算动词；动词后为行尾或 `[\s;&|)}'"`]` 之一，因此管道末尾、子 shell、`sh -c '…'` 引号内、pwsh 脚本块 `{… | del}` 内的动词也算）；工具形态 `git clean|checkout|restore`、`tar -x…`、`sort -o`、`awk -i`、`sed -i`/`--in-place`、`perl -i`/`-e`、`python -c`、`Rscript -e`/`--expr`、`node -e`/`--eval`、以 heredoc 喂入的解释器（`python|Rscript|node|perl - <<`）——这一组工具名前同样要求非路径名字符，以排除 `a.tar -X` 这类文件名碰撞；GNU 前缀变体 `gsed -i`、`gawk -i`、`gtar -x` 与 `ipython -c` 视同原工具（`gsed -i <raw>/x` 必须 deny；heredoc 形态不含 `i?` 前缀，`ipython - <<` 落 `ask`）；`>`/`>>` 重定向（目标为 `/dev/null` 的丢弃型重定向 `>`、`>>`、`N>`、`N>>`、`&>`、`&>>` 除外：它们不写任何文件，判定时先剥除（只剥 `&`/`>` 起的部分，不吞前导 fd 数字：`bzip2>/dev/null <raw>/x` 中的 `bzip2` 仍是写动词）再看其余写动词与重定向；`/dev/nullx`、`/dev/null/x` 不是 `/dev/null`，不剥除）；`open(`；破坏性标志 `-delete`、`--remove-files`（前导为行首或空白，后继与动词相同）；pwsh cmdlet `Remove-Item Move-Item Copy-Item Rename-Item New-Item Set-Content Add-Content Clear-Content Clear-Item Out-File` 与别名 `del erase ri rd ren rni move mi copy cpi ni clc cli`（不区分大小写；仅对 `pwsh` 工具、或 `bash` 命令文本含 `pwsh`/`powershell` 词时生效——这些别名在 bash 里不是命令，`grep -r move <raw>` 必须仍是 `ask`）。该清单是启发式 denylist 而非穷举：不在清单内的写法落 `ask`（仍经 PI 审批），raw 在 workspace 外时由沙箱兜底。raw 仅作为源的 `cp`/重定向（指写到真实文件的重定向，如 `cat <raw>/x | sort > out.txt`）也 deny，这是已接受的 deny 方向误报；`sandbox_permissions` SHALL NOT 改变判定。

@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Shell command touches raw
-对 `bash`（含 persistent 变体，同 id）与 `pwsh`，"触及 raw" SHALL 定义为：`command` 文本包含任一 raw 目录的配置原文或其解析后绝对路径且该文本的后继字符不是路径名字符（`[A-Za-z0-9._-]`）或已到行尾，**或** `command` 文本经路径等价规范化（连续 `/` 折叠为一个、作为路径段的 `/.` 去除）后满足前一条，**或** 有效工作目录 `realpath(workdir ?? session cwd)` 位于任一 raw 目录内。raw 根所在文件系统大小写不敏感时（探测：raw 根的另一种大小写拼写——含小写字母时取全大写，否则取全小写——能被 realpath 解析回同一路径；根不存在、解析失败或根中无字母时视为敏感；每次判定重新探测，不缓存），原文与绝对路径的匹配 SHALL 不区分大小写；文件系统大小写敏感时大小写变体 SHALL NOT 视为触及（不误伤同名异例目录）。glob、brace、反引号、逗号等 shell 元字符紧随 raw 文本时 SHALL 视为触及（fail-closed）；兄弟路径（`<raw>x`、`<raw>.bak`、`<raw>_old`）SHALL NOT 视为触及。不触及 raw 时 SHALL 委托下一个监听器。判定只看文本与工作目录，有三处已记录的漏报（raw 位于 workspace 外时由沙箱兜底）：persistent bash 先 `cd` 进 raw 再以相对路径写入不被识别；比 raw 原文更短的 glob 前缀（如 `rm -rf protecte*`）不含原文，不被识别；`..` 回溯写法（如 `data/x/../raw`）不做解析，不被识别。
+对 `bash`（含 persistent 变体，同 id）与 `pwsh`，"触及 raw" SHALL 定义为：`command` 文本包含任一 raw 目录的配置原文或其解析后绝对路径且该文本的后继字符不是路径名字符（`[A-Za-z0-9._-]`）或已到行尾，**或** `command` 文本经路径等价规范化（连续 `/` 折叠为一个、作为路径段的 `/.` 去除）后满足前一条（比较时配置原文同样做该规范化），**或** 有效工作目录 `realpath(workdir ?? session cwd)` 位于任一 raw 目录内。raw 根所在文件系统大小写不敏感时（探测：raw 根的另一种大小写拼写——含小写字母时取全大写，否则取全小写——能被 realpath 解析回同一路径；根不存在、解析失败或根中无字母时视为敏感；每次判定重新探测，不缓存），原文与绝对路径的匹配 SHALL 不区分大小写；文件系统大小写敏感时大小写变体 SHALL NOT 视为触及（不误伤同名异例目录）。glob、brace、反引号、逗号等 shell 元字符紧随 raw 文本时 SHALL 视为触及（fail-closed）；兄弟路径（`<raw>x`、`<raw>.bak`、`<raw>_old`）SHALL NOT 视为触及。不触及 raw 时 SHALL 委托下一个监听器。判定只看文本与工作目录，有三处已记录的漏报（raw 位于 workspace 外时由沙箱兜底）：persistent bash 先 `cd` 进 raw 再以相对路径写入不被识别；比 raw 原文更短的 glob 前缀（如 `rm -rf protecte*`）不含原文，不被识别；`..` 回溯写法（如 `data/x/../raw`）不做解析，不被识别。
 
 #### Scenario: absolute raw path in command
 - **WHEN** 配置 `rawDirs: ["/data/raw"]`，调用 `bash`，`command` 为 `head /data/raw/obs.csv`
