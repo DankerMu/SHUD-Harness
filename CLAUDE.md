@@ -72,7 +72,7 @@ SHUD-Harness/
 - 日常：`pnpm run check` 是唯一默认闸（typecheck → lint → format → coverage → dup → deadcode → naming → schema drift → docs gate）。改 Zod 后 `pnpm run schema:generate`；改 `instructions/agents/*.md` 后 `pnpm run instructions:render`；两者产物都由 CI 比对。
 - 运行时：`pnpm run profile:smoke`（dsh 启动 + 路由断言）、`pnpm run shud:tiny`（ccw 30 天）本机运行；CI 有 npm 版 dsh（`profile-smoke` job），无 SHUD。
 - 环境：`DMXAPI_KEY` 只经环境变量；本机跑 dsh/gh 前 `unset ALL_PROXY`；`DSH_HOME` 指向临时目录避免污染真实会话。
-- 流程：一个 issue 一个分支/worktree，走 `subagent-workflow`；PR ≤400 行（CI 阻断，`size-exempt` label 记录例外）；提交信息 conventional（commit-msg 钩子）；merge 需 CI `all-checks-passed` + PI 功能验收。
+- 流程：一个 issue 一个分支/worktree，走 `subagent-workflow`；PR ≤400 行（CI 阻断，`size-exempt` label 记录例外）；提交信息 conventional（commit-msg 钩子）；通常 merge 需 CI `all-checks-passed` + PI 功能验收。**Epic #210 例外**：子 PR 完成规定工程验证与审查后可 merge、关闭实现 issue；PI 在整个 Epic 结束时统一功能验收，Epic 关闭与 OpenSpec 归档仍等 PI 明确通过（[ADR-0005](docs/adr/implemented/0005-epic-210-acceptance.md)）。
 
 ## Verification Matrix
 
@@ -179,7 +179,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 
 **不得**：下科学结论（单流域提升 ≠ 模型改进；calibration ≠ 结构验证）· 自行批准 PI gate · 改物理方程/默认参数/benchmark baseline 而不经 `ask` · 放宽任何闸以让自己的改动通过 · dsh 升级绕开 `chore(dsh-upgrade)` issue。
 
-**升级**：阻塞于需 PI 判断的问题时，写明问题与证据后停下；merge 由 PI 做功能验收。决策记录四区见 `docs/adr/README.md`。
+**升级**：阻塞于需 PI 判断的问题时，写明问题与证据后停下；PI 功能验收时点按 Development Workflow（Epic #210 为整 Epic 验收，合并子 PR 不等于验收通过）。决策记录四区见 `docs/adr/README.md`。
 
 ## Enforcement Index
 
@@ -208,8 +208,8 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | raw-guard 五探针 / raw 字节不变 | `scripts/runtime/raw-guard-probes.sh` | 本机 `pnpm run raw-guard:probes`（需 `DMXAPI_KEY`） | block |
 | ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
-| merge = PI 功能验收 | GitHub PR | GitHub rulesets（PR required） | gate |
-| 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | review-only until M1 | review-only |
+| PI 功能验收（Epic #210 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 验收记录；工程门禁不变 | gate |
+| 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
 | docs 随代码改 | PR 模板 | review-only | review-only |
 | 科学措辞规则（M3 转测试常量） | 报告生成 | review-only until M3 | review-only |
 | 运行时不变量伴生（M2 起入矩阵） | reviewer 清单 | review-only until M2 | review-only |
