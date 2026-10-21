@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { devNull, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { collectRepositoryRevision } from "./repository-revision.ts";
 
@@ -182,6 +182,70 @@ describe("collectRepositoryRevision", () => {
     expect(() => collectRepositoryRevision(repo)).toThrow(`cannot read git status at ${repo}: `);
   });
 
+  test("a status overflow on stderr alone (empty stdout) throws instead of marking dirty", () => {
+    const repo = committedRepo("stderr-flood");
+    // ~1.1 MB of short warning lines on stderr, above execFileSync's 1 MiB default; nothing on stdout.
+    shimGit(
+      "status",
+      `yes "warning: could not open directory 'x/': Permission denied" | head -n 20000 >&2; exit 0`,
+    );
+
+    expect(() => collectRepositoryRevision(repo)).toThrow(
+      `cannot read git status at ${repo}: warning: could not open directory`,
+    );
+  });
+
+  test("a non-overflow status failure throws even when stdout has output", () => {
+    const repo = committedRepo("status-128");
+    shimGit("status", "printf '?? x\\n'; exit 128");
+
+    const error = thrownBy(() => collectRepositoryRevision(repo));
+    expect(error.message).toContain(`cannot read git status at ${repo}: `);
+    expect(error.cause).toMatchObject({ status: 128 });
+  });
+
+  test("symbolic-ref failing with a status other than 1 throws with the path", () => {
+    const repo = committedRepo("symref-128");
+    shimGit("symbolic-ref", "echo 'fatal: simulated symbolic-ref failure' >&2; exit 128");
+
+    const error = thrownBy(() => collectRepositoryRevision(repo));
+    expect(error.message).toBe(
+      `cannot read git branch at ${repo}: fatal: simulated symbolic-ref failure`,
+    );
+    expect(error.cause).toMatchObject({ status: 128 });
+  });
+
+  test("symbolic-ref exiting 1 with output is not mistaken for a detached HEAD", () => {
+    const repo = committedRepo("symref-1-output");
+    shimGit("symbolic-ref", "echo refs/heads/x; exit 1");
+
+    expect(() => collectRepositoryRevision(repo)).toThrow(`cannot read git branch at ${repo}: `);
+  });
+
+  test("HEAD pointing at a tag throws instead of reporting the tag as a branch", () => {
+    const repo = committedRepo("head-tag");
+    git(repo, "tag", "v1");
+    writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/tags/v1\n");
+
+    expect(() => collectRepositoryRevision(repo)).toThrow(`cannot read git branch at ${repo}: `);
+  });
+
+  test("a tag with the same name as the current branch does not change the branch name", () => {
+    const repo = committedRepo("same-name-tag");
+    git(repo, "checkout", "-q", "-b", "v1");
+    git(repo, "tag", "v1");
+
+    expect(collectRepositoryRevision(repo).branch).toBe("v1");
+  });
+
+  test("HEAD pointing at a branch named HEAD throws instead of reading as detached", () => {
+    const repo = committedRepo("branch-named-head");
+    git(repo, "update-ref", "refs/heads/HEAD", git(repo, "rev-parse", "HEAD"));
+    writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/HEAD\n");
+
+    expect(() => collectRepositoryRevision(repo)).toThrow(`cannot read git branch at ${repo}: `);
+  });
+
   test.runIf(caseInsensitive)(
     "a case-variant spelling of the repository root is accepted on a case-insensitive filesystem",
     () => {
@@ -231,4 +295,29 @@ function committedRepo(name: string, content = "v1\n"): string {
 
 function sha256(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+// Puts a `git` shim first on PATH that runs `action` when the collector's subcommand matches
+// exactly (`$5` in `git -C <repo> -c core.fsmonitor=false <sub> ...`) and otherwise execs the
+// real git. Call after the fixture repos are built; afterEach's unstubAllEnvs restores PATH.
+function shimGit(subcommand: string, action: string): void {
+  const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+  const shimDir = join(root, "shim");
+  mkdirSync(shimDir);
+  writeFileSync(
+    join(shimDir, "git"),
+    `#!/bin/sh\nif [ "$5" = "${subcommand}" ]; then\n${action}\nfi\nexec "${realGit}" "$@"\n`,
+    { mode: 0o755 },
+  );
+  vi.stubEnv("PATH", `${shimDir}${delimiter}${process.env.PATH ?? ""}`);
+}
+
+function thrownBy(action: () => unknown): Error {
+  try {
+    action();
+  } catch (error) {
+    if (error instanceof Error) return error;
+    throw error;
+  }
+  throw new Error("expected the action to throw");
 }
