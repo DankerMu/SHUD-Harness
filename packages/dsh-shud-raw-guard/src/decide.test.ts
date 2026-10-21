@@ -207,7 +207,6 @@ const shellCases: [string, Kind][] = [
   ["rm -rf protecte*", "next"],
   ...POSIX_WRITES.map((verb): [string, Kind] => [`${verb} protected/x derived/x`, "deny"]),
   ...POSIX_WRITES.map((verb): [string, Kind] => [`${verb.toUpperCase()} protected/x`, "deny"]),
-  ["RM protected/x", "deny"],
   ["sh -c 'ls protected | xargs rm'", "deny"],
   ["echo $(ls protected | xargs rm)", "deny"],
   ["ls protected | xargs rm;echo", "deny"],
@@ -259,12 +258,33 @@ const pwshCases: [string, Kind][] = [
   ["ni protected/x", "deny"],
   ["Clear-Item protected/x", "deny"],
   ["Get-ChildItem protected/third x", "ask"],
+  ["gci protected | %{$_|del}", "deny"],
+  ["Get-ChildItem protected | ForEach-Object {$_ | Remove-Item}", "deny"],
+];
+// Bash-only: pwsh aliases (move, copy, ni) are not bash commands.
+const bashCases: [string, Kind][] = [
+  ["grep -r move protected", "ask"],
+  ["grep -n copy protected/README", "ask"],
+  ["file protected/ni", "ask"],
+  ["cat protected/x.xz", "ask"],
+  ["xzcat protected/x.xz", "ask"],
+  ["tar -tzf protected/a.tgz", "ask"],
+  ["tar -tvf protected/a.tar -X excl", "ask"],
+  ["git log -- protected", "ask"],
+  ["awk '{print $1}' protected/x", "ask"],
+  ["sed -n 1,5p protected/x", "ask"],
+  ["Rscript analyse.R protected/x", "ask"],
+  ["pwsh -c 'gci protected | del'", "deny"],
+  ["Rscript - <<'EOF'\nunlink(\"protected/x\")\nEOF", "deny"],
+  ['node - <<\'EOF\'\nrequire("fs").rmSync("protected")\nEOF', "deny"],
+  ["perl - <<'EOF'\nunlink \"protected/x\"\nEOF", "deny"],
 ];
 
 test.each([
   ...shellCases.map(([command, kind]) => ["bash", command, kind]),
   ...shellCases.map(([command, kind]) => ["pwsh", command, kind]),
   ...pwshCases.map(([command, kind]) => ["pwsh", command, kind]),
+  ...bashCases.map(([command, kind]) => ["bash", command, kind]),
 ])("%s `%s` -> %s (#245 boundary and write verbs)", (name, command, kind) => {
   const result = decide(name, { command });
   expect(result.kind).toBe(kind);

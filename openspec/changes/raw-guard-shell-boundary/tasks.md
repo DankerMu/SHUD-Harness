@@ -3,7 +3,7 @@
 ## 1. Decision core (`packages/dsh-shud-raw-guard`)
 
 - [x] 1.1 `decide.test.ts`：按 design "Required evidence" 新增用例，动词/cmdlet/别名**按完整清单逐项迭代**（参照 `:63` 的 `split(" ")` 循环，不得只抽样）：glob/brace/反引号提及、短前缀 glob 为 next（已记录漏报）、兄弟路径 next、前缀/转义/`sudo` 动词、`unlink rmdir shred`、`-delete`（含 `-delete;`）/`--remove-files`、管道末尾动词（bash `xargs rm`、pwsh `| Remove-Item`）、pwsh 小写 cmdlet、`--rm`/`arm` 非动词、默认 rawDirs 下 `*`/`?`/`{,}` 三形态删除 deny 与 `*` 读 ask（字符串拼接构造）；先对当前源码运行并在报告中列出红的用例清单。
-- [x] 1.2 `decide.ts`：提及边界改为 `(?![A-Za-z0-9._-])`；`WRITE_VERBS` 改为 lookbehind 锚定、收尾 `(?=\s|$)`、补动词、补标志（后继 `(?=$|[\s;&|)])`）、补 pwsh cmdlet/别名（不区分大小写）；不引入 `\S*` 贪婪前缀。全部测试绿。
+- [x] 1.2 `decide.ts`：提及边界改为 `(?![A-Za-z0-9._-])`；`WRITE_VERBS` 改为 lookbehind `(?<![A-Za-z0-9_.-])` 锚定、动词/标志/工具形态/pwsh 共用收尾 `(?=$|[\s;&|)}'"\`])`、补动词、补标志、补解释器一行式与 heredoc、补 pwsh cmdlet/别名（不区分大小写，仅 pwsh 工具或命令含 `pwsh|powershell` 时生效）；不引入 `\S*` 贪婪前缀。全部测试绿。
 - [x] 1.3 `pnpm run check` 绿（覆盖率、knip、dup、lint 不放宽）。
 
 Suggested fixture level: expanded

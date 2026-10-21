@@ -38,6 +38,6 @@ Non-goals: 变量/命令替换混淆（`$D/raw`、`eval`、base64）；**比 raw
 Review focus:
 1. 新边界 `(?![A-Za-z0-9._-])` 是否把所有 shell 元字符都归为提及，且兄弟目录仍为 `next`（两方向都有测试）。
 2. 动词 lookbehind 是否误伤含 `rm`/`dd` 子串的词（`arm`、`--rm`、`add`、`sudo` 自身），是否有灾难性回溯（无 `\S*` 贪婪前缀）。
-3. `-delete`/`--remove-files` 标志的后继 `(?=$|[\s;&|)])` 是否覆盖 `-delete;` 等形态，且 `--delete-after`（rsync 本身已是动词）不影响判定。
+3. 动词/标志/工具/pwsh 共用的后继 `(?=$|[\s;&|)}'"\`])` 是否覆盖 `-delete;`、`{…|del}` 等形态，且 `--delete-after`（rsync 本身已是动词）不影响判定；pwsh 别名只在 pwsh 上下文生效，bash `grep -r move <raw>` 仍 ask。
 4. spec 清单与 `WRITE_VERBS` 常量逐项一致，无一项只在一边。
 5. 每条新测试对修复前源码为红（implementer 报告需列出）。

@@ -38,7 +38,7 @@
 - **THEN** 不作判定，返回 `next()` 的结果
 
 ### Requirement: Shell write under raw is denied
-触及 raw 且命令含写动词时策略门 SHALL 返回 `deny`，`reason` 含 `immutable` 并指向 `read` 工具。写动词 SHALL 包括：POSIX 动词 `rm mv cp tee touch mkdir chmod chown chgrp truncate dd install rsync ln unlink rmdir shred gzip gunzip bzip2 xz unzip`（不区分大小写；动词前允许任意路径前缀、反斜杠转义、引号或 `sudo` 等前导词，即动词前一个字符不是 `[A-Za-z0-9_-]` 即可；动词后为行尾或 `[\s;&|)'"`]` 之一，因此管道末尾、子 shell、`sh -c '…'` 引号内的动词也算）；`git clean|checkout|restore`、`tar -x…`、`sort -o`、`awk -i`；`>`/`>>` 重定向；`sed -i`/`--in-place`、`perl -i`/`-e`、`python -c`、`Rscript -e`/`--expr`、`node -e`/`--eval`、以 heredoc 喂入的解释器（`python|Rscript|node|perl - <<`）、`open(`；破坏性标志 `-delete`、`--remove-files`（前导为行首或空白，后继与动词相同）；pwsh cmdlet `Remove-Item Move-Item Copy-Item Rename-Item New-Item Set-Content Add-Content Clear-Content Clear-Item Out-File` 与别名 `del erase ri rd ren rni move mi copy cpi ni clc cli`（不区分大小写）。该清单是启发式 denylist 而非穷举：不在清单内的写法落 `ask`（仍经 PI 审批），raw 在 workspace 外时由沙箱兜底。raw 仅作为源的 `cp`/重定向也 deny，这是已接受的 deny 方向误报；`sandbox_permissions` SHALL NOT 改变判定。
+触及 raw 且命令含写动词时策略门 SHALL 返回 `deny`，`reason` 含 `immutable` 并指向 `read` 工具。写动词 SHALL 包括：POSIX 动词 `rm mv cp tee touch mkdir chmod chown chgrp truncate dd install rsync ln unlink rmdir shred gzip gunzip bzip2 xz unzip`（不区分大小写；动词前允许任意路径前缀、反斜杠转义、引号或 `sudo` 等前导词，即动词前一个字符不是 `[A-Za-z0-9_.-]` 即可——`.` 排除使 `x.xz`、`x.dd` 这类文件名后缀不算动词；动词后为行尾或 `[\s;&|)}'"`]` 之一，因此管道末尾、子 shell、`sh -c '…'` 引号内、pwsh 脚本块 `{… | del}` 内的动词也算）；工具形态 `git clean|checkout|restore`、`tar -x…`、`sort -o`、`awk -i`（工具名前同样要求非路径名字符，`a.tar -X` 不算）；`>`/`>>` 重定向；`sed -i`/`--in-place`、`perl -i`/`-e`、`python -c`、`Rscript -e`/`--expr`、`node -e`/`--eval`、以 heredoc 喂入的解释器（`python|Rscript|node|perl - <<`）、`open(`；破坏性标志 `-delete`、`--remove-files`（前导为行首或空白，后继与动词相同）；pwsh cmdlet `Remove-Item Move-Item Copy-Item Rename-Item New-Item Set-Content Add-Content Clear-Content Clear-Item Out-File` 与别名 `del erase ri rd ren rni move mi copy cpi ni clc cli`（不区分大小写；仅对 `pwsh` 工具、或 `bash` 命令文本含 `pwsh`/`powershell` 词时生效——这些别名在 bash 里不是命令，`grep -r move <raw>` 必须仍是 `ask`）。该清单是启发式 denylist 而非穷举：不在清单内的写法落 `ask`（仍经 PI 审批），raw 在 workspace 外时由沙箱兜底。raw 仅作为源的 `cp`/重定向也 deny，这是已接受的 deny 方向误报；`sandbox_permissions` SHALL NOT 改变判定。
 
 #### Scenario: append redirect into raw
 - **WHEN** 调用 `bash`，`command` 为 `echo bad >> data/raw/obs.csv`
@@ -69,8 +69,16 @@
 - **THEN** 决策 `kind` 为 `deny`
 
 #### Scenario: verb-shaped substrings inside file names stay reads
-- **WHEN** 调用 `bash`，`command` 为 `cat protected/model x` 或 `ls protected/rivers`；或调用 `pwsh`，`command` 为 `Get-ChildItem protected/third x`
+- **WHEN** 调用 `bash`，`command` 为 `cat protected/model x`、`ls protected/rivers`、`cat protected/x.xz`、`grep -r move protected`、`file protected/ni`、`tar -tzf protected/a.tgz`、`tar -tvf protected/a.tar -X excl`、`git log -- protected`、`awk '{print $1}' protected/x`、`sed -n 1,5p protected/x` 或 `Rscript analyse.R protected/x`；或调用 `pwsh`，`command` 为 `Get-ChildItem protected/third x`
 - **THEN** 决策 `kind` 为 `ask`
+
+#### Scenario: pwsh aliases and script blocks
+- **WHEN** 调用 `pwsh`，`command` 为 `gci protected | %{$_|del}` 或 `Get-ChildItem protected | ForEach-Object {$_ | Remove-Item}`；或调用 `bash`，`command` 为 `pwsh -c 'gci protected | del'`
+- **THEN** 决策 `kind` 为 `deny`
+
+#### Scenario: heredoc-fed interpreters
+- **WHEN** 调用 `bash`，`command` 分别以 `Rscript - <<'EOF'`、`node - <<'EOF'`、`perl - <<'EOF'` 开头且正文提及 `protected`
+- **THEN** 决策 `kind` 为 `deny`
 
 #### Scenario: prefixed or escaped verb is still a write
 - **WHEN** 调用 `bash`，`command` 为 `/bin/rm protected/x`、`\rm protected/x` 或 `sudo rm protected/x`
