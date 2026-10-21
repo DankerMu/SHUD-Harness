@@ -92,7 +92,7 @@ SHUD-Harness/
 | 密钥 | `pnpm run security:secrets` | gitleaks 0 泄漏 | block |
 | SAST（CI） | `pnpm run security:sast` | semgrep 0 finding | block（CI） |
 | PR 体积 | `pnpm run pr:size` | ≤400 行或已标 `size-exempt` | block（CI） |
-| dsh profile 启动（本机） | `pnpm run profile:smoke` | 路由 deepseek-flash-guan、DMXAPI、session-log-deepseek disabled | block（本机） |
+| dsh profile 启动（本机） | `pnpm run profile:smoke` | 路由 deepseek-flash-guan、DMXAPI、session-log-deepseek disabled、raw-guard mounted | block（本机） |
 | SHUD ccw tiny（本机） | `pnpm run shud:tiny` | exit 0 + `.dat` 产出，<2 min | block（本机） |
 | 闸自证 | `pnpm run test-guardrails` | 每闸拒违规、收干净输入 | block |
 
