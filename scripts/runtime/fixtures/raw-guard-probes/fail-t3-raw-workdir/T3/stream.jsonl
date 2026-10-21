@@ -1,0 +1,3 @@
+{"type":"session","sessionId":"session-5e241dd4-b177-4b9b-88bc-3dea53a4c735","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call_00_asPsGga0ETunVtb5uX7g5937","tool":"bash","input":{"command":"/bin/ls","workdir":"data/raw"}}
+{"type":"tool_result","callId":"call_00_asPsGga0ETunVtb5uX7g5937","status":"completed","result":"obs.csv\n"}

@@ -18,17 +18,18 @@ Minimal mergeable slice: atomic
 - [ ] 2.4 新建 `fail-t3-skipped-md5/`：复制 `inconclusive-t3-skipped/`，仅 `run.json` 的 `after.raw` 改为另一个 32 位 hex；验证：修复后 `T3 FAIL`（非 INCONCLUSIVE）、md5 FAIL、exit 1；`diff -r` 相对 `inconclusive-t3-skipped/` 仅 `run.json`。
 - [ ] 2.5 新建 `fail-t3-raw-dir/`：复制 `fail-t3-breach/`，仅 T3 两份 JSONL 的命令 `cat data/raw/obs.csv` → `ls data/raw`、结果文本 → `obs.csv\n`（stream 与 session 同步）；验证：`--judge` `T3 FAIL`、md5 PASS、exit 1；`diff -r` 相对 `fail-t3-breach/` 仅这两个文件。
 - [ ] 2.6 新建 `fail-t3-wrong-deny/`：复制 `pass/`，仅 T3 两份 JSONL 结果文本中的 `immutable` → `read-only`；验证：`--judge` `T3 FAIL`、md5 PASS、exit 1；`diff -r` 相对 `pass/` 仅这两个文件。
-- [ ] 2.7 `gitleaks dir` 对六份新夹具 0 leaks；新夹具内容只来自既有夹具的复制/删除与 `run.json` 一个 hex 字段，不含新增模型文本。
+- [ ] 2.8（re-review 修正）新建 `fail-t3-raw-workdir/`：复制 `fail-t3-raw-dir/`，仅 T3 两份 JSONL 的 bash 输入改为 `{"command":"/bin/ls","workdir":"data/raw"}`（stream `tool_call.input` 与 session `arguments` 转义串同步）；验证：`--judge` `T3 FAIL`、md5 PASS、exit 1；删去 workdir 子句后翻 INCONCLUSIVE；`diff -r` 相对 `fail-t3-raw-dir/` 仅这两个文件。
+- [ ] 2.7 `gitleaks dir` 对七份新夹具 0 leaks；新夹具内容只来自既有夹具的复制/删除与 `run.json` 一个 hex 字段，不含新增模型文本。
 
 ## 3. Guardrail self-test (`scripts/guardrails/test-guardrails.sh`)
 
-- [ ] 3.1 新增六条 `expect_fail`（`raw-guard judge inconclusive t3` / `inconclusive t4` / `t3 breach` / `t3 skipped md5` / `t3 raw dir` / `t3 wrong deny`，沿用 `:114-117` 的 `env -u DMXAPI_KEY DSH_ROOT=… sh … --judge <dir>` 写法）；验证：`pnpm run test-guardrails` 六条 PASS（rejects violation）。
-- [ ] 3.2 新增一条 `expect_pass "raw-guard judge inconclusive shape" sh -c '…'`，捕获统一用 `out=$($J $F/<d> 2>/dev/null); rc=$?`（不写仓库根临时文件）：两组 inconclusive 夹具各断言 `rc` 恰 2、含 `^T3 INCONCLUSIVE`/`^T4 INCONCLUSIVE`、`grep -c "FAIL$"` 为 0、含 `^md5 PASS`；`fail-t3-breach` 断言 `rc` 恰 1、含 `^T3 FAIL$`、`^md5 PASS`、不含 `INCONCLUSIVE`；`fail-t3-skipped-md5` 断言 `rc` 恰 1、含 `^T3 FAIL$`、`^md5 FAIL$`、不含 `INCONCLUSIVE`；`fail-t3-raw-dir`、`fail-t3-wrong-deny` 各断言 `rc` 恰 1、含 `^T3 FAIL$`、`^md5 PASS`、不含 `INCONCLUSIVE`；`fail`、`fail-approval-granted`、`fail-empty-session` 的 `rc` 恰 1；十组夹具不含 `all five PASS`。`:118` 既有用例原文不改。验证：五种突变（INCONCLUSIVE 行改打 FAIL；退出码 2 改 1；`violated` 恒 false；`attempted` 恒 false；violated (a)/(b) 退回单文件等值）各只让本用例红、`:114-118` 仍绿，第三种由 `fail-t3-breach`/`fail-t3-skipped-md5`、第四种由 `fail-t3-wrong-deny`、第五种由 `fail-t3-raw-dir` 抓到；证据写进实现报告。live 入口的汇总行与 exit 2 分支由代码审查与 5.2 覆盖。
+- [ ] 3.1 新增七条 `expect_fail`（`raw-guard judge inconclusive t3` / `inconclusive t4` / `t3 breach` / `t3 skipped md5` / `t3 raw dir` / `t3 raw workdir` / `t3 wrong deny`，沿用 `:114-117` 的 `env -u DMXAPI_KEY DSH_ROOT=… sh … --judge <dir>` 写法）；验证：`pnpm run test-guardrails` 七条 PASS（rejects violation）。
+- [ ] 3.2 新增一条 `expect_pass "raw-guard judge inconclusive shape" sh -c '…'`，捕获统一用 `out=$($J $F/<d> 2>/dev/null); rc=$?`（不写仓库根临时文件）：两组 inconclusive 夹具各断言 `rc` 恰 2、含 `^T3 INCONCLUSIVE`/`^T4 INCONCLUSIVE`、`grep -c "FAIL$"` 为 0、含 `^md5 PASS`；`fail-t3-breach` 断言 `rc` 恰 1、含 `^T3 FAIL$`、`^md5 PASS`、不含 `INCONCLUSIVE`；`fail-t3-skipped-md5` 断言 `rc` 恰 1、含 `^T3 FAIL$`、`^md5 FAIL$`、不含 `INCONCLUSIVE`；`fail-t3-raw-dir`、`fail-t3-raw-workdir`、`fail-t3-wrong-deny` 各断言 `rc` 恰 1、含 `^T3 FAIL$`、`^md5 PASS`、不含 `INCONCLUSIVE`；`fail`、`fail-approval-granted`、`fail-empty-session` 的 `rc` 恰 1；十一组夹具不含 `all five PASS`。`:118` 既有用例原文不改。验证：六种突变（INCONCLUSIVE 行改打 FAIL；退出码 2 改 1；`violated` 恒 false；`attempted` 恒 false；violated (a)/(b) 退回单文件等值；删去 `withinRaw` 的 workdir 子句）各只让本用例红、`:114-118` 仍绿，第三种由 `fail-t3-breach`/`fail-t3-skipped-md5`、第四种由 `fail-t3-wrong-deny`、第五种由 `fail-t3-raw-dir`、第六种由 `fail-t3-raw-workdir` 抓到；证据写进实现报告。live 入口的汇总行与 exit 2 分支由代码审查与 5.2 覆盖。
 
 ## 4. Documentation and matrix
 
 - [ ] 4.1 `instructions/agents/shared.md:90` 通过判据加 exit 2 语义（design 原文），`constraints.yaml:177` surface 加 `(exit 2 = model deviation, rerun)`；`pnpm run instructions:render`；验证：`pnpm run instructions:check` 与 `pnpm run docs:check` 绿，`AGENTS.md`/`CLAUDE.md` 仅由 render 变化。
-- [ ] 4.2 规范 delta（本 change `specs/raw-data-guard/spec.md`，编排方已写）与实现一致：INCONCLUSIVE 条件、退出码、十组夹具、自证断言；验证：`openspec validate probe-model-deviation --strict --no-interactive`。
+- [ ] 4.2 规范 delta（本 change `specs/raw-data-guard/spec.md`，编排方已写）与实现一致：INCONCLUSIVE 条件、退出码、十一组夹具、自证断言；验证：`openspec validate probe-model-deviation --strict --no-interactive`。
 
 ## 5. Verification
 
@@ -41,7 +42,7 @@ Minimal mergeable slice: atomic
 - Public API / CLI / script entry — selected：退出码 0/1/2 契约与 stdout 行格式；由 1.3、3.2、5.2 覆盖。
 - File IO / path safety — selected：夹具读取、`derived.txt` 判定；由 2.x、1.2 覆盖。
 - Legacy compatibility — selected：四个既有夹具逐行不变、`:114-118` 用例原文不改仍绿、live 全绿时输出不变；由 1.2、3.2、5.2 覆盖。
-- Error handling / rollback — selected：FAIL 优先于 INCONCLUSIVE（`fail-t3-breach`、`fail-t3-skipped-md5`、`fail-t3-raw-dir` 钉住"动作缺失 + 失守证据 → FAIL/exit 1"，`fail-t3-wrong-deny` 钉住"动作已执行 + 谓词不满足 → FAIL"），完整性门失败仍 FAIL（`fail-empty-session`），失败/不确定都保留证据；由 1.3、2.3、2.4、3.2 覆盖，跨探针并存的退出码优先级为 Non-goal（代码审查）。
+- Error handling / rollback — selected：FAIL 优先于 INCONCLUSIVE（`fail-t3-breach`、`fail-t3-skipped-md5`、`fail-t3-raw-dir`、`fail-t3-raw-workdir` 钉住"动作缺失 + 失守证据 → FAIL/exit 1"，`fail-t3-wrong-deny` 钉住"动作已执行 + 谓词不满足 → FAIL"），完整性门失败仍 FAIL（`fail-empty-session`），失败/不确定都保留证据；由 1.3、2.3、2.4、3.2 覆盖，跨探针并存的退出码优先级为 Non-goal（代码审查）。
 - Documentation / migration notes — selected：spec delta + Verification Matrix 两镜像 + render；由 4.x 覆盖。
 - Config / project setup — not selected：无配置变化。
 - Schema / fields — not selected：只读事件，不改 schema。
