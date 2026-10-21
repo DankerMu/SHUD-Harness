@@ -11,8 +11,8 @@ Must preserve:
 
 Must add/change:
 - 提及边界：`<escaped raw>(?![A-Za-z0-9._-])`。效果：`<raw>*`、`<raw>?`、`{<raw>,x}`、`` `<raw>` ``、`<raw>/x` 均算提及；`<raw>x`、`<raw>.bak`、`<raw>_old`、`<raw>-2` 不算。
-- 写动词锚定：`(?<![A-Za-z0-9_-])` 代替 `(^|[\s;&|(])`，使 `/bin/rm`、`\rm`、`sudo rm`、`$(rm` 命中，`arm`、`--rm` 不命中；收尾改为 `(?=\s|$)`，使管道末尾的 `| xargs rm`、`| Remove-Item` 命中。
-- 动词表新增 `unlink rmdir shred`；标志 `-delete`、`--remove-files`（前导为行首或空白，后继为 `(?=$|[\s;&|)])`，任何动词携带即 deny）；pwsh cmdlet 与别名见 proposal，pwsh 子式不区分大小写（`remove-item` 同样命中）——TS 5.8 会校验正则字面量语法，内联 `(?i:…)` 不可用，pwsh 部分应是独立带 `i` 标志的正则，与 POSIX/标志正则用 `||` 组合。重定向、`sed -i`、`perl -i`、`python -c`、`open(` 子式不变。
+- 写动词锚定：`(?<![A-Za-z0-9_-])` 代替 `(^|[\s;&|(])`，使 `/bin/rm`、`\rm`、`sudo rm`、`$(rm` 命中，`arm`、`--rm` 不命中；收尾改为**与标志共用的** `(?=$|[\s;&|)'"\`])`（round 1 修正：仅 `(?=\s|$)` 会让 `sh -c '… | xargs rm'`、`$(… rm)`、`rm;echo`、`"rm" x` 落 ask），使管道末尾、子 shell、引号包裹的动词都命中；POSIX 动词正则加 `i` 标志（APFS 大小写不敏感下 `RM` 仍执行 `/bin/rm`）。
+- 动词表新增 `unlink rmdir shred chgrp gzip gunzip bzip2 xz unzip`；工具形态 `git\s+(clean|checkout|restore)`、`tar\s+-[a-zA-Z]*x`、`sort\s+-o`、`awk\s+-i`；解释器一行式 `Rscript\s+(-e|--expr)`、`node\s+(-e|--eval)`、`perl\s+-[a-zA-Z]*[ie]`、heredoc 喂入 `(python[0-9.]*|Rscript|node|perl)\s+-\s*<<`（与既有 `python -c` 同级）；标志 `-delete`、`--remove-files`（前导为行首或空白，后继同动词收尾，任何动词携带即 deny）；pwsh cmdlet 加 `Clear-Item`，别名加 `ren rni move mi copy cpi ni clc cli`；spec 明文该清单为启发式 denylist 而非穷举；pwsh cmdlet 与别名见 proposal，pwsh 子式不区分大小写（`remove-item` 同样命中）——TS 5.8 会校验正则字面量语法，内联 `(?i:…)` 不可用，pwsh 部分应是独立带 `i` 标志的正则，与 POSIX/标志正则用 `||` 组合。重定向、`sed -i`、`perl -i`、`python -c`、`open(` 子式不变。
 - 规范同步：spec "Shell command touches raw" 写明边界定义与 glob/brace 场景；"Shell write under raw is denied" 列出完整动词/标志/cmdlet 清单与前缀规则。
 
 Governing invariant: 命令文本一旦按规范定义"包含"任一 raw 目录（后继不是路径名字符），决策只能是 `deny` 或 `ask`，绝不 `next`；带任何已知写动词或破坏性标志时必须是 `deny`，读审批卡文案不得承载写操作。
@@ -27,8 +27,8 @@ Seams under test: 导出函数 `decideRawAccess(call, options)` 与 `normalizeRa
 
 Required evidence:
 - 对 `rawDirs: ["protected"]`：`rm -rf protected*` / `rm -rf protected?` / `rm -rf {protected,x}` / `rm -rf protected/*` → `deny`；`cat protected*` / `cat protected?` / `ls {protected,derived}` / `` cat `echo protected` `` → `ask`；`rm protectedx/x` / `rm protected.bak` / `cat protected_old/x` → `next`。
-- 动词清单逐项迭代（参照 `decide.test.ts:63` 的 `split(" ")` 循环）：POSIX 全部 17 个动词各一条 `<verb> protected/x derived/x` → `deny`；前缀/转义/前导词 `/bin/rm`、`\rm`、`sudo rm` → `deny`；标志 `find protected -delete`、`find protected -delete; echo`、`tar -cf a.tar protected --remove-files` → `deny`；管道末尾 `find protected -type f | xargs rm` → `deny`（bash 与 pwsh 同跑）。
-- pwsh：9 个 cmdlet 与 4 个别名各一条 `<cmdlet> protected/x` → `deny`；小写 `remove-item protected/x` → `deny`；管道末尾 `Get-ChildItem protected | Remove-Item` → `deny`。
+- 动词清单逐项迭代（参照 `decide.test.ts:63` 的 `split(" ")` 循环）：POSIX 全部 22 个动词各一条 `<verb> protected/x derived/x` → `deny`（另加全大写形式一轮）；前缀/转义/前导词 `/bin/rm`、`\rm`、`sudo rm` → `deny`；标志 `find protected -delete`、`find protected -delete; echo`、`tar -cf a.tar protected --remove-files` → `deny`；管道末尾 `find protected -type f | xargs rm` → `deny`（bash 与 pwsh 同跑）。
+- pwsh：10 个 cmdlet 与 13 个别名各一条 `<cmdlet> protected/x` → `deny`；小写 `remove-item protected/x` → `deny`；管道末尾 `Get-ChildItem protected | Remove-Item` → `deny`。
 - 非动词：`docker run --rm -v protected:/d img`、`arm protected/x` → `ask`。
 - 对默认 `normalizeRawDirs()`：默认 raw 路径分别接 `*`、`?`、包进 `{…,x}` 的删除三条 → `deny`，默认 raw 路径接 `*` 的 `cat` → `ask`（测试用字符串拼接构造命令，避免仓库 hook 的文本拦截）。
 - 现有 7 个 test（含仅 darwin 的 1 个）全部保持；`pnpm run check` 绿；`pnpm run raw-guard:probes` T1–T5 PASS、md5 PASS。

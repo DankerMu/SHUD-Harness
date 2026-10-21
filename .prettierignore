@@ -12,3 +12,5 @@ docs/
 openspec/
 templates/
 *.md
+# subagent-workflow fix-pass gate state (untracked, excluded via .git/info/exclude)
+.review-gate.json

@@ -181,9 +181,11 @@ test.runIf(process.platform === "darwin")(
 
 type Kind = "deny" | "ask" | "next";
 const POSIX_WRITES =
-  "rm mv cp tee touch mkdir chmod chown truncate dd install rsync ln unlink rmdir shred".split(" ");
+  "rm mv cp tee touch mkdir chmod chown chgrp truncate dd install rsync ln unlink rmdir shred gzip gunzip bzip2 xz unzip".split(
+    " ",
+  );
 const PWSH_WRITES =
-  "Remove-Item Move-Item Copy-Item Rename-Item New-Item Set-Content Add-Content Clear-Content Out-File del erase ri rd".split(
+  "Remove-Item Move-Item Copy-Item Rename-Item New-Item Set-Content Add-Content Clear-Content Clear-Item Out-File del erase ri rd ren rni move mi copy cpi ni clc cli".split(
     " ",
   );
 const shellCases: [string, Kind][] = [
@@ -200,9 +202,35 @@ const shellCases: [string, Kind][] = [
   ["rm protected.bak", "next"],
   ["rm protected_old/x", "next"],
   ["rm protected-2/x", "next"],
+  ["rm protected2/x", "next"],
   ["cat protected_old/x", "next"],
   ["rm -rf protecte*", "next"],
   ...POSIX_WRITES.map((verb): [string, Kind] => [`${verb} protected/x derived/x`, "deny"]),
+  ...POSIX_WRITES.map((verb): [string, Kind] => [`${verb.toUpperCase()} protected/x`, "deny"]),
+  ["RM protected/x", "deny"],
+  ["sh -c 'ls protected | xargs rm'", "deny"],
+  ["echo $(ls protected | xargs rm)", "deny"],
+  ["ls protected | xargs rm;echo", "deny"],
+  ["ls protected | xargs rm&&echo", "deny"],
+  ['"rm" protected/x', "deny"],
+  ['bash -c "find protected -delete"', "deny"],
+  ["echo `find protected -delete`", "deny"],
+  ["Rscript -e 'unlink(\"protected\", recursive=TRUE)'", "deny"],
+  ["Rscript -e 'file.remove(\"protected/x\")'", "deny"],
+  ['node -e \'require("fs").rmSync("protected",{recursive:true})\'', "deny"],
+  ["perl -e 'unlink(\"protected/x\")'", "deny"],
+  ["python3 - <<'EOF'\nimport shutil\nshutil.rmtree(\"protected\")\nEOF", "deny"],
+  ["gzip protected/x", "deny"],
+  ["git clean -fdx protected", "deny"],
+  ["tar -xzf a.tgz -C protected", "deny"],
+  ["sort -o protected/x protected/x", "deny"],
+  ["git checkout -- protected/x", "deny"],
+  ["git restore protected/x", "deny"],
+  ["awk -i inplace 1 protected/x", "deny"],
+  ["node --eval 'x' protected/x", "deny"],
+  ["Rscript --expr 'x' protected/x", "deny"],
+  ["cat protected/model x", "ask"],
+  ["ls protected/rivers", "ask"],
   ["/bin/rm protected/x", "deny"],
   ["\\rm protected/x", "deny"],
   ["sudo rm protected/x", "deny"],
@@ -226,6 +254,11 @@ const pwshCases: [string, Kind][] = [
   ["Set-Content protected/x 1", "deny"],
   ["Get-ChildItem protected | Remove-Item", "deny"],
   ["Get-ChildItem protected", "ask"],
+  ['pwsh -c "Get-ChildItem protected | Remove-Item"', "deny"],
+  ["ren protected/x y", "deny"],
+  ["ni protected/x", "deny"],
+  ["Clear-Item protected/x", "deny"],
+  ["Get-ChildItem protected/third x", "ask"],
 ];
 
 test.each([
