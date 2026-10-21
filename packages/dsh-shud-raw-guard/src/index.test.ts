@@ -78,6 +78,25 @@ test("delegation preserves later policy decisions and failures exactly once", as
   expect(next).toHaveBeenCalledTimes(1);
 });
 
+test("raw identity follows the calling session rather than process cwd or another session", async () => {
+  const { ctx, listeners } = harness();
+  apply(ctx, { rawDirs: ["protected"] });
+  const listener = listeners.get("tools/pre-execute") as Listener;
+  const next = vi.fn(() => Promise.resolve<PreToolDecision>({ kind: "cancel" }));
+  for (const [cwd, expected] of [
+    ["/session-a", "deny"],
+    ["/session-b", "cancel"],
+  ]) {
+    const agent = { session: { header: { cwd } } };
+    const result = await listener(
+      { name: "write", agent, arguments: { file_path: "/session-a/protected/new.csv" } },
+      next,
+    );
+    expect(result.kind).toBe(expected);
+  }
+  expect(next).toHaveBeenCalledTimes(1);
+});
+
 test("missing or malformed session cwd falls back safely and instance counts stay separate", async () => {
   const first = harness();
   const second = harness();
