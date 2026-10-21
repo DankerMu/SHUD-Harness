@@ -397,8 +397,9 @@ const fdRedirectCases: [string, Kind, typeof options, string?][] = [
   ["cat protected/a 2>&1\t#c", "ask", options],
   // Fail closed: a regex cannot tell an opening quote from a closing one, so no
   // quote, backtick or } ends an fd number. Bash splits words only at space, tab
-  // and newline (not \r, \f or U+00A0), so all of these name files; the quoted
-  // read wrappers are accepted deny-direction false positives.
+  // and newline (not \r, \f or U+00A0), so each row writes a file in bash or, in
+  // the quoted forms, fails closed as one (>&2` x` is fd duplication when x is not
+  // a command); the quoted read wrappers are accepted deny-direction false positives.
   ['cat protected/a >&2" "', "deny", options],
   ['cat protected/a >&2" x"', "deny", options],
   ['cat protected/a >&2";x"', "deny", options],
@@ -480,6 +481,63 @@ const spellingCases: [string, Kind, typeof options, string][] = [
 ];
 test.each(spellingCases)("bash `%s` -> %s (#247 path spelling)", (command, kind, config, ws) => {
   const result = decide("bash", { command }, config, ws);
+  expect(result.kind).toBe(kind);
+  if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+  if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+});
+
+// #260: quote splicing, backslash escapes and continuations join one bash word;
+// pwsh also accepts \ as a separator (bash reads sub\x as subx).
+const subX = normalizeRawDirs({ rawDirs: ["sub/x"] });
+const subx = normalizeRawDirs({ rawDirs: ["subx"] });
+const rawCut = defaultRaw.lastIndexOf("/");
+const rawParent = defaultRaw.slice(0, rawCut);
+const rawLeaf = defaultRaw.slice(rawCut + 1);
+const quoteSplitCases: [string, string, Kind, typeof options][] = [
+  ["bash", 'rm -rf prot"ected"', "deny", options],
+  ["bash", "rm -rf prot'ected'", "deny", options],
+  ["bash", "rm -rf prot\\ected", "deny", options],
+  ["bash", 'rm -rf "prot"ected/obs.csv', "deny", options],
+  ["bash", 'rm -rf prot""ected', "deny", options],
+  ["bash", "rm -rf prot\\\nected", "deny", options],
+  ["bash", "cat prot''ected/obs.csv", "ask", options],
+  ["bash", `rm -rf ${defaultRaw.slice(0, -2)}"${defaultRaw.slice(-2)}"`, "deny", defaults],
+  ["pwsh", "Remove-Item sub\\x", "deny", subX],
+  ["bash", 'pwsh -c "Remove-Item sub\\x"', "deny", subX],
+  ["pwsh", "Get-Content sub\\x\\obs.csv", "ask", subX],
+  // Composition: the stripped and pwsh copies still get dot/slash normalization,
+  // and the pwsh copy is also quote-stripped.
+  ["pwsh", "Remove-Item sub\\\\x", "deny", subX],
+  ["pwsh", 'Remove-Item sub"\\x"', "deny", subX],
+  ["pwsh", "Remove-Item sub\\.\\x", "deny", subX],
+  ["bash", `rm -rf ${rawParent}/./${rawLeaf.slice(0, 1)}"${rawLeaf.slice(1)}"`, "deny", defaults],
+  // Order: strip before normalizing (bash data/\/raw is data//raw).
+  ["bash", `rm -rf ${rawParent}/"/"${rawLeaf}`, "deny", defaults],
+  ["bash", `rm -rf ${rawParent}/\\/${rawLeaf}`, "deny", defaults],
+  // Documented gap: a glob or brace inside the raw name needs expansion.
+  ["bash", "rm -rf p*d", "next", options],
+  ["bash", "rm -rf protecte?", "next", options],
+  ["bash", "rm -rf prot[e]cted", "next", options],
+  ["bash", "rm -rf prot{e,}cted", "next", options],
+  ["bash", "rm -rf protect{ed,}", "next", options],
+  ["bash", 'rm "prot ected"', "next", options],
+  ["bash", "rm sub\\x", "next", subX],
+  ["pwsh", "Remove-Item sub\\xy", "next", subX],
+  ["pwsh", "Get-Content sub\\x.bak", "next", subX],
+  // Accepted false positives of the stripped and pwsh spellings, including
+  // regex-escaped text (sub\/x) that only names a multi-segment raw path.
+  ["bash", "rm 'prot\\ected'", "deny", options],
+  ["pwsh", "Remove-Item 'prot''ected'", "deny", options],
+  ["pwsh", "Remove-Item sub\\x", "deny", subx],
+  ["bash", "grep -l pwsh notes; rm sub\\x", "deny", subX],
+  ["bash", "sed -i 's/sub\\/x/y/' cfg", "deny", subX],
+  ["bash", "grep -rn 'sub\\/x' scripts", "ask", subX],
+  // Pre-existing: \ is not a name character, so the escaped text already names the raw dir.
+  ["bash", "sed -i 's/protected\\/x/y/' cfg", "deny", options],
+  ["bash", "grep -rn 'protected\\/x' scripts", "ask", options],
+];
+test.each(quoteSplitCases)("%s `%s` -> %s %j (#260 quote split)", (name, command, kind, config) => {
+  const result = decide(name, { command }, config);
   expect(result.kind).toBe(kind);
   if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
   if (kind === "deny") expect(result.reason).toMatch(/immutable/);

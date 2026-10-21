@@ -135,7 +135,13 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
   if ((call.name === "bash" || call.name === "pwsh") && typeof fields.command === "string") {
     const command = fields.command;
     const workdir = canonical(typeof fields.workdir === "string" ? fields.workdir : cwd, cwd);
-    const texts = [command, normalizeCommandPaths(command)];
+    const pwsh = call.name === "pwsh" || PWSH_COMMAND.test(command);
+    // Quote splicing, \ escapes and \<newline> join one bash word, so a copy drops
+    // them; pwsh alone also reads \ as a separator (bash sub\x is subx).
+    const bases = pwsh ? [command, command.replace(/\\/g, "/")] : [command];
+    const texts = bases
+      .flatMap((text) => [text, text.replace(/\\\n|["'\\]/g, "")])
+      .flatMap((text) => [text, normalizeCommandPaths(text)]);
     for (const raw of options.rawDirs) {
       const root = canonical(raw, cwd);
       const flags = caseInsensitiveRoot(root) ? "i" : "";
@@ -146,7 +152,6 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         return texts.some((candidate) => pattern.test(candidate));
       });
       if (!mentioned && !contains(root, workdir)) continue;
-      const pwsh = call.name === "pwsh" || PWSH_COMMAND.test(command);
       const checked = command.replace(DISCARD_REDIRECT, " ");
       return WRITE_VERBS.test(checked) || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
     }
