@@ -178,3 +178,131 @@ test.runIf(process.platform === "darwin")(
     }
   },
 );
+
+type Kind = "deny" | "ask" | "next";
+const POSIX_WRITES =
+  "rm mv cp tee touch mkdir chmod chown chgrp truncate dd install rsync ln unlink rmdir shred gzip gunzip bzip2 xz unzip".split(
+    " ",
+  );
+const PWSH_WRITES =
+  "Remove-Item Move-Item Copy-Item Rename-Item New-Item Set-Content Add-Content Clear-Content Clear-Item Out-File del erase ri rd ren rni move mi copy cpi ni clc cli".split(
+    " ",
+  );
+const shellCases: [string, Kind][] = [
+  ["rm -rf protected*", "deny"],
+  ["rm -rf protected?", "deny"],
+  ["rm -rf {protected,x}", "deny"],
+  ["rm -rf protected/*", "deny"],
+  ["cat protected*", "ask"],
+  ["cat protected?", "ask"],
+  ["ls {protected,derived}", "ask"],
+  ["cat `echo protected`", "ask"],
+  ["ls `echo protected`", "ask"],
+  ["rm protectedx/x", "next"],
+  ["rm protected.bak", "next"],
+  ["rm protected_old/x", "next"],
+  ["rm protected-2/x", "next"],
+  ["rm protected2/x", "next"],
+  ["cat protected_old/x", "next"],
+  ["rm -rf protecte*", "next"],
+  ...POSIX_WRITES.map((verb): [string, Kind] => [`${verb} protected/x derived/x`, "deny"]),
+  ...POSIX_WRITES.map((verb): [string, Kind] => [`${verb.toUpperCase()} protected/x`, "deny"]),
+  ["sh -c 'ls protected | xargs rm'", "deny"],
+  ["echo $(ls protected | xargs rm)", "deny"],
+  ["ls protected | xargs rm;echo", "deny"],
+  ["ls protected | xargs rm&&echo", "deny"],
+  ['"rm" protected/x', "deny"],
+  ['bash -c "find protected -delete"', "deny"],
+  ["echo `find protected -delete`", "deny"],
+  ["Rscript -e 'unlink(\"protected\", recursive=TRUE)'", "deny"],
+  ["Rscript -e 'file.remove(\"protected/x\")'", "deny"],
+  ['node -e \'require("fs").rmSync("protected",{recursive:true})\'', "deny"],
+  ["perl -e 'unlink(\"protected/x\")'", "deny"],
+  ["python3 - <<'EOF'\nimport shutil\nshutil.rmtree(\"protected\")\nEOF", "deny"],
+  ["gzip protected/x", "deny"],
+  ["git clean -fdx protected", "deny"],
+  ["tar -xzf a.tgz -C protected", "deny"],
+  ["sort -o protected/x protected/x", "deny"],
+  ["git checkout -- protected/x", "deny"],
+  ["git restore protected/x", "deny"],
+  ["awk -i inplace 1 protected/x", "deny"],
+  ["node --eval 'x' protected/x", "deny"],
+  ["Rscript --expr 'x' protected/x", "deny"],
+  ["cat protected/model x", "ask"],
+  ["ls protected/rivers", "ask"],
+  ["/bin/rm protected/x", "deny"],
+  ["\\rm protected/x", "deny"],
+  ["sudo rm protected/x", "deny"],
+  ["echo $(rm protected/x)", "deny"],
+  ["rmdir protected", "deny"],
+  ["find protected -delete", "deny"],
+  ["find protected -delete; echo", "deny"],
+  ["tar -cf a.tar protected --remove-files", "deny"],
+  ["find protected -type f | xargs rm", "deny"],
+  ["docker run --rm -v protected:/d img", "ask"],
+  ["arm protected/x", "ask"],
+  ["add protected/x", "ask"],
+  ["sudo cat protected/x", "ask"],
+  ["find protected --delete-after", "ask"],
+];
+const pwshCases: [string, Kind][] = [
+  ...PWSH_WRITES.map((cmdlet): [string, Kind] => [`${cmdlet} protected/x`, "deny"]),
+  ...PWSH_WRITES.filter((cmdlet) => cmdlet !== cmdlet.toLowerCase()).map(
+    (cmdlet): [string, Kind] => [`${cmdlet.toLowerCase()} protected/x`, "deny"],
+  ),
+  ["Set-Content protected/x 1", "deny"],
+  ["Get-ChildItem protected | Remove-Item", "deny"],
+  ["Get-ChildItem protected", "ask"],
+  ['pwsh -c "Get-ChildItem protected | Remove-Item"', "deny"],
+  ["ren protected/x y", "deny"],
+  ["ni protected/x", "deny"],
+  ["Clear-Item protected/x", "deny"],
+  ["Get-ChildItem protected/third x", "ask"],
+  ["gci protected | %{$_|del}", "deny"],
+  ["Get-ChildItem protected | ForEach-Object {$_ | Remove-Item}", "deny"],
+];
+// Bash-only: pwsh aliases (move, copy, ni) are not bash commands.
+const bashCases: [string, Kind][] = [
+  ["grep -r move protected", "ask"],
+  ["grep -n copy protected/README", "ask"],
+  ["file protected/ni", "ask"],
+  ["cat protected/x.xz", "ask"],
+  ["xzcat protected/x.xz", "ask"],
+  ["tar -tzf protected/a.tgz", "ask"],
+  ["tar -tvf protected/a.tar -X excl", "ask"],
+  ["git log -- protected", "ask"],
+  ["awk '{print $1}' protected/x", "ask"],
+  ["sed -n 1,5p protected/x", "ask"],
+  ["Rscript analyse.R protected/x", "ask"],
+  ["gsed -i s/a/b/ protected/x", "deny"],
+  ["/opt/homebrew/bin/gsed -i s/a/b/ protected/x", "deny"],
+  ["gawk -i inplace 1 protected/x", "deny"],
+  ["gtar -xf a.tar -C protected", "deny"],
+  ["ipython -c x protected", "deny"],
+  ["pwsh -c 'gci protected | del'", "deny"],
+  ["Rscript - <<'EOF'\nunlink(\"protected/x\")\nEOF", "deny"],
+  ['node - <<\'EOF\'\nrequire("fs").rmSync("protected")\nEOF', "deny"],
+  ["perl - <<'EOF'\nunlink \"protected/x\"\nEOF", "deny"],
+];
+
+test.each([
+  ...shellCases.map(([command, kind]) => ["bash", command, kind]),
+  ...shellCases.map(([command, kind]) => ["pwsh", command, kind]),
+  ...pwshCases.map(([command, kind]) => ["pwsh", command, kind]),
+  ...bashCases.map(([command, kind]) => ["bash", command, kind]),
+])("%s `%s` -> %s (#245 boundary and write verbs)", (name, command, kind) => {
+  const result = decide(name, { command });
+  expect(result.kind).toBe(kind);
+  if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+  if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+});
+
+const defaultRaw = normalizeRawDirs().rawDirs[0];
+test.each([
+  [`rm -rf ${defaultRaw}*`, "deny"],
+  [`rm -rf ${defaultRaw}?`, "deny"],
+  [`rm -rf {${defaultRaw},x}`, "deny"],
+  [`cat ${defaultRaw}*`, "ask"],
+])("default rawDirs bash `%s` -> %s", (command, kind) => {
+  expect(decide("bash", { command }, normalizeRawDirs()).kind).toBe(kind);
+});
