@@ -98,7 +98,22 @@ SHUD-Harness/
 
 ## Runtime Lifecycle
 
-无常驻 dev server。dsh 手动启动：`DSH_HOME=<tmp> node ../deepseek-harness/apps/cli/lib/bin.js --profile headless --patch profile/shud/cordis.patch.yml --dump-config`（`--patch` 必须在子命令参数之前；`web --no-open --port <p>` 看审批卡/作业卡）。证据取自 session log（`approval/asked|decided`、`job/settled`、`tool/result`），不取自终端回忆。SHUD 运行一律在 scratch workspace 复制 `input/ccw` 后进行，submodule 永不改动。
+无常驻 dev server。以下命令从本仓库根目录执行；先 `pnpm run build` 产出插件 `lib/`。无全局 `dsh` 时使用现有 checkout 的 Node 入口：
+
+```sh
+export DSH_HOME="$(mktemp -d)"
+pnpm run profile:install
+node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
+```
+
+`profile:install` 默认以 `web` 模板创建 `shud` 并 `link:` 安装本仓库 bundle；安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud web --no-open --port <p>`。headless 任务改用同一 bundle 的独立 profile：
+
+```sh
+PROFILE_NAME=shud-probe PROFILE_TEMPLATE=headless pnpm run profile:install
+node ../deepseek-harness/apps/cli/lib/bin.js --profile shud-probe --json "<task>"
+```
+
+headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 `DMXAPI_KEY`。切换到研究 workspace 时须使用宿主入口的绝对路径，并保持该 `DSH_HOME`；可选 `--patch <overlay>` 必须在 `web` 等应用参数之前，不能代替 bundle 安装。部署期在用户 `$DSH_HOME/profiles/shud/cordis.patch.yml` 覆写 `shud-raw-guard.config.rawDirs`，覆盖 workspace 外的真实 raw 目录；默认 `data/raw` 仅供开发/探针。证据取自 session log（`approval/asked|decided`、`job/settled`、`tool/result`），不取自终端回忆。SHUD 运行一律在 scratch workspace 复制 `input/ccw` 后进行，submodule 永不改动。
 
 ## Conventions
 
