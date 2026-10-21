@@ -16,7 +16,8 @@ const REPOSITORY_LOCATOR_VARS = [
 /**
  * Read-only snapshot of the git repository rooted exactly at `repoPath`.
  * Never writes to the repository: optional locks (index refresh) and fsmonitor are disabled.
- * `dirty` follows git status ignore rules; status output overflowing the read buffer counts as dirty.
+ * `dirty` follows git status ignore rules; any porcelain output counts as dirty, even if the read
+ * overflowed; an overflow with empty stdout throws.
  * Throws with `repoPath` in the message when it is not a repository root or has no commits.
  */
 export function collectRepositoryRevision(repoPath: string): RepositoryRevision {
@@ -50,18 +51,25 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
     });
   }
 
-  let branch: string;
+  let ref: string;
   try {
-    branch = run(["symbolic-ref", "--short", "-q", "HEAD"]).trim();
+    ref = run(["symbolic-ref", "-q", "HEAD"]).trim();
   } catch (error) {
-    // Detached HEAD: symbolic-ref -q exits 1 silently. Git forbids a branch named "HEAD".
+    // Detached HEAD: symbolic-ref -q exits 1 silently.
     if (failureField(error, "status") !== 1 || failureField(error, "stdout") !== "") {
       throw new Error(`cannot read git branch at ${repoPath}: ${failureDetail(error)}`, {
         cause: error,
       });
     }
-    branch = "HEAD";
+    ref = "";
   }
+  // Only refs/heads/<name> is a branch, and <name> HEAD would read as detached.
+  // HEAD symref'd elsewhere (e.g. a tag, whose rev-parse may be a tag object) fails.
+  const name = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : undefined;
+  if (ref !== "" && (name === undefined || name === "HEAD")) {
+    throw new Error(`cannot read git branch at ${repoPath}: HEAD points at ${ref}, not a branch`);
+  }
+  const branch = name ?? "HEAD";
 
   let dirty: boolean;
   try {
@@ -73,8 +81,10 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
     ]);
     dirty = status.length > 0;
   } catch (error) {
-    // Output overflowed the read buffer, so it was necessarily non-empty.
-    if (failureField(error, "code") !== "ENOBUFS") {
+    // Any porcelain output means dirty, even when the read was cut short by either
+    // stream overflowing; an overflow with empty stdout is a failure.
+    const stdout = failureField(error, "stdout");
+    if (failureField(error, "code") !== "ENOBUFS" || typeof stdout !== "string" || stdout === "") {
       throw new Error(`cannot read git status at ${repoPath}: ${failureDetail(error)}`, {
         cause: error,
       });
