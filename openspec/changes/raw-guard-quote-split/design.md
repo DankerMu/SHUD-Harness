@@ -30,7 +30,7 @@ Must add/change:
   - 反例（next）：bash `rm "prot ected"`；bash `rm sub\x`（`rawDirs: ["sub/x"]`）；pwsh `Remove-Item sub\xy`、`Get-Content sub\x.bak`（`rawDirs: ["sub/x"]`，兄弟名）。
   - 已接受误报（钉住为 deny）：bash `rm 'prot\ected'`、pwsh `Remove-Item 'prot''ected'`（`rawDirs: ["protected"]`）；pwsh `Remove-Item sub\x`（`rawDirs: ["subx"]`：pwsh 语境下未换 `/` 的基底也做去 `\`，得 `subx`）；bash `grep -l pwsh notes; rm sub\x`（`rawDirs: ["sub/x"]`：命令含 `pwsh` 词即对全文做 `\`→`/`）。
   - 默认 raw 至少一行：`rm -rf data/r"aw"` 形态（用测试文件里已有的 `defaultRaw` 拼接方式，在 raw 名中插入引号）→ deny。
-  - 组合（review round 1：去引号或 pwsh `\`→`/` 之后再做 `normalizeCommandPaths`，此前无行钉住）：deny——pwsh `Remove-Item sub\\x`（JS 字面量 `"Remove-Item sub\\\\x"`）、pwsh `Remove-Item sub\.\x`（`rawDirs: ["sub/x"]`）、bash 默认 raw `rm -rf data/./r"aw"`（用 `defaultRaw` 拼接）。
+  - 组合（review round 1：去引号或 pwsh `\`→`/` 之后再做 `normalizeCommandPaths`，此前无行钉住）：deny——pwsh `Remove-Item sub\\x`（JS 字面量 `"Remove-Item sub\\\\x"`）、pwsh `Remove-Item sub\.\x`（`rawDirs: ["sub/x"]`）、bash 默认 raw `rm -rf data/./r"aw"`（用 `defaultRaw` 拼接）；pwsh `Remove-Item sub"\x"`（`rawDirs: ["sub/x"]`，review round 3：`\`→`/` 副本也要去引号）。
   - 顺序（review round 2：先去引号/`\`、再规范化；对调两层 flatMap 时此前所有行仍绿）：deny——bash 默认 raw `rm -rf data/"/"raw` 与 `rm -rf data/\/raw`（bash 里即 `data//raw`；均用 `defaultRaw` 的父段与叶段拼接）。
   - 正则转义路径（本 PR 新增的已接受误报，改前 next）：bash `sed -i 's/sub\/x/y/' cfg` → deny、`grep -rn 'sub\/x' scripts` → ask（`rawDirs: ["sub/x"]`；raw 名含 `/`，仅去 `\` 副本命中）。
   - 既有行为记录（改前已是 deny/ask，不计入红行）：bash `sed -i 's/protected\/x/y/' cfg` → deny、`grep -rn 'protected\/x' scripts` → ask（`rawDirs: ["protected"]`；`\` 不算名字字符，原文已命中）。
@@ -51,7 +51,7 @@ Seams under test: `decideRawAccess(call, options)`（vitest）；live 探针 T1�
 
 Required evidence:
 - 新增 deny/ask 行在改动前的 `decide.ts` 上红（next），改后绿；next 钉住行与反例改前改后都绿；既有行不变。
-- 突变：去掉去引号副本 → 引号/转义 deny 行红；去引号正则去掉 `\\\n` 分支 → 续行 deny 行红；去掉 pwsh `\`→`/` 基底 → pwsh 行红；`\`→`/` 改为对所有命令都做 → bash `rm sub\x` 反例红；`pwsh` 判定放回循环内且 mention 用不到它（即只对 `call.name === "pwsh"` 做替换）→ bash `pwsh -c "Remove-Item sub\x"` 行红；规范化只作用于原命令（不作用于去引号/换 `/` 副本）→ 三条组合行红；对调两层 flatMap（先规范化、后去引号）→ 两条顺序行红；去引号字符类去掉 `\\`（保留续行分支）→ `rm -rf prot\ected` 与两条 `sub\/x` 正则转义行红。
+- 突变：去掉去引号副本 → 引号/转义 deny 行红；去引号正则去掉 `\\\n` 分支 → 续行 deny 行红；去掉 pwsh `\`→`/` 基底 → pwsh 行红；`\`→`/` 改为对所有命令都做 → bash `rm sub\x` 反例红；`pwsh` 判定放回循环内且 mention 用不到它（即只对 `call.name === "pwsh"` 做替换）→ bash `pwsh -c "Remove-Item sub\x"` 行红；规范化只作用于原命令（不作用于去引号/换 `/` 副本）→ 三条组合行红；对调两层 flatMap（先规范化、后去引号）→ 两条顺序行红；去引号字符类去掉 `\\`（保留续行分支）→ `rm -rf prot\ected` 与两条 `sub\/x` 正则转义行红；去引号只作用于原命令、不作用于 pwsh `\`→`/` 副本 → pwsh `Remove-Item sub"\x"` 行红。
 - `pnpm vitest run packages/dsh-shud-raw-guard` 全绿；`pnpm run check` exit 0（覆盖率不降）；`pnpm run build`。
 - live `pnpm run raw-guard:probes` 两次 T1–T5 PASS（或 INCONCLUSIVE 重跑），md5 不变（编排方）。
 

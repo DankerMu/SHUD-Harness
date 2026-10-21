@@ -505,8 +505,10 @@ const quoteSplitCases: [string, string, Kind, typeof options][] = [
   ["pwsh", "Remove-Item sub\\x", "deny", subX],
   ["bash", 'pwsh -c "Remove-Item sub\\x"', "deny", subX],
   ["pwsh", "Get-Content sub\\x\\obs.csv", "ask", subX],
-  // Composition: the stripped and pwsh copies still get dot/slash normalization.
+  // Composition: the stripped and pwsh copies still get dot/slash normalization,
+  // and the pwsh copy is also quote-stripped.
   ["pwsh", "Remove-Item sub\\\\x", "deny", subX],
+  ["pwsh", 'Remove-Item sub"\\x"', "deny", subX],
   ["pwsh", "Remove-Item sub\\.\\x", "deny", subX],
   ["bash", `rm -rf ${rawParent}/./${rawLeaf.slice(0, 1)}"${rawLeaf.slice(1)}"`, "deny", defaults],
   // Order: strip before normalizing (bash data/\/raw is data//raw).
