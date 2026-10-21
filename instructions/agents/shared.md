@@ -64,7 +64,7 @@ SHUD-Harness/
 
 - 克隆后：`pnpm install`（自动执行 `prepare` → `core.hooksPath=.git-hooks`）。本机需 `gitleaks`（brew）；`semgrep` 仅 CI。
 - 日常：`pnpm run check` 是唯一默认闸（typecheck → lint → format → coverage → dup → deadcode → naming → schema drift → docs gate）。改 Zod 后 `pnpm run schema:generate`；改 `instructions/agents/*.md` 后 `pnpm run instructions:render`；两者产物都由 CI 比对。
-- 运行时：`pnpm run profile:smoke`（dsh 启动 + 路由断言）、`pnpm run shud:tiny`（ccw 30 天）本机运行，CI 没有 dsh/SHUD。
+- 运行时：`pnpm run profile:smoke`（dsh 启动 + 路由断言）、`pnpm run shud:tiny`（ccw 30 天）本机运行；CI 有 npm 版 dsh（`profile-smoke` job），无 SHUD。
 - 环境：`DMXAPI_KEY` 只经环境变量；本机跑 dsh/gh 前 `unset ALL_PROXY`；`DSH_HOME` 指向临时目录避免污染真实会话。
 - 流程：一个 issue 一个分支/worktree，走 `subagent-workflow`；PR ≤400 行（CI 阻断，`size-exempt` label 记录例外）；提交信息 conventional（commit-msg 钩子）；merge 需 CI `all-checks-passed` + PI 功能验收。
 
@@ -86,7 +86,7 @@ SHUD-Harness/
 | 密钥 | `pnpm run security:secrets` | gitleaks 0 泄漏 | block |
 | SAST（CI） | `pnpm run security:sast` | semgrep 0 finding | block（CI） |
 | PR 体积 | `pnpm run pr:size` | ≤400 行或已标 `size-exempt` | block（CI） |
-| dsh profile 启动（本机） | `pnpm run profile:smoke` | 路由 deepseek-flash-guan、DMXAPI、session-log-deepseek disabled、raw-guard mounted | block（本机） |
+| dsh profile 启动（本机 + CI） | `pnpm run profile:smoke` | 路由 deepseek-flash-guan、DMXAPI、session-log-deepseek disabled、raw-guard mounted | block（本机 + CI） |
 | raw-guard 五探针（本机，需 `DMXAPI_KEY`） | `pnpm run raw-guard:probes` | T1–T5 PASS、两份 raw md5 不变、总绿汇总 | block（本机） |
 | Web 审批卡往返 | 手工：读 raw → Allow once；写 raw → deny | session log 读审批 allowed-once 后成功；写 immutable 且无新审批；raw md5 不变 | manual |
 | SHUD ccw tiny（本机） | `pnpm run shud:tiny` | exit 0 + `.dat` 产出，<2 min | block（本机） |
@@ -198,7 +198,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | 越界动作（no-verify、force-push、dsh/raw 写、生成物手编） | `scripts/guardrails/no-bypass.sh`（`.claude/settings.json` 与 `.codex/hooks.json` 共用） | pre-commit 等价：agent PreToolUse hook | block |
 | 本次触碰 >1000 行文件 | `.claude/hooks/large-file-guard/large-file-guard.sh` | pre-commit 等价：agent hook on git commit | block |
 | 闸自证 | `scripts/guardrails/test-guardrails.sh` | 本机 `pnpm run test-guardrails` | block |
-| dsh profile 路由 / 出站关闭 | `scripts/runtime/profile-smoke.sh` | 本机 `pnpm run profile:smoke` | block |
+| dsh profile 路由 / 出站关闭 | `scripts/runtime/profile-smoke.sh` | 本机 + CI `pnpm run profile:smoke` | block |
 | raw-guard 五探针 / raw 字节不变 | `scripts/runtime/raw-guard-probes.sh` | 本机 `pnpm run raw-guard:probes`（需 `DMXAPI_KEY`） | block |
 | ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |

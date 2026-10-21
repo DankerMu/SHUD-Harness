@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Profile smoke: build, install a temporary web-template profile, then check
-# composed configuration and actual plugin import. CI has no dsh checkout; recorded as a readiness gap.
+# composed configuration and actual plugin import. CI uses the pinned npm dsh host.
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 if [ "${PROFILE_SMOKE_SKIP_BUILD:-0}" != 1 ]; then
