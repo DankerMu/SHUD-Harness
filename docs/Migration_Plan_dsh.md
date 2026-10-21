@@ -133,3 +133,28 @@ spike 放在仓库外，不开 openspec change / issue / PR。每项记录：行
 - **M1 入口**：设计输入 = `04_IMPLEMENTATION/Phased_Plan.md` §1 + `Repository_Layout.md` + `Port_List.md` + ADR-0004 K2/K9/K10；走 `stage-change-pipeline`（grill 凭证可引用 Phase 2 已拍板分支，缺口才补问）→ OpenSpec change `m1-skeleton` → issue；M1 验收门见 Phased_Plan §0 表。前置：#200 可与 M1 代码并行，不阻塞。
 - 2026-10-20 M1 开工：OpenSpec change [`m1-skeleton`](../openspec/changes/m1-skeleton/proposal.md)，Epic [#210](https://github.com/DankerMu/SHUD-Harness/issues/210)。K10 挂载口径按实测修正为 workspace 包说明符（bundle 声明依赖并经 `link:` 安装）；文字传播由 #217 完成。本条记录开工而非完成，手工 Web 审批往返与 raw md5 证据由 #223 验收后追加。
 - 2026-10-21 M1 工程集成：PI 在本会话确认“测试通过，继续”。#211–#222 的工程与文档切片已逐 PR 合并；最终 [CI 39542343267](https://github.com/DankerMu/SHUD-Harness/actions/runs/39542343267) 的 `profile-smoke` 与 `all-checks-passed` 均成功。真实 `deepseek-flash-guan` 五探针正例全绿、两份 raw md5 不变；禁用插件负例正确失败，证据见 [#235](https://github.com/DankerMu/SHUD-Harness/pull/235)、[#236](https://github.com/DankerMu/SHUD-Harness/pull/236)。手工验收结论已接受，但 [#223](https://github.com/DankerMu/SHUD-Harness/issues/223) 所需本次 session log 路径及审批/拒写摘录尚未定位，未据此虚构事件或归档 Epic；实际 Web 启动参数为 `--profile shud --no-open --port <p>`，不再追加 `web` 位置参数。
+
+### M1 手工 Web 验收证据（2026-10-21，#223）
+
+PI 选择补采一次真实 Web 会话并亲自在审批卡点击“允许一次”；下列记录补齐上条工程集成日志中的证据缺口。使用持久 `DSH_HOME=/Users/danker/.dsh` 的 `shud` Web profile，模型为 `deepseek-flash-guan`（DMXAPI，key 仅由环境变量提供）。通过宿主现有 workspace API 登记合成工作区，不改宿主代码或 profile 配置；agent 未代批审批。
+
+- 工作区：`/Users/danker/.shud-acceptance-ob3hziek/work`；raw 样本：`data/raw/obs.csv`。
+- Session：`session-6cc096e4-2c08-4574-9e26-efa787a45170`。
+- 原始日志：`/Users/danker/.dsh/sessions/--Users-danker-.shud-acceptance-ob3hziek-work--/session-6cc096e4-2c08-4574-9e26-efa787a45170/session.v4.jsonl.zstd`。逐帧解压后按 `seq`、approval id 与 tool call id 关联；不以模型回复判定。
+- raw MD5：运行前与完成后均为 `406a4b65e6edef2cae087755117da2b9`。
+
+读 raw：seq 18 的 bash 调用执行 `cat data/raw/obs.csv`；以下为同一请求的实际日志字段摘录：
+
+```jsonl
+{"seq":19,"type":"approval/asked","data":{"id":"680a9abf-e78b-4647-bc1d-8653ebbf6262","toolName":"bash","callId":"call_00_ye1uq1WaB4A7qvpyM1Mp7560","reason":"Reading raw data requires PI approval (provenance rule)."}}
+{"seq":20,"type":"approval/decided","data":{"id":"680a9abf-e78b-4647-bc1d-8653ebbf6262","outcome":"allowed-once"}}
+{"seq":23,"type":"tool/result","data":{"message":{"toolCallId":"call_00_ye1uq1WaB4A7qvpyM1Mp7560","isError":false,"content":[{"type":"text","text":"date,q\n2020-01-01,1.5\n2020-01-02,1.7\n"}]}}}
+```
+
+写 raw：同一会话 seq 27 调用 `write` 尝试把样本的 `1.5` 改为 `9.9`，seq 28 被拒；从该 write 调用到 seq 33 的 `turn/end` 没有新的 `approval/asked`，文件字节不变：
+
+```jsonl
+{"seq":28,"type":"tool/result","data":{"message":{"toolCallId":"call_00_Nii7WoUPoOksK91x29ht0502","isError":true,"content":[{"type":"text","text":"Error: Raw data is immutable. Use the read tool to read raw data; write derived data in the workspace."}]}}}
+```
+
+两个场景及 MD5 对照均通过；该证据仅用于 M1 的手工 Web 审批往返，不扩张为通用 raw 数据安全证明。
