@@ -85,7 +85,11 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@24.0.3)(@vitest/coverage-v8@4.1.11)(jiti@2.7.0)(yaml@2.9.1)
 
-  profile/shud: {}
+  profile/shud:
+    dependencies:
+      '@shud-harness/dsh-shud-raw-guard':
+        specifier: workspace:*
+        version: link:../../packages/dsh-shud-raw-guard
 
 packages:
 
