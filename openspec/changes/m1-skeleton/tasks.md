@@ -72,3 +72,10 @@ Verification: `pnpm install --frozen-lockfile`; `pnpm run check`; direct Node in
 - Governing invariant: deny/ask terminates this guard; next delegates exactly once and retains the next listener's decision. Sibling surfaces: execution field extraction, return mapping, audit and counters share the same core verdict.
 - Required evidence: adapter tests for invalid config, deny/ask/next, malformed exec fields, downstream rejection, redacted logging and separate instance counters; `pnpm run check`, frozen install, build/import, real Cordis context smoke. No profile/bundle/schema/lint-whitelist changes.
 - Completed upstream: #211 merged via #225 after PI acceptance; #222 merged via #226. Shared change remains open.
+
+## Issue #213 enforcement fixture
+
+- Fixture level: expanded (upstream agree), task 2.3. Invariant: dsh imports are limited to the exact public `dsh-tools` and `cordis` package roots; direct checkout/internal package imports are rejected. Existing lint behavior remains intact.
+- Selected: public script entry/config/permissions → planted disallowed import must fail, both whitelist roots pass, internal subpaths remain denied; file IO/errors → self-test trap removes planted source; shared ordering → lint/self-test/control-plane declarations land atomically; packaging → current typed adapter remains lint-clean; documentation → render and drift check. Not selected: schema/units, resource discovery, legacy migration.
+- Sibling surfaces: ESLint package and checkout restrictions, guardrail positive/negative cases, constraints review_only, source Enforcement Index and generated projections.
+- Evidence: pre-change planted negative accepted (red guard), post-change self-test rejects it and accepts whitelist; `pnpm run test-guardrails`, `pnpm run check`, render/strict OpenSpec validation; no plugin or runtime changes.
