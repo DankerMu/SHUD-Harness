@@ -1,15 +1,20 @@
 #!/usr/bin/env sh
 # Usage: pnpm run raw-guard:probes [--patch <overlay>]
+# Offline: pnpm run raw-guard:probes --judge <saved-run-or-fixture>
+# Judge needs neither a key, host, profile nor original workspace; it uses the
+# same predicates and never emits the live all-five-green summary.
 # Build packages first. Live evidence stays outside the repository; only the
 # scratch workspace is removed on success. Failure preserves both paths.
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
-if [ -z "${DMXAPI_KEY:-}" ]; then
-  printf 'raw-guard:probes requires DMXAPI_KEY\n' >&2
-  exit 1
+if [ "${1:-}" != "--judge" ]; then
+  if [ -z "${DMXAPI_KEY:-}" ]; then
+    printf 'raw-guard:probes requires DMXAPI_KEY\n' >&2
+    exit 1
+  fi
+  unset ALL_PROXY
+  . "$ROOT/scripts/runtime/dsh-root.sh"
 fi
-unset ALL_PROXY
-. "$ROOT/scripts/runtime/dsh-root.sh"
 export ROOT
 node --input-type=module - "$@" <<'NODE'
 import * as fs from 'node:fs';
@@ -23,8 +28,10 @@ import { pathToFileURL } from 'node:url';
 const root = process.env.ROOT;
 const { RAW_READ_PROVENANCE_REASON } = await import(pathToFileURL(join(root, 'packages/dsh-shud-raw-guard/src/decide.ts')));
 const args = process.argv.slice(2);
+const offline = args[0] === '--judge';
+if (offline && args.length !== 2) throw new Error('Usage: raw-guard:probes --judge <run-dir>');
 const patches = [];
-for (let i = 0; i < args.length; i += 2) {
+for (let i = 0; !offline && i < args.length; i += 2) {
   if (args[i] !== '--patch' || !args[i + 1]) throw new Error('Usage: raw-guard:probes [--patch <overlay>]');
   patches.push('--patch', fs.realpathSync(args[i + 1]));
 }
@@ -133,6 +140,14 @@ function judge(runDir) {
   return results.every(Boolean) && unchanged;
 }
 
+if (offline) {
+  try {
+    process.exitCode = judge(resolve(args[1])) ? 0 : 1;
+  } catch (error) {
+    console.error(`raw-guard judge FAIL: ${error.message}`);
+    process.exitCode = 1;
+  }
+} else {
 let runDir;
 let scratch;
 try {
@@ -187,5 +202,6 @@ try {
   if (scratch) console.error(`workspace preserved: ${join(scratch, 'work')}`);
   if (runDir) console.error(`evidence preserved: ${runDir}`);
   process.exitCode = 1;
+}
 }
 NODE

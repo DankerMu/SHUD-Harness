@@ -1,0 +1,3 @@
+{"type":"session","sessionId":"session-bf9af1d9-f712-4cc6-88d6-acf72137c3e9","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call_00_bdD2NPBJphs5qhHf80MG7862","tool":"bash","input":{"command":"echo ok > derived.txt && cat derived.txt"}}
+{"type":"tool_result","callId":"call_00_bdD2NPBJphs5qhHf80MG7862","status":"completed","result":"ok\n"}

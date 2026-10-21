@@ -1,0 +1,7 @@
+{"type":"session","sessionId":"session-487ee124-8509-4cfd-9310-7f94c6e22aaa","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call_00_e4RxMrhLRrM1DXPXhSpD5236","tool":"read","input":{"file_path":"data/raw/obs.csv"}}
+{"type":"tool_result","callId":"call_00_e4RxMrhLRrM1DXPXhSpD5236","status":"completed","result":"<path>/fixture/work/data/raw/obs.csv</path>\n<type>file</type>\n<content>\n1: date,q\n2: 2020-01-01,1.5\n3: 2020-01-02,1.7\n\n(End of file - total 3 lines)\n</content>"}
+{"type":"tool_call","callId":"call_00_ET_P33Psva32R7WibQabh2C1385","tool":"edit","input":{"file_path":"data/raw/obs.csv","old_string":"2020-01-01,1.5","new_string":"2020-01-01,9.9"}}
+{"type":"tool_result","callId":"call_00_ET_P33Psva32R7WibQabh2C1385","status":"completed","result":"The file /fixture/work/data/raw/obs.csv has been updated successfully."}
+{"type":"tool_call","callId":"call_00_Kl2HvhkFOOhrJQul9m7K5709","tool":"read","input":{"file_path":"data/raw/obs.csv"}}
+{"type":"tool_result","callId":"call_00_Kl2HvhkFOOhrJQul9m7K5709","status":"completed","result":"<path>/fixture/work/data/raw/obs.csv</path>\n<type>file</type>\n<content>\n1: date,q\n2: 2020-01-01,9.9\n3: 2020-01-02,1.7\n\n(End of file - total 3 lines)\n</content>"}
