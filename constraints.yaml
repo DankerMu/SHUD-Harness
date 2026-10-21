@@ -172,7 +172,7 @@ verification:
     command: "pnpm run security:sast"
   - surface: "PR size"
     command: "pnpm run pr:size"
-  - surface: "dsh profile boot (local only)"
+  - surface: "dsh profile boot (local + CI)"
     command: "pnpm run profile:smoke"
   - surface: "raw-guard five probes (local block; requires DMXAPI_KEY)"
     command: "pnpm run raw-guard:probes"
@@ -185,7 +185,7 @@ verification:
     command: "pnpm run test-guardrails"
 
 readiness_gaps:
-  - "CI cannot run dsh or SHUD: profile:smoke and shud:tiny are local-only block gates"
+  - "CI cannot run SHUD: shud:tiny remains a local-only block gate"
   - "CI cannot run real LLM probes: raw-guard:probes requires local DMXAPI_KEY; Web approval remains manual"
   - "eng-init rendered-harness checker lives in gitignored .claude/skills; repo-side equivalents are instructions:check + docs:paths"
   - "semgrep not installed locally; CI job sast runs it"

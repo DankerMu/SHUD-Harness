@@ -114,10 +114,44 @@ jobs:
         if: github.event_name != 'pull_request'
         run: echo "pr-size applies to pull requests only; push to main is post-merge"
 
+  profile-smoke:
+    name: profile-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Prepare pinned npm host
+        run: |
+          mkdir -p "$RUNNER_TEMP/dsh"
+          printf '{"name":"dsh-ci","private":true}\n' > "$RUNNER_TEMP/dsh/package.json"
+          printf 'auto-install-peers=true\n' > "$RUNNER_TEMP/dsh/.npmrc"
+          node -e 'console.log("DSH_VERSION=" + JSON.parse(require("node:fs").readFileSync("profile/shud/package.json", "utf8")).peerDependencies["@deepseek-ai/dsh"])' >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/dsh/node_modules
+          key: ${{ runner.os }}-dsh-${{ env.DSH_VERSION }}-pnpm-11.28.5-node-24
+      - name: Install pinned dsh without native build scripts
+        run: pnpm --dir "$RUNNER_TEMP/dsh" add --ignore-scripts "@deepseek-ai/dsh@$DSH_VERSION"
+      - name: Verify Web profile configuration and plugin import
+        env:
+          DSH_ROOT: ${{ runner.temp }}/dsh/node_modules/@deepseek-ai/dsh
+          DSH_HOME: ${{ runner.temp }}/home
+        run: pnpm run profile:smoke
+
   all-checks-passed:
     name: all-checks-passed
     runs-on: ubuntu-latest
-    needs: [lint, test, docs-gate, secrets, sast, pr-size]
+    needs: [lint, test, docs-gate, secrets, sast, pr-size, profile-smoke]
     if: always()
     steps:
       - name: Fail if any required job did not succeed (failure, cancelled or skipped)
