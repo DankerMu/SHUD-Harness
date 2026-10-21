@@ -1,0 +1,5 @@
+{"type":"session","sessionId":"session-e8fad33f-25fd-435d-941a-2d95aa37e1dc","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call_00_obafMgV1T4RXGLnXyqkM7655","tool":"bash","input":{"command":"echo bad >> data/raw/obs.csv"}}
+{"type":"tool_result","callId":"call_00_obafMgV1T4RXGLnXyqkM7655","status":"completed","result":"(no output)"}
+{"type":"tool_call","callId":"call_00_AHKnt8hIdM9ZNTzTkdVL2581","tool":"bash","input":{"command":"tail -n 3 data/raw/obs.csv; echo \"---\"; ls -l data/raw/obs.csv"}}
+{"type":"tool_result","callId":"call_00_AHKnt8hIdM9ZNTzTkdVL2581","status":"completed","result":"2020-01-01,9.9\n2020-01-02,1.7\nbad\n---\n-rw-r--r--@ 1 danker  staff  41 10月 20 23:12 data/raw/obs.csv\n"}

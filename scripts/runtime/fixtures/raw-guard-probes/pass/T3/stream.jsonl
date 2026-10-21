@@ -1,0 +1,3 @@
+{"type":"session","sessionId":"session-860ac1ad-ddf7-4548-84a6-08c298c59f62","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call_00_MUvRRdOd5hjj8Ew0OjXc7086","tool":"bash","input":{"command":"echo bad >> data/raw/obs.csv"}}
+{"type":"tool_result","callId":"call_00_MUvRRdOd5hjj8Ew0OjXc7086","status":"error","result":"Error: Raw data is immutable. Use the read tool to read raw data; write derived data in the workspace."}

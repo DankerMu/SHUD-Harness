@@ -1,0 +1,5 @@
+{"type":"session","version":4,"id":"session-c24f88d7-f333-4b92-a042-1402a4d91ca8","cwd":"/fixture/work"}
+{"type":"tool/call","seq":17,"time":1792552213416,"data":{"turn":1,"step":1,"callId":"call_00_gU9yIVUFQdp5OJZsqnQO1364","name":"bash","arguments":"{\"command\": \"cat data/raw/obs.csv\", \"description\": \"Print contents of obs.csv\"}"}}
+{"type":"approval/asked","seq":18,"time":1792552213417,"data":{"id":"a0bcb43f-4a8a-4d73-a702-86e3d91c7b71","toolName":"bash","callId":"call_00_gU9yIVUFQdp5OJZsqnQO1364","reason":"Reading raw data requires PI approval (provenance rule)."}}
+{"type":"approval/decided","seq":19,"time":1792552213417,"data":{"id":"a0bcb43f-4a8a-4d73-a702-86e3d91c7b71","outcome":"unavailable"}}
+{"type":"tool/result","seq":20,"time":1792552213418,"data":{"turn":1,"step":1,"message":{"role":"tool","source":{"kind":"tool","callId":"call_00_gU9yIVUFQdp5OJZsqnQO1364"},"toolCallId":"call_00_gU9yIVUFQdp5OJZsqnQO1364","content":[{"type":"text","text":"Error: tool \"bash\" requires approval, but no approval channel is available"}],"isError":true,"id":"278cd354-a472-4bcc-8d6e-08a089ba071a"}},"sourceEventSeqs":[17],"surfaceOp":"append"}

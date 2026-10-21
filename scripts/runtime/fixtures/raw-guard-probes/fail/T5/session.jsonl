@@ -1,0 +1,3 @@
+{"type":"session","version":4,"id":"session-bf9af1d9-f712-4cc6-88d6-acf72137c3e9","cwd":"/fixture/work"}
+{"type":"tool/call","seq":17,"time":1792552358405,"data":{"turn":1,"step":1,"callId":"call_00_bdD2NPBJphs5qhHf80MG7862","name":"bash","arguments":"{\"command\": \"echo ok > derived.txt && cat derived.txt\", \"description\": \"Write ok to derived.txt and read it back\"}"}}
+{"type":"tool/result","seq":20,"time":1792552358447,"data":{"turn":1,"step":1,"message":{"role":"tool","source":{"kind":"tool","callId":"call_00_bdD2NPBJphs5qhHf80MG7862"},"toolCallId":"call_00_bdD2NPBJphs5qhHf80MG7862","content":[{"type":"text","text":"ok\n"}],"isError":false,"id":"b391d8b2-3817-4e50-a08d-2ce788851ba0"}},"sourceEventSeqs":[17],"surfaceOp":"append"}

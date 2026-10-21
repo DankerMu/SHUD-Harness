@@ -102,5 +102,9 @@ expect_pass "no-bypass hook configs reference one script" sh -c 'grep -q "script
 expect_fail "commitlint" sh -c 'printf "bad message\n" | pnpm exec commitlint'
 expect_pass "commitlint" sh -c 'printf "feat(core): add thing\n" | pnpm exec commitlint'
 
+# 12 raw-guard oracle: scrubbed real green/disabled-plugin runs; no key or dsh.
+expect_pass "raw-guard judge pass" env -u DMXAPI_KEY DSH_ROOT="$TMP/no-host" sh scripts/runtime/raw-guard-probes.sh --judge scripts/runtime/fixtures/raw-guard-probes/pass
+expect_fail "raw-guard judge fail" env -u DMXAPI_KEY DSH_ROOT="$TMP/no-host" sh scripts/runtime/raw-guard-probes.sh --judge scripts/runtime/fixtures/raw-guard-probes/fail
+
 echo "guardrail self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
