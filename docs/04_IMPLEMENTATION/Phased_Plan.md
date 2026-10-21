@@ -16,7 +16,7 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 
 | 里程碑 | 主题 | 用户可见步骤 | 验收门 |
 |---|---|---|---|
-| M1 | 骨架：profile + bundle + 两个薄插件 | 在 `dsh --profile shud` 里对话，raw 数据写入被拒并可审批 | `dsh --profile shud` 启动；raw-guard 单测 + 5 探针全绿；CI 通过 |
+| M1 | 骨架：profile + bundle + raw-guard 插件（包：`dsh-shud-core` 库 + `dsh-shud-raw-guard`） | 在 `dsh --profile shud` 里对话：写 raw 被拒（无审批路径），bash 读 raw 弹出 PI 审批卡 | `dsh --profile shud` 启动；raw-guard 单测 + 5 探针全绿；CI 通过 |
 | M2 | 运行主链：`shud_run` + durable JobRegistry + RunRecord | 一句话跑 ccw，中途重启 dsh，完成后被唤醒并拿到 RunRecord | ccw 全程 4m45s 内 dsh 重启一次，仍产出 RunRecord 且含退出码与产物清单 |
 | M3 | **MVP-1**：TaskCard + EvidenceReport + StackLock + 审批接线 | 从任务卡到 Markdown 证据报告，含 PI 审批 | 首任务"ccw 运行 → RunRecord → EvidenceReport"端到端；报告含 StackLock 三字段与响应 model |
 | M4 | **MVP-2**：已知答案回放 | 提交 openMP RHS 切片 ChangeRequest，经 VerificationCase 判定 | 正确性门按 serial baseline 一致性判定（ADR-0002 D4） |
@@ -25,9 +25,14 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 
 ## 1. M1 骨架
 
-**交付**
-- pnpm workspace：`packages/dsh-shud-core`（8 对象 Zod schema、治理常量、policy-gate-core 纯函数移植）、`packages/dsh-shud-raw-guard`（spike 插件 TS 化 + 单测）、`profile/shud/`（bundle `package.json` + `cordis.patch.yml`：模型路由、`session-log-deepseek` 关闭、插件挂载）。
-- CI：typecheck + vitest + `dsh --profile shud --dump-config` 自检。
+**交付计划**（不是完成状态；对应 OpenSpec change [`m1-skeleton`](../../openspec/changes/m1-skeleton/proposal.md)、Epic #210）
+- pnpm workspace：`packages/dsh-shud-core` 库（8 对象 Zod schema、治理常量、policy-gate-core 纯函数移植）、`packages/dsh-shud-raw-guard` 插件（决策核、dsh 适配层、审计与单测）、`profile/shud/` bundle（模型路由、仅关闭 `session-log-deepseek`、以 workspace 包说明符挂载 raw-guard）。
+- `profile:install`：识别 checkout/npm 两种 dsh 布局，幂等建立 web 模板的 `shud` 或 headless 模板的 `shud-probe` profile；不覆盖用户 patch。
+- 本机 `profile:smoke`：build → 临时 profile 建档 → dump-config/schema 自检，证明 raw-guard 可导入；`raw-guard:probes`：真实 LLM 五探针、session log 判据、负例与离线 judge 夹具自证。
+- CI：typecheck + vitest + `profile-smoke` job（npm 版 dsh），结果纳入 `all-checks-passed`；真实 LLM 探针只在本机运行。
+- eslint dsh seam 白名单与闸自证；Verification Matrix / Enforcement Index / constraints 同步。
+- 手工 Web 验收记录读 raw 的 ask → Allow once → 工具结果，以及写 raw 的 deny 无卡，session log 与 raw md5 证据记入 Migration_Plan。此项证明用户可见步骤，不改上表验收门。
+- 用户可见步骤改写依据：grill 分支⑤用户决策（[design D13](../../openspec/changes/m1-skeleton/design.md)）；写 raw deny 无审批路径，bash 读 raw ask。
 - 移植清单执行：[Port_List](Port_List.md)。
 
 **验收门**：上表 M1 行。**前置**：Phase 4 reset 完成（ADR-0004 K15）。
