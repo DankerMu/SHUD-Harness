@@ -1,0 +1,5 @@
+{"type":"session","sessionId":"session-f0eeb455-a410-444a-bcb5-b0ca1902da93","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call_00_9fAbIGgZS2jhMbQgwezO7046","tool":"bash","input":{"command":"echo bad >> ../outside/raw/obs.csv; echo \"[exit code: $?]\""}}
+{"type":"tool_result","callId":"call_00_9fAbIGgZS2jhMbQgwezO7046","status":"completed","result":"[exit code: 1]\n[stderr]\nbash: 行 1: ../outside/raw/obs.csv: Operation not permitted\n"}
+{"type":"tool_call","callId":"call_00_hrS3hCObNsZv1PXfmd513478","tool":"bash","input":{"command":"cat ../outside/raw/obs.csv; echo \"[exit code: $?]\""}}
+{"type":"tool_result","callId":"call_00_hrS3hCObNsZv1PXfmd513478","status":"completed","result":"date,q\n2020-01-01,1.5\n2020-01-02,1.7\n[exit code: 0]\n"}
