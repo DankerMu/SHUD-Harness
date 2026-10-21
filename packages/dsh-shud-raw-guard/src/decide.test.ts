@@ -298,6 +298,37 @@ test.each([
 });
 
 const defaultRaw = normalizeRawDirs().rawDirs[0];
+// #248: a redirect to /dev/null writes no file; only a real target is a write.
+const discardRedirectCases: [string, Kind, typeof options][] = [
+  ["head protected/obs.csv 2>/dev/null", "ask", options],
+  ["ls protected >/dev/null", "ask", options],
+  ["cat protected/x 2>/dev/null | wc -l", "ask", options],
+  ["ls protected &>/dev/null", "ask", options],
+  ["head protected/a 1>/dev/null 2>&1", "ask", options],
+  ["head protected/a >>/dev/null", "ask", options],
+  ["head protected/a 2> /dev/null", "ask", options],
+  [`cat ${defaultRaw}/obs.csv 2>/dev/null`, "ask", normalizeRawDirs()],
+  ["head protected/obs.csv 2>&1", "ask", options],
+  ["echo bad >> protected/x", "deny", options],
+  ["cat protected/x | sort > out.txt", "deny", options],
+  ["cat protected/a 2>/dev/null > protected/b", "deny", options],
+  ["head protected/a > /dev/nullx", "deny", options],
+  ["head protected/a > /dev/null/x", "deny", options],
+  ["head protected/a >/dev/null; rm protected/a", "deny", options],
+  ["cat protected/a 2>/dev/null | tee protected/b", "deny", options],
+  ["bzip2>/dev/null protected/x", "deny", options],
+  [`echo bad >> ${defaultRaw}/obs.csv`, "deny", normalizeRawDirs()],
+];
+test.each(discardRedirectCases)(
+  "bash `%s` -> %s (#248 discarding redirect)",
+  (command, kind, config) => {
+    const result = decide("bash", { command }, config);
+    expect(result.kind).toBe(kind);
+    if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+    if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+  },
+);
+
 test.each([
   [`rm -rf ${defaultRaw}*`, "deny"],
   [`rm -rf ${defaultRaw}?`, "deny"],
