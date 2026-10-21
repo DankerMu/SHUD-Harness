@@ -471,7 +471,7 @@ const spellingCases: [string, Kind, typeof options, string][] = [
   ["rm data/raw-x", "next", defaults, defaultWs],
   ["rm data/rawx/y", "next", defaults, defaultWs],
   ["rm data/raw.bak", "next", defaults, defaultWs],
-  ["rm -rf data/x/../raw", "next", defaults, defaultWs],
+  ["rm -rf data/x/../raw", "deny", defaults, defaultWs],
   ["rm -rf PROTECTED", caseKind("deny"), options, caseWs],
   ["rm -rf Protected/x", caseKind("deny"), options, caseWs],
   ["cat PROTECTED/x", caseKind("ask"), options, caseWs],
@@ -541,6 +541,84 @@ test.each(quoteSplitCases)("%s `%s` -> %s %j (#260 quote split)", (name, command
   expect(result.kind).toBe(kind);
   if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
   if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+});
+
+// #263: inside one shell word a `..` segment lexically cancels the plain segment
+// before it; symlinks are not resolved and a leading `..` stays as written.
+const foldWs = mkdtempSync(join(tmpdir(), "shud-guard-fold-"));
+const foldOutside = mkdtempSync(join(tmpdir(), "shud-guard-fold-outside-"));
+for (const dir of ["raw", "x", "other"]) mkdirSync(join(foldWs, "sub", dir), { recursive: true });
+symlinkSync(foldOutside, join(foldWs, "sub", "lnk"));
+symlinkSync(join(foldWs, "sub", "x"), join(foldWs, "lnk2"));
+afterAll(() => {
+  for (const dir of [foldWs, foldOutside]) rmSync(dir, { recursive: true, force: true });
+});
+const subRaw = normalizeRawDirs({ rawDirs: ["sub/raw"] });
+const parentFoldCases: [string, string, Kind, typeof options, string, string?][] = [
+  ["bash", "rm -rf sub/x/../raw", "deny", subRaw, foldWs],
+  ["bash", "rm sub/x/../raw/f", "deny", subRaw, foldWs],
+  ["bash", "rm -rf ./sub/x/../raw", "deny", subRaw, foldWs],
+  ["bash", `rm -rf ${realpathSync.native(foldWs)}/sub/x/../raw`, "deny", subRaw, foldWs],
+  ["bash", "rm -rf sub/x/y/../../raw", "deny", subRaw, foldWs],
+  ["bash", "rm -rf {sub/x/../raw,y}", "deny", subRaw, foldWs],
+  ["bash", "cat sub/x/../raw/f", "ask", subRaw, foldWs],
+  ["bash", "cat sub//x/./../raw/f", "ask", subRaw, foldWs],
+  // Composition: the pwsh and quote-stripped copies are folded too.
+  ["pwsh", "Remove-Item sub\\x\\..\\raw", "deny", subRaw, foldWs],
+  ["bash", 'rm -rf sub/x/"../"raw', "deny", subRaw, foldWs],
+  // Segment shapes: dotted, versioned and glob segments are plain and cancel.
+  ["bash", "rm -rf sub/.x/../raw", "deny", subRaw, foldWs],
+  ["bash", "rm -rf sub/v1.2/../raw", "deny", subRaw, foldWs],
+  ["bash", "rm -rf sub/*/../raw", "deny", subRaw, foldWs],
+  // Word position: every word is folded, not only the first or the last.
+  ["bash", "mv sub/x/../raw /tmp/y", "deny", subRaw, foldWs],
+  ["bash", "cp -r out/d sub/x/../raw/", "deny", subRaw, foldWs],
+  ["bash", "rm -rf {a,sub/x}/../raw", "deny", subRaw, foldWs],
+  // Default rawDirs, built from its parent and leaf segments.
+  ["bash", `cat ${rawParent}/x/../${rawLeaf}/f`, "ask", defaults, defaultWs],
+  ["bash", `rm -rf ${rawParent}/x/y/../../${rawLeaf}`, "deny", defaults, defaultWs],
+  ["bash", `cat ${rawParent}//x/./../${rawLeaf}/f`, "ask", defaults, defaultWs],
+  ["bash", `rm -rf ${rawParent}/x/../${rawLeaf}x`, "next", defaults, defaultWs],
+  ["bash", `rm -rf ${rawParent}/x/../../${rawLeaf}`, "next", defaults, defaultWs],
+  ["bash", `cat ${rawParent}/a b/../${rawLeaf}`, "next", defaults, defaultWs],
+  ["bash", `rm -rf ${rawParent}/${rawLeaf}/../other`, "deny", defaults, defaultWs],
+  // Counterexamples: siblings, separate words and folding to another `raw`.
+  ["bash", "rm -rf sub/x/../rawx", "next", subRaw, foldWs],
+  ["bash", "rm -rf sub/x/../raw.bak", "next", subRaw, foldWs],
+  ["bash", "rm -rf sub/rawx", "next", subRaw, foldWs],
+  ["bash", "cat sub/a b/../raw", "next", subRaw, foldWs],
+  ["bash", "rm -rf sub/x/../../raw", "next", subRaw, foldWs],
+  // Not regressed: the folded copy is appended, never replaces the text it folds.
+  ["bash", "rm -rf sub/raw/../other", "deny", subRaw, foldWs],
+  ["bash", "cat sub/raw/../other/f", "ask", subRaw, foldWs],
+  ["bash", "rm -rf sub//raw/../other", "deny", subRaw, foldWs],
+  // Accepted false positive: sub/lnk is a real symlink elsewhere, folded lexically.
+  ["bash", "rm -rf sub/lnk/../raw", "deny", subRaw, foldWs],
+  // Documented gaps: symlink traversal (lnk2 -> sub/x) and a leading `..` from workdir.
+  ["bash", "rm -rf lnk2/../raw", "next", subRaw, foldWs],
+  ["bash", "rm -rf ../raw", "next", subRaw, foldWs, "sub/x"],
+  ["bash", "cat ../raw/f", "next", subRaw, foldWs, "sub/x"],
+  ["bash", "cd sub/x && rm -rf ../raw", "next", subRaw, foldWs],
+  // Documented gap: a quoted or escaped space splits the word before folding.
+  ["bash", 'rm -rf "sub/x y/../raw"', "next", subRaw, foldWs],
+  ["bash", "rm -rf sub/x\\ y/../raw", "next", subRaw, foldWs],
+];
+test.each(parentFoldCases)(
+  "%s `%s` -> %s (#263 parent fold)",
+  (name, command, kind, config, ws, workdir) => {
+    const result = decide(name, workdir ? { command, workdir } : { command }, config, ws);
+    expect(result.kind).toBe(kind);
+    if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+    if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+  },
+);
+
+// #263 resource limit: folding is one linear pass per word, not a fixed point.
+test("bash `rm -rf sub/` + 'a/' x 2e5 + '../' x 2e5 + raw -> deny (#263 adversarial)", () => {
+  const command = `rm -rf sub/${"a/".repeat(2e5)}${"../".repeat(2e5)}raw`;
+  const result = decide("bash", { command }, subRaw, foldWs);
+  expect(result.kind).toBe("deny");
+  expect(result.reason).toMatch(/immutable/);
 });
 
 test("file tools already canonicalize dot spellings (#247 sibling surface)", () => {
