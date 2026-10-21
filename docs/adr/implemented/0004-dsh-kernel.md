@@ -29,12 +29,14 @@ kind: architecture
 | K7 | **MVP 零自定义 UI**：用 dsh 自带聊天、审批卡片、作业卡片 + Markdown 报告文件 | 1.4 调研：自定义卡片需 React 包 + 构建；YAGNI |
 | K8 | **durable JobRegistry backend 是 M2 核心交付，替换全部 `jobs-local`**：实现 `ctx.jobs` 契约，子进程 detach、作业记录落盘、启动时 pid 对账、补 `job/settled` 并投递完成通知 | spike 1.3：优雅关停杀子进程且 settled 未落盘；SIGKILL 留孤儿；重启后一律 `unknown job` |
 | K9 | **出站通道**：只关闭 `session-log-deepseek`（它把整份会话日志作为 `dsh_session_log` 字段随每次 official-route 请求发往端点，本项目端点是第三方中转）；插件清单上报与 `FEEDBACK_ONLY` 遥测保持 dsh 默认 | spike 1.1 实测 12 次请求曾携带会话日志；PI 决定只关这一条 |
-| K10 | **插件形态 = TypeScript + tsc 构建，pnpm workspace 多包**；profile 的 `cordis.patch.yml` 以文件路径挂载各包 `lib/`，不发 npm | 复用现有 TS 资产（Zod schema、policy-gate-core）；dsh 支持文件路径/`file:` URL 挂载 |
+| K10 | **插件形态 = TypeScript + tsc 构建，pnpm workspace 多包**；profile 的 `cordis.patch.yml` 以 workspace 包说明符挂载（bundle 声明 `workspace:*` 依赖，包入口指向 `lib/`），不发 npm | 复用现有 TS 资产（Zod schema、policy-gate-core）；实测 `link:` 下相对路径解析到 profile 的 `node_modules`，无法导入；bundle 声明 workspace 依赖后可按包说明符导入 |
 | K11 | **MVP 不做记忆**；首任务跑通后再评估 | dsh 无内置 memory 包；跨任务才有价值 |
 | K12 | **治理四条不变式原样继承**：改物理方程/默认参数/benchmark baseline 需 PI 批；单流域指标提升 ≠ 模型改进；校准 ≠ 结构验证；删除原始数据禁止或 PI 批 | 与内核无关的领域规则 |
 | K13 | **作用域规则**：任何 spike 不以首任务的一个用户可见步骤收尾就不准开；写入本 ADR 与 CLAUDE.md | 防止 M2 式失控复发 |
 | K14 | **旧文档处置**：agent 出三列处置表（留 / 删 / 删-记），PI 批后执行；表见 [Doc_Disposition_2026-10-20](../../00_INDEX/Doc_Disposition_2026-10-20.md) | PI 决定"有用保留、没用删除" |
 | K15 | **仓库重置机制**：同仓库 `main` 原地清理提交，历史保留，`archive/zero-v0.8.3` tag 已打；64 个 open issue 全部关闭并统一评论指向本 ADR，#132 的需求（StackLock 脏状态观测）按路径名 `git status` 语义重开普通任务；根目录删除 `SHUD.pptx`、`shud_harness_theory_to_code_addendum_zh/`、`spikes/`、`workspace/`（本迁移计划移入 docs/） | PI 决定 |
+
+K10 revisit（2026-10-20，`m1-skeleton` design D7）：依据 `link:` 安装下的模块解析实测，将挂载方式修正为 workspace 包说明符 + bundle `workspace:*` 依赖；TS + tsc 多包、不发 npm 的决策不变。
 
 ## 需求 → dsh 机制映射（spike 实测）
 

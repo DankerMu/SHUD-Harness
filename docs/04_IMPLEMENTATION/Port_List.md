@@ -18,7 +18,7 @@ reset 时只有本表列出的代码资产可以从 `archive/zero-v0.8.3` 搬入
 | idempotency / lock / failure ledger 服务与 34K 行测试 | `packages/core/src/domain/services/` | — | 不搬 | 零交付功能下不值得 |
 | backend（Hono）/ frontend（React） | `packages/backend`、`packages/frontend` | — | 不搬 | ADR-0004 K2 |
 | GLM provider 脚本 | `scripts/glm-provider/` | — | 不搬 | 模型改为 DMXAPI（K3） |
-| spike 插件 `shud-raw-guard` | `../dsh-spike/plugins/shud-raw-guard/index.js` | `packages/dsh-shud-raw-guard/` | TS 化 + 单测 | spike 1.2 已验证 |
-| spike overlay | `../dsh-spike/overlays/*.yml` | `profile/shud/cordis.patch.yml` | ✅ 已合并（仅 dmxapi-flash；raw-guard 挂载行随 M1 包落地时加入，不留占位） | 模型路由 + 出站关闭（只关 `session-log-deepseek`，K9；spike 里关掉的 otel/inventory 两行按 K9 不带入） |
+| spike 插件 `shud-raw-guard` | `../dsh-spike/plugins/shud-raw-guard/index.js` | `packages/dsh-shud-raw-guard/` | ✅ TS 化 + 单测（M1） | spike 1.2 已验证 |
+| spike overlay | `../dsh-spike/overlays/*.yml` | `profile/shud/cordis.patch.yml` | ✅ 已合并 dmxapi-flash；raw-guard ✅ 已加入（包说明符） | 模型路由 + 出站关闭（只关 `session-log-deepseek`，K9；spike 里关掉的 otel/inventory 两行按 K9 不带入） |
 
 移植时的运行时调整：测试从 `bun:test` 改 `vitest`；包内相对导入带 `.ts` 扩展名（`rewriteRelativeImportExtensions`，Node 24 直接运行 `.ts` 的 `scripts/schema/generate.ts` 与 `tsc` 产出都能解析）；`core-schemas.test.ts` 的 `import.meta.dir` 改为 `fileURLToPath(import.meta.url)`；`tsc --noEmit` 不含 `*.test.ts`（与旧根 tsconfig 一致，测试由 vitest 负责）。
