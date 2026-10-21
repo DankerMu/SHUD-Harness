@@ -4,7 +4,7 @@
 
 PI 已明确回复“测试通过，继续”，据此完成逐 PR 集成。已完成项与合并 PR：1.1–1.2 → #225；2.1–2.2 → #227；2.3 → #228；3.1 → #230；3.2 → #231；3.3 → #232；3.4 → #234；4.1 → #235；4.2 → #236；4.3 → #237；5.1 → #238；6.1 → #226。每个集成 PR 的最终 main-target `all-checks-passed` 均通过；#238 的 [CI 39542343267](https://github.com/DankerMu/SHUD-Harness/actions/runs/39542343267) 同时包含成功的 npm/Linux `profile-smoke` 与聚合检查。真实五探针正例、禁用插件负例、离线夹具与独立审查证据保存在对应 PR。
 
-6.2 尚未勾选：PI 验收结论已记录，但本机当前持久会话与已知临时会话中未定位到本次 `allowed-once` 序列。需补充实际验收的 session log 路径后摘录，不以 headless `unavailable` 或旧 spike 记录替代；追踪 [#223](https://github.com/DankerMu/SHUD-Harness/issues/223)。本 change 暂不归档。
+6.2 已由 [#243](https://github.com/DankerMu/SHUD-Harness/pull/243) 补齐并合并：[Migration_Plan_dsh](../../../../docs/Migration_Plan_dsh.md) 记录了 session `session-6cc096e4-2c08-4574-9e26-efa787a45170` 的 seq 19 → 20 → 23（provenance 审批、PI allowed-once、读取成功）与 seq 27 → 28 → 33（write、immutable 拒绝、完成，期间无新审批）；raw MD5 前后均为 `406a4b65e6edef2cae087755117da2b9`。全部 15 项任务完成，PI 选择同步正式规格后归档。
 
 ## 1. raw-guard 包与决策核（packages/dsh-shud-raw-guard，纯函数）
 
@@ -47,7 +47,7 @@ PI 已明确回复“测试通过，继续”，据此完成逐 PR 集成。已�
 ## 6. 文档对齐与手工 Web 验收（docs）
 
 - [x] 6.1 `docs/04_IMPLEMENTATION/Phased_Plan.md` §0 M1 行按 D13 改写主题与用户可见步骤两列（验收门列不动），§1 交付列表与本 change 对齐（raw-guard 包、profile-install、probes、CI profile-smoke、seam 白名单、手工 Web 验收作为用户可见步骤的证据），并在 §1 注明用户可见步骤改写依据 = grill 分支⑤用户决策；`docs/04_IMPLEMENTATION/Port_List.md`：`wording.ts` 行处置改为"M3 重写为常量 + 测试（消费者 EvidenceReport）"，policy-gate-core 行"体量重估留 M1"改为"随 M3 棘轮（constraints.yaml baseline）"；`docs/Migration_Plan_dsh.md` 加一行 M1 开工记录（change 名、Epic 号、K10 修正）。验证 `pnpm run docs:check` 通过，§0 M1 行与 raw-data-guard spec 的 deny/ask 口径逐字一致
-- [ ] 6.2 M1 收口手工 Web 验收：`profile:install` 到真实 `DSH_HOME`，`dsh --profile shud --no-open --port <p>`，按 shud-profile spec「Manual Web acceptance」两个 scenario 操作，把 session log 路径与 `approval/asked` → `approval/decided{allowed-once}` → `tool/result` 序列摘录、以及写 raw 的 `tool/result` isError 摘录追加到 `docs/Migration_Plan_dsh.md`。验证 Migration_Plan 新行含两段摘录且 raw 文件 md5 前后一致
+- [x] 6.2 M1 收口手工 Web 验收：`profile:install` 到真实 `DSH_HOME`，`dsh --profile shud --no-open --port <p>`，按 shud-profile spec「Manual Web acceptance」两个 scenario 操作，把 session log 路径与 `approval/asked` → `approval/decided{allowed-once}` → `tool/result` 序列摘录、以及写 raw 的 `tool/result` isError 摘录追加到 `docs/Migration_Plan_dsh.md`。验证 Migration_Plan 新行含两段摘录且 raw 文件 md5 前后一致
 - Suggested fixture level: none - 纯文档与一次手工操作，无运行时代码
 - Minimal mergeable slice: 6.1 单独一刀（atomic：三处文字是同一事实源变更，拆开会在合并窗口内出现互相矛盾的里程碑描述；验证路径 `docs:check`）；6.2 为独立切片（验证路径是手工 Web 流程，与 6.1 不同；依赖 3.3 落地），两者按验证路径拆为两个 issue
 
