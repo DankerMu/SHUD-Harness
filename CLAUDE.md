@@ -191,7 +191,7 @@ SHUD-Harness/
 | ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
 | merge = PI 功能验收 | GitHub PR | GitHub rulesets（PR required） | gate |
-| 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | review-only until M1 | review-only |
+| 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
 | docs 随代码改 | PR 模板 | review-only | review-only |
 | 科学措辞规则（M3 转测试常量） | 报告生成 | review-only until M3 | review-only |
 | 运行时不变量伴生（M2 起入矩阵） | reviewer 清单 | review-only until M2 | review-only |
