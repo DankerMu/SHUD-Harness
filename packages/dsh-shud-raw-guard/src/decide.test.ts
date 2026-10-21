@@ -342,6 +342,56 @@ test.each(discardRedirectCases)(
   },
 );
 
+// #255: a file-target >&word and a read-write <>word write a file; fd
+// duplication, moving and closing (>&2, 2>&1-, 1>&-) and /dev/null do not.
+const fdRedirectCases: [string, Kind, typeof options][] = [
+  ["echo x >&protected/b", "deny", options],
+  ["echo x >& protected/b", "deny", options],
+  ["echo x 1>&protected/b", "deny", options],
+  ["cat protected/a >&out.txt", "deny", options],
+  ["echo x >&2x protected/a", "deny", options],
+  ["echo XY 1<>protected/a", "deny", options],
+  [": <>protected/newfile", "deny", options],
+  ["exec 3<>protected/newfile", "deny", options],
+  ["cat protected/a 0<>protected/b", "deny", options],
+  ["cat protected/a 2>/dev/null >&protected/b", "deny", options],
+  ["echo XY 1<>protected/a 2>/dev/null", "deny", options],
+  ["head protected/a >&/dev/nullx", "deny", options],
+  [`echo x >&${defaultRaw}/b`, "deny", normalizeRawDirs()],
+  ["head protected/a 2>&1", "ask", options],
+  ["head protected/a >&2", "ask", options],
+  ["head protected/a >& 2", "ask", options],
+  ["head protected/a 1>&-", "ask", options],
+  ["head protected/a 2>&1-", "ask", options],
+  ["cat protected/a 3>&1-", "ask", options],
+  ["head protected/a 2>&1 | wc -l", "ask", options],
+  ["head protected/a 2>&1;", "ask", options],
+  ["sh -c 'head protected/a >&2'", "ask", options],
+  ["head protected/a >&/dev/null", "ask", options],
+  ["head protected/a 3<>/dev/null", "ask", options],
+  ["head protected/a <protected/b", "ask", options],
+  ["diff <(cat protected/a) b", "ask", options],
+  ["cat protected/a <<EOF", "ask", options],
+  [`head ${defaultRaw}/a 2>&1`, "ask", normalizeRawDirs()],
+];
+test.each(fdRedirectCases)("bash `%s` -> %s (#255 fd redirect)", (command, kind, config) => {
+  const result = decide("bash", { command }, config);
+  expect(result.kind).toBe(kind);
+  if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+  if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+});
+
+// #255 resource limit: whitespace-only or fd-only redirect tails stay linear reads.
+test.each([
+  ["'>&' + 1e6 spaces", ">&" + " ".repeat(1e6)],
+  ["'1>&' x 3e5", "1>&".repeat(3e5)],
+  ["'<>' + 1e6 spaces", "<>" + " ".repeat(1e6)],
+])("bash `cat protected/a ` + %s -> ask (#255 adversarial)", (_label, tail) => {
+  const result = decide("bash", { command: `cat protected/a ${tail}` });
+  expect(result.kind).toBe("ask");
+  expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+});
+
 test.each([
   [`rm -rf ${defaultRaw}*`, "deny"],
   [`rm -rf ${defaultRaw}?`, "deny"],
