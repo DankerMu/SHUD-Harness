@@ -2,21 +2,21 @@
 
 ## 1. Decision core (`packages/dsh-shud-raw-guard/src/decide.ts`, `decide.test.ts`)
 
-- [ ] 1.1 先加测试：design 列出的 ask 行与 deny 行（含默认 `data/raw` 的 `>>` 行与对照行）入 `test.each` 表，`reason` 断言齐全；验证：对未改的 `decide.ts` 运行 `pnpm vitest run packages/dsh-shud-raw-guard/src/decide.test.ts`，恰好新增的 ask 行红、deny 行绿，记录红行数。
-- [ ] 1.2 加 `DISCARD_REDIRECT` 常量与 `checked = command.replace(DISCARD_REDIRECT, " ")`，`WRITE_VERBS.test(checked)`；mention 判定、`PWSH_WRITES.test(command)` 不改；验证：同一命令全绿，`git diff` 显示 `decide.ts` 仅新增常量与改一行。
-- [ ] 1.3 `pnpm run check` exit 0（覆盖率不降）；`pnpm run build` 产出 `lib/decide.js`。
+- [x] 1.1 先加测试：design 列出的 ask 行与 deny 行（含默认 `data/raw` 的 `>>` 行与对照行）入 `test.each` 表，`reason` 断言齐全；验证：对未改的 `decide.ts` 运行 `pnpm vitest run packages/dsh-shud-raw-guard/src/decide.test.ts`，恰好新增的 ask 行红、deny 行绿，记录红行数。
+- [x] 1.2 加 `DISCARD_REDIRECT` 常量与 `checked = command.replace(DISCARD_REDIRECT, " ")`，`WRITE_VERBS.test(checked)`；mention 判定、`PWSH_WRITES.test(command)` 不改；验证：同一命令全绿，`git diff` 显示 `decide.ts` 仅新增常量与改一行。
+- [x] 1.3 `pnpm run check` exit 0（覆盖率不降）；`pnpm run build` 产出 `lib/decide.js`。
 
 Suggested fixture level: expanded
 Minimal mergeable slice: atomic
 
 ## 2. Spec
 
-- [ ] 2.1 本 change `specs/raw-data-guard/spec.md` delta（编排方已写）与实现一致：剥除列表、`/dev/nullx` 排除、两个场景；验证：`openspec validate raw-guard-discard-redirect --strict --no-interactive`。
+- [x] 2.1 本 change `specs/raw-data-guard/spec.md` delta（编排方已写）与实现一致：剥除列表、`/dev/nullx` 排除、两个场景；验证：`openspec validate raw-guard-discard-redirect --strict --no-interactive`。
 
 ## 3. Verification
 
-- [ ] 3.1 `pnpm run raw-guard:probes`（编排方执行）：T1–T5 PASS 或 INCONCLUSIVE 重跑，md5 不变，证据目录记入 PR。
-- [ ] 3.2 PR 内附 reviewer 白盒审查摘要（Critical Paths #1/#2）、红→绿证据、probes 结果。
+- [x] 3.1 `pnpm run raw-guard:probes`（编排方执行）：T1–T5 PASS 或 INCONCLUSIVE 重跑，md5 不变，证据目录记入 PR。
+- [x] 3.2 PR 内附 reviewer 白盒审查摘要（Critical Paths #1/#2）、红→绿证据、probes 结果。
 
 ## Risk packs
 
