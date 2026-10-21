@@ -5,6 +5,18 @@
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
 : "${DSH_HOME:?profile:install requires DSH_HOME}"
+# Match the host's home spelling before checking existence: template creation
+# replaces an existing profile, so a shell/host path mismatch would lose user state.
+DSH_HOME=$(node -e '
+const path = require("node:path");
+const os = require("node:os");
+let home = process.env.DSH_HOME;
+if (!home || !home.trim()) throw new Error("profile:install requires non-blank DSH_HOME");
+if (home === "~") home = os.homedir();
+else if (home.startsWith("~/") || home.startsWith("~\\")) home = path.join(os.homedir(), home.slice(2));
+process.stdout.write(path.resolve(home));
+')
+export DSH_HOME
 PROFILE_NAME="${PROFILE_NAME:-shud}"
 PROFILE_TEMPLATE="${PROFILE_TEMPLATE:-web}"
 unset ALL_PROXY
