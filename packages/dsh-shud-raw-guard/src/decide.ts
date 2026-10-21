@@ -84,6 +84,27 @@ function contains(root: string, target: string): boolean {
   return target === root || target.startsWith(root.endsWith(sep) ? root : root + sep);
 }
 
+// Equivalent spellings: repeated separators collapse and a `/.` path segment
+// (followed by /, end or a command boundary) drops. `./x` and `..` stay as written.
+function normalizeCommandPaths(text: string): string {
+  return text.replace(/\/{2,}/g, "/").replace(/\/\.(?=\/|$|[\s;&|)}'"`])/g, "");
+}
+
+// A canonical root is on a case-insensitive filesystem when its other-case
+// spelling (upper if that differs, else lower) natively resolves back to it.
+// Missing roots, failed probes and letterless roots count as case-sensitive.
+// Probed per decision, not cached: a root created later must be seen.
+export function caseInsensitiveRoot(root: string): boolean {
+  const upper = root.toUpperCase();
+  const variant = upper !== root ? upper : root.toLowerCase();
+  if (variant === root) return false;
+  try {
+    return realpathSync.native(variant) === root;
+  } catch {
+    return false;
+  }
+}
+
 export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
   const args = call.arguments;
   if (!args || typeof args !== "object" || Array.isArray(args)) return NEXT;
@@ -103,12 +124,15 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
   if ((call.name === "bash" || call.name === "pwsh") && typeof fields.command === "string") {
     const command = fields.command;
     const workdir = canonical(typeof fields.workdir === "string" ? fields.workdir : cwd, cwd);
+    const texts = [command, normalizeCommandPaths(command)];
     for (const raw of options.rawDirs) {
       const root = canonical(raw, cwd);
-      const mentioned = [raw, root].some((text) => {
+      const flags = caseInsensitiveRoot(root) ? "i" : "";
+      const mentioned = [raw, normalizeCommandPaths(raw), root].some((text) => {
         const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         // Any non-path-name character after raw text (glob, brace, backtick) is a mention.
-        return new RegExp(`${escaped}(?![A-Za-z0-9._-])`).test(command);
+        const pattern = new RegExp(`${escaped}(?![A-Za-z0-9._-])`, flags);
+        return texts.some((candidate) => pattern.test(candidate));
       });
       if (!mentioned && !contains(root, workdir)) continue;
       const pwsh = call.name === "pwsh" || PWSH_COMMAND.test(command);

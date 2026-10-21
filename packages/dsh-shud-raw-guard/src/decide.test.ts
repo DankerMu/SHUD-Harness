@@ -1,8 +1,21 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, expect, test } from "vitest";
-import { decideRawAccess, normalizeRawDirs, RAW_READ_PROVENANCE_REASON } from "./decide.ts";
+import {
+  caseInsensitiveRoot,
+  decideRawAccess,
+  normalizeRawDirs,
+  RAW_READ_PROVENANCE_REASON,
+} from "./decide.ts";
 
 test("rejects invalid rawDirs rather than silently using defaults", () => {
   for (const config of [
@@ -336,4 +349,62 @@ test.each([
   [`cat ${defaultRaw}*`, "ask"],
 ])("default rawDirs bash `%s` -> %s", (command, kind) => {
   expect(decide("bash", { command }, normalizeRawDirs()).kind).toBe(kind);
+});
+
+// #247: equivalent spellings of a raw path decide like the configured text.
+// Filesystem case sensitivity is read with existsSync before any differently
+// cased directory exists: macOS APFS takes the insensitive branch, Linux the other.
+const defaultWs = mkdtempSync(join(tmpdir(), "shud-guard-default-"));
+mkdirSync(join(defaultWs, defaultRaw), { recursive: true });
+const defaultInsensitive = existsSync(join(defaultWs, defaultRaw.toUpperCase()));
+const caseWs = mkdtempSync(join(tmpdir(), "shud-guard-case-"));
+mkdirSync(join(caseWs, "protected"));
+const caseInsensitive = existsSync(join(caseWs, "PROTECTED"));
+const caseRoot = realpathSync.native(join(caseWs, "protected"));
+afterAll(() => {
+  for (const dir of [defaultWs, caseWs]) rmSync(dir, { recursive: true, force: true });
+});
+const defaults = normalizeRawDirs();
+const missing = normalizeRawDirs({ rawDirs: ["missing/raw"] });
+const caseKind = (kind: Kind): Kind => (caseInsensitive ? kind : "next");
+const spellingCases: [string, Kind, typeof options, string][] = [
+  ["rm -rf DATA/RAW", defaultInsensitive ? "deny" : "next", defaults, defaultWs],
+  ["rm -rf data/./raw", "deny", defaults, defaultWs],
+  ["rm -rf data//raw", "deny", defaults, defaultWs],
+  ["rm -rf ./data//./raw/", "deny", defaults, defaultWs],
+  ["cat data/./raw/x", "ask", defaults, defaultWs],
+  ["rm data/raw-x", "next", defaults, defaultWs],
+  ["rm data/rawx/y", "next", defaults, defaultWs],
+  ["rm data/raw.bak", "next", defaults, defaultWs],
+  ["rm -rf data/x/../raw", "next", defaults, defaultWs],
+  ["rm -rf PROTECTED", caseKind("deny"), options, caseWs],
+  ["rm -rf Protected/x", caseKind("deny"), options, caseWs],
+  ["cat PROTECTED/x", caseKind("ask"), options, caseWs],
+  ["cat Protected/x", caseKind("ask"), options, caseWs],
+  ["rm -rf MISSING/RAW", "next", missing, caseWs],
+  ["rm -rf missing/./raw", "deny", missing, caseWs],
+];
+test.each(spellingCases)("bash `%s` -> %s (#247 path spelling)", (command, kind, config, ws) => {
+  const result = decide("bash", { command }, config, ws);
+  expect(result.kind).toBe(kind);
+  if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+  if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+});
+
+test("file tools already canonicalize dot spellings (#247 sibling surface)", () => {
+  expect(decide("write", { file_path: "data/./raw/x" }, defaults, defaultWs).kind).toBe("deny");
+});
+
+test("caseInsensitiveRoot matches the independently observed filesystem sensitivity", () => {
+  expect(caseInsensitiveRoot(caseRoot)).toBe(caseInsensitive);
+});
+
+test("caseInsensitiveRoot treats a root without letters as case-sensitive", () => {
+  expect(caseInsensitiveRoot("/1/2")).toBe(false);
+});
+
+test.runIf(!caseInsensitive)("case-sensitive filesystem: a separate PROTECTED/ is not raw", () => {
+  mkdirSync(join(caseWs, "PROTECTED"));
+  expect(caseInsensitiveRoot(caseRoot)).toBe(false);
+  expect(decide("bash", { command: "rm -rf PROTECTED" }, options, caseWs).kind).toBe("next");
 });
