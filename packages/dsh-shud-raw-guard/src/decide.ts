@@ -101,6 +101,21 @@ function normalizeCommandPaths(text: string): string {
   return text.replace(/\/{2,}/g, "/").replace(/\/\.(?=\/|$|[\s;&|)}'"`])/g, "");
 }
 
+// Lexical `..`: inside one shell word a `..` segment cancels the plain segment
+// before it (not empty, `.` or `..`). Symlinks are not resolved.
+function foldParentSegments(text: string): string {
+  return text.replace(/[^\s;&|()<>'"`]+/g, (word) => {
+    const kept: string[] = [];
+    for (const segment of word.split("/")) {
+      const top = kept.at(-1);
+      if (segment === ".." && top !== undefined && top !== "" && top !== "." && top !== "..")
+        kept.pop();
+      else kept.push(segment);
+    }
+    return kept.join("/");
+  });
+}
+
 // A canonical root is on a case-insensitive filesystem when its other-case
 // spelling (upper if that differs, else lower) natively resolves back to it.
 // Missing roots, failed probes and letterless roots count as case-sensitive.
@@ -141,7 +156,10 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
     const bases = pwsh ? [command, command.replace(/\\/g, "/")] : [command];
     const texts = bases
       .flatMap((text) => [text, text.replace(/\\\n|["'\\]/g, "")])
-      .flatMap((text) => [text, normalizeCommandPaths(text)]);
+      .flatMap((text) => {
+        const normalized = normalizeCommandPaths(text);
+        return [text, normalized, foldParentSegments(normalized)];
+      });
     for (const raw of options.rawDirs) {
       const root = canonical(raw, cwd);
       const flags = caseInsensitiveRoot(root) ? "i" : "";
