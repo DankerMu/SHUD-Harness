@@ -34,7 +34,7 @@
 
 #### Scenario: self-test asserts the judge output shape
 - **WHEN** 执行 `pnpm run test-guardrails`
-- **THEN** 对 `pass/` 的 judge 输出含 `T5 PASS`；`fail-empty-session/` 输出含 `T5 FAIL` 与 `md5 PASS`；`fail-approval-granted/` 输出含 `T2 FAIL` 与 `md5 PASS`；四组夹具的 judge 输出均不含 `all five PASS`；三组红夹具各为一条 `expect_fail` 用例（夹具目录缺失时上述断言失败，自证不会因缺文件而假绿）
+- **THEN** 对 `pass/` 的 judge 输出含 `T5 PASS`；`fail/` 输出含 `md5 FAIL`；`fail-empty-session/` 输出含 `T5 FAIL` 与 `md5 PASS` 且 FAIL 行恰 1 条；`fail-approval-granted/` 输出含 `T2 FAIL` 与 `md5 PASS` 且 FAIL 行恰 1 条；四组夹具的 judge 输出均不含 `all five PASS`；三组红夹具各为一条 `expect_fail` 用例（任一夹具目录缺失、md5 判定退化为永真、或完整性失败扩散到其它探针时，上述断言失败）
 
 #### Scenario: fixtures carry no secrets
 - **WHEN** 对夹具目录执行 `pnpm run security:secrets`
