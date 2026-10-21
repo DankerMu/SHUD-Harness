@@ -209,6 +209,38 @@ describe("core Zod schemas", () => {
     expect(issuePaths(withoutBaseUrl)).toContain("llm.base_url");
   });
 
+  test("StackLock requires a boolean dirty flag on every repository revision", () => {
+    for (const name of ["SHUD", "rSHUD", "AutoSHUD"] as const) {
+      const lock = validStackLock();
+      const withoutDirty = StackLockSchema.safeParse({
+        ...lock,
+        repos: { ...lock.repos, [name]: removeKey(lock.repos[name], "dirty") },
+      });
+      expect(withoutDirty.success).toBe(false);
+      expect(issuePaths(withoutDirty)).toContain(`repos.${name}.dirty`);
+    }
+
+    const lock = validStackLock();
+    const stringDirty = StackLockSchema.safeParse({
+      ...lock,
+      repos: { ...lock.repos, SHUD: { ...lock.repos.SHUD, dirty: "false" } },
+    });
+    expect(stringDirty.success).toBe(false);
+    expect(issuePaths(stringDirty)).toContain("repos.SHUD.dirty");
+
+    const extraField = StackLockSchema.safeParse({
+      ...lock,
+      repos: { ...lock.repos, rSHUD: { ...lock.repos.rSHUD, remote: "origin" } },
+    });
+    expect(extraField.success).toBe(false);
+
+    const dirtyTrue = StackLockSchema.safeParse({
+      ...lock,
+      repos: { ...lock.repos, AutoSHUD: { ...lock.repos.AutoSHUD, dirty: true } },
+    });
+    expect(dirtyTrue.success).toBe(true);
+  });
+
   test("StackLock rejects the legacy runtime.r_packages_lock string", () => {
     const legacyRPackagesLock = StackLockSchema.safeParse({
       ...validStackLock(),
@@ -526,14 +558,17 @@ function validStackLock() {
       SHUD: {
         commit: "9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb",
         branch: "master",
+        dirty: false,
       },
       rSHUD: {
         commit: "d162db3d162db3d162db3d162db3d162db3d162d",
         branch: "master",
+        dirty: false,
       },
       AutoSHUD: {
         commit: "1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe",
         branch: "master",
+        dirty: false,
       },
     },
     runtime: {

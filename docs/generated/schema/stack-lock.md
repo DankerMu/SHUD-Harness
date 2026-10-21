@@ -15,12 +15,15 @@ Required is evaluated within the immediate parent object.
 | repos.SHUD | yes | no | object | additionalProperties=false |
 | repos.SHUD.commit | yes | no | string | minLength=1 |
 | repos.SHUD.branch | yes | no | string | minLength=1 |
+| repos.SHUD.dirty | yes | no | boolean | - |
 | repos.rSHUD | yes | no | object | additionalProperties=false |
 | repos.rSHUD.commit | yes | no | string | minLength=1 |
 | repos.rSHUD.branch | yes | no | string | minLength=1 |
+| repos.rSHUD.dirty | yes | no | boolean | - |
 | repos.AutoSHUD | yes | no | object | additionalProperties=false |
 | repos.AutoSHUD.commit | yes | no | string | minLength=1 |
 | repos.AutoSHUD.branch | yes | no | string | minLength=1 |
+| repos.AutoSHUD.dirty | yes | no | boolean | - |
 | runtime | yes | no | object | additionalProperties=false |
 | runtime.os | yes | no | string | minLength=1 |
 | runtime.r_version | yes | no | string | minLength=1 |
@@ -53,12 +56,15 @@ repos:
   SHUD:
     commit: "example"
     branch: "example"
+    dirty: false
   rSHUD:
     commit: "example"
     branch: "example"
+    dirty: false
   AutoSHUD:
     commit: "example"
     branch: "example"
+    dirty: false
 runtime:
   os: "example"
   r_version: "example"
@@ -87,18 +93,21 @@ created_at: "example"
 ## Changelog Diff
 
 ```diff
-+ schema StackLock sha256:12fa08b816edb34a9a66c91deca5a147a0f2ff1a6ecf7235ced557240d6a4ece
++ schema StackLock sha256:43e4a4cdcb20f9392fa443770eb2c7a2a3e55de9aba1008922cc3beb8b6f8927
 + field stack_id required=yes nullable=no type=string constraints=pattern=^STACK-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$
 + field repos required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.SHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.SHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.SHUD.branch required=yes nullable=no type=string constraints=minLength=1
++ field repos.SHUD.dirty required=yes nullable=no type=boolean constraints=-
 + field repos.rSHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.rSHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.rSHUD.branch required=yes nullable=no type=string constraints=minLength=1
++ field repos.rSHUD.dirty required=yes nullable=no type=boolean constraints=-
 + field repos.AutoSHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.AutoSHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.AutoSHUD.branch required=yes nullable=no type=string constraints=minLength=1
++ field repos.AutoSHUD.dirty required=yes nullable=no type=boolean constraints=-
 + field runtime required=yes nullable=no type=object constraints=additionalProperties=false
 + field runtime.os required=yes nullable=no type=string constraints=minLength=1
 + field runtime.r_version required=yes nullable=no type=string constraints=minLength=1

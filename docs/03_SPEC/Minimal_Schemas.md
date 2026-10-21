@@ -65,9 +65,9 @@ TaskCard.status 使用粗粒度状态机管理任务生命周期。执行期间�
 ```yaml
 stack_id: STACK-0001                  # 格式: STACK-NNNN
 repos:
-  SHUD:      { commit: 9b55b0c, branch: master }
-  rSHUD:     { commit: d162db3, branch: master }
-  AutoSHUD:  { commit: 1cbec6f, branch: master }
+  SHUD:      { commit: 9b55b0c, branch: master, dirty: false }
+  rSHUD:     { commit: d162db3, branch: master, dirty: false }
+  AutoSHUD:  { commit: 1cbec6f, branch: master, dirty: false }
 runtime:
   os: "Darwin 24.6.0"
   r_version: "4.4.1"
@@ -87,9 +87,11 @@ llm:                                  # 恰好三字段（ADR-0004 K4）
   base_url: "https://www.dmxapi.cn"   # string；第三方端点必锁：同名模型在不同端点可能被静默换版/量化
   request_alias: "deepseek-flash-guan" # string；请求中发送的 model id（ADR-0004 K3）
   response_model: "<响应体 model 字段原值>"  # string；API 返回的 `model` 字段，仅记录、不强制校验（K4）
-fingerprint: "sha256:..."             # 整体哈希，用于快速比对
+fingerprint: "sha256:..."             # sha256: + 去掉 stack_id/created_at/fingerprint 后按键排序的紧凑 JSON 的 SHA-256，用于快速比对
 created_at: 2026-04-25T10:00:00Z
 ```
+
+**repos.dirty 说明**：`git status --porcelain --untracked-files=normal --ignore-submodules=none` 输出非空即 `true`（含 tracked 修改与 untracked 文件，不含 `.gitignore` 忽略的文件）；`commit` 为 HEAD 完整 id，detached HEAD 时 `branch` 为 `HEAD`。采集只读（`collectRepositoryRevision`），同一 commit 的 clean 与 dirty checkout 指纹不同。
 
 **llm 字段说明**（ADR-0004 K4，取代 AGA-P0-1 的 model + params + prompt 锁）：`base_url` 或 `request_alias` 变化视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。`response_model` 是滚动别名（`deepseek-flash`）在建 lock 时的实际解析结果，只记录不强制：其变化**不**自动使 lock 失效，每条 RunRecord 另记 `llm.response_model`，可比性由 PI 看报告判断。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
 
