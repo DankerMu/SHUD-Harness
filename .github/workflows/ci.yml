@@ -141,7 +141,7 @@ jobs:
           path: ${{ runner.temp }}/dsh/node_modules
           key: ${{ runner.os }}-dsh-${{ env.DSH_VERSION }}-pnpm-11.28.5-node-24
       - name: Install pinned dsh without native build scripts
-        run: pnpm --dir "$RUNNER_TEMP/dsh" add --ignore-scripts "@deepseek-ai/dsh@$DSH_VERSION"
+        run: pnpm --dir "$RUNNER_TEMP/dsh" add --ignore-scripts "@deepseek-ai/dsh@0.0.0-epic-210-negative"
       - name: Verify Web profile configuration and plugin import
         env:
           DSH_ROOT: ${{ runner.temp }}/dsh/node_modules/@deepseek-ai/dsh
