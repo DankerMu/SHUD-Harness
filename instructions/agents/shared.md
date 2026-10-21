@@ -87,6 +87,8 @@ SHUD-Harness/
 | SAST（CI） | `pnpm run security:sast` | semgrep 0 finding | block（CI） |
 | PR 体积 | `pnpm run pr:size` | ≤400 行或已标 `size-exempt` | block（CI） |
 | dsh profile 启动（本机） | `pnpm run profile:smoke` | 路由 deepseek-flash-guan、DMXAPI、session-log-deepseek disabled、raw-guard mounted | block（本机） |
+| raw-guard 五探针（本机，需 `DMXAPI_KEY`） | `pnpm run raw-guard:probes` | T1–T5 PASS、两份 raw md5 不变、总绿汇总 | block（本机） |
+| Web 审批卡往返 | 手工：读 raw → Allow once；写 raw → deny | session log 读审批 allowed-once 后成功；写 immutable 且无新审批；raw md5 不变 | manual |
 | SHUD ccw tiny（本机） | `pnpm run shud:tiny` | exit 0 + `.dat` 产出，<2 min | block（本机） |
 | 闸自证 | `pnpm run test-guardrails` | 每闸拒违规、收干净输入 | block |
 
@@ -197,6 +199,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | 本次触碰 >1000 行文件 | `.claude/hooks/large-file-guard/large-file-guard.sh` | pre-commit 等价：agent hook on git commit | block |
 | 闸自证 | `scripts/guardrails/test-guardrails.sh` | 本机 `pnpm run test-guardrails` | block |
 | dsh profile 路由 / 出站关闭 | `scripts/runtime/profile-smoke.sh` | 本机 `pnpm run profile:smoke` | block |
+| raw-guard 五探针 / raw 字节不变 | `scripts/runtime/raw-guard-probes.sh` | 本机 `pnpm run raw-guard:probes`（需 `DMXAPI_KEY`） | block |
 | ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
 | merge = PI 功能验收 | GitHub PR | GitHub rulesets（PR required） | gate |
