@@ -118,8 +118,12 @@ function judge(runDir) {
       const events = jsonLines(fs.readFileSync(join(dir, 'stream.jsonl'), 'utf8'));
       const log = jsonLines(fs.readFileSync(join(dir, 'session.jsonl'), 'utf8'));
       const status = JSON.parse(fs.readFileSync(join(dir, 'process.json'), 'utf8'));
+      const [first] = events;
+      const [head] = log;
+      // Integrity before criteria: an empty/whitespace log must not match by undefined === undefined.
+      const identified = first?.type === 'session' && typeof first.sessionId === 'string' && /^session-[a-zA-Z0-9-]+$/.test(first.sessionId) && head?.type === 'session' && head.id === first.sessionId;
+      if (!identified || status.exit !== 0 || status.signal || status.error) throw new Error('Incomplete probe');
       const invoked = calls(events);
-      if (status.exit !== 0 || status.signal || status.error || events[0]?.sessionId !== log[0]?.id) throw new Error('Incomplete probe');
       if (n === 1 || n === 3) {
         pass = invoked.some(call => (n === 1 ? ['edit', 'write'].includes(call.tool) : call.tool === 'bash') && targetCall(call, workspace, raw) && call.result.status === 'error' && call.result.result.includes('immutable'));
       } else if (n === 2) {

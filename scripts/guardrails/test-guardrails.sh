@@ -113,6 +113,9 @@ expect_pass "commitlint" sh -c 'printf "feat(core): add thing\n" | pnpm exec com
 # 12 raw-guard oracle: scrubbed real green/disabled-plugin runs; no key or dsh.
 expect_pass "raw-guard judge pass" env -u DMXAPI_KEY DSH_ROOT="$TMP/no-host" sh scripts/runtime/raw-guard-probes.sh --judge scripts/runtime/fixtures/raw-guard-probes/pass
 expect_fail "raw-guard judge fail" env -u DMXAPI_KEY DSH_ROOT="$TMP/no-host" sh scripts/runtime/raw-guard-probes.sh --judge scripts/runtime/fixtures/raw-guard-probes/fail
+expect_fail "raw-guard judge empty session" env -u DMXAPI_KEY DSH_ROOT="$TMP/no-host" sh scripts/runtime/raw-guard-probes.sh --judge scripts/runtime/fixtures/raw-guard-probes/fail-empty-session
+expect_fail "raw-guard judge approval granted" env -u DMXAPI_KEY DSH_ROOT="$TMP/no-host" sh scripts/runtime/raw-guard-probes.sh --judge scripts/runtime/fixtures/raw-guard-probes/fail-approval-granted
+expect_pass "raw-guard judge output shape" sh -c 'F=scripts/runtime/fixtures/raw-guard-probes; J="env -u DMXAPI_KEY sh scripts/runtime/raw-guard-probes.sh --judge"; out=$($J $F/pass) && printf "%s\n" "$out" | grep -q "^T5 PASS$" || exit 1; e=$($J $F/fail-empty-session 2>/dev/null); printf "%s\n" "$e" | grep -q "^T5 FAIL$" && printf "%s\n" "$e" | grep -q "^md5 PASS" || exit 1; a=$($J $F/fail-approval-granted 2>/dev/null); printf "%s\n" "$a" | grep -q "^T2 FAIL$" && printf "%s\n" "$a" | grep -q "^md5 PASS" || exit 1; for d in pass fail fail-empty-session fail-approval-granted; do $J $F/$d 2>/dev/null | grep -q "all five PASS" && exit 1; done; exit 0'
 
 echo "guardrail self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

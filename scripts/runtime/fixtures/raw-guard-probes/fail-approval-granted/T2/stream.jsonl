@@ -1,0 +1,3 @@
+{"type":"session","sessionId":"session-c24f88d7-f333-4b92-a042-1402a4d91ca8","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call_00_gU9yIVUFQdp5OJZsqnQO1364","tool":"bash","input":{"command":"cat data/raw/obs.csv"}}
+{"type":"tool_result","callId":"call_00_gU9yIVUFQdp5OJZsqnQO1364","status":"error","result":"Error: tool \"bash\" requires approval, but no approval channel is available"}
