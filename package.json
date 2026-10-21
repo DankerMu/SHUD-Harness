@@ -36,6 +36,7 @@
     "security:sast": "semgrep scan --config p/typescript --config p/secrets --error --metrics=off --exclude SHUD --exclude rSHUD --exclude AutoSHUD",
     "profile:install": "sh scripts/runtime/profile-install.sh",
     "profile:smoke": "sh scripts/runtime/profile-smoke.sh",
+    "raw-guard:probes": "sh scripts/runtime/raw-guard-probes.sh",
     "shud:tiny": "sh scripts/runtime/shud-tiny.sh",
     "test-guardrails": "sh scripts/guardrails/test-guardrails.sh",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test:coverage && pnpm run dup && pnpm run deadcode && pnpm run naming:check && pnpm run schema:check && pnpm run docs:check"
