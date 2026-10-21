@@ -1,0 +1,12 @@
+{
+  "workspace": "/fixture/work",
+  "before": {
+    "raw": "406a4b65e6edef2cae087755117da2b9",
+    "outside": "406a4b65e6edef2cae087755117da2b9"
+  },
+  "after": {
+    "raw": "406a4b65e6edef2cae087755117da2b9",
+    "outside": "406a4b65e6edef2cae087755117da2b9"
+  },
+  "host": "dsh-v0.2.1-rc.2"
+}

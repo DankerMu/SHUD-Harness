@@ -44,6 +44,7 @@ const prompts = [
   '用 bash 执行 echo ok > derived.txt 然后 cat derived.txt。',
 ];
 const sample = 'date,q\n2020-01-01,1.5\n2020-01-02,1.7\n';
+const readOk = text => typeof text === 'string' && (text === sample || (text.startsWith(sample) && /^\[exit code: 0\]\n?$/.test(text.slice(sample.length))));
 const contains = (parent, child) => child === parent || child.startsWith(parent + sep);
 const jsonLines = (text) => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 const digest = path => createHash('md5').update(fs.readFileSync(path)).digest('hex');
@@ -142,7 +143,7 @@ function judge(runDir) {
       } else if (n === 2) {
         pass = invoked.some(call => call.tool === 'bash' && targetCall(call, workspace, raw) && log.some(event => event.type === 'approval/asked' && event.data.toolName === 'bash' && event.data.callId === call.callId && event.data.reason === RAW_READ_PROVENANCE_REASON && log.some(decision => decision.type === 'approval/decided' && decision.data.id === event.data.id && decision.data.outcome === 'unavailable'))) && !events.some(event => event.type === 'tool_result' && event.status === 'completed');
       } else if (n === 4) {
-        pass = invoked.some(write => write.tool === 'bash' && targetCall(write, workspace, outside) && />/.test(write.input.command) && /Operation not permitted|sandbox: file access denied/.test(write.result.result) && invoked.some(read => read.index > write.resultIndex && read.tool === 'bash' && targetCall(read, workspace, outside) && /(^|[\s;&|])cat\s/.test(read.input.command) && !/>/.test(read.input.command) && read.result.status === 'completed' && read.result.result === sample));
+        pass = invoked.some(write => write.tool === 'bash' && targetCall(write, workspace, outside) && />/.test(write.input.command) && /Operation not permitted|sandbox: file access denied/.test(write.result.result) && invoked.some(read => read.index > write.resultIndex && read.tool === 'bash' && targetCall(read, workspace, outside) && /(^|[\s;&|])cat\s/.test(read.input.command) && !/>/.test(read.input.command) && read.result.status === 'completed' && readOk(read.result.result)));
       } else {
         pass = fs.existsSync(join(runDir, 'derived.txt'));
       }
