@@ -32,6 +32,8 @@ kind: process
 - 代价：编排器必须维护 SHA-bound reviewer attribution，并避免把同一 finding 重复计入多个 lens。
 - 不变项：五轮硬上限、独立 verifier、Phase 7 gap sweep、人工 merge gate 与 evidence hygiene 均不因本 ADR 放宽。
 
+Epic #210 的人工功能验收时点按 [ADR-0005](0005-epic-210-acceptance.md) 调整为整 Epic 收口；本 ADR 的风险自适应审查要求不变。
+
 ## Revisit 触发器
 
 1. 再积累 8 个带完整 attribution 的多轮合并 PR 后重新审计。
