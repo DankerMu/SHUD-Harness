@@ -31,14 +31,17 @@ const ASK: RawGuardDecision = {
 // script blocks match while verb-shaped substrings inside names (rivers) do not.
 // Case-insensitive: case-insensitive filesystems resolve RM to /bin/rm.
 // Redirects that write a file: > and >> (not <>); >&word unless word is an fd
-// number, an fd number plus - (move) or a lone - (close) that ends at end of text,
-// whitespace or ; & | ( ) < > }, optionally after quotes ' " `, as in 2>&1, >& 2,
-// 2>&1-, 1>&-, $(... 2>&1) and sh -c '... >&2'. A bash word breaks only there, so
-// >&2x, >&2:x, >&2$x, >&2\x and >&2"x" name files, as does >&$fd; and read-write
-// <>word, which creates or overwrites in place. \S never matches the whitespace \s*
+// number, an fd number plus - (move) or a lone - (close) immediately followed by
+// end of text, space, tab, newline or ; & | ( ) < >, as in 2>&1, >& 2, 2>&1-,
+// 1>&- and $(... 2>&1); and read-write <>word, which creates or overwrites in
+// place. A bash word breaks only there: quotes, backticks and } do not end it, and
+// \r, \f and U+00A0 do not split it, so >&2x, >&2:x, >&2$x, >&2\x, >&2"x", >&2" ",
+// >&2} and >&$fd name files. A regex cannot tell an opening quote from a closing
+// one, so quoted wrappers such as sh -c '... >&2' count as files too (accepted
+// deny-direction false positive). [^ \t\n] never matches the blanks [ \t\n]*
 // skipped, so >& 2 stays.
 const WRITE_VERBS =
-  /(?<![A-Za-z0-9_.-])(rm|mv|cp|tee|touch|mkdir|chmod|chown|chgrp|truncate|dd|install|rsync|ln|unlink|rmdir|shred|gzip|gunzip|bzip2|xz|unzip)(?=$|[\s;&|)}'"`])|(^|\s)(-delete|--remove-files)(?=$|[\s;&|)}'"`])|(^|[^<])>{1,2}\s*[^&]|(^|[^<])>&\s*(?!(?:[0-9]+-?|-)(?=['"`]*(?:$|[\s;&|()<>}])))\S|<>\s*\S|(?<![A-Za-z0-9_.-])(?:git\s+(clean|checkout|restore)|g?tar\s+-[a-zA-Z]*x|sort\s+-o|g?awk\s+-i|g?sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*[ie]|i?python[0-9.]*\s+-c|Rscript\s+(-e|--expr)|node\s+(-e|--eval)|(python[0-9.]*|Rscript|node|perl)\s+-\s*<<)|\bopen\s*\(/i;
+  /(?<![A-Za-z0-9_.-])(rm|mv|cp|tee|touch|mkdir|chmod|chown|chgrp|truncate|dd|install|rsync|ln|unlink|rmdir|shred|gzip|gunzip|bzip2|xz|unzip)(?=$|[\s;&|)}'"`])|(^|\s)(-delete|--remove-files)(?=$|[\s;&|)}'"`])|(^|[^<])>{1,2}\s*[^&]|(^|[^<])>&[ \t\n]*(?!(?:[0-9]+-?|-)(?=$|[ \t\n;&|()<>]))[^ \t\n]|<>[ \t\n]*[^ \t\n]|(?<![A-Za-z0-9_.-])(?:git\s+(clean|checkout|restore)|g?tar\s+-[a-zA-Z]*x|sort\s+-o|g?awk\s+-i|g?sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*[ie]|i?python[0-9.]*\s+-c|Rscript\s+(-e|--expr)|node\s+(-e|--eval)|(python[0-9.]*|Rscript|node|perl)\s+-\s*<<)|\bopen\s*\(/i;
 // PowerShell names are case-insensitive; same anchors as the POSIX verbs. The
 // aliases are not bash commands, so they apply only to pwsh or a pwsh wrapper.
 const PWSH_WRITES =

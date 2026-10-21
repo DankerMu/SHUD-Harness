@@ -366,7 +366,6 @@ const fdRedirectCases: [string, Kind, typeof options, string?][] = [
   ["cat protected/a 3>&1-", "ask", options],
   ["head protected/a 2>&1 | wc -l", "ask", options],
   ["head protected/a 2>&1;", "ask", options],
-  ["sh -c 'head protected/a >&2'", "ask", options],
   ["head protected/a >&/dev/null", "ask", options],
   ["head protected/a 3<>/dev/null", "ask", options],
   ["head protected/a <protected/b", "ask", options],
@@ -390,13 +389,31 @@ const fdRedirectCases: [string, Kind, typeof options, string?][] = [
   [`cat ${defaultRaw}/a >&2:out`, "deny", normalizeRawDirs()],
   ["cat protected/a 2>&1)", "ask", options],
   ["cat protected/a 2>&1&&x", "ask", options],
-  ["x `cat protected/a 2>&1`", "ask", options],
   ["{ cat protected/a >&2; }", "ask", options],
   ['x "$(cat protected/a 2>&1)"', "ask", options],
   ["cat protected/a 2>&1>/dev/null", "ask", options],
   ["cat protected/a 2>&1<x", "ask", options],
-  ["cat protected/a >&2''", "ask", options],
-  ['sh -c "head protected/a >&2"', "ask", options],
+  ["cat protected/a 2>&1\n", "ask", options],
+  ["cat protected/a 2>&1\t#c", "ask", options],
+  // Fail closed: a regex cannot tell an opening quote from a closing one, so no
+  // quote, backtick or } ends an fd number. Bash splits words only at space, tab
+  // and newline (not \r, \f or U+00A0), so all of these name files; the quoted
+  // read wrappers are accepted deny-direction false positives.
+  ['cat protected/a >&2" "', "deny", options],
+  ['cat protected/a >&2" x"', "deny", options],
+  ['cat protected/a >&2";x"', "deny", options],
+  ["cat protected/a >&2' '", "deny", options],
+  ["cat protected/a >&2` x`", "deny", options],
+  ['cat protected/a >&2" /../protected/b"', "deny", options],
+  ["cat protected/a >&2}", "deny", options],
+  ["cat protected/a >&2\r", "deny", options],
+  ["cat protected/a >&2\fx", "deny", options],
+  ["cat protected/a >&2\u00a0x", "deny", options],
+  ['echo x >&2" "', "deny", options, "protected"],
+  ["sh -c 'head protected/a >&2'", "deny", options],
+  ['sh -c "head protected/a >&2"', "deny", options],
+  ["x `cat protected/a 2>&1`", "deny", options],
+  ["cat protected/a >&2''", "deny", options],
 ];
 test.each(fdRedirectCases)(
   "bash `%s` -> %s (#255 fd redirect)",
