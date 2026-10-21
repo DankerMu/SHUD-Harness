@@ -1,10 +1,9 @@
-# Spec Delta
+# stack-lock Specification
 
 ## Purpose
-
 定义 StackLock 中三个源码仓库（SHUD、rSHUD、AutoSHUD）的版本记录：字段形态、对仓库只读的采集方式，以及让不可等价环境可快速区分的整体指纹（IR-001）。
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Repository revision records dirty state
 `StackLockSchema.repos` SHALL 恰含 `SHUD`、`rSHUD`、`AutoSHUD` 三个键，每个值 SHALL 为严格对象 `{ commit, branch, dirty }`：`commit`、`branch` 为非空字符串，`dirty` 为 required boolean；缺失 `dirty`、`dirty` 非 boolean 或出现多余字段时解析 SHALL 失败。生成投影 `docs/generated/schema/stack-lock.md` 与 `docs/generated/json-schema/stack-lock.json` SHALL 与该 schema 一致。
@@ -18,7 +17,7 @@
 - **THEN** 解析失败，缺失时 issue path 为 `repos.<name>.dirty`
 
 ### Requirement: Read-only repository revision collection
-`collectRepositoryRevision(repoPath)` SHALL 只用 `git rev-parse --show-toplevel`、`git rev-parse --verify HEAD`、`git symbolic-ref --short -q HEAD`、`git status --porcelain --untracked-files=normal --ignore-submodules=none` 采集 `repoPath` 指向的仓库，以参数数组调用 git（无 shell）并附 `-c core.fsmonitor=false`，环境 SHALL 设置 `GIT_OPTIONAL_LOCKS=0` 并剔除继承的仓库定位变量（`GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE` 等）。`repoPath` 的规范路径（`realpathSync.native`：解析 symlink，并取文件系统上的实际大小写与 Unicode 写法）SHALL 等于仓库 top-level，否则抛错（不得向上采集父仓库）。`commit` 为 HEAD 的完整 commit id；`branch` 为当前分支短名，detached HEAD 时 SHALL 为 `HEAD`；`dirty` 在上述 status 输出非空时为 `true`（含 tracked 修改与 untracked 文件，不受 `status.showUntrackedFiles` 配置影响）；输出超出读取缓冲上限时同样 SHALL 为 `true`。`dirty` 沿用 `git status` 的忽略语义：被 `.gitignore`、`.git/info/exclude` 或 `core.excludesFile`（未设置时为 `$XDG_CONFIG_HOME/git/ignore`，默认 `~/.config/git/ignore`）排除的文件不计入，因此宿主的全局忽略规则会影响结果。git 自身 SHALL NOT 写入被采集仓库（含 `.git/index`），采集 SHALL NOT 访问网络；宿主配置的外部 filter 驱动（如 git-lfs 的 clean filter）在 status 比对内容时由 git 调用，其副作用不在此保证内。`repoPath` 不是 git 仓库或没有提交时 SHALL 抛出含该路径的错误。
+`collectRepositoryRevision(repoPath)` SHALL 只用 `git rev-parse --show-toplevel`、`git rev-parse --verify HEAD`、`git symbolic-ref --short -q HEAD`、`git status --porcelain --untracked-files=normal --ignore-submodules=none` 采集 `repoPath` 指向的仓库，以参数数组调用 git（无 shell）并附 `-c core.fsmonitor=false`，环境 SHALL 设置 `GIT_OPTIONAL_LOCKS=0` 并剔除继承的仓库定位变量（`GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE` 等）。`repoPath` 的规范路径（`realpathSync.native`：解析 symlink，并取文件系统上的实际大小写与 Unicode 写法）SHALL 等于仓库 top-level，否则抛错（不得向上采集父仓库）。`commit` 为 HEAD 的完整 commit id；`branch` 为当前分支短名，detached HEAD 时 SHALL 为 `HEAD`；`dirty` 在上述 status 输出非空时为 `true`（含 tracked 修改与 untracked 文件，不受 `status.showUntrackedFiles` 配置影响）；输出超出读取缓冲上限时同样 SHALL 为 `true`。`dirty` 沿用 `git status` 的忽略语义：被 `.gitignore`、`.git/info/exclude` 或 `core.excludesFile`（未设置时为 `$XDG_CONFIG_HOME/git/ignore`，默认 `~/.config/git/ignore`）排除的文件不计入，因此宿主的全局忽略规则会影响结果。git 自身 SHALL NOT 写入被采集仓库（含 `.git/index`），采集 SHALL NOT 访问网络；宿主配置的外部 filter 驱动（如 git-lfs 的 clean filter）在 status 比对内容时由 git 调用，其副作用不在此保证内。`repoPath` 不是 git 仓库、没有提交，或 status 因缓冲溢出以外的原因失败时，SHALL 抛出含该路径的错误。
 
 #### Scenario: clean checkout
 - **WHEN** 对一个刚提交、工作区干净的 `main` 分支临时仓库采集
