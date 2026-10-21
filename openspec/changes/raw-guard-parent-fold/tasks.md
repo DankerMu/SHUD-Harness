@@ -4,7 +4,7 @@
 
 - [ ] 1.1 先加测试：design 列出的 deny/ask/组合/默认 raw/反例/不回归/残留/资源行入新 `test.each` 表，并把 #247 拼写表的 `data/x/../raw` 行改为 deny；验证：对未改的 `decide.ts` 运行 `pnpm vitest run packages/dsh-shud-raw-guard/src/decide.test.ts`，恰好新增 deny/ask 行（含改为 deny 的那行、s1 误报行与资源行）红（当前为 next），反例、不回归、残留 next 行绿，记录红行数。
 - [ ] 1.2 新增 `foldParentSegments` 并改 `texts` 第二层为 design 的构造；验证：同一命令全绿，既有行不变，`git diff` 中 `decide.ts` 只动新函数与 `texts`。
-- [ ] 1.3 design 列出的六项突变各自让对应行变红（证据记入报告，不提交）。
+- [ ] 1.3 design 列出的十一项突变各自让对应行变红（证据记入报告，不提交）。
 - [ ] 1.4 `pnpm run check` exit 0（覆盖率不降）；`pnpm run build`。
 
 ## 2. Spec

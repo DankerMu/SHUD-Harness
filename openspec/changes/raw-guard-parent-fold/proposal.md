@@ -8,7 +8,7 @@
 
 - `decide.ts`：新增 `foldParentSegments(text)`：按 shell 词边界（空白与 `;&|()<>'"` 反引号）切词，词内按 `/` 分段，用栈把 `..` 与其前一个普通段（非空、非 `.`、非 `..`）相消，再按原分隔符拼回。候选文本在每份 `normalizeCommandPaths` 副本之后再加一份折叠副本。纯加法：匹配模式、raw 侧文本、写动词判定、workdir 判定都不变。
 - `decide.test.ts`：issue 验收表入表（deny/ask/反例/不回归/残留），`decide.test.ts` 中默认配置 `data/x/../raw` 的 next 钉住行改为 deny。
-- 规范 `raw-data-guard` "Shell command touches raw"：加入 `..` 词法折叠触及条款；已记录漏报中的 `..` 条目收窄为「经符号链接回溯」与「相对工作目录的前导 `..`」；新增场景 "parent traversal spelling is touching"；原场景 "parent traversal spelling is a documented gap" 保留名称（openspec 不允许 MODIFIED 块丢弃现有场景，故有意偏离 issue 验收中的改名写法），内容收窄为符号链接回溯与前导 `..`。
+- 规范 `raw-data-guard` "Shell command touches raw"：加入 `..` 词法折叠触及条款；已记录漏报中的 `..` 条目收窄为「经符号链接回溯」「被消去段含引号或转义的空白/元字符」与「相对工作目录的前导 `..`」；新增场景 "parent traversal spelling is touching"；原场景 "parent traversal spelling is a documented gap" 保留名称（openspec 不允许 MODIFIED 块丢弃现有场景，故有意偏离 issue 验收中的改名写法），内容收窄为符号链接回溯与前导 `..`。
 
 ## Triage
 

@@ -566,6 +566,14 @@ const parentFoldCases: [string, string, Kind, typeof options, string, string?][]
   // Composition: the pwsh and quote-stripped copies are folded too.
   ["pwsh", "Remove-Item sub\\x\\..\\raw", "deny", subRaw, foldWs],
   ["bash", 'rm -rf sub/x/"../"raw', "deny", subRaw, foldWs],
+  // Segment shapes: dotted, versioned and glob segments are plain and cancel.
+  ["bash", "rm -rf sub/.x/../raw", "deny", subRaw, foldWs],
+  ["bash", "rm -rf sub/v1.2/../raw", "deny", subRaw, foldWs],
+  ["bash", "rm -rf sub/*/../raw", "deny", subRaw, foldWs],
+  // Word position: every word is folded, not only the first or the last.
+  ["bash", "mv sub/x/../raw /tmp/y", "deny", subRaw, foldWs],
+  ["bash", "cp -r out/d sub/x/../raw/", "deny", subRaw, foldWs],
+  ["bash", "rm -rf {a,sub/x}/../raw", "deny", subRaw, foldWs],
   // Default rawDirs, built from its parent and leaf segments.
   ["bash", `cat ${rawParent}/x/../${rawLeaf}/f`, "ask", defaults, defaultWs],
   ["bash", `rm -rf ${rawParent}/x/y/../../${rawLeaf}`, "deny", defaults, defaultWs],
@@ -591,6 +599,9 @@ const parentFoldCases: [string, string, Kind, typeof options, string, string?][]
   ["bash", "rm -rf ../raw", "next", subRaw, foldWs, "sub/x"],
   ["bash", "cat ../raw/f", "next", subRaw, foldWs, "sub/x"],
   ["bash", "cd sub/x && rm -rf ../raw", "next", subRaw, foldWs],
+  // Documented gap: a quoted or escaped space splits the word before folding.
+  ["bash", 'rm -rf "sub/x y/../raw"', "next", subRaw, foldWs],
+  ["bash", "rm -rf sub/x\\ y/../raw", "next", subRaw, foldWs],
 ];
 test.each(parentFoldCases)(
   "%s `%s` -> %s (#263 parent fold)",
