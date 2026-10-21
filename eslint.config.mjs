@@ -57,7 +57,12 @@ export default tseslint.config(
             {
               group: ["**/deepseek-harness/**"],
               message:
-                "dsh is the host, not a dependency: import only documented seams via @deepseek-ai/dsh (ADR-0004 K2).",
+                "dsh is the host: import documented seams only via @deepseek-ai/dsh-tools or @deepseek-ai/cordis (ADR-0004 K2).",
+            },
+            {
+              regex: "^@deepseek-ai/(?!(?:dsh-tools|cordis)$)",
+              message:
+                "Only @deepseek-ai/dsh-tools and @deepseek-ai/cordis are documented dsh seams (ADR-0004 K2).",
             },
           ],
         },

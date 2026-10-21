@@ -29,6 +29,14 @@ P="packages/dsh-shud-core/src/__guardtest_maxlines.ts"; PLANTED="$PLANTED $P"
 expect_fail "eslint max-lines" pnpm exec eslint "$P"
 rm -f "$P"
 
+# 2b documented dsh seams: reject internals, accept the public type boundary.
+P="packages/dsh-shud-core/src/__guardtest_seam.ts"; PLANTED="$PLANTED $P"
+printf "import '@deepseek-ai/dsh-agent';\n" > "$P"
+expect_fail "eslint dsh internal import" pnpm exec eslint "$P"
+printf "import type {} from '@deepseek-ai/dsh-tools';\n" > "$P"
+expect_pass "eslint dsh public seam" pnpm exec eslint "$P"
+rm -f "$P"
+
 # 3 jscpd (duplicate block planted in an isolated dir, scanned directly)
 mkdir -p "$ROOT/scripts/__guardtest_dup"; PLANTED="$PLANTED scripts/__guardtest_dup"
 for n in a b; do
