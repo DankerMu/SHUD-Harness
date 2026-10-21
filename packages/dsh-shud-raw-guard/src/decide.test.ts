@@ -490,6 +490,9 @@ test.each(spellingCases)("bash `%s` -> %s (#247 path spelling)", (command, kind,
 // pwsh also accepts \ as a separator (bash reads sub\x as subx).
 const subX = normalizeRawDirs({ rawDirs: ["sub/x"] });
 const subx = normalizeRawDirs({ rawDirs: ["subx"] });
+const rawCut = defaultRaw.lastIndexOf("/");
+const rawParent = defaultRaw.slice(0, rawCut);
+const rawLeaf = defaultRaw.slice(rawCut + 1);
 const quoteSplitCases: [string, string, Kind, typeof options][] = [
   ["bash", 'rm -rf prot"ected"', "deny", options],
   ["bash", "rm -rf prot'ected'", "deny", options],
@@ -502,6 +505,10 @@ const quoteSplitCases: [string, string, Kind, typeof options][] = [
   ["pwsh", "Remove-Item sub\\x", "deny", subX],
   ["bash", 'pwsh -c "Remove-Item sub\\x"', "deny", subX],
   ["pwsh", "Get-Content sub\\x\\obs.csv", "ask", subX],
+  // Composition: the stripped and pwsh copies still get dot/slash normalization.
+  ["pwsh", "Remove-Item sub\\\\x", "deny", subX],
+  ["pwsh", "Remove-Item sub\\.\\x", "deny", subX],
+  ["bash", `rm -rf ${rawParent}/./${rawLeaf.slice(0, 1)}"${rawLeaf.slice(1)}"`, "deny", defaults],
   // Documented gap: a glob or brace inside the raw name needs expansion.
   ["bash", "rm -rf p*d", "next", options],
   ["bash", "rm -rf protecte?", "next", options],
@@ -512,11 +519,14 @@ const quoteSplitCases: [string, string, Kind, typeof options][] = [
   ["bash", "rm sub\\x", "next", subX],
   ["pwsh", "Remove-Item sub\\xy", "next", subX],
   ["pwsh", "Get-Content sub\\x.bak", "next", subX],
-  // Accepted deny-direction false positives of the stripped and pwsh spellings.
+  // Accepted false positives of the stripped and pwsh spellings, including
+  // regex-escaped text that only names the raw path.
   ["bash", "rm 'prot\\ected'", "deny", options],
   ["pwsh", "Remove-Item 'prot''ected'", "deny", options],
   ["pwsh", "Remove-Item sub\\x", "deny", subx],
   ["bash", "grep -l pwsh notes; rm sub\\x", "deny", subX],
+  ["bash", "sed -i 's/protected\\/x/y/' cfg", "deny", options],
+  ["bash", "grep -rn 'protected\\/x' scripts", "ask", options],
 ];
 test.each(quoteSplitCases)("%s `%s` -> %s %j (#260 quote split)", (name, command, kind, config) => {
   const result = decide(name, { command }, config);

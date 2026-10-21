@@ -30,6 +30,8 @@ Must add/change:
   - 反例（next）：bash `rm "prot ected"`；bash `rm sub\x`（`rawDirs: ["sub/x"]`）；pwsh `Remove-Item sub\xy`、`Get-Content sub\x.bak`（`rawDirs: ["sub/x"]`，兄弟名）。
   - 已接受误报（钉住为 deny）：bash `rm 'prot\ected'`、pwsh `Remove-Item 'prot''ected'`（`rawDirs: ["protected"]`）；pwsh `Remove-Item sub\x`（`rawDirs: ["subx"]`：pwsh 语境下未换 `/` 的基底也做去 `\`，得 `subx`）；bash `grep -l pwsh notes; rm sub\x`（`rawDirs: ["sub/x"]`：命令含 `pwsh` 词即对全文做 `\`→`/`）。
   - 默认 raw 至少一行：`rm -rf data/r"aw"` 形态（用测试文件里已有的 `defaultRaw` 拼接方式，在 raw 名中插入引号）→ deny。
+  - 组合（review round 1：去引号或 pwsh `\`→`/` 之后再做 `normalizeCommandPaths`，此前无行钉住）：deny——pwsh `Remove-Item sub\\x`（JS 字面量 `"Remove-Item sub\\\\x"`）、pwsh `Remove-Item sub\.\x`（`rawDirs: ["sub/x"]`）、bash 默认 raw `rm -rf data/./r"aw"`（用 `defaultRaw` 拼接）。
+  - 正则转义路径（review round 1 备注，已接受误报钉住）：bash `sed -i 's/protected\/x/y/' cfg` → deny、`grep -rn 'protected\/x' scripts` → ask（`rawDirs: ["protected"]`；`\` 不算名字字符，原文已命中，去 `\` 副本同样命中——两条路径各自成立，故这两行是误报记录而非剥离哨兵，剥离哨兵是 `rm -rf prot\ected` 等行）。
   - 运行环境：沿用 `decide.test.ts` 现有的临时 workspace（含 `protected/`）；`sub/x` 行不需要建目录——`canonical()` 对不存在的路径段逐级上溯，mention 只做文本匹配，与已有 `missing/raw` 行（`decide.test.ts:462`、`:479`）同理。
 - 注释订正：`decide.test.ts` fail-closed 块（#255 fix pass 2 加入，注释写 "all of these name files"）改为说明「bash 写文件，或引号包裹形态按 fail-closed 判为文件」，涵盖 `` >&2` x` `` 在 `x` 不是命令时实为 fd 复制的情况。只改注释。
 
@@ -47,7 +49,7 @@ Seams under test: `decideRawAccess(call, options)`（vitest）；live 探针 T1�
 
 Required evidence:
 - 新增 deny/ask 行在改动前的 `decide.ts` 上红（next），改后绿；next 钉住行与反例改前改后都绿；既有行不变。
-- 突变：去掉去引号副本 → 引号/转义 deny 行红；去引号正则去掉 `\\\n` 分支 → 续行 deny 行红；去掉 pwsh `\`→`/` 基底 → pwsh 行红；`\`→`/` 改为对所有命令都做 → bash `rm sub\x` 反例红；`pwsh` 判定放回循环内且 mention 用不到它（即只对 `call.name === "pwsh"` 做替换）→ bash `pwsh -c "Remove-Item sub\x"` 行红。
+- 突变：去掉去引号副本 → 引号/转义 deny 行红；去引号正则去掉 `\\\n` 分支 → 续行 deny 行红；去掉 pwsh `\`→`/` 基底 → pwsh 行红；`\`→`/` 改为对所有命令都做 → bash `rm sub\x` 反例红；`pwsh` 判定放回循环内且 mention 用不到它（即只对 `call.name === "pwsh"` 做替换）→ bash `pwsh -c "Remove-Item sub\x"` 行红；规范化只作用于原命令（不作用于去引号/换 `/` 副本）→ 三条组合行红。
 - `pnpm vitest run packages/dsh-shud-raw-guard` 全绿；`pnpm run check` exit 0（覆盖率不降）；`pnpm run build`。
 - live `pnpm run raw-guard:probes` 两次 T1–T5 PASS（或 INCONCLUSIVE 重跑），md5 不变（编排方）。
 
