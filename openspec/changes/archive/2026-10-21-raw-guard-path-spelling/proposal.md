@@ -8,7 +8,7 @@
 
 - `packages/dsh-shud-raw-guard/src/decide.ts`：mention 判定改为**加法**——原文匹配 **或** 规范化后匹配。规范化：命令文本折叠连续 `/`、去掉 `/.` 段（`data/./raw` → `data/raw`，`data//raw` → `data/raw`）。大小写：对每个 raw 根做一次探测——`realpathSync.native(root 的另一种大小写拼写)`（含小写字母取全大写，否则取全小写）能解析回 `root` 则该根所在文件系统大小写不敏感，mention 正则加 `i`；根不存在、探测失败或根中无字母 → 视为大小写敏感（不误伤）。每次判定重新探测，不缓存（缓存会把「根不存在」永久记成敏感）。探测函数 `caseInsensitiveRoot` 导出供测试直接断言。既有行为（原文、realpath 绝对路径、边界字符 `(?![A-Za-z0-9._-])`、workdir 包含）不变。
 - `decide.test.ts`：`rm -rf data/./raw`、`rm -rf data//raw` → deny；`cat data/./raw/x` → ask；大小写变体在临时目录上按独立手段（`existsSync(大写拼写)`）判定的文件系统敏感性分支断言：不敏感 → deny/ask，敏感 → next，敏感 FS 上另建同名异例目录仍 next；探测函数另有隔离的 mock 测试（全大写根的小写回退、解析到不同路径、抛错）与无字母根断言；既有边界行（`rm protectedx/x` → next、`echo ok > derived.txt` → next）不变。
-- 规范 `raw-data-guard` "Shell command touches raw"：等价写法与大小写变体条款 + 三个场景；`..` 回溯写法登记为已记录漏报（Non-goal）。
+- 规范 `raw-data-guard` "Shell command touches raw"：等价写法与大小写变体条款 + 四个场景；`..` 回溯写法登记为已记录漏报（Non-goal）。
 
 ## Triage
 
