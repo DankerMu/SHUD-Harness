@@ -37,6 +37,11 @@ const WRITE_VERBS =
 const PWSH_WRITES =
   /(?<![A-Za-z0-9_.-])(Remove-Item|Move-Item|Copy-Item|Rename-Item|New-Item|Set-Content|Add-Content|Clear-Content|Clear-Item|Out-File|del|erase|ri|rd|ren|rni|move|mi|copy|cpi|ni|clc|cli)(?=$|[\s;&|)}'"`])/i;
 const PWSH_COMMAND = /\b(pwsh|powershell)\b/i;
+// A redirect to /dev/null writes no file, so it is stripped before WRITE_VERBS.
+// It starts at & or >, never at a leading fd digit (bzip2>/dev/null stays bzip2),
+// and the target must end there (/dev/nullx, /dev/null/x are real files). Used
+// only with replace: the g flag makes test/exec stateful through lastIndex.
+const DISCARD_REDIRECT = /&?>{1,2}\s*\/dev\/null(?![A-Za-z0-9._/-])/g;
 
 type RawGuardOptions = { rawDirs: string[] };
 
@@ -107,7 +112,8 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
       });
       if (!mentioned && !contains(root, workdir)) continue;
       const pwsh = call.name === "pwsh" || PWSH_COMMAND.test(command);
-      return WRITE_VERBS.test(command) || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
+      const checked = command.replace(DISCARD_REDIRECT, " ");
+      return WRITE_VERBS.test(checked) || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
     }
   }
   return NEXT;
