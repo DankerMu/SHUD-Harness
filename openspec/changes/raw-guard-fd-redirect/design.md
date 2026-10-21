@@ -11,7 +11,7 @@ Must preserve:
 
 Must add/change:
 - `WRITE_VERBS` 追加两支（放在原重定向子式之后，`|` 连接）：
-  - `(^|[^<])>&\s*(?!(?:[0-9]+-?|-)(?![A-Za-z0-9._/-]))\S`：`>&` 后可选空白，若接下来是「一串数字、一串数字加 `-`（fd 移动，bash 5.3.15 实测 `echo e 1>&2-` 不建文件）或单个 `-`，且其后不是路径名字符 `[A-Za-z0-9._/-]`」则是 fd 复制/移动/关闭，不算写；否则只要还有一个非空白字符就算写。`>&2x`、`>&2/x` 是文件。`>&$fd` 按写（deny 方向误报，运行时可能是 fd 号）。`(^|[^<])` 与原子式一致，使 `<>&` 这类畸形不归此支。`N>&word`（N≥2）在 bash 中报 ambiguous redirect、不写文件，按写处理属 deny 方向误报，可接受。
+  - `(^|[^<])>&\s*(?!(?:[0-9]+-?|-)(?=['"`]*(?:$|[\s;&|()<>}])))\S`：`>&` 后可选空白，若接下来是「一串数字、一串数字加 `-`（fd 移动，bash 5.3.15 实测 `echo e 1>&2-` 不建文件）或单个 `-`，且其后（可隔若干个引号 `'"` 或反引号）是行尾或 shell 词边界 `[\s;&|()<>}]`」则是 fd 复制/移动/关闭，不算写；否则只要还有一个非空白字符就算写。bash 的 word 只在空白与元字符处断开，所以 `>&2x`、`>&2/x`、`>&2:x`、`>&2,`、`>&2$x`、`>&2\x`、`>&2"x"`、`>&2'y'` 都是文件（round 1 review 在 bash 5.3.15 实测建文件，其中 `>&2"/../<raw>/b"` 改写了替身 raw 文件）。允许引号后接边界，是为了让 `sh -c 'head <raw>/a >&2'` 的闭引号、`>&2''` 仍为 fd 复制；`}` 进边界集与 WRITE_VERBS 动词尾一致，`<`、`>` 进边界集使 `1>&1>&…`、`2>&1>/dev/null` 仍为 fd 复制。`>&$fd` 按写（deny 方向误报，运行时可能是 fd 号）。`(^|[^<])` 与原子式一致，使 `<>&` 这类畸形不归此支。`N>&word`（N≥2）在 bash 中报 ambiguous redirect、不写文件，按写处理属 deny 方向误报，可接受。
   - `<>\s*\S`：读写重定向，`N<>`/`<>` 皆中。命令文本里任何 `<>` 后接非空白都中，含 SQL 不等号，deny 方向误报（spec 写明）。
   - `\s*` 后接否定前瞻与单字符 `\S`，回溯量与输入长度线性，无 ReDoS。
 - `DISCARD_REDIRECT` = `/(?:&?>{1,2}|>&|<>)\s*\/dev\/null(?![A-Za-z0-9._/-])/g`：`>&/dev/null`、`N>&/dev/null`、`<>/dev/null`、`N<>/dev/null` 也剥除；仍只从 `&`/`>`/`<` 起剥，不吞前导 fd 数字（`bzip2>/dev/null` 不变）。剥除先于 `WRITE_VERBS`，所以 `>&/dev/null` 是读、`>&/dev/nullx` 是写。
@@ -19,7 +19,8 @@ Must add/change:
 - 测试（`decide.test.ts` 新增一张 `test.each` 表，`rawDirs: ["protected"]` 替身 + 默认 raw 各至少一行；每行断言 `kind`，deny 行 `reason` 含 `immutable`，ask 行 `reason` 为 `RAW_READ_PROVENANCE_REASON`）：
   - deny：`echo x >&protected/b`、`echo x >& protected/b`、`echo x 1>&protected/b`、`cat protected/a >&out.txt`、`echo x >&2x protected/a`（触及 raw 的同时写到文件 `2x`）、`echo XY 1<>protected/a`、`: <>protected/newfile`、`exec 3<>protected/newfile`、`cat protected/a 0<>protected/b`、`cat protected/a 2>/dev/null >&protected/b`、`echo XY 1<>protected/a 2>/dev/null`、`head protected/a >&/dev/nullx`、默认 raw `echo x >&<默认 raw>/b`。
   - ask：`head protected/a 2>&1`、`head protected/a >&2`、`head protected/a >& 2`、`head protected/a 1>&-`、`head protected/a 2>&1-`、`cat protected/a 3>&1-`、`head protected/a 2>&1 | wc -l`、`head protected/a 2>&1;`、`sh -c 'head protected/a >&2'`、`head protected/a >&/dev/null`、`head protected/a 3<>/dev/null`、`head protected/a <protected/b`、`diff <(cat protected/a) b`、`cat protected/a <<EOF`、默认 raw `head <默认 raw>/a 2>&1`。
-  - 对照（已在 #248 表）：`echo x &>protected/b`、`&>>`、`> protected/b` 仍 deny。
+  - 对照（round 1 review 发现此前并无专门行，本次补入）：`echo x &>protected/b`、`echo x &>>protected/b` → deny；`bzip2<>/dev/null protected/x` → deny（钉住 `DISCARD_REDIRECT` 的 `<>` 分支：去掉该分支时 `&?>{1,2}` 只剥 `>/dev/null`，余下 `bzip2<` 不再命中写动词）。
+  - fd 号后的词边界（round 1 review）：deny：`echo x >&1,/../protected/x`、`cat protected/a >&2:out`、`cat protected/a >&2,`、`cat protected/a >&2$x`、`cat protected/a >&2\x`、`cat protected/a >&2-"q"`、`cat protected/a >&2"/../protected/b"`、`cat protected/a >&2'y'`、`workdir: protected` 下 `echo x >&2"x"`、默认 raw `cat <默认 raw>/a >&2:out`；ask：`cat protected/a 2>&1)`、`cat protected/a 2>&1&&x`、`` x `cat protected/a 2>&1` ``、`{ cat protected/a >&2; }`、`x "$(cat protected/a 2>&1)"`、`cat protected/a 2>&1>/dev/null`、`cat protected/a 2>&1<x`、`cat protected/a >&2''`、`sh -c "head protected/a >&2"`。
 
 Governing invariant: 触及 raw 的命令中，任何把输出写到真实文件的重定向（`>`、`>>`、`&>`、`&>>`、文件形态 `>&`、`<>`）都使判定为 deny；fd 复制/关闭与 `/dev/null` 丢弃不算写；不触及 raw 的命令仍 `next`。
 
@@ -34,7 +35,7 @@ Seams under test: `decideRawAccess(call, options)` 纯函数（vitest）；live 
 Required evidence:
 - 新增 deny 行中 `>&` 与 `<>` 文件形态在改动前红、改后绿；新增 ask 行改前改后都绿（钉住"不过宽"）。
 - `pnpm vitest run packages/dsh-shud-raw-guard` 全绿；`pnpm run check` exit 0。
-- 突变：去掉 `>&` 支 → `>&protected/b` 行红；去掉 `<>` 支 → `1<>` 行红；否定前瞻去掉内层 `(?![A-Za-z0-9._/-])` → `>&2x` 行红；`DISCARD_REDIRECT` 去掉 `>&` → `>&/dev/null` ask 行红；内层去掉 `-?` → `2>&1-` ask 行红。
+- 突变：去掉 `>&` 支 → `>&protected/b` 行红；去掉 `<>` 支 → `1<>` 行红；去掉内层边界前瞻 `(?=['"`]*(?:…))` → `>&2x` 与边界 deny 行红；`DISCARD_REDIRECT` 去掉 `>&` → `>&/dev/null` ask 行红；内层去掉 `-?` → `2>&1-` ask 行红；边界前瞻改回 `(?![A-Za-z0-9._/-])` → `>&2:out` 等边界 deny 行红；边界去掉引号前缀 `['"`]*` → `sh -c 'head protected/a >&2'` ask 行红；`DISCARD_REDIRECT` 去掉 `<>` → `bzip2<>/dev/null` deny 行红。
 - 资源上限：对抗输入 `">&" + " ".repeat(1e6)`、`"1>&".repeat(3e5)`、`"<>" + " ".repeat(1e6)`（各前置 `cat protected/a `）作为 vitest 行，三行均断言 `kind` 为 `ask`、`reason` 为 `RAW_READ_PROVENANCE_REASON`（`>&`、`<>` 后全是空白，无 `\S`，不算写；`1>&` 重复串中每个 `>&1` 都是 fd 复制，末尾 `>&` 后为空），且在默认超时内完成；fixture review 用 node 实测各 ≤7 ms。
 - `pnpm run build` 后 `pnpm run raw-guard:probes` T1–T5 PASS（或 INCONCLUSIVE 重跑）、md5 不变。
 
@@ -47,3 +48,6 @@ Review focus:
 4. `<>` 支的 deny 方向误报（SQL 不等号）已在 spec 写明且可接受。
 5. 新正则无 ReDoS（1e6 字符对抗输入，见资源上限测试行）。
 6. fd 移动 `N>&M-` 仍 ask。
+7. fd 号后的边界与 bash word 断词一致：只有元字符/空白/行尾（可隔引号）才结束 fd 号。
+
+Known residual（round 1 review）：`DISCARD_REDIRECT` 的 `/dev/null` 尾边界沿用 #248 的路径名字符集，`>&/dev/null"/../x"`、`<>/dev/null"x"` 会被剥除；bash 实测前者报 Not a directory 不写入，后者目标是 `/dev/nullx`（不在 raw），不改。

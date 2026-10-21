@@ -344,7 +344,7 @@ test.each(discardRedirectCases)(
 
 // #255: a file-target >&word and a read-write <>word write a file; fd
 // duplication, moving and closing (>&2, 2>&1-, 1>&-) and /dev/null do not.
-const fdRedirectCases: [string, Kind, typeof options][] = [
+const fdRedirectCases: [string, Kind, typeof options, string?][] = [
   ["echo x >&protected/b", "deny", options],
   ["echo x >& protected/b", "deny", options],
   ["echo x 1>&protected/b", "deny", options],
@@ -373,13 +373,40 @@ const fdRedirectCases: [string, Kind, typeof options][] = [
   ["diff <(cat protected/a) b", "ask", options],
   ["cat protected/a <<EOF", "ask", options],
   [`head ${defaultRaw}/a 2>&1`, "ask", normalizeRawDirs()],
+  ["echo x &>protected/b", "deny", options],
+  ["echo x &>>protected/b", "deny", options],
+  ["bzip2<>/dev/null protected/x", "deny", options],
+  // A bash word breaks only at whitespace and metacharacters, so an fd number
+  // followed by any other character (: , $ \ or quoted text) names a file.
+  ["echo x >&1,/../protected/x", "deny", options],
+  ["cat protected/a >&2:out", "deny", options],
+  ["cat protected/a >&2,", "deny", options],
+  ["cat protected/a >&2$x", "deny", options],
+  ["cat protected/a >&2\\x", "deny", options],
+  ['cat protected/a >&2-"q"', "deny", options],
+  ['cat protected/a >&2"/../protected/b"', "deny", options],
+  ["cat protected/a >&2'y'", "deny", options],
+  ['echo x >&2"x"', "deny", options, "protected"],
+  [`cat ${defaultRaw}/a >&2:out`, "deny", normalizeRawDirs()],
+  ["cat protected/a 2>&1)", "ask", options],
+  ["cat protected/a 2>&1&&x", "ask", options],
+  ["x `cat protected/a 2>&1`", "ask", options],
+  ["{ cat protected/a >&2; }", "ask", options],
+  ['x "$(cat protected/a 2>&1)"', "ask", options],
+  ["cat protected/a 2>&1>/dev/null", "ask", options],
+  ["cat protected/a 2>&1<x", "ask", options],
+  ["cat protected/a >&2''", "ask", options],
+  ['sh -c "head protected/a >&2"', "ask", options],
 ];
-test.each(fdRedirectCases)("bash `%s` -> %s (#255 fd redirect)", (command, kind, config) => {
-  const result = decide("bash", { command }, config);
-  expect(result.kind).toBe(kind);
-  if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
-  if (kind === "deny") expect(result.reason).toMatch(/immutable/);
-});
+test.each(fdRedirectCases)(
+  "bash `%s` -> %s (#255 fd redirect)",
+  (command, kind, config, workdir) => {
+    const result = decide("bash", workdir ? { command, workdir } : { command }, config);
+    expect(result.kind).toBe(kind);
+    if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+    if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+  },
+);
 
 // #255 resource limit: whitespace-only or fd-only redirect tails stay linear reads.
 test.each([

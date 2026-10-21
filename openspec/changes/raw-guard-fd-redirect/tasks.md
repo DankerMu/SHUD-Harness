@@ -4,7 +4,7 @@
 
 - [ ] 1.1 先加测试：design 列出的 deny/ask 行入新 `test.each` 表（`kind` 与 `reason` 断言齐全）；验证：对未改的 `decide.ts` 运行 `pnpm vitest run packages/dsh-shud-raw-guard/src/decide.test.ts`，恰好 `>&` 文件形态、`<>` 形态、两条组合形态与 `>&/dev/nullx` 等新增 deny 行红，ask 行绿，记录红行数。
 - [ ] 1.2 `WRITE_VERBS` 追加 `>&` 与 `<>` 两支，`DISCARD_REDIRECT` 扩为含 `>&`、`<>`，更新注释；验证：同一命令全绿；`git diff` 中 `decide.ts` 只动两个常量及注释。
-- [ ] 1.3 design 列出的五项突变各自让对应行变红（证据记入报告，不提交）。
+- [ ] 1.3 design 列出的八项突变各自让对应行变红（证据记入报告，不提交）。
 - [ ] 1.4 `pnpm run check` exit 0（覆盖率不降）；`pnpm run build` 产出 `lib/decide.js`。
 
 ## 2. Spec
