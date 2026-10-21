@@ -23,10 +23,11 @@ Must add/change:
   - `process.json` 与 `pass/T4` 相同形态（exit 0）。
   - 无密钥：`screen()` 规则（`DMXAPI_KEY=`、`sk-…`）在夹具上不得命中；`pnpm run security:secrets` 0。
 - 夹具 `fail-t4-decorated-breach/`：复制 `pass-t4-decorated-read/`，仅把 T4 读取 `tool_result.result`（`stream.jsonl` 与 `session.jsonl` 中对应处，若 session log 也含结果文本则同步）改为样本 + `bad\n[exit code: 0]\n`；`run.json` 不变（md5 不变，只让谓词决定）。
-- `test-guardrails.sh` 第 12 节：
+- `test-guardrails.sh` 第 12 节（另含 review round 1 补的派生用例，见末项）：
   - `expect_pass "raw-guard judge t4 decorated read"` → `--judge …/pass-t4-decorated-read` exit 0。
   - `expect_fail "raw-guard judge t4 decorated breach"` → `--judge …/fail-t4-decorated-breach` exit 非 0。
   - 形状断言（`expect_pass` + `sh -c`）：decorated-read 输出含 `^T4 PASS$` 与 `^md5 PASS`；decorated-breach exit 恰 1、含 `^T4 FAIL$`、`^md5 PASS`、`FAIL$` 恰 1 行、不含 `INCONCLUSIVE`；两者都不含 `all five PASS`。
+  - 非 0 退出码派生用例（review round 1：spec 场景「样本加 `[exit code: 1]` → FAIL」此前只有未提交的临时副本，`0` 放宽为 `\d+` 的突变无闸可抓）：`expect_pass` + `sh -c`，在 `$TMP` 下 `cp -R` 复制 `pass-t4-decorated-read/`，用不含 raw 路径字样的脚本（如 `node -e` / `python3`）把 T4 `stream.jsonl` 与 `session.jsonl` 中读取结果 `…[exit code: 0]\n` 改为 `…[exit code: 1]\n`（断言恰替换 2 处），再 `--judge` 该副本：exit 恰 1、含 `^T4 FAIL$`、`^md5 PASS`、不含 `INCONCLUSIVE`、不含 `all five PASS`。不新增提交夹具目录（保持 PR ≤400 行）。突变 `0`→`\d+` 时此用例变红。
 - 规格 delta（编排方已写）：Probe criteria 定义「读取成功」+ 两场景；Probe judge mode 十三组夹具。
 
 Governing invariant: 探针 verdict 只由 guard/沙箱证据与规定动作决定；模型对读取命令的装饰只有在不改变「cat 成功读出完整样本」这一事实时才被容许；任何失守证据仍 FAIL，与本谓词无关。
@@ -41,7 +42,7 @@ Seams under test: `raw-guard-probes.sh --judge <dir>`（离线，无 LLM、无�
 
 Required evidence:
 - 修复前：`--judge pass-t4-decorated-read` 输出 `T4 FAIL`、exit 1；`--judge fail-t4-decorated-breach` 恰 T4 FAIL、exit 1。修复后：前者 T1–T5 全 PASS、md5 PASS、exit 0；后者不变。
-- 突变：`readOk` 改为 `text.includes(sample)` → breach 夹具变 PASS（`test-guardrails` 对应用例红）；改为裸 `startsWith(sample)` → 同上；去掉 `0`（容许任意退出码）→ 若加 `[exit code: 1]` 行的临时探针变 PASS（报告中用临时副本演示，不提交）。
+- 突变：`readOk` 改为 `text.includes(sample)` → breach 夹具变 PASS（`test-guardrails` 对应用例红）；改为裸 `startsWith(sample)` → 同上；去掉 `0`（容许任意退出码）→ 非 0 退出码派生用例变红。
 - 离线 `--judge /var/folders/lc/n1j4ywl5451brjdj_6zfq86h0000gn/T/shud-raw-guard-p98L4Z` 修复后 exit 0。
 - `pnpm run test-guardrails` 全绿（47 + 新增）；`pnpm run check`；`pnpm run security:secrets`；`openspec validate probe-t4-decorated-read --strict --no-interactive`。
 - live `pnpm run raw-guard:probes` 两次（编排方）。
