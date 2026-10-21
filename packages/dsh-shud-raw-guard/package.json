@@ -1,0 +1,26 @@
+{
+  "name": "@shud-harness/dsh-shud-raw-guard",
+  "version": "0.9.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.3",
+    "vitest": "4.1.11",
+    "typescript": "5.8.3"
+  }
+}
