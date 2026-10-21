@@ -2,9 +2,9 @@
 
 ## 1. Decision core (`packages/dsh-shud-raw-guard/src/decide.ts`, `decide.test.ts`)
 
-- [ ] 1.1 先加测试：design 列出的 deny/ask/next/反例/误报行入新 `test.each` 表；验证：对未改的 `decide.ts` 运行 `pnpm vitest run packages/dsh-shud-raw-guard/src/decide.test.ts`，恰好新增的 deny/ask 行与误报钉住行红（当前为 next），next 与反例行绿，记录红行数。
+- [ ] 1.1 先加测试：design 列出的 deny/ask/next/反例/误报行入新 `test.each` 表；验证：对未改的 `decide.ts` 运行 `pnpm vitest run packages/dsh-shud-raw-guard/src/decide.test.ts`，恰好新增的 deny/ask 行与误报钉住行红（当前为 next；design 标为「既有行为记录」的两行除外，改前即绿），next 与反例行绿，记录红行数。
 - [ ] 1.2 `pwsh` 前移、`texts` 改为 design 的构造并加注释；验证：同一命令全绿，既有行不变，`git diff` 中 `decide.ts` 只动 shell 分支。
-- [ ] 1.3 design 列出的六项突变各自让对应行变红（证据记入报告，不提交）。
+- [ ] 1.3 design 列出的八项突变各自让对应行变红（证据记入报告，不提交）。
 - [ ] 1.4 订正 fail-closed 注释块措辞（只改注释）。
 - [ ] 1.5 `pnpm run check` exit 0（覆盖率不降）；`pnpm run build`。
 

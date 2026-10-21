@@ -509,6 +509,9 @@ const quoteSplitCases: [string, string, Kind, typeof options][] = [
   ["pwsh", "Remove-Item sub\\\\x", "deny", subX],
   ["pwsh", "Remove-Item sub\\.\\x", "deny", subX],
   ["bash", `rm -rf ${rawParent}/./${rawLeaf.slice(0, 1)}"${rawLeaf.slice(1)}"`, "deny", defaults],
+  // Order: strip before normalizing (bash data/\/raw is data//raw).
+  ["bash", `rm -rf ${rawParent}/"/"${rawLeaf}`, "deny", defaults],
+  ["bash", `rm -rf ${rawParent}/\\/${rawLeaf}`, "deny", defaults],
   // Documented gap: a glob or brace inside the raw name needs expansion.
   ["bash", "rm -rf p*d", "next", options],
   ["bash", "rm -rf protecte?", "next", options],
@@ -520,11 +523,14 @@ const quoteSplitCases: [string, string, Kind, typeof options][] = [
   ["pwsh", "Remove-Item sub\\xy", "next", subX],
   ["pwsh", "Get-Content sub\\x.bak", "next", subX],
   // Accepted false positives of the stripped and pwsh spellings, including
-  // regex-escaped text that only names the raw path.
+  // regex-escaped text (sub\/x) that only names a multi-segment raw path.
   ["bash", "rm 'prot\\ected'", "deny", options],
   ["pwsh", "Remove-Item 'prot''ected'", "deny", options],
   ["pwsh", "Remove-Item sub\\x", "deny", subx],
   ["bash", "grep -l pwsh notes; rm sub\\x", "deny", subX],
+  ["bash", "sed -i 's/sub\\/x/y/' cfg", "deny", subX],
+  ["bash", "grep -rn 'sub\\/x' scripts", "ask", subX],
+  // Pre-existing: \ is not a name character, so the escaped text already names the raw dir.
   ["bash", "sed -i 's/protected\\/x/y/' cfg", "deny", options],
   ["bash", "grep -rn 'protected\\/x' scripts", "ask", options],
 ];
