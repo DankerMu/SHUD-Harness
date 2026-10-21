@@ -34,6 +34,7 @@
     "pr:size": "sh scripts/guardrails/pr-size.sh",
     "security:secrets": "gitleaks git --no-banner --redact",
     "security:sast": "semgrep scan --config p/typescript --config p/secrets --error --metrics=off --exclude SHUD --exclude rSHUD --exclude AutoSHUD",
+    "profile:install": "sh scripts/runtime/profile-install.sh",
     "profile:smoke": "sh scripts/runtime/profile-smoke.sh",
     "shud:tiny": "sh scripts/runtime/shud-tiny.sh",
     "test-guardrails": "sh scripts/guardrails/test-guardrails.sh",
