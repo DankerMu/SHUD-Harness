@@ -13,8 +13,9 @@
 
 ## 3. Collector (`packages/dsh-shud-core/src/stack-lock/repository-revision.ts`)
 
-- [ ] 3.1 先写 `repository-revision.test.ts`（design 列出的 10 条，含仓库内空子目录抛错与 `showUntrackedFiles no` 仍 dirty；仅 `mkdtemp` 临时仓库，宿主 git 配置以 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` 屏蔽，`afterEach` 还原环境）；验证：模块不存在时红。
+- [ ] 3.1 先写 `repository-revision.test.ts`（design 列出的 10 条，含仓库内空子目录抛错与 `showUntrackedFiles no` 仍 dirty；仅 `mkdtemp` 临时仓库，宿主 git 配置以 `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM`/`XDG_CONFIG_HOME` 屏蔽，`afterEach` 还原环境）；验证：模块不存在时红。
 - [ ] 3.2 实现 `collectRepositoryRevision`；验证：该测试文件全绿；临时去掉 top-level 校验时空子目录测试红；去掉 `--untracked-files=normal` 时测试 10 红；去掉 `GIT_OPTIONAL_LOCKS=0` 时测试 9 红（mtime 用 `utimesSync` 显式错开 ≥2 秒）、去掉 `GIT_DIR` 剔除时测试 7 红（突变证据记入报告，不提交）。
+- [ ] 3.2a review round 1 修复：top-level 比对改用 `realpathSync.native`；status ENOBUFS 判 dirty、其他失败带 `repoPath` 抛错；测试补 `XDG_CONFIG_HOME` 屏蔽与 design 测试 11–13；验证：新测试在修复前红（12 抛 ENOBUFS；13 在本机抛 not a git repository root），修复后全绿。
 - [ ] 3.3 `src/index.ts` 导出两个函数；验证：`pnpm run deadcode` 0 error。
 
 ## 4. Docs
@@ -38,8 +39,8 @@ Minimal mergeable slice: atomic（schema 字段、指纹、采集同属 IR-001 �
 - Error handling / rollback — selected：非仓库、无提交、仓库内空子目录 → 抛错带路径，由 3.1 测试 8 覆盖；symbolic-ref 非 detached 失败抛错无测试（难以稳定构造，design Non-goals 记为已知缺口）。
 - Legacy compatibility — selected：其余 schema 与投影字节不变、既有测试仍绿；无持久化 StackLock 需迁移（仓库内无写入方）；由 1.3、5.1 覆盖。
 - Documentation / migration notes — selected：`Minimal_Schemas.md` §2 与 spec delta；由 4.1、4.2 覆盖。
-- Config / project setup — not selected：无配置项；git 为既有系统依赖。用户 git 配置照常生效，dirty 相关配置由显式参数覆盖（测试 10）。
+- Config / project setup — not selected：无配置项；git 为既有系统依赖。用户 git 配置照常生效；`status.showUntrackedFiles` 由显式参数覆盖（测试 10），三个忽略来源沿用 git status 语义（测试 4、11）。
 - Auth / permissions / secrets — not selected：不读写凭据；git 命令不触网。
 - Concurrency / shared state — not selected：同步纯读；`GIT_OPTIONAL_LOCKS=0` 已避免与并发 git 进程争 index 锁。
-- Resource limits — not selected：三仓库 `git status` 规模小（SHUD/rSHUD/AutoSHUD）。
+- Resource limits — selected（review round 1）：status 输出超过 `maxBuffer` 时判 dirty 而不抛错；由测试 12 覆盖。
 - Release / packaging — not selected：无新依赖（`node:` 内建）。

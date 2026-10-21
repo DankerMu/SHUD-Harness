@@ -16,6 +16,7 @@ const REPOSITORY_LOCATOR_VARS = [
 /**
  * Read-only snapshot of the git repository rooted exactly at `repoPath`.
  * Never writes to the repository: optional locks (index refresh) and fsmonitor are disabled.
+ * `dirty` follows git status ignore rules; status output overflowing the read buffer counts as dirty.
  * Throws with `repoPath` in the message when it is not a repository root or has no commits.
  */
 export function collectRepositoryRevision(repoPath: string): RepositoryRevision {
@@ -36,7 +37,7 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
       cause: error,
     });
   }
-  if (topLevel !== realpathSync(repoPath)) {
+  if (topLevel !== realpathSync.native(repoPath)) {
     throw new Error(`not a git repository root: ${repoPath} (enclosing top-level is ${topLevel})`);
   }
 
@@ -62,16 +63,28 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
     branch = "HEAD";
   }
 
-  const status = run([
-    "status",
-    "--porcelain",
-    "--untracked-files=normal",
-    "--ignore-submodules=none",
-  ]);
-  return { commit, branch, dirty: status.length > 0 };
+  let dirty: boolean;
+  try {
+    const status = run([
+      "status",
+      "--porcelain",
+      "--untracked-files=normal",
+      "--ignore-submodules=none",
+    ]);
+    dirty = status.length > 0;
+  } catch (error) {
+    // Output overflowed the read buffer, so it was necessarily non-empty.
+    if (failureField(error, "code") !== "ENOBUFS") {
+      throw new Error(`cannot read git status at ${repoPath}: ${failureDetail(error)}`, {
+        cause: error,
+      });
+    }
+    dirty = true;
+  }
+  return { commit, branch, dirty };
 }
 
-function failureField(error: unknown, key: "status" | "stdout" | "stderr"): unknown {
+function failureField(error: unknown, key: "code" | "status" | "stdout" | "stderr"): unknown {
   return typeof error === "object" && error !== null && key in error
     ? (error as Record<string, unknown>)[key]
     : undefined;

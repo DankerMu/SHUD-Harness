@@ -16,12 +16,12 @@ Must add/change:
   - `canonicalJson(v)`：对象按 `Object.keys(v).sort()`（码元序）递归输出 `{"k":v,...}`；数组按序；字符串/数字/布尔/`null` 用 `JSON.stringify`；无空白。`undefined` 值不会出现（输入已过 schema；函数不负责校验）。
   - 返回 `"sha256:" + createHash("sha256").update(canonicalJson(content), "utf8").digest("hex")`（64 位小写 hex）。
 - 采集 `collectRepositoryRevision(repoPath: string): RepositoryRevision`：
-  - `run(args)` = `execFileSync("git", ["-C", repoPath, "-c", "core.fsmonitor=false", ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] })`；`core.fsmonitor=false` 防止 fsmonitor 守护进程在 `.git/` 写 IPC socket（零写入）；`env` = `process.env` 复制，删去会把 git 重定向到别的仓库的变量 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_ALTERNATE_OBJECT_DIRECTORIES`、`GIT_COMMON_DIR`、`GIT_NAMESPACE`，再设 `GIT_OPTIONAL_LOCKS=0` 与 `LC_ALL=C`（错误文本固定为英文）。用户/系统 git 配置照常生效（`safe.directory` 等需要它）；与 dirty 语义相关的配置由显式参数覆盖。`GIT_CEILING_DIRECTORIES` 等发现限制类变量保留（它们只收紧搜索，`-C <repo>` 不受其害）。
-  - top-level 校验：`run(["rev-parse", "--show-toplevel"]).trim()` 必须等于 `realpathSync(repoPath)`（macOS 上 `/var` → `/private/var`，两侧都取 realpath），否则抛错（消息含 `repoPath` 与实际 top-level）。理由：`git -C <仓库内的空目录>` 会向上发现父仓库并返回父仓库的 commit——未初始化的 `SHUD/` submodule（未带 `--recurse-submodules` 的 clone）会被静默记成 SHUD-Harness 的 commit 与 dirty（fixture review 实测）。非仓库目录在此步即失败抛错。
+  - `run(args)` = `execFileSync("git", ["-C", repoPath, "-c", "core.fsmonitor=false", ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] })`；`core.fsmonitor=false` 防止 fsmonitor 守护进程在 `.git/` 写 IPC socket（零写入）；`env` = `process.env` 复制，删去会把 git 重定向到别的仓库的变量 `GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE`、`GIT_OBJECT_DIRECTORY`、`GIT_ALTERNATE_OBJECT_DIRECTORIES`、`GIT_COMMON_DIR`、`GIT_NAMESPACE`，再设 `GIT_OPTIONAL_LOCKS=0` 与 `LC_ALL=C`（错误文本固定为英文）。用户/系统 git 配置照常生效（`safe.directory` 等需要它）；只有 untracked 报告模式（`status.showUntrackedFiles`）由显式参数覆盖。忽略规则沿用 `git status` 语义，三个来源都生效：`.gitignore`、`.git/info/exclude`、`core.excludesFile`（未设置时为 `$XDG_CONFIG_HOME/git/ignore`）。不覆盖全局忽略的理由：issue #199 要求 git status 语义；若以 `-c core.excludesFile=` 清空，macOS 上被全局忽略的 `.DS_Store` 会让每个 checkout 判 dirty。宿主配置的外部 filter（如 git-lfs clean filter）在 status 比对 stat 变化文件的内容时由 git 调用，可能写 `.git/lfs/`；零写入保证只针对 git 自身（三个 submodule 目前没有 filter 属性）。`GIT_CEILING_DIRECTORIES` 等发现限制类变量保留（它们只收紧搜索，`-C <repo>` 不受其害）。
+  - top-level 校验：`run(["rev-parse", "--show-toplevel"]).trim()` 必须等于 `realpathSync.native(repoPath)`（macOS 上 `/var` → `/private/var`；native 版还会把大小写与 NFC/NFD 写法纠正为磁盘实际写法，与 git 输出一致，JS 版 `realpathSync` 不会，round 1 review 实测误拒 `.../repo` 对 `.../Repo`），否则抛错（消息含 `repoPath` 与实际 top-level）。理由：`git -C <仓库内的空目录>` 会向上发现父仓库并返回父仓库的 commit——未初始化的 `SHUD/` submodule（未带 `--recurse-submodules` 的 clone）会被静默记成 SHUD-Harness 的 commit 与 dirty（fixture review 实测）。非仓库目录在此步即失败抛错。
   - `commit` = `run(["rev-parse", "--verify", "HEAD"]).trim()`；失败（无提交）→ `throw new Error(\`cannot read git HEAD at ${repoPath}: ...\`)`，含 git stderr 首行。
   - `branch` = `symbolic-ref --short -q HEAD` 的输出；该命令在 detached 时以 1 退出且无输出 → `"HEAD"`（git 禁止名为 `HEAD` 的分支，故无歧义）；其他非 0 退出码 → 抛错。
-  - `dirty` = `run(["status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"]).length > 0`：显式参数覆盖 `status.showUntrackedFiles=no` 等配置（否则 untracked 文件会被配置隐藏而判 clean，fixture review 实测）；`.gitignore` 忽略的文件不计；嵌套子模块改动计入。
-- 测试 `repository-revision.test.ts`（临时仓库 helper：`git init -b main`，提交时 `-c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false`；`beforeEach` 用 `vi.stubEnv` 设 `GIT_CONFIG_GLOBAL=<os.devNull>`、`GIT_CONFIG_NOSYSTEM=1`，使 helper 与被测采集都不受宿主机全局 `core.hooksPath`、`init.templateDir`、`status.showUntrackedFiles`、`core.fsmonitor` 影响；`afterEach` 调 `vi.unstubAllEnvs()`（`vitest.config.ts` 未设 `unstubEnvs`）并 `rmSync(dir, { recursive: true, force: true })`）：
+  - `dirty` = `run(["status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=none"]).length > 0`：显式参数覆盖 `status.showUntrackedFiles=no`（否则 untracked 文件会被配置隐藏而判 clean，fixture review 实测）；三个忽略来源排除的文件不计；嵌套子模块改动计入。`execFileSync` 输出超过 `maxBuffer`（默认 1 MiB）时抛 `code === "ENOBUFS"`：输出已非空，判 `dirty: true`；status 的其他失败抛错，消息含 `repoPath`。
+- 测试 `repository-revision.test.ts`（临时仓库 helper：`git init -b main`，提交时 `-c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false`；`beforeEach` 用 `vi.stubEnv` 设 `GIT_CONFIG_GLOBAL=<os.devNull>`、`GIT_CONFIG_NOSYSTEM=1`、`XDG_CONFIG_HOME=<临时目录下不存在的子目录>`，使 helper 与被测采集都不受宿主机全局 `core.hooksPath`、`init.templateDir`、`status.showUntrackedFiles`、`core.fsmonitor`，以及默认全局忽略 `~/.config/git/ignore` 与全局 attributes 影响；`afterEach` 调 `vi.unstubAllEnvs()`（`vitest.config.ts` 未设 `unstubEnvs`）并 `rmSync(dir, { recursive: true, force: true })`）：
   1. clean：`{ commit: <rev-parse 结果, 40 hex>, branch: "main", dirty: false }`。
   2. tracked 修改：改已提交文件内容 → `dirty: true`，commit 不变。
   3. untracked 文件 → `dirty: true`。
@@ -32,6 +32,10 @@ Must add/change:
   8. 非仓库目录 → 抛错，消息含该路径；`git init` 后无提交 → 抛错；**仓库内的空子目录**（形同未初始化的 submodule）→ 抛错，消息含该路径（不得返回父仓库的 commit）。
   9. 只读：用 `utimesSync(file, t, t)` 把已提交文件的 mtime 显式设为与提交时相差至少 2 秒（内容不变；不用 `sleep`，保证 stat 必然变化）后采集 → `dirty: false`，且 `.git/index` 采集前后 sha256 相同。编排方已在 git 2.49.0 实测：此情形下默认 `git status` 会改写 index，`GIT_OPTIONAL_LOCKS=0` 不会，故本测试能区分。
   10. 仓库内 `git config status.showUntrackedFiles no` 后新建未跟踪文件 → 仍 `dirty: true`。
+  11. 忽略来源：仅新建被 `.git/info/exclude` 列出的文件 → `dirty: false`；仅新建被仓库配置 `core.excludesFile`（指向临时目录中的忽略文件）列出的文件 → `dirty: false`。钉住 git status 忽略语义。
+  12. 缓冲溢出：在工作区顶层新建足够多的长文件名 untracked 文件，使 porcelain 输出超过 1 MiB → `dirty: true`，不抛错。
+  13. 大小写写法（仅在大小写不敏感文件系统上运行，以独立的 `existsSync` 判定）：仓库目录 `Repo`，以 `.../repo` 采集 → 成功，commit 正确。
+  14. status 其他失败：损坏 `.git/index` 后采集 → 抛错，消息含 `cannot read git status at <repoPath>`。
 - 测试 `fingerprint.test.ts`（以 `validStackLock()` 形态的本地常量为输入）：
   1. 格式 `/^sha256:[0-9a-f]{64}$/`。
   2. 只改一个 repo 的 `dirty` false→true → 指纹不同（IR-001 验收）。
@@ -40,7 +44,7 @@ Must add/change:
   5. `runtime.r_packages_lock` 为 `null` 与对象 → 指纹不同。
   6. 固定向量：一份写死的 lock 的指纹等于测试里写死的 64 位 hex；该 hex 由 `printf '%s' '<canonical json>' | shasum -a 256` 独立算出，命令与 canonical 串作为注释写在测试里（钉住算法，防止后续改动静默改变比对结果）。该向量同时钉住当前旧五字段 `llm` 形态；M3 按 K4 把 `llm` 收窄为三字段时，向量 SHALL 随之重算更新（测试注释写明），这是预期变化而非回归。
 - `core-schemas.test.ts`：`validStackLock()` 三个 repo 加 `dirty: false`；新增反例：任一 repo 缺 `dirty` → issue path `repos.<name>.dirty`；`dirty: "false"`（字符串）→ 拒绝；多余字段仍被 strictObject 拒绝。
-- `Minimal_Schemas.md` §2：三行示例改为 `{ commit: ..., branch: master, dirty: false }`；`fingerprint` 注释改为「`sha256:` + 去掉 `stack_id`/`created_at`/`fingerprint` 后按键排序的紧凑 JSON 的 SHA-256」；示例后加一句 `dirty` 语义（`git status --porcelain` 非空即 true，含 untracked、不含 ignored；detached 时 `branch` 为 `HEAD`）。
+- `Minimal_Schemas.md` §2：三行示例改为 `{ commit: ..., branch: master, dirty: false }`；`fingerprint` 注释改为「`sha256:` + 去掉 `stack_id`/`created_at`/`fingerprint` 后按键排序的紧凑 JSON 的 SHA-256」；示例后加一句 `dirty` 语义（`git status --porcelain` 非空即 true，含 untracked；不含被 `.gitignore`、`.git/info/exclude`、`core.excludesFile` 排除的文件；detached 时 `branch` 为 `HEAD`）。
 
 Governing invariant: 同一 commit 下 clean 与 dirty checkout 产生不同 `repos` 内容与不同指纹；采集对被采集仓库零写入、只看 `repoPath` 指向的仓库；指纹只由环境内容决定，与身份、时刻、键序无关。
 

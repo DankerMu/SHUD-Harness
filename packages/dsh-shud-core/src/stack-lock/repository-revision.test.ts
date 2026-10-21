@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -26,13 +27,21 @@ const LOCATOR_VARS = [
   "GIT_NAMESPACE",
 ] as const;
 
+// Observed independently of the code under test: does this filesystem fold case?
+const caseProbe = mkdtempSync(join(tmpdir(), "stack-lock-case-"));
+mkdirSync(join(caseProbe, "Repo"));
+const caseInsensitive = existsSync(join(caseProbe, "repo"));
+rmSync(caseProbe, { recursive: true, force: true });
+
 let root: string;
 
 beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "stack-lock-revision-"));
   vi.stubEnv("GIT_CONFIG_GLOBAL", devNull);
   vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  // Hides the host's default global ignore (~/.config/git/ignore) and attributes.
+  vi.stubEnv("XDG_CONFIG_HOME", join(root, "no-xdg-config"));
   for (const name of LOCATOR_VARS) vi.stubEnv(name, undefined);
-  root = mkdtempSync(join(tmpdir(), "stack-lock-revision-"));
 });
 
 afterEach(() => {
@@ -140,6 +149,52 @@ describe("collectRepositoryRevision", () => {
 
     expect(collectRepositoryRevision(repo).dirty).toBe(true);
   });
+
+  test("files ignored by .git/info/exclude or a repo-configured core.excludesFile keep the checkout clean", () => {
+    const excluded = committedRepo("info-exclude");
+    writeFileSync(join(excluded, ".git", "info", "exclude"), "local.tmp\n");
+    writeFileSync(join(excluded, "local.tmp"), "ignored\n");
+    expect(collectRepositoryRevision(excluded).dirty).toBe(false);
+
+    const configured = committedRepo("excludes-file");
+    const ignoreFile = join(root, "custom-ignore");
+    writeFileSync(ignoreFile, "scratch.out\n");
+    git(configured, "config", "core.excludesFile", ignoreFile);
+    writeFileSync(join(configured, "scratch.out"), "ignored\n");
+    expect(collectRepositoryRevision(configured).dirty).toBe(false);
+  });
+
+  test("status output larger than the read buffer still marks dirty without throwing", () => {
+    const repo = committedRepo("flood");
+    // 6000 lines of "?? <200-char name>\n" is ~1.2 MB, above execFileSync's 1 MiB default.
+    const stem = "u".repeat(195);
+    for (let i = 0; i < 6000; i += 1) {
+      writeFileSync(join(repo, `${stem}${String(i).padStart(5, "0")}`), "");
+    }
+
+    expect(collectRepositoryRevision(repo).dirty).toBe(true);
+  }, 60_000);
+
+  test("any other status failure throws with the path", () => {
+    const repo = committedRepo("corrupt-index");
+    writeFileSync(join(repo, ".git", "index"), "not an index");
+
+    expect(() => collectRepositoryRevision(repo)).toThrow(`cannot read git status at ${repo}: `);
+  });
+
+  test.runIf(caseInsensitive)(
+    "a case-variant spelling of the repository root is accepted on a case-insensitive filesystem",
+    () => {
+      const repo = committedRepo("Repo");
+      const head = git(repo, "rev-parse", "HEAD");
+
+      expect(collectRepositoryRevision(join(root, "repo"))).toEqual({
+        commit: head,
+        branch: "main",
+        dirty: false,
+      });
+    },
+  );
 });
 
 function git(cwd: string, ...args: string[]): string {

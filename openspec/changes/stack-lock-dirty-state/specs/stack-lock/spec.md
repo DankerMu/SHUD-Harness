@@ -18,7 +18,7 @@
 - **THEN** 解析失败，缺失时 issue path 为 `repos.<name>.dirty`
 
 ### Requirement: Read-only repository revision collection
-`collectRepositoryRevision(repoPath)` SHALL 只用 `git rev-parse --show-toplevel`、`git rev-parse --verify HEAD`、`git symbolic-ref --short -q HEAD`、`git status --porcelain --untracked-files=normal --ignore-submodules=none` 采集 `repoPath` 指向的仓库，以参数数组调用 git（无 shell）并附 `-c core.fsmonitor=false`，环境 SHALL 设置 `GIT_OPTIONAL_LOCKS=0` 并剔除继承的仓库定位变量（`GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE` 等）。`repoPath` 的 realpath SHALL 等于仓库 top-level，否则抛错（不得向上采集父仓库）。`commit` 为 HEAD 的完整 commit id；`branch` 为当前分支短名，detached HEAD 时 SHALL 为 `HEAD`；`dirty` 在上述 status 输出非空时为 `true`（含 tracked 修改与 untracked 文件，不受 `status.showUntrackedFiles` 配置影响；不含 `.gitignore` 忽略的文件）。采集 SHALL NOT 写入被采集仓库（含 `.git/index`）且 SHALL NOT 访问网络；`repoPath` 不是 git 仓库或没有提交时 SHALL 抛出含该路径的错误。
+`collectRepositoryRevision(repoPath)` SHALL 只用 `git rev-parse --show-toplevel`、`git rev-parse --verify HEAD`、`git symbolic-ref --short -q HEAD`、`git status --porcelain --untracked-files=normal --ignore-submodules=none` 采集 `repoPath` 指向的仓库，以参数数组调用 git（无 shell）并附 `-c core.fsmonitor=false`，环境 SHALL 设置 `GIT_OPTIONAL_LOCKS=0` 并剔除继承的仓库定位变量（`GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE` 等）。`repoPath` 的规范路径（`realpathSync.native`：解析 symlink，并取文件系统上的实际大小写与 Unicode 写法）SHALL 等于仓库 top-level，否则抛错（不得向上采集父仓库）。`commit` 为 HEAD 的完整 commit id；`branch` 为当前分支短名，detached HEAD 时 SHALL 为 `HEAD`；`dirty` 在上述 status 输出非空时为 `true`（含 tracked 修改与 untracked 文件，不受 `status.showUntrackedFiles` 配置影响）；输出超出读取缓冲上限时同样 SHALL 为 `true`。`dirty` 沿用 `git status` 的忽略语义：被 `.gitignore`、`.git/info/exclude` 或 `core.excludesFile`（未设置时为 `$XDG_CONFIG_HOME/git/ignore`，默认 `~/.config/git/ignore`）排除的文件不计入，因此宿主的全局忽略规则会影响结果。git 自身 SHALL NOT 写入被采集仓库（含 `.git/index`），采集 SHALL NOT 访问网络；宿主配置的外部 filter 驱动（如 git-lfs 的 clean filter）在 status 比对内容时由 git 调用，其副作用不在此保证内。`repoPath` 不是 git 仓库或没有提交时 SHALL 抛出含该路径的错误。
 
 #### Scenario: clean checkout
 - **WHEN** 对一个刚提交、工作区干净的 `main` 分支临时仓库采集
@@ -33,8 +33,12 @@
 - **THEN** `dirty` 为 `true`
 
 #### Scenario: ignored file stays clean
-- **WHEN** 仅新建一个被 `.gitignore` 忽略的文件
+- **WHEN** 仅新建一个被 `.gitignore`、`.git/info/exclude` 或仓库配置的 `core.excludesFile` 排除的文件
 - **THEN** `dirty` 为 `false`
+
+#### Scenario: oversized status output still marks dirty
+- **WHEN** untracked 文件多到 status 输出超过读取缓冲上限
+- **THEN** `dirty` 为 `true`，不抛错
 
 #### Scenario: detached HEAD
 - **WHEN** 仓库处于 `git checkout --detach` 之后
