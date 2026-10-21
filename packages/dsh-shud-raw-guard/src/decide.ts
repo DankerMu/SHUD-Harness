@@ -31,7 +31,7 @@ const ASK: RawGuardDecision = {
 // script blocks match while verb-shaped substrings inside names (rivers) do not.
 // Case-insensitive: case-insensitive filesystems resolve RM to /bin/rm.
 const WRITE_VERBS =
-  /(?<![A-Za-z0-9_.-])(rm|mv|cp|tee|touch|mkdir|chmod|chown|chgrp|truncate|dd|install|rsync|ln|unlink|rmdir|shred|gzip|gunzip|bzip2|xz|unzip)(?=$|[\s;&|)}'"`])|(^|\s)(-delete|--remove-files)(?=$|[\s;&|)}'"`])|(^|[^<])>{1,2}\s*[^&]|(?<![A-Za-z0-9_.-])(?:git\s+(clean|checkout|restore)|tar\s+-[a-zA-Z]*x|sort\s+-o|awk\s+-i|sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*[ie]|python[0-9.]*\s+-c|Rscript\s+(-e|--expr)|node\s+(-e|--eval)|(python[0-9.]*|Rscript|node|perl)\s+-\s*<<)|\bopen\s*\(/i;
+  /(?<![A-Za-z0-9_.-])(rm|mv|cp|tee|touch|mkdir|chmod|chown|chgrp|truncate|dd|install|rsync|ln|unlink|rmdir|shred|gzip|gunzip|bzip2|xz|unzip)(?=$|[\s;&|)}'"`])|(^|\s)(-delete|--remove-files)(?=$|[\s;&|)}'"`])|(^|[^<])>{1,2}\s*[^&]|(?<![A-Za-z0-9_.-])(?:git\s+(clean|checkout|restore)|g?tar\s+-[a-zA-Z]*x|sort\s+-o|g?awk\s+-i|g?sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*[ie]|i?python[0-9.]*\s+-c|Rscript\s+(-e|--expr)|node\s+(-e|--eval)|(python[0-9.]*|Rscript|node|perl)\s+-\s*<<)|\bopen\s*\(/i;
 // PowerShell names are case-insensitive; same anchors as the POSIX verbs. The
 // aliases are not bash commands, so they apply only to pwsh or a pwsh wrapper.
 const PWSH_WRITES =
