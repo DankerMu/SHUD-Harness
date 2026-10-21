@@ -23,8 +23,14 @@ const ASK: RawGuardDecision = {
   reason: RAW_READ_PROVENANCE_REASON,
   displayReason: { en: "Read raw data — approve?", zh: "读取原始数据，是否批准？" },
 };
+// A verb counts when the preceding character is not part of a word, so path
+// prefixes (/bin/rm), escapes (\rm), leading words (sudo rm) and pipeline
+// tails (| xargs rm) match, while arm and --rm do not.
 const WRITE_VERBS =
-  /(^|[\s;&|(])(rm|mv|cp|tee|touch|mkdir|chmod|chown|truncate|dd|install|rsync|ln)\s|(^|[^<])>{1,2}\s*[^&]|sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*i|python[0-9.]*\s+-c|\bopen\s*\(/;
+  /(?<![A-Za-z0-9_-])(rm|mv|cp|tee|touch|mkdir|chmod|chown|truncate|dd|install|rsync|ln|unlink|rmdir|shred)(?=\s|$)|(^|\s)(-delete|--remove-files)(?=$|[\s;&|)])|(^|[^<])>{1,2}\s*[^&]|sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*i|python[0-9.]*\s+-c|\bopen\s*\(/;
+// PowerShell names are case-insensitive; TS rejects inline (?i:), hence a separate regex.
+const PWSH_WRITES =
+  /(?<![A-Za-z0-9_-])(Remove-Item|Move-Item|Copy-Item|Rename-Item|New-Item|Set-Content|Add-Content|Clear-Content|Out-File|del|erase|ri|rd)(?=\s|$)/i;
 
 type RawGuardOptions = { rawDirs: string[] };
 
@@ -90,9 +96,11 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
       const root = canonical(raw, cwd);
       const mentioned = [raw, root].some((text) => {
         const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        return new RegExp(`${escaped}(?=$|[/\\s'";|&<>()])`).test(command);
+        // Any non-path-name character after raw text (glob, brace, backtick) is a mention.
+        return new RegExp(`${escaped}(?![A-Za-z0-9._-])`).test(command);
       });
-      if (mentioned || contains(root, workdir)) return WRITE_VERBS.test(command) ? DENY : ASK;
+      if (mentioned || contains(root, workdir))
+        return WRITE_VERBS.test(command) || PWSH_WRITES.test(command) ? DENY : ASK;
     }
   }
   return NEXT;

@@ -178,3 +178,73 @@ test.runIf(process.platform === "darwin")(
     }
   },
 );
+
+type Kind = "deny" | "ask" | "next";
+const POSIX_WRITES =
+  "rm mv cp tee touch mkdir chmod chown truncate dd install rsync ln unlink rmdir shred".split(" ");
+const PWSH_WRITES =
+  "Remove-Item Move-Item Copy-Item Rename-Item New-Item Set-Content Add-Content Clear-Content Out-File del erase ri rd".split(
+    " ",
+  );
+const shellCases: [string, Kind][] = [
+  ["rm -rf protected*", "deny"],
+  ["rm -rf protected?", "deny"],
+  ["rm -rf {protected,x}", "deny"],
+  ["rm -rf protected/*", "deny"],
+  ["cat protected*", "ask"],
+  ["cat protected?", "ask"],
+  ["ls {protected,derived}", "ask"],
+  ["cat `echo protected`", "ask"],
+  ["ls `echo protected`", "ask"],
+  ["rm protectedx/x", "next"],
+  ["rm protected.bak", "next"],
+  ["rm protected_old/x", "next"],
+  ["rm protected-2/x", "next"],
+  ["cat protected_old/x", "next"],
+  ["rm -rf protecte*", "next"],
+  ...POSIX_WRITES.map((verb): [string, Kind] => [`${verb} protected/x derived/x`, "deny"]),
+  ["/bin/rm protected/x", "deny"],
+  ["\\rm protected/x", "deny"],
+  ["sudo rm protected/x", "deny"],
+  ["echo $(rm protected/x)", "deny"],
+  ["rmdir protected", "deny"],
+  ["find protected -delete", "deny"],
+  ["find protected -delete; echo", "deny"],
+  ["tar -cf a.tar protected --remove-files", "deny"],
+  ["find protected -type f | xargs rm", "deny"],
+  ["docker run --rm -v protected:/d img", "ask"],
+  ["arm protected/x", "ask"],
+  ["add protected/x", "ask"],
+  ["sudo cat protected/x", "ask"],
+  ["find protected --delete-after", "ask"],
+];
+const pwshCases: [string, Kind][] = [
+  ...PWSH_WRITES.map((cmdlet): [string, Kind] => [`${cmdlet} protected/x`, "deny"]),
+  ...PWSH_WRITES.filter((cmdlet) => cmdlet !== cmdlet.toLowerCase()).map(
+    (cmdlet): [string, Kind] => [`${cmdlet.toLowerCase()} protected/x`, "deny"],
+  ),
+  ["Set-Content protected/x 1", "deny"],
+  ["Get-ChildItem protected | Remove-Item", "deny"],
+  ["Get-ChildItem protected", "ask"],
+];
+
+test.each([
+  ...shellCases.map(([command, kind]) => ["bash", command, kind]),
+  ...shellCases.map(([command, kind]) => ["pwsh", command, kind]),
+  ...pwshCases.map(([command, kind]) => ["pwsh", command, kind]),
+])("%s `%s` -> %s (#245 boundary and write verbs)", (name, command, kind) => {
+  const result = decide(name, { command });
+  expect(result.kind).toBe(kind);
+  if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+  if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+});
+
+const defaultRaw = normalizeRawDirs().rawDirs[0];
+test.each([
+  [`rm -rf ${defaultRaw}*`, "deny"],
+  [`rm -rf ${defaultRaw}?`, "deny"],
+  [`rm -rf {${defaultRaw},x}`, "deny"],
+  [`cat ${defaultRaw}*`, "ask"],
+])("default rawDirs bash `%s` -> %s", (command, kind) => {
+  expect(decide("bash", { command }, normalizeRawDirs()).kind).toBe(kind);
+});
