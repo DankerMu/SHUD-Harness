@@ -2,18 +2,18 @@
 
 ## 1. Revision collection (`packages/dsh-shud-core/src/stack-lock/repository-revision.ts`, `repository-revision.test.ts`)
 
-- [ ] 1.1 先加测试：design 列出的七个用例与 PATH shim 助手；验证：对未改的实现运行 `pnpm vitest run packages/dsh-shud-core/src/stack-lock/repository-revision.test.ts`，恰好 stderr-only 溢出、HEAD → tag、同名 tag、`refs/heads/HEAD` 四个用例红，两个 `symbolic-ref` shim 用例与「非溢出失败带输出」用例绿，记录红数。
-- [ ] 1.2 按 design 改 status catch、branch 段与注释；验证：同一命令全绿，现有用例不变。
-- [ ] 1.3 design 列出的八项突变各自让对应用例变红（证据记入报告，不提交）。
-- [ ] 1.4 `pnpm run check` exit 0（覆盖率不降）。
+- [x] 1.1 先加测试：design 列出的七个用例与 PATH shim 助手；验证：对未改的实现运行 `pnpm vitest run packages/dsh-shud-core/src/stack-lock/repository-revision.test.ts`，恰好 stderr-only 溢出、HEAD → tag、同名 tag、`refs/heads/HEAD` 四个用例红，两个 `symbolic-ref` shim 用例与「非溢出失败带输出」用例绿，记录红数。
+- [x] 1.2 按 design 改 status catch、branch 段与注释；验证：同一命令全绿，现有用例不变。
+- [x] 1.3 design 列出的八项突变各自让对应用例变红（证据记入报告，不提交）。
+- [x] 1.4 `pnpm run check` exit 0（覆盖率不降）。
 
 ## 2. Spec
 
-- [ ] 2.1 本 change spec delta 与实现一致；验证：`openspec validate stack-lock-revision-residuals --strict --no-interactive`。
+- [x] 2.1 本 change spec delta 与实现一致；验证：`openspec validate stack-lock-revision-residuals --strict --no-interactive`。
 
 ## 3. Verification
 
-- [ ] 3.1 PR 内附 reviewer 审查摘要、红→绿、突变表。
+- [x] 3.1 PR 内附 reviewer 审查摘要、红→绿、突变表。
 
 Suggested fixture level: expanded
 Minimal mergeable slice: atomic（同一函数的两段错误映射与测试）

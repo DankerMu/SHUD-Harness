@@ -91,7 +91,7 @@ fingerprint: "sha256:..."             # sha256: + 去掉 stack_id/created_at/fin
 created_at: 2026-04-25T10:00:00Z
 ```
 
-**repos.dirty 说明**：`git status --porcelain --untracked-files=normal --ignore-submodules=none` 输出非空即 `true`（含 tracked 修改与 untracked 文件；沿用 git status 忽略语义，不含被 `.gitignore`、`.git/info/exclude` 或 `core.excludesFile`（未设置时为 `~/.config/git/ignore`）排除的文件；输出超出读取缓冲上限也判 `true`）；`commit` 为 HEAD 完整 id，detached HEAD 时 `branch` 为 `HEAD`。采集只读（`collectRepositoryRevision`），同一 commit 的 clean 与 dirty checkout 指纹不同。
+**repos.dirty 说明**：`git status --porcelain --untracked-files=normal --ignore-submodules=none` 输出非空即 `true`（含 tracked 修改与 untracked 文件；沿用 git status 忽略语义，不含被 `.gitignore`、`.git/info/exclude` 或 `core.excludesFile`（未设置时为 `~/.config/git/ignore`）排除的文件；读取因输出超出缓冲上限而中断时，stdout 已有输出判 `true`，stdout 为空则抛错）；`commit` 为 HEAD 完整 id，`branch` 为 `refs/heads/<name>` 的 `<name>`，detached HEAD 时为 `HEAD`，HEAD 指向非分支引用（如 tag）或名为 `HEAD` 的分支时抛错。采集只读（`collectRepositoryRevision`），同一 commit 的 clean 与 dirty checkout 指纹不同。
 
 **llm 字段说明**（ADR-0004 K4，取代 AGA-P0-1 的 model + params + prompt 锁）：`base_url` 或 `request_alias` 变化视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。`response_model` 是滚动别名（`deepseek-flash`）在建 lock 时的实际解析结果，只记录不强制：其变化**不**自动使 lock 失效，每条 RunRecord 另记 `llm.response_model`，可比性由 PI 看报告判断。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
 
