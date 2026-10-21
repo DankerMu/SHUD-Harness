@@ -30,18 +30,29 @@ const ASK: RawGuardDecision = {
 // (end, whitespace, ; & | ) } ' " `) so subshells, sh -c '...' wrappers and pwsh
 // script blocks match while verb-shaped substrings inside names (rivers) do not.
 // Case-insensitive: case-insensitive filesystems resolve RM to /bin/rm.
+// Redirects that write a file: > and >> (not <>); >&word unless word is an fd
+// number, an fd number plus - (move) or a lone - (close) immediately followed by
+// end of text, space, tab, newline or ; & | ( ) < >, as in 2>&1, >& 2, 2>&1-,
+// 1>&- and $(... 2>&1); and read-write <>word, which creates or overwrites in
+// place. A bash word breaks only there: quotes, backticks and } do not end it, and
+// \r, \f and U+00A0 do not split it, so >&2x, >&2:x, >&2$x, >&2\x, >&2"x", >&2" ",
+// >&2} and >&$fd name files. A regex cannot tell an opening quote from a closing
+// one, so quoted wrappers such as sh -c '... >&2' count as files too (accepted
+// deny-direction false positive). [^ \t\n] never matches the blanks [ \t\n]*
+// skipped, so >& 2 stays.
 const WRITE_VERBS =
-  /(?<![A-Za-z0-9_.-])(rm|mv|cp|tee|touch|mkdir|chmod|chown|chgrp|truncate|dd|install|rsync|ln|unlink|rmdir|shred|gzip|gunzip|bzip2|xz|unzip)(?=$|[\s;&|)}'"`])|(^|\s)(-delete|--remove-files)(?=$|[\s;&|)}'"`])|(^|[^<])>{1,2}\s*[^&]|(?<![A-Za-z0-9_.-])(?:git\s+(clean|checkout|restore)|g?tar\s+-[a-zA-Z]*x|sort\s+-o|g?awk\s+-i|g?sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*[ie]|i?python[0-9.]*\s+-c|Rscript\s+(-e|--expr)|node\s+(-e|--eval)|(python[0-9.]*|Rscript|node|perl)\s+-\s*<<)|\bopen\s*\(/i;
+  /(?<![A-Za-z0-9_.-])(rm|mv|cp|tee|touch|mkdir|chmod|chown|chgrp|truncate|dd|install|rsync|ln|unlink|rmdir|shred|gzip|gunzip|bzip2|xz|unzip)(?=$|[\s;&|)}'"`])|(^|\s)(-delete|--remove-files)(?=$|[\s;&|)}'"`])|(^|[^<])>{1,2}\s*[^&]|(^|[^<])>&[ \t\n]*(?!(?:[0-9]+-?|-)(?=$|[ \t\n;&|()<>]))[^ \t\n]|<>[ \t\n]*[^ \t\n]|(?<![A-Za-z0-9_.-])(?:git\s+(clean|checkout|restore)|g?tar\s+-[a-zA-Z]*x|sort\s+-o|g?awk\s+-i|g?sed\s+(-[a-zA-Z]*i|--in-place)|perl\s+-[a-zA-Z]*[ie]|i?python[0-9.]*\s+-c|Rscript\s+(-e|--expr)|node\s+(-e|--eval)|(python[0-9.]*|Rscript|node|perl)\s+-\s*<<)|\bopen\s*\(/i;
 // PowerShell names are case-insensitive; same anchors as the POSIX verbs. The
 // aliases are not bash commands, so they apply only to pwsh or a pwsh wrapper.
 const PWSH_WRITES =
   /(?<![A-Za-z0-9_.-])(Remove-Item|Move-Item|Copy-Item|Rename-Item|New-Item|Set-Content|Add-Content|Clear-Content|Clear-Item|Out-File|del|erase|ri|rd|ren|rni|move|mi|copy|cpi|ni|clc|cli)(?=$|[\s;&|)}'"`])/i;
 const PWSH_COMMAND = /\b(pwsh|powershell)\b/i;
-// A redirect to /dev/null writes no file, so it is stripped before WRITE_VERBS.
-// It starts at & or >, never at a leading fd digit (bzip2>/dev/null stays bzip2),
-// and the target must end there (/dev/nullx, /dev/null/x are real files). Used
-// only with replace: the g flag makes test/exec stateful through lastIndex.
-const DISCARD_REDIRECT = /&?>{1,2}\s*\/dev\/null(?![A-Za-z0-9._/-])/g;
+// A redirect to /dev/null (>, >>, &>, &>>, >&, <>) writes no file, so it is
+// stripped before WRITE_VERBS. It starts at &, > or <, never at a leading fd digit
+// (bzip2>/dev/null stays bzip2), and the target must end there (/dev/nullx,
+// /dev/null/x are real files). Used only with replace: the g flag makes
+// test/exec stateful through lastIndex.
+const DISCARD_REDIRECT = /(?:&?>{1,2}|>&|<>)\s*\/dev\/null(?![A-Za-z0-9._/-])/g;
 
 type RawGuardOptions = { rawDirs: string[] };
 

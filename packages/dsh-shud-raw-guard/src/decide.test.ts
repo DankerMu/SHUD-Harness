@@ -342,6 +342,100 @@ test.each(discardRedirectCases)(
   },
 );
 
+// #255: a file-target >&word and a read-write <>word write a file; fd
+// duplication, moving and closing (>&2, 2>&1-, 1>&-) and /dev/null do not.
+const fdRedirectCases: [string, Kind, typeof options, string?][] = [
+  ["echo x >&protected/b", "deny", options],
+  ["echo x >& protected/b", "deny", options],
+  ["echo x 1>&protected/b", "deny", options],
+  ["cat protected/a >&out.txt", "deny", options],
+  ["echo x >&2x protected/a", "deny", options],
+  ["echo XY 1<>protected/a", "deny", options],
+  [": <>protected/newfile", "deny", options],
+  ["exec 3<>protected/newfile", "deny", options],
+  ["cat protected/a 0<>protected/b", "deny", options],
+  ["cat protected/a 2>/dev/null >&protected/b", "deny", options],
+  ["echo XY 1<>protected/a 2>/dev/null", "deny", options],
+  ["head protected/a >&/dev/nullx", "deny", options],
+  [`echo x >&${defaultRaw}/b`, "deny", normalizeRawDirs()],
+  ["head protected/a 2>&1", "ask", options],
+  ["head protected/a >&2", "ask", options],
+  ["head protected/a >& 2", "ask", options],
+  ["head protected/a 1>&-", "ask", options],
+  ["head protected/a 2>&1-", "ask", options],
+  ["cat protected/a 3>&1-", "ask", options],
+  ["head protected/a 2>&1 | wc -l", "ask", options],
+  ["head protected/a 2>&1;", "ask", options],
+  ["head protected/a >&/dev/null", "ask", options],
+  ["head protected/a 3<>/dev/null", "ask", options],
+  ["head protected/a <protected/b", "ask", options],
+  ["diff <(cat protected/a) b", "ask", options],
+  ["cat protected/a <<EOF", "ask", options],
+  [`head ${defaultRaw}/a 2>&1`, "ask", normalizeRawDirs()],
+  ["echo x &>protected/b", "deny", options],
+  ["echo x &>>protected/b", "deny", options],
+  ["bzip2<>/dev/null protected/x", "deny", options],
+  // A bash word breaks only at whitespace and metacharacters, so an fd number
+  // followed by any other character (: , $ \ or quoted text) names a file.
+  ["echo x >&1,/../protected/x", "deny", options],
+  ["cat protected/a >&2:out", "deny", options],
+  ["cat protected/a >&2,", "deny", options],
+  ["cat protected/a >&2$x", "deny", options],
+  ["cat protected/a >&2\\x", "deny", options],
+  ['cat protected/a >&2-"q"', "deny", options],
+  ['cat protected/a >&2"/../protected/b"', "deny", options],
+  ["cat protected/a >&2'y'", "deny", options],
+  ['echo x >&2"x"', "deny", options, "protected"],
+  [`cat ${defaultRaw}/a >&2:out`, "deny", normalizeRawDirs()],
+  ["cat protected/a 2>&1)", "ask", options],
+  ["cat protected/a 2>&1&&x", "ask", options],
+  ["{ cat protected/a >&2; }", "ask", options],
+  ['x "$(cat protected/a 2>&1)"', "ask", options],
+  ["cat protected/a 2>&1>/dev/null", "ask", options],
+  ["cat protected/a 2>&1<x", "ask", options],
+  ["cat protected/a 2>&1\n", "ask", options],
+  ["cat protected/a 2>&1\t#c", "ask", options],
+  // Fail closed: a regex cannot tell an opening quote from a closing one, so no
+  // quote, backtick or } ends an fd number. Bash splits words only at space, tab
+  // and newline (not \r, \f or U+00A0), so all of these name files; the quoted
+  // read wrappers are accepted deny-direction false positives.
+  ['cat protected/a >&2" "', "deny", options],
+  ['cat protected/a >&2" x"', "deny", options],
+  ['cat protected/a >&2";x"', "deny", options],
+  ["cat protected/a >&2' '", "deny", options],
+  ["cat protected/a >&2` x`", "deny", options],
+  ['cat protected/a >&2" /../protected/b"', "deny", options],
+  ["cat protected/a >&2}", "deny", options],
+  ["cat protected/a >&2\r", "deny", options],
+  ["cat protected/a >&2\fx", "deny", options],
+  ["cat protected/a >&2\u00a0x", "deny", options],
+  ['echo x >&2" "', "deny", options, "protected"],
+  ["sh -c 'head protected/a >&2'", "deny", options],
+  ['sh -c "head protected/a >&2"', "deny", options],
+  ["x `cat protected/a 2>&1`", "deny", options],
+  ["cat protected/a >&2''", "deny", options],
+];
+test.each(fdRedirectCases)(
+  "bash `%s` -> %s (#255 fd redirect)",
+  (command, kind, config, workdir) => {
+    const result = decide("bash", workdir ? { command, workdir } : { command }, config);
+    expect(result.kind).toBe(kind);
+    if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+    if (kind === "deny") expect(result.reason).toMatch(/immutable/);
+  },
+);
+
+// #255 resource limit: whitespace-only or fd-only redirect tails stay linear reads.
+test.each([
+  ["'>&' + 1e6 spaces", ">&" + " ".repeat(1e6)],
+  ["'1>&' x 3e5", "1>&".repeat(3e5)],
+  ["'<>' + 1e6 spaces", "<>" + " ".repeat(1e6)],
+])("bash `cat protected/a ` + %s -> ask (#255 adversarial)", (_label, tail) => {
+  const result = decide("bash", { command: `cat protected/a ${tail}` });
+  expect(result.kind).toBe("ask");
+  expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+});
+
 test.each([
   [`rm -rf ${defaultRaw}*`, "deny"],
   [`rm -rf ${defaultRaw}?`, "deny"],
