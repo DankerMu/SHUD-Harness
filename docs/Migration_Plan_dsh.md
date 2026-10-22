@@ -160,3 +160,26 @@ PI 选择补采一次真实 Web 会话并亲自在审批卡点击“允许一次
 ```
 
 两个场景及 MD5 对照均通过；该证据仅用于 M1 的手工 Web 审批往返，不扩张为通用 raw 数据安全证明。
+
+### M1 收口修复的 PI 功能验收（2026-10-22）
+
+Epic #210 关闭后，M1 收口复审又合并了 13 个修复（#247 #248 #251 #255 #260 #263 #266 #273 #277 #279 #283 与 StackLock 的 #199、#264）。ADR-0005 只覆盖 Epic #210，这批修复的 PI 功能验收在此补做；PI 结论：「已全部完成，通过」。
+
+自动闸（main `ac5f9bbf`）：`pnpm run check` 892 passed；`profile:smoke` OK；`raw-guard:probes` 两次 T1–T5 PASS、md5 不变；`shud:tiny` exit 0（22 个 `.dat`）。
+
+Web 往返：独立 `DSH_HOME=/Users/danker/.shud-acceptance-m1fix-20261022/dsh-home`，`shud` Web profile，模型 `deepseek-flash-guan`（DMXAPI，key 仅由环境变量提供）；合成工作区 `/Users/danker/Documents/shud-acceptance-m1fix-20261022/work`（默认 `rawDirs`）。PI 亲自点击审批卡，agent 未代批。Session `session-c08fa6b1-6335-4f36-8ae7-41a8238515d0`，原始日志 `/Users/danker/.shud-acceptance-m1fix-20261022/dsh-home/sessions/--Users-danker-Documents-shud-acceptance-m1fix-20261022-work--/session-c08fa6b1-6335-4f36-8ae7-41a8238515d0/session.v4.jsonl.zstd`，逐帧解压后按 `seq` 与 tool call id 关联：
+
+| 命令 | 对应 | 日志（seq） | 结果 |
+|---|---|---|---|
+| `cat data/raw/obs.csv` | 基线 | 19 asked → 20 allowed-once → 23 | 返回 3 行样本 |
+| `echo bad >> data/raw/obs.csv` | 基线 | 35 → 36，无 asked | `Raw data is immutable` |
+| `head data/raw/obs.csv 2>/dev/null` | #248 | 49 asked → 50 allowed-once → 53 | 返回样本 |
+| `cat ./data/raw/obs.csv` | #247 | 66 asked → 67 allowed-once → 70 | 返回样本 |
+| `ls data` | #273 | 82 → 85，无 asked | 输出 `raw` |
+| `tar -tf data/raw/a.tar` | #279 | 98 asked → 99 allowed-once → 102 | 输出 `notes.txt` |
+| `tar -cf out/raw-copy.tar data/raw` | #283 | 115 asked → 116 allowed-once → 119 | 归档写到 `out/` |
+| `tar -cf data/raw/new.tar notes.txt` | #283 | 138 → 139，无 asked | `Raw data is immutable` |
+| `tar -xf data/raw/a.tar -C out` | #279 | 151 → 152，无 asked | `Raw data is immutable` |
+| `rm -rf data` | #273 | 164 → 165，无 asked | 祖先目录拒绝文案 |
+
+raw MD5 前后一致：`obs.csv` `406a4b65e6edef2cae087755117da2b9`，`a.tar` `b44f2949186b04ea191dca76e0445468`；`data/raw/new.tar` 不存在，`out/` 下无解包产物。PI 通过即接受：raw 内归档用 bash 解包（`tar -xf <raw>/a.tar -C work`）直接拒绝、无审批通道（#279 起）。宿主 Web 启动时自动选中 Documents 下的默认工作区而非进程 cwd，验收会话须在界面中选定合成工作区后新建；默认工作区内的两次试跑不计入证据。该证据只覆盖上表场景，不扩张为通用 raw 数据安全证明。
