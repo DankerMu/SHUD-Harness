@@ -9,12 +9,12 @@
 
 ## 2. Spec
 
-- [ ] 2.1 本 change 的 spec delta 与实现一致；验证：`openspec validate raw-guard-write-spelling --strict --no-interactive`。
+- [x] 2.1 本 change 的 spec delta 与实现一致；验证：`openspec validate raw-guard-write-spelling --strict --no-interactive`。
 
 ## 3. Verification
 
-- [ ] 3.1 `pnpm run raw-guard:probes`（编排方）跑两次：T1–T5 PASS，INCONCLUSIVE 则重跑；md5 不变。
-- [ ] 3.2 PR 内附 reviewer 白盒审查摘要（Critical Paths #1/#2）、红→绿、突变表、probes 结果。
+- [x] 3.1 `pnpm run raw-guard:probes`（编排方）跑两次：T1–T5 PASS，INCONCLUSIVE 则重跑；md5 不变。
+- [x] 3.2 PR 内附 reviewer 白盒审查摘要（Critical Paths #1/#2）、红→绿、突变表、probes 结果。
 
 Suggested fixture level: expanded
 Minimal mergeable slice: atomic（写判定候选集与 tar 检测同属第一遍写判定）
