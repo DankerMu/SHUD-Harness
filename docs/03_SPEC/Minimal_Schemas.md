@@ -11,7 +11,7 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 
 > **Canonical Source 说明：** Support schema（Artifact、ErrorRecord、PiGate、PiGateDecision、NotificationRecord、ReportExport、AnalysisProgressPayload、User、Session、AuditEvent、LockRecord、IdempotencyRecord 等）的权威定义不在本文件，见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md)。本文件仅定义 8 个核心对象 + MemoryNote。
 
-> **M2 修订来源：** RunJob（§4）已按 OpenSpec [m2-run-chain「Run identifiers / RunJob record」](../../openspec/changes/m2-run-chain/specs/run-records/spec.md) task 4.1 与 `packages/dsh-shud-core/src/schemas/run-job.ts` 对齐；下述 RunRecord 仍待 task 4.2 修订。该修订不改变其余对象的当前契约。
+> **M2 修订来源：** RunJob（§4）与 RunRecord（§5）已按 OpenSpec [m2-run-chain「Run identifiers / RunJob record / RunRecord record」](../../openspec/changes/m2-run-chain/specs/run-records/spec.md) tasks 4.1–4.2 与 `packages/dsh-shud-core/src/schemas/run-job.ts`、`packages/dsh-shud-core/src/schemas/run-record.ts` 对齐。该修订不改变其余对象的当前契约。
 
 ---
 
@@ -183,35 +183,48 @@ created → submitted → running → succeeded | failed | cancelled → collect
 
 ## 5. RunRecord
 
-M2 字段处置：`command` 为 argv 数组；`artifacts.metrics_summary` 与 `artifacts.plots` 推迟 M3。id、完整字段与 M2 取值约束在 task 4.2 随 RunRecord Zod 修订，当前不是已实现投影。
+M2 的实现源为 `packages/dsh-shud-core/src/schemas/run-record.ts`。RunRecord 是 collect 后的不可变结果记录；以下为可解析的成功记录。所有字段必填，未测量或未绑定的可空字段显式传 `null`；`numerical_health` 本身必须是对象。
 
 ```yaml
-run_id: RUN-0001                      # 格式: RUN-NNNN
-job_id: JOB-0001
-task_id: TASK-0001
-stack_id: STACK-0001
-data_id: DATA-0001
-status: succeeded | failed            # 终态，只有两个值
-command: ["<shudBin>", "-o", "output/ccw.out", "ccw"] # argv
+run_id: RUN-20261022T031500-a1b2
+job_id: JOB-20261022T031500-a1b2
+task_id: null                       # M2 可空，M3 收紧
+stack_id: null
+data_id: null
+status: succeeded                  # succeeded | failed；仅 exit_class: ok 成功
+command: ["/usr/local/bin/shud", "-o", "output/ccw.out", "ccw"] # argv
+exit_code: 0                       # 整数或 null
+exit_class: ok
 artifacts:
-  stdout: "artifacts/RUN-0001/stdout.log"
-  stderr: "artifacts/RUN-0001/stderr.log"
-  shud_output: "runs/RUN-0001/output/"
-  metrics_summary: "artifacts/RUN-0001/metrics.yaml" # M3
-  plots: ["artifacts/RUN-0001/hydrograph.png"]       # M3
-numerical_health:
-  water_balance_residual: 0.0008
-  cvode_failures: 0
-  negative_state_count: 0
-  max_solver_dt: 5.2
+  stdout: /workspace/runs/RUN-20261022T031500-a1b2/stdout.log
+  stderr: /workspace/runs/RUN-20261022T031500-a1b2/stderr.log
+  shud_output: /workspace/runs/RUN-20261022T031500-a1b2/output/ccw.out
+  files:
+    - path: flow.dat               # 相对于 shud_output
+      size_bytes: 1024             # 必填非负整数字节数
+numerical_health:                   # M2 不计算这些指标，四个字段均可为 null
+  water_balance_residual: null
+  cvode_failures: null
+  negative_state_count: null
+  max_solver_dt: null
 resources:
-  wall_seconds: 420
-  peak_memory_mb: 1830
+  wall_seconds: 60                  # 非负秒数或 null
+  peak_memory_mb: null              # 非负 MB 数值或 null
 llm:
-  response_model: "<响应体 model 字段原值>"  # string，必填；记录响应 model；变化不自动失效 lock（K4）
+  response_model: deepseek-flash-guan # 必填非空字符串
+  response_model_source: configured # response | configured
+collected_at: "2026-10-22T03:16:00Z" # ISO 8601 UTC
 ```
 
-**废弃字段**: `status: success`（统一用 `succeeded`，与 RunJob 终态对齐）、`metrics: {}`（改为 `artifacts.metrics_summary` 路径引用）。
+**退出类别：** `classifyRunExit(exitCode, missingOutcome?)` 为唯一映射：`0 → ok`、`10 → nan`、`12 → file_io`、`13 → input`、`19 → cvode`、`20 → consistency`，其它非零整数为 `other`（退出码事实见 [SHUD_IO_Facts](../01_CODEBASE/SHUD_IO_Facts.md#退出码)）。`exit_code: null` 必须明确提供 `cancelled`（取消且无退出码）或 `lost`（进程丢失/从未启动且无退出码），不猜测默认结果。数值退出证据优先于取消意图。schema 拒绝退出码与类别矛盾的记录，并要求 `ok` 对应 `succeeded`，其余八类对应 `failed`。
+
+**产物清单：** `artifacts.files` 不是 Artifact 登记对象，不要求非空 `task_id`；`size_bytes` 复用 `ArtifactSchema.size_bytes` 的非负整数约束，但在文件条目中必填。`path` 必须是非空相对路径，拒绝绝对路径、驱动器路径与任一 `..` 路径段（包含反斜杠形式）。这些是词法检查，不证明实际文件或符号链接仍位于 `shud_output` 内；文件系统复核属于 collect。
+
+**数值与来源：** `water_balance_residual` 为数值或 `null`，`cvode_failures` / `negative_state_count` 为非负整数或 `null`，`max_solver_dt` 为非负数值或 `null`。`response` 表示响应体 model 原值；`configured` 表示响应体不可得时记录已配置模型 id，不能冒称响应体值。模型变化不自动失效 lock（K4）。
+
+**密钥边界：** 根对象、产物对象、每个文件条目、数值健康、资源与模型来源对象均拒绝未知键，不接受 credentials、环境变量、headers 或自由 metadata 袋。规定的 argv、路径、模型字符串仍是领域数据，不是任意密钥内容扫描器；生产者不得把密钥放入这些字段。
+
+**相对原文的处置：** 采用 §4 的品牌 ID 格式替换 `RUN-NNNN` / `JOB-NNNN`；`command` 为 argv 数组；新增 `exit_code`、`exit_class`、`artifacts.files`、`llm.response_model_source` 与 `collected_at`，M2 允许三项引用为空。`artifacts.metrics_summary` / `artifacts.plots` 标为 **M3**，M2 不接受这两个字段。旧 `status: success` 与 `metrics: {}` 仍废弃。
 
 ---
 

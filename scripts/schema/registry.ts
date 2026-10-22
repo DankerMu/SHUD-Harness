@@ -10,6 +10,7 @@ import { ErrorRecordSchema } from "../../packages/dsh-shud-core/src/schemas/erro
 import { IdempotencyRecordSchema } from "../../packages/dsh-shud-core/src/schemas/idempotency.ts";
 import { LockRecordSchema } from "../../packages/dsh-shud-core/src/schemas/lock.ts";
 import { RunJobSchema } from "../../packages/dsh-shud-core/src/schemas/run-job.ts";
+import { RunRecordSchema } from "../../packages/dsh-shud-core/src/schemas/run-record.ts";
 import { StackLockSchema } from "../../packages/dsh-shud-core/src/schemas/stack-lock.ts";
 import { TaskCardSchema } from "../../packages/dsh-shud-core/src/schemas/task.ts";
 
@@ -148,6 +149,43 @@ export const schemaDefinitions: SchemaDefinition[] = [
         at: null,
         detail: null,
       },
+    },
+  },
+  {
+    name: "RunRecord",
+    slug: "run-record",
+    sourcePath: "packages/dsh-shud-core/src/schemas/run-record.ts",
+    exportName: "RunRecordSchema",
+    schema: RunRecordSchema,
+    strictInput: true,
+    exampleOverrides: {
+      run_id: "RUN-20261022T031500-a1b2",
+      job_id: "JOB-20261022T031500-a1b2",
+      task_id: null,
+      stack_id: null,
+      data_id: null,
+      status: "succeeded",
+      command: ["/usr/local/bin/shud", "-o", "output/ccw.out", "ccw"],
+      exit_code: 0,
+      exit_class: "ok",
+      artifacts: {
+        stdout: "/workspace/runs/RUN-20261022T031500-a1b2/stdout.log",
+        stderr: "/workspace/runs/RUN-20261022T031500-a1b2/stderr.log",
+        shud_output: "/workspace/runs/RUN-20261022T031500-a1b2/output/ccw.out",
+        files: [{ path: "flow.dat", size_bytes: 1024 }],
+      },
+      numerical_health: {
+        water_balance_residual: null,
+        cvode_failures: null,
+        negative_state_count: null,
+        max_solver_dt: null,
+      },
+      resources: { wall_seconds: 60, peak_memory_mb: null },
+      llm: {
+        response_model: "deepseek-flash-guan",
+        response_model_source: "configured",
+      },
+      collected_at: "2026-10-22T03:16:00Z",
     },
   },
 ];

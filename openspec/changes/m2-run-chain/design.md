@@ -209,6 +209,18 @@ collect 失败（`exit_code` 不可读或非整数、产物目录不可读、Run
 - Required evidence: submitted/null-pid record passes; running/null-pid or null-start identity fails; each id/status/command scenario has valid and invalid coverage; generated examples parse; fixed UTC input yields paired prefixes/suffixes; public API smoke parses a generated-id record and rejects its malformed counterpart.
 - Non-goals: RunRecord/exit-class mapping (#302), id collision deduplication against filesystem/indexes (#305), job processes, raw tool behavior, and PI acceptance. No schema weakening to accommodate the renderer.
 
+### Execution boundaries: RunRecord contract (#302)
+
+- Change surface: core schema modules/barrel/tests, registry, new RunRecord projections, Minimal_Schemas RunRecord section/source note, and three glossary terms.
+- Governing invariant: accepted records use one authoritative numeric-exit mapping and a consistent `exit_code`/`exit_class`/`status` triple. Non-null exit codes map deterministically; null requires an explicit `cancelled` or `lost` outcome. Only `ok` succeeds; numeric exit evidence is never replaced by cancellation.
+- Must preserve: all nine existing schemas and 18 generated projection bytes, RunJob brands/public exports, generator discovery and strict-input round trips, existing Artifact size semantics and input/output type assertions.
+- Sibling surfaces: exported classifier, RunRecord cross-field validator, nested artifact files/resources/health/model provenance, public exports, registered example, generated projections, canonical prose and glossary.
+- File entries use required nonnegative integral byte sizes with the existing Artifact size constraint, but are not Artifact objects. Their paths are nonempty relative paths within `shud_output`, rejecting absolute/parent traversal; lexical schema checks do not prove filesystem/symlink containment. Numerical-health is a required object with four required nullable fields, not an optional or nullable whole object.
+- Secret boundary: strict prescribed fields at every object level reject additional credentials/environment/headers/free-form metadata. Required argv/path/model strings remain domain data; schema validation is not an arbitrary-secret detector. Producers must never source credentials into those fields; this slice adds no environment access, logger or serializer. Review checks no credential-bearing free-form bags and no secret material in examples/tests; do not claim strictness sanitizes arbitrary strings.
+- Test placement: keep RunRecord scenario tests in `core-schemas.test.ts` as requested. Relocate the existing compiler-API Artifact/Manifest proof unchanged into a focused sibling type-contract test if needed to remain below 1000 lines; normal brand typecheck proof remains unchanged. No new compiler-API program or limit exemption.
+- Required evidence: numeric classes including unknown nonzero, both null outcomes and contradictory triples; missing/empty model/source rejection and configured acceptance; byte-size boundaries, strict nested unknown keys, required nullable fields; actual public built API parse/classify smoke. Generate RunRecord pair with old 18 hashes unchanged; in an isolated copy modify a representable Zod field without regenerating and observe drift-specific `schema:check` failure, then restored-source success.
+- Non-goals: collect/persistence/process work, numerical-health calculation, token-pattern scanner, filesystem containment enforcement, host upgrade, JSON projection refinement equivalence or PI acceptance.
+
 ## Not yet specified
 
 - 用户自有 SHUD 输入目录的生命周期（AutoSHUD 产物如何进入、是否需要 DataProvenance 记录来源）——M3 DataProvenance 与 AutoSHUD 编排推到时再界定。

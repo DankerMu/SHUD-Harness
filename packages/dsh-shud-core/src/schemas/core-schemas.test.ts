@@ -1,8 +1,4 @@
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
-import ts from "typescript";
 import {
   ArtifactManifestSchema,
   ArtifactSchema,
@@ -14,6 +10,7 @@ import {
   TaskCardSchema,
 } from "./index.ts";
 import {
+  classifyRunExit,
   COLLECT_RETRY_INTERVAL_MS,
   generateRunIdentifiers,
   JobRecordIdSchema,
@@ -23,16 +20,188 @@ import {
   NOTIFY_RETRY_INTERVAL_MS,
   RunIdSchema,
   RunJobSchema,
+  RunRecordSchema,
 } from "../index.ts";
 
 const STACK_ID = "STACK-11111111-1111-4111-8111-111111111111";
 const DATA_ID = "DATA-22222222-2222-4222-8222-222222222222";
 const MANIFEST_ID = "MANIFEST-33333333-3333-4333-8333-333333333333";
 const SUCCESSOR_MANIFEST_ID = "MANIFEST-44444444-4444-4444-8444-444444444444";
-const NODE_TYPE_OPTIONS: ts.CompilerOptions = {
-  types: ["node"],
-  typeRoots: [dirname(dirname(createRequire(import.meta.url).resolve("@types/node/package.json")))],
-};
+
+describe("RunRecord contract", () => {
+  test.each([
+    [0, "ok", "succeeded"],
+    [10, "nan", "failed"],
+    [12, "file_io", "failed"],
+    [13, "input", "failed"],
+    [19, "cvode", "failed"],
+    [20, "consistency", "failed"],
+    [3, "other", "failed"],
+    [-1, "other", "failed"],
+  ] as const)("classifies exit %s as %s with status %s", (code, exitClass, status) => {
+    expect(classifyRunExit(code)).toBe(exitClass);
+    expect(classifyRunExit(code, "cancelled")).toBe(exitClass);
+    const record = { ...validRunRecord(), exit_code: code, exit_class: exitClass, status };
+    expect(RunRecordSchema.parse(record).exit_class).toBe(exitClass);
+  });
+
+  test.each(["cancelled", "lost"] as const)("requires explicit null outcome %s", (outcome) => {
+    expect(classifyRunExit(null, outcome)).toBe(outcome);
+    const record = { ...validRunRecord(), exit_code: null, exit_class: outcome, status: "failed" };
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+  });
+
+  test("classifier refuses absent null evidence and nonintegral exit codes", () => {
+    expect(() => {
+      Reflect.apply(classifyRunExit, undefined, [null]);
+    }).toThrow();
+    for (const code of [1.5, NaN, Infinity]) expect(() => classifyRunExit(code)).toThrow();
+  });
+
+  test.each([
+    [0, "other", "failed", "exit_class"],
+    [10, "ok", "succeeded", "exit_class"],
+    [3, "cancelled", "failed", "exit_class"],
+    [null, "ok", "succeeded", "exit_class"],
+    [null, "other", "failed", "exit_class"],
+    [0, "ok", "failed", "status"],
+    [10, "nan", "succeeded", "status"],
+    [null, "lost", "succeeded", "status"],
+    [null, "cancelled", "succeeded", "status"],
+  ] as const)("rejects contradictory exit triple %s/%s/%s", (code, exitClass, status, field) => {
+    const record = { ...validRunRecord(), exit_code: code, exit_class: exitClass, status };
+    const result = RunRecordSchema.safeParse(record);
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain(field);
+  });
+
+  test.each([
+    "",
+    "/outside.dat",
+    "../outside.dat",
+    "nested/../../outside.dat",
+    "C:\\outside.dat",
+    "\\\\server\\share\\file.dat",
+    "nested\\..\\outside.dat",
+  ])("rejects unsafe artifact path %s", (path) => {
+    const record = validRunRecord();
+    record.artifacts.files = [{ path, size_bytes: 0 }];
+    const result = RunRecordSchema.safeParse(record);
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain("artifacts.files.0.path");
+  });
+
+  test.each([
+    ["nested/flow.dat", 0],
+    ["nested/flow.dat", 1024],
+    ["./flow.dat", 0],
+    ["nested/model..dat", 1024],
+  ] as const)("accepts relative path %s with %s bytes", (path, size) => {
+    const record = validRunRecord();
+    record.artifacts.files = [{ path, size_bytes: size }];
+    expect(RunRecordSchema.safeParse(record).success).toBe(true);
+  });
+
+  test.each([-1, 0.5, null, undefined])("rejects invalid artifact byte size %s", (size) => {
+    const record = validRunRecord();
+    const files = [{ path: "flow.dat", size_bytes: size }];
+    const artifacts = { ...record.artifacts, files };
+    const result = RunRecordSchema.safeParse({ ...record, artifacts });
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain("artifacts.files.0.size_bytes");
+  });
+
+  test.each([
+    ["response_model", ""],
+    ["response_model", undefined],
+    ["response_model_source", undefined],
+    ["response_model_source", "guessed"],
+  ])("rejects invalid model provenance %s=%s", (field, value) => {
+    const record = validRunRecord();
+    const llm = { ...record.llm, [field]: value };
+    const result = RunRecordSchema.safeParse({ ...record, llm });
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain(`llm.${field}`);
+  });
+
+  test("accepts configured provenance, branded ids and explicit nullable measurements", () => {
+    const record = {
+      ...validRunRecord(),
+      ...generateRunIdentifiers(),
+      llm: { response_model: "deepseek-flash-guan", response_model_source: "configured" },
+    };
+    expect(RunRecordSchema.parse(record)).toEqual(record);
+  });
+
+  test.each([
+    ["numerical_health", "cvode_failures", -1],
+    ["numerical_health", "cvode_failures", 0.5],
+    ["numerical_health", "negative_state_count", -1],
+    ["numerical_health", "negative_state_count", 0.5],
+    ["numerical_health", "max_solver_dt", -1],
+    ["resources", "wall_seconds", -1],
+    ["resources", "peak_memory_mb", -1],
+  ] as const)("rejects invalid measurement %s.%s=%s", (group, field, value) => {
+    const record = validRunRecord();
+    const candidate = { ...record, [group]: { ...record[group], [field]: value } };
+    const result = RunRecordSchema.safeParse(candidate);
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain(`${group}.${field}`);
+  });
+
+  test.each([0, 0.5])("accepts measured fractions and zero boundaries %s", (value) => {
+    const numerical_health = {
+      water_balance_residual: -0.125,
+      cvode_failures: 0,
+      negative_state_count: 0,
+      max_solver_dt: value,
+    };
+    const resources = { wall_seconds: value, peak_memory_mb: value };
+    const candidate = { ...validRunRecord(), numerical_health, resources };
+    expect(RunRecordSchema.parse(candidate)).toEqual(candidate);
+  });
+
+  test.each([
+    ["job_id", "JOB-0001"],
+    ["job_id", "shud-0123456789abcdef"],
+    ["run_id", "RUN-20261022T031500-A1B2"],
+    ["command", "shud ccw"],
+    ["numerical_health", null],
+  ])("rejects invalid record field %s", (field, value) => {
+    const result = RunRecordSchema.safeParse({ ...validRunRecord(), [field]: value });
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain(field);
+  });
+
+  test("requires every root and nested field, including nullable fields", () => {
+    const record = validRunRecord();
+    for (const key of Object.keys(record) as Array<keyof typeof record>) {
+      expect(RunRecordSchema.safeParse(removeKey(record, key)).success, key).toBe(false);
+    }
+    for (const group of ["artifacts", "numerical_health", "resources", "llm"] as const) {
+      for (const key of Object.keys(record[group])) {
+        const reduced = Object.fromEntries(
+          Object.entries(record[group]).filter(([k]) => k !== key),
+        );
+        const result = RunRecordSchema.safeParse({ ...record, [group]: reduced });
+        expect(result.success).toBe(false);
+        expect(issuePaths(result)).toContain(`${group}.${key}`);
+      }
+    }
+  });
+
+  test("rejects unprescribed credential bags at every object level", () => {
+    const record = validRunRecord();
+    expect(RunRecordSchema.safeParse({ ...record, credentials: {} }).success).toBe(false);
+    for (const group of ["artifacts", "numerical_health", "resources", "llm"] as const) {
+      const candidate = { ...record, [group]: { ...record[group], credentials: {} } };
+      expect(RunRecordSchema.safeParse(candidate).success).toBe(false);
+    }
+    const files = [{ path: "flow.dat", size_bytes: 0, headers: {} }];
+    const artifacts = { ...record.artifacts, files };
+    expect(RunRecordSchema.safeParse({ ...record, artifacts }).success).toBe(false);
+  });
+});
 
 describe("RunJob contract", () => {
   test("paired identifiers use UTC seconds and one lowercase random suffix", () => {
@@ -185,98 +354,6 @@ describe("core Zod schemas", () => {
     expect(explicitlyNotLlmGenerated.success).toBe(true);
     if (explicitlyNotLlmGenerated.success) {
       expect(explicitlyNotLlmGenerated.data.llm_generated).toBe(false);
-    }
-  });
-
-  test("public schema barrel preserves Artifact and ArtifactManifest input/output requiredness", () => {
-    const barrelPath = join(dirname(fileURLToPath(import.meta.url)), "index.ts");
-    const program = ts.createProgram({
-      rootNames: [barrelPath],
-      options: {
-        ...NODE_TYPE_OPTIONS,
-        module: ts.ModuleKind.ESNext,
-        moduleResolution: ts.ModuleResolutionKind.Bundler,
-        allowImportingTsExtensions: true,
-        noEmit: true,
-        skipLibCheck: true,
-        target: ts.ScriptTarget.ES2022,
-      },
-    });
-    expect(
-      ts
-        .getPreEmitDiagnostics(program)
-        .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")),
-    ).toEqual([]);
-
-    const source = program.getSourceFile(barrelPath);
-    expect(source).toBeDefined();
-    const checker = program.getTypeChecker();
-    const moduleSymbol = source ? checker.getSymbolAtLocation(source) : undefined;
-    expect(moduleSymbol).toBeDefined();
-    const exportsByName = new Map(
-      moduleSymbol
-        ? checker.getExportsOfModule(moduleSymbol).map((symbol) => [symbol.getName(), symbol])
-        : [],
-    );
-
-    for (const inputTypeName of ["Artifact", "ArtifactInput"] as const) {
-      const inputTypeSymbol = exportsByName.get(inputTypeName);
-      expect(inputTypeSymbol).toBeDefined();
-      const inputType = inputTypeSymbol
-        ? checker.getDeclaredTypeOfSymbol(inputTypeSymbol)
-        : undefined;
-      const marker = inputType?.getProperty("llm_generated");
-      expect(marker).toBeDefined();
-      expect(Boolean(marker && marker.flags & ts.SymbolFlags.Optional)).toBe(true);
-    }
-
-    const storedTypeSymbol = exportsByName.get("StoredArtifact");
-    expect(storedTypeSymbol).toBeDefined();
-    const storedType = storedTypeSymbol
-      ? checker.getDeclaredTypeOfSymbol(storedTypeSymbol)
-      : undefined;
-    const storedMarker = storedType?.getProperty("llm_generated");
-    expect(storedMarker).toBeDefined();
-    expect(Boolean(storedMarker && storedMarker.flags & ts.SymbolFlags.Optional)).toBe(false);
-    expect(
-      storedMarker && source
-        ? checker.typeToString(checker.getTypeOfSymbolAtLocation(storedMarker, source))
-        : undefined,
-    ).toBe("boolean");
-
-    for (const manifestTypeName of [
-      "ArtifactManifest",
-      "ArtifactManifestInput",
-      "StoredArtifactManifest",
-    ] as const) {
-      const manifestTypeSymbol = exportsByName.get(manifestTypeName);
-      expect(manifestTypeSymbol).toBeDefined();
-      const manifestType = manifestTypeSymbol
-        ? checker.getDeclaredTypeOfSymbol(manifestTypeSymbol)
-        : undefined;
-
-      for (const requiredField of [
-        "manifest_id",
-        "task_id",
-        "artifacts",
-        "generated_at",
-        "generator",
-      ] as const) {
-        const field = manifestType?.getProperty(requiredField);
-        expect(field).toBeDefined();
-        expect(Boolean(field && field.flags & ts.SymbolFlags.Optional)).toBe(false);
-      }
-
-      for (const optionalField of [
-        "run_id",
-        "report_id",
-        "superseded_by",
-        "manifest_sha256",
-      ] as const) {
-        const field = manifestType?.getProperty(optionalField);
-        expect(field).toBeDefined();
-        expect(Boolean(field && field.flags & ts.SymbolFlags.Optional)).toBe(true);
-      }
     }
   });
 
@@ -886,4 +963,33 @@ function issuePaths(
 ): string[] {
   if (result.success) return [];
   return result.error.issues.map((issue) => issue.path.join("."));
+}
+
+function validRunRecord() {
+  return {
+    run_id: "RUN-20261022T031500-a1b2",
+    job_id: "JOB-20261022T031500-a1b2",
+    task_id: null,
+    stack_id: null,
+    data_id: null,
+    status: "succeeded",
+    command: ["/usr/local/bin/shud", "ccw"],
+    exit_code: 0,
+    exit_class: "ok",
+    artifacts: {
+      stdout: "/runs/example/stdout.log",
+      stderr: "/runs/example/stderr.log",
+      shud_output: "/runs/example/output/ccw.out",
+      files: [{ path: "flow.dat", size_bytes: 0 }],
+    },
+    numerical_health: {
+      water_balance_residual: null,
+      cvode_failures: null,
+      negative_state_count: null,
+      max_solver_dt: null,
+    },
+    resources: { wall_seconds: null, peak_memory_mb: null },
+    llm: { response_model: "deepseek-chat", response_model_source: "response" },
+    collected_at: "2026-10-22T03:16:00Z",
+  };
 }

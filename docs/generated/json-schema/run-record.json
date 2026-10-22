@@ -1,0 +1,263 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/run-record.json",
+  "title": "RunRecord",
+  "type": "object",
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "job_id": {
+      "type": "string",
+      "pattern": "^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stack_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "data_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "succeeded",
+        "failed"
+      ]
+    },
+    "command": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "exit_code": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "exit_class": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "nan",
+        "file_io",
+        "input",
+        "cvode",
+        "consistency",
+        "other",
+        "cancelled",
+        "lost"
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "stdout": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stderr": {
+          "type": "string",
+          "minLength": 1
+        },
+        "shud_output": {
+          "type": "string",
+          "minLength": 1
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "path",
+              "size_bytes"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "stdout",
+        "stderr",
+        "shud_output",
+        "files"
+      ],
+      "additionalProperties": false
+    },
+    "numerical_health": {
+      "type": "object",
+      "properties": {
+        "water_balance_residual": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "cvode_failures": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "negative_state_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_solver_dt": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "water_balance_residual",
+        "cvode_failures",
+        "negative_state_count",
+        "max_solver_dt"
+      ],
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "wall_seconds": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "peak_memory_mb": {
+          "anyOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "wall_seconds",
+        "peak_memory_mb"
+      ],
+      "additionalProperties": false
+    },
+    "llm": {
+      "type": "object",
+      "properties": {
+        "response_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "response_model_source": {
+          "type": "string",
+          "enum": [
+            "response",
+            "configured"
+          ]
+        }
+      },
+      "required": [
+        "response_model",
+        "response_model_source"
+      ],
+      "additionalProperties": false
+    },
+    "collected_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+    }
+  },
+  "required": [
+    "run_id",
+    "job_id",
+    "task_id",
+    "stack_id",
+    "data_id",
+    "status",
+    "command",
+    "exit_code",
+    "exit_class",
+    "artifacts",
+    "numerical_health",
+    "resources",
+    "llm",
+    "collected_at"
+  ],
+  "additionalProperties": false
+}
