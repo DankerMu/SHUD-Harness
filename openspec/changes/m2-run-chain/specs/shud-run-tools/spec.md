@@ -22,11 +22,15 @@
 - **THEN** `run-job.json` 的 `label` 为 `ccw 30d`，`job_list` 中该登记的 label 为 `<run_id> ccw 30d`
 
 ### Requirement: Response model capture
-`shud_run` SHALL 在执行时取发起本次工具调用的响应体 model id，作为提交参数交给注册表写入 `run-job.json` 的 `llm.response_model`，并记 `llm.response_model_source: response`。工具执行上下文取不到响应体 model 时 SHALL 改记该 Agent 当前生效的已配置模型 id 并记 `response_model_source: configured`；两者都取不到时 SHALL 返回工具错误且不提交。取值 SHALL NOT 硬编码。
+`shud_run` SHALL 在执行时取发起本次工具调用的模型 id，作为提交参数交给注册表写入 `run-job.json` 的 `llm.response_model` 与 `llm.response_model_source`。宿主 `dsh-v0.2.1-rc.2` 不向插件暴露响应体 model（design O4），因此 SHALL 记 `response_model_source: configured`，取值顺序为 `exec.agent.session.requestHeader()?.config.model`，缺失时 `exec.agent.options.model`；两者都取不到时 SHALL 返回工具错误且不提交。SHALL NOT 把 assistant 消息的 `source.model`（请求路由，不是响应体 model）记为 `response`；`response` 取值保留给宿主日后暴露响应体 model 的 dsh 升级，由 `chore(dsh-upgrade)` 重开。取值 SHALL NOT 硬编码。
 
-#### Scenario: response model unavailable
-- **WHEN** 测试替身的工具执行上下文不提供响应体 model，只提供已配置模型 `deepseek-flash-guan`
+#### Scenario: model from the request header
+- **WHEN** 测试替身的 `requestHeader()?.config.model` 为 `deepseek-flash-guan`、`options.model` 为 `other-model`，且 assistant `source.model` 另有值
 - **THEN** `run-job.json` 的 `llm.response_model` 为 `deepseek-flash-guan`、`llm.response_model_source` 为 `configured`
+
+#### Scenario: fallback to the agent option
+- **WHEN** 测试替身的 `requestHeader()` 为 `undefined`，`options.model` 为 `deepseek-flash-guan`
+- **THEN** `llm.response_model` 为 `deepseek-flash-guan`、`llm.response_model_source` 为 `configured`；任何情形下 `response_model_source` 都不是 `response`
 
 #### Scenario: no model at all
 - **WHEN** 测试替身的工具执行上下文既无响应体 model 也无已配置模型

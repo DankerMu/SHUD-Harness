@@ -7,7 +7,7 @@
 ## ADDED Requirements
 
 ### Requirement: Registry replacement
-`shud` profile SHALL 只有一个 `ctx.jobs` 实现，由 `@shud-harness/dsh-shud-jobs` 提供并以 id `jobs` 替换 Web 模板的 `jobs-local` 行。对 `kind` 不是 `shud` 的作业，注册表的行为（登记、owner 与作用域、输出读取、`job_list`/`job_output`/`job_kill`、并发上限、事件路由、owner 释放与 teardown 时取消并等待结算）SHALL 与 `jobs-local` 一致，且 SHALL NOT 跨重启保留；重启后对这些作业 id 的查询仍为 `unknown job`。
+`shud` profile SHALL 只有一个 `ctx.jobs` 实现，由 `@shud-harness/dsh-shud-jobs` 以插入行 `shud-jobs` 提供；Web 模板的 `jobs-local` 行（id `jobs`）SHALL 被禁用（shud-profile「Profile composition」）。对 `kind` 不是 `shud` 的作业，注册表的行为（登记、owner 与作用域、输出读取、`job_list`/`job_output`/`job_kill`、并发上限、事件路由、owner 释放与 teardown 时取消并等待结算）SHALL 与 `jobs-local` 一致，且 SHALL NOT 跨重启保留；重启后对这些作业 id 的查询仍为 `unknown job`。
 
 #### Scenario: bash background job unchanged
 - **WHEN** 模型以 `bash` 的 `run_in_background` 启动 `sleep 1; echo ok`
@@ -22,7 +22,7 @@
 - **THEN** 重启后 `job_output` 对该作业 id 报 `unknown job`，不产生运行目录或活动索引条目
 
 ### Requirement: Registry configuration
-插件行配置 SHALL 为 `LocalJobRegistry.Config` 与 {`stateDir`, `shudBin`} 的并集：父类键（`maxConcurrentJobsPerOwner`、`retainBytes`、`settledRetainBytes`、`pumpPollMs`）沿用父类默认值与校验；`stateDir`（绝对路径，可写目录，不存在时创建）与 `shudBin`（可执行文件绝对路径）为必填。任一必填键缺失、为空、不可写或不可执行，或出现并集之外的键时，插件 apply SHALL 抛出指明配置键的错误，SHALL NOT 回退到任何内置默认值。dsh 不把 `jobs` 视为必需启动项，因此该行激活失败时 dsh 继续启动、在 stderr 打印该行的激活失败诊断（含错误消息）；此时 `ctx.jobs` 不存在，依赖它的插件行（`tool-jobs`、`shud-tools` 等）不激活，`bash run_in_background` 与 Web 作业卡不可用。
+插件行配置 SHALL 为 `LocalJobRegistry.Config` 与 {`stateDir`, `shudBin`} 的并集：父类键（`maxConcurrentJobsPerOwner`、`retainBytes`、`settledRetainBytes`、`pumpPollMs`）沿用父类默认值与校验；`stateDir`（绝对路径，可写目录，不存在时创建）与 `shudBin`（可执行文件绝对路径）为必填。任一必填键缺失、为空、不可写或不可执行，或出现并集之外的键时，插件 apply SHALL 抛出指明配置键的错误，SHALL NOT 回退到任何内置默认值。dsh 不把 `shud-jobs` 行视为必需启动项，因此该行激活失败时 dsh 继续启动、在 stderr 打印该行的激活失败诊断（含错误消息）；此时 `ctx.jobs` 不存在，依赖它的插件行（`tool-jobs`、`shud-tools` 等）不激活，`bash run_in_background` 与 Web 作业卡不可用。
 
 #### Scenario: missing shudBin at apply
 - **WHEN** vitest 以缺少 `shudBin` 的配置 apply 注册表插件
@@ -33,8 +33,8 @@
 - **THEN** 前者成功且第 3 个并发无 owner 作业的启动按父类规则被拒；后者抛错并指出未知键 `shudbin`
 
 #### Scenario: missing shudBin at real boot
-- **WHEN** 以把 `jobs` 行 `shudBin` 置空的 overlay 执行 `dsh --profile shud --patch <overlay> --no-open --port <p>`
-- **THEN** stderr 含 `did not activate`、`jobs` 与 `shudBin`，`tool-jobs` 行未激活
+- **WHEN** 以 `shud-jobs` 行 `config` 为有效 `stateDir` 加空 `shudBin` 的 overlay（按 id 的 patch 整体替换 `config`）执行 `dsh --profile shud --patch <overlay> --no-open --port <p>`
+- **THEN** stderr 含 `did not activate`、`shud-jobs` 与 `shudBin`，`tool-jobs` 行未激活
 
 ### Requirement: State directory lock and indexes
 注册表 SHALL 在 apply 时于 `stateDir` 取得排他锁文件 `lock`（记录持有者 pid 与进程启动时间）：锁被另一个存活的 dsh 进程持有（pid 存活且启动时间一致）时 apply SHALL 失败并指明 `stateDir` 与持有者 pid；持有者已不存在或 pid 被复用时 SHALL 视为陈旧锁并接管；注册表释放时 SHALL 删除锁。`stateDir` SHALL 含活动索引 `active.json`（尚未完成唤醒的作业的 `run_id`、`job_id`、运行目录绝对路径）与完成索引 `completed.json`（已离开活动索引的作业的 `run_id`、`job_id` 到运行目录绝对路径的映射），二者 SHALL 以临时文件加 rename 原子写；同一注册表实例内对索引的所有修改 SHALL 串行执行。作业离开活动索引时 SHALL 先写入完成索引再从活动索引移除。
@@ -45,7 +45,7 @@
 
 #### Scenario: second process on the same stateDir
 - **WHEN** 一个 dsh 进程持有 `stateDir` 锁时，另一个 dsh 进程以同一 `stateDir` 启动
-- **THEN** 后者的 `jobs` 行激活失败，诊断含该 `stateDir` 与持有者 pid；前者不受影响
+- **THEN** 后者的 `shud-jobs` 行激活失败，诊断含该 `stateDir` 与持有者 pid；前者不受影响
 
 #### Scenario: stale lock reclaimed
 - **WHEN** `lock` 记录的 pid 已不存在（前一个 dsh 被 SIGKILL）时启动注册表
@@ -236,7 +236,7 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **THEN** 旧循环停止，新实例对账后投递，发起会话恰收到一条唤醒
 
 ### Requirement: At-least-once wake
-所有结算路径（宿主在线时自然退出或被 kill、对账补结算、接管作业结束）SHALL 经同一路径唤醒：「Registry poll loop」结算 → collect → `sessionController.resolveAgent(owner_session)` → `agent.followup`（以 `createUserMessage` 构造的用户消息，`source.kind: shud-jobs`，含 `run_id`、`exit_class` 与产物数量，或 collect 失败原因）→ `ctx.sessions.flush` 成功后才把 `notify.status` 置 `delivered` → 写入完成索引并移出活动索引。每个 collect 完成或 collect 失败达上限的作业 SHALL 唤醒一次，没有豁免（含模型 `job_kill` 的作业与 `job_output` 已读到结果的作业）。就绪：投递 SHALL 只在 `sessionController` 与 `sessions` 均可用后开始，注册表以 `ctx.inject(['sessionController', 'sessions'], 回调)` 启动投递，二者 SHALL NOT 成为插件行的启动依赖；Web 模板中 `jobs` 行先于 `session-controller` 行 apply，此前产生的待投递条目在回调触发后投递。服务缺失本身 SHALL NOT 使条目变为 `unreachable`（宿主无启动完成信号，无法区分"尚未 apply"与"profile 无该行"）：不挂 `session-controller` 的 profile（headless）中条目保持 `notify.status: pending` 并在 `detail` 写明等待会话控制服务。投递开始后，`owner_session` 为 `null` 或会话已不存在时 SHALL 立即置 `notify.status: unreachable` 并记录原因；恢复或 flush 失败等暂时性错误 SHALL 计入 `notify.attempts`，由轮询循环在不少于 core 常量重试间隔后重试（重启后由对账继续），达到 core 常量上限后置 `unreachable`；`unreachable` 后 SHALL NOT 再重试。
+所有结算路径（宿主在线时自然退出或被 kill、对账补结算、接管作业结束）SHALL 经同一路径唤醒：「Registry poll loop」结算 → collect → `sessionController.resolveAgent(owner_session)` → `agent.followup`（以 `createUserMessage` 构造的用户消息，`source.kind: shud-jobs`，含 `run_id`、`exit_class` 与产物数量，或 collect 失败原因）→ `ctx.sessions.flush` 成功后才把 `notify.status` 置 `delivered` → 写入完成索引并移出活动索引。每个 collect 完成或 collect 失败达上限的作业 SHALL 唤醒一次，没有豁免（含模型 `job_kill` 的作业与 `job_output` 已读到结果的作业）。就绪：投递 SHALL 只在 `sessionController` 与 `sessions` 均可用后开始，注册表以 `ctx.inject(['sessionController', 'sessions'], 回调)` 启动投递，二者 SHALL NOT 成为插件行的启动依赖，投递 SHALL NOT 依赖 `shud-jobs` 行与 `session-controller` 行的相对顺序；注册表 apply 时 `sessionController` 尚不可用期间产生的待投递条目在回调触发后投递。服务缺失本身 SHALL NOT 使条目变为 `unreachable`（宿主无启动完成信号，无法区分"尚未 apply"与"profile 无该行"）：不挂 `session-controller` 的 profile（headless）中条目保持 `notify.status: pending` 并在 `detail` 写明等待会话控制服务。投递开始后，`owner_session` 为 `null` 或会话已不存在时 SHALL 立即置 `notify.status: unreachable` 并记录原因；恢复或 flush 失败等暂时性错误 SHALL 计入 `notify.attempts`，由轮询循环在不少于 core 常量重试间隔后重试（重启后由对账继续），达到 core 常量上限后置 `unreachable`；`unreachable` 后 SHALL NOT 再重试。
 
 #### Scenario: wake while host online
 - **WHEN** 宿主在线、发起会话空闲时作业以退出码 0 结束
@@ -254,13 +254,13 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** 发起会话已被删除后对账遇到该作业
 - **THEN** `notify.status` 为 `unreachable`，`run-record.json` 存在，下次启动不再尝试唤醒
 
-#### Scenario: session controller applies after jobs
-- **WHEN** Web 模板中 dsh 重启，`jobs` 行 apply 时对账发现一个停机期间已结束的作业，`session-controller` 行随后才 apply
+#### Scenario: session controller not yet available at reconcile
+- **WHEN** Web 模板中 dsh 重启，`shud-jobs` 行 apply 时 `sessionController` 尚不可用，对账发现一个停机期间已结束的作业
 - **THEN** 该作业 `notify.status` 先为 `pending`，`session-controller` 可用后投递，最终为 `delivered`，发起会话 session log 有一条 `shud-jobs` 消息
 
 #### Scenario: no session controller
 - **WHEN** 在不挂载 `session-controller` 的 headless profile 中作业结束
-- **THEN** `jobs` 行保持激活，RunRecord 已生成，`notify.status` 保持 `pending` 且 `detail` 指出等待会话控制服务，不变为 `unreachable`
+- **THEN** `shud-jobs` 行保持激活，RunRecord 已生成，`notify.status` 保持 `pending` 且 `detail` 指出等待会话控制服务，不变为 `unreachable`
 
 ### Requirement: Recoverability invariant
 运行时不变量"shud 作业可恢复（SIGTERM/SIGKILL）"SHALL 以以下可观察断言判定，SHALL NOT 以 `job/settled` 事件判定（dsh 不为无 owner 作业写该事件）：对任一在宿主收到 SIGTERM 或 SIGKILL 前已由 `shud_run` 返回 `job_id` 的作业，重启后（1）`run-job.json` 存在且状态只沿「RunJob record」状态机前进；（2）最终存在 `run-record.json` 或 `collect-error.json`；（3）同一运行目录在任一时刻至多一个 SHUD 进程；（4）在挂载 `session-controller` 的 profile 中，`notify.status` 最终为 `delivered`（发起会话 session log 有一条 `source.kind: shud-jobs` 且含该 `run_id` 的用户消息）或带原因的 `unreachable`；（5）在同一前提下，该作业最终出现在 `completed.json` 且不在 `active.json`。注册表集成测试与 `shud:restart` SHALL 断言这五条。
