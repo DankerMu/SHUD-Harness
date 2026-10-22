@@ -64,14 +64,37 @@ function unquote(text: string): string {
 // --exclude-from. Segments end at ; | newline and at & except in >& and <&
 // (&>word is already a write or a stripped /dev/null). Scanning from the first
 // tar of each segment keeps the check linear.
-const TAR_COMMAND = /(?<![A-Za-z0-9_.-])[gG]?[tT][aA][rR]\s/;
+// #279/#283: tar, gtar and bsdtar (any case), not after a path-name character.
+const TAR_COMMAND = /(?<![A-Za-z0-9_.-])(?:[gG]|[bB][sS][dD])?[tT][aA][rR]\s/;
 const TAR_EXTRACT_OPTION = /^\s+[A-Za-z]*x|\s(?:-[A-Za-z]*x|--(?:ext[a-z]*|get?)(?![A-Za-z0-9-]))/;
 const COMMAND_SEGMENT = /[;|\n]|(?<![<>])&/;
-function tarExtracts(text: string): boolean {
-  return text.split(COMMAND_SEGMENT).some((segment) => {
+// The text after the first tar of each command segment, from the blank after the
+// name; scanning from the first tar keeps the checks linear.
+function tarArguments(text: string): string[] {
+  return text.split(COMMAND_SEGMENT).flatMap((segment) => {
     const tar = TAR_COMMAND.exec(segment);
-    return tar !== null && TAR_EXTRACT_OPTION.test(segment.slice(tar.index + tar[0].length - 1));
+    return tar === null ? [] : [segment.slice(tar.index + tar[0].length - 1)];
   });
+}
+function tarExtracts(text: string): boolean {
+  return tarArguments(text).some((options) => TAR_EXTRACT_OPTION.test(options));
+}
+// #283: tar writes the archive named after f in create, append, update, catenate
+// or delete mode (c r u A, case-sensitive: -C changes directory). The archive is
+// the word after the first f of a short cluster (or glued to it), after
+// --file/--fil, or after an old-style first cluster holding f. - is stdout.
+// Stopping at the first f keeps the operand scan linear.
+const TAR_ARCHIVE_WRITE =
+  /^\s+[A-Za-z]*[cruA]|\s(?:-[A-Za-z]*[cruA]|--(?:cr|ap|up|ca|conc|dele)[a-z]*(?![A-Za-z0-9-]))/;
+const TAR_ARCHIVE_OPERAND =
+  /^\s+[A-Za-eg-z]*f[A-Za-z]*\s+(\S+)|\s-[A-Za-eg-z]*f\s*(\S+)|\s--file?(?:=|\s+)(\S+)/g;
+function tarArchives(text: string): string[] {
+  return tarArguments(text)
+    .filter((options) => TAR_ARCHIVE_WRITE.test(options))
+    .flatMap((options) =>
+      [...options.matchAll(TAR_ARCHIVE_OPERAND)].map((match) => match[1] ?? match[2] ?? match[3]),
+    )
+    .filter((archive) => archive !== "-");
 }
 // #273 (PI 2026-10-21): a destructive command naming a strict ancestor of a raw dir,
 // up to three levels (parent, grandparent, great-grandparent), is denied. Other
@@ -249,7 +272,13 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         const checked = text.replace(DISCARD_REDIRECT, " ");
         return WRITE_VERBS.test(checked) || tarExtracts(checked);
       });
-      return writes || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
+      const archives = new Set([command, unquote(command)].flatMap(tarArchives));
+      const roots = archives.size > 0 ? options.rawDirs.map((dir) => canonical(dir, cwd)) : [];
+      const writesArchive = [...archives].some((archive) => {
+        const target = canonical(archive, workdir);
+        return roots.some((other) => contains(other, target));
+      });
+      return writes || writesArchive || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
     }
     // Second pass, only when no raw dir is touched: a destructive verb naming an
     // ancestor. Ancestors come from the configured spelling, the canonical root and
