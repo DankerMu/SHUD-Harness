@@ -62,7 +62,8 @@ async function operationTrace(registry: Plugin) {
     const repeatedKill = jobs.kill(killId, h.ownerId);
     const first = producer();
     const second = producer();
-    ids.push(jobs.start(first.spec), jobs.start(second.spec));
+    const liveUnownedId = jobs.start(first.spec);
+    ids.push(liveUnownedId, jobs.start(second.spec));
     const limit = caughtError(() => jobs.start(producer().spec));
     const ownerLive = producer(h.ownerId);
     ids.push(jobs.start(ownerLive.spec));
@@ -71,12 +72,14 @@ async function operationTrace(registry: Plugin) {
     await scoped.dispose();
     await global.dispose();
     const noController = caughtError(() => jobs.start(producer().spec));
+    const beforeRegistryDisposal = jobs.get(liveUnownedId);
+    expect(beforeRegistryDisposal.status).toBe("running");
     await fiber.dispose();
     const afterTeardown = jobs.list();
     const stateFiles = await readdir(h.stateDir);
     const workspaceFiles = await readdir(h.cwd);
     await h.apply(registry, h.config);
-    const forgotten = caughtError(() => h.ctx.jobs.get(id, h.ownerId));
+    const forgotten = caughtError(() => h.ctx.jobs.get(liveUnownedId));
     expect(foreignList).toEqual([]);
     expect(foreignRead).toContain("belongs to another session");
     expect(observed.chunks.map((chunk) => chunk.text).join("")).toBe("hello\n");
@@ -119,6 +122,7 @@ async function operationTrace(registry: Plugin) {
         limit,
         afterOwnerRelease,
         noController,
+        beforeRegistryDisposal,
         afterTeardown,
         forgotten,
         stateFiles,

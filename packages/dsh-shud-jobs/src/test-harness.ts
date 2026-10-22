@@ -29,6 +29,7 @@ export async function createHarness() {
   function createSession(id: SessionId) {
     return {
       id,
+      header: { cwd },
       append(type: string, data: unknown) {
         sessionEvents.push({ type, data: structuredClone(data) });
       },
