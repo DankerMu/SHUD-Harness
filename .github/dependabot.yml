@@ -7,6 +7,16 @@ updates:
     ignore:
       # dsh is the pinned host checkout (../deepseek-harness); upgrades go through chore(dsh-upgrade) issues.
       - dependency-name: "@deepseek-ai/*"
+      # Toolchain majors need code changes (typescript-eslint support, vitest peer deps)
+      # and go through a dedicated issue; @types/node tracks the Node 24 runtime major.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@vitest/coverage-v8"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
       dev-tooling:
         dependency-type: development
