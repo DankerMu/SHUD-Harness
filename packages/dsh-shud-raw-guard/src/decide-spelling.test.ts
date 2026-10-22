@@ -10,7 +10,9 @@ type Kind = "deny" | "ask" | "next";
 // tar extract (any x short-option cluster, --extract/--get and abbreviations, old-style
 // xf) deny; tar listing/creation, -X, a later command's -x and a.tar -x stay reads.
 const spellWs = mkdtempSync(join(tmpdir(), "shud-guard-spell-"));
-mkdirSync(join(spellWs, "prot"));
+mkdirSync(join(spellWs, "prot", "sub"), { recursive: true });
+mkdirSync(join(spellWs, "raw2"));
+mkdirSync(join(spellWs, "ref", "raw"), { recursive: true });
 afterAll(() => rmSync(spellWs, { recursive: true, force: true }));
 const prot = normalizeRawDirs({ rawDirs: ["prot"] });
 function decide(command: string) {
@@ -105,4 +107,129 @@ test.each([
   const result = decide(command);
   expect(result.kind).toBe("ask");
   expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+});
+
+// #283: tar writes an archive (c r u A, --create ... --delete) whose operand (first f
+// of a short cluster, --file/--fil, old-style first cluster) is under any raw dir;
+// raw as a packing source, -C and - (stdout) stay reads. bsdtar counts as tar.
+type Setup = { rawDirs?: string[]; workdir?: string };
+const multiRaw: Setup = { rawDirs: ["prot", "raw2"] };
+const refRaw: Setup = { rawDirs: ["ref/raw"] };
+const inProt: Setup = { workdir: "prot" };
+function decideIn(command: string, setup: Setup = {}) {
+  const args = setup.workdir === undefined ? { command } : { command, workdir: setup.workdir };
+  const options = normalizeRawDirs({ rawDirs: setup.rawDirs ?? ["prot"] });
+  return decideRawAccess({ name: "bash", arguments: args, cwd: spellWs }, options);
+}
+function expectKind(result: ReturnType<typeof decideIn>, kind: Kind) {
+  expect(result.kind).toBe(kind);
+  if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+  if (kind === "deny") expect(result.code).toBe("raw-immutable");
+}
+const tarArchiveCases: [string, Kind, Setup?][] = [
+  ["tar -cf prot/a.tar x", "deny"],
+  ["tar -rf prot/a.tar x", "deny"],
+  ["tar -uf prot/a.tar x", "deny"],
+  ["tar -Af prot/a.tar b.tar", "deny"],
+  ["tar --delete -f prot/a.tar x", "deny"],
+  ["tar cf prot/a.tar x", "deny"],
+  ["tar --create --file=prot/a.tar x", "deny"],
+  ["tar --append --file prot/a.tar x", "deny"],
+  ["tar --up -f prot/a.tar x", "deny"],
+  ["tar --cat -f prot/a.tar b.tar", "deny"],
+  ["tar --conc -f prot/a.tar b.tar", "deny"],
+  ["tar --cr --fil=prot/a.tar x", "deny"],
+  ["tar -c -f prot/sub/a.tar x", "deny"],
+  ["tar -f prot/a.tar -c x", "deny"],
+  ["tar -cfprot/a.tar x", "deny"],
+  ['tar -c -f "prot/a.tar" x', "deny"],
+  ["tar -cf prot/a.tar x 2>/dev/null", "deny"],
+  ["gtar -rf prot/a.tar x", "deny"],
+  ["bsdtar -cf prot/a.tar x", "deny"],
+  ["BSDTAR -cf prot/a.tar x", "deny"],
+  // Fixture review r1 pins: the mode letter or f not first/last in its cluster, --ca.
+  ["tar -zcf prot/a.tgz x", "deny"],
+  ["tar zcf prot/a.tgz x", "deny"],
+  ["tar cfv prot/a.tar x", "deny"],
+  ["tar --ca -f prot/a.tar b.tar", "deny"],
+  // Review round 1 pins: old-style r u A, cluster letter classes and positions, blanks
+  // (double spaces, tabs), a later segment, and a tar inside $( ) or backticks after
+  // bsdtar (main denies these two; pinned so they are not loosened).
+  ["tar rf prot/a.tar x", "deny"],
+  ["tar uf prot/a.tar x", "deny"],
+  ["tar Af prot/a.tar b.tar", "deny"],
+  ["tar Jcf prot/a.txz x", "deny"],
+  ["tar zvcf prot/a.tgz x", "deny"],
+  ["tar cfvP prot/a.tar x", "deny"],
+  ["tar  cf prot/a.tar x", "deny"],
+  ["tar\tcf prot/a.tar x", "deny"],
+  ["tar\t-cf prot/a.tar x", "deny"],
+  ["tar -c\t-f prot/a.tar x", "deny"],
+  ["tar -cf  prot/a.tar x", "deny"],
+  ["tar -cf\tprot/a.tar x", "deny"],
+  ["tar cf  prot/a.tar x", "deny"],
+  ["tar cf\tprot/a.tar x", "deny"],
+  ["tar -c --file  prot/a.tar x", "deny"],
+  ["tar -c --file\tprot/a.tar x", "deny"],
+  ["tar -c\t--file=prot/a.tar x", "deny"],
+  ["tar -cf prot/a.tar x && ls", "deny"],
+  ["bsdtar -tf a.tar $(tar xf b.tar -C prot)", "deny"],
+  ["bsdtar -tf a.tar `tar xf b.tar -C prot`", "deny"],
+  // Review round 2 pins: an earlier bsdtar word does not hide a later tar (main denies
+  // the first two), and options after a ( still count (main denies the -C row).
+  ["bsdtar -tf a.tar tar xf b.tar -C prot", "deny"],
+  ["TAR=bsdtar tar xf b.tar -C prot", "deny"],
+  ["TAR=bsdtar tar cf prot/a.tar x", "deny"],
+  ["tar -C $(pwd)/prot -xf a.tar", "deny"],
+  ["tar --exclude=$(cat ex) -cf prot/a.tar x", "deny"],
+  // Only the piece after ( or ` sees the inner tar when the outer word is a plain tar.
+  ["tar -tf a.tar $(tar xf b.tar -C prot)", "deny"],
+  ["tar -tf a.tar `tar xf b.tar -C prot`", "deny"],
+  // Review round 3 pins: an old-style first word that is itself a tar name is not a
+  // mode cluster (its r or A is no write); a later plain tar still sees rf.
+  ["TAR=bsdtar tar -tf prot/a.tar", "ask"],
+  ["env TAR=bsdtar tar -tvf prot/a.tar", "ask"],
+  ["TAR=gtar tar --list -f prot/a.tar", "ask"],
+  ["echo bsdtar tar -tf prot/a.tar", "ask"],
+  ["TAR=tar bsdtar -tf prot/a.tar", "ask"],
+  ["TAR=bsdtar TAR -tf prot/a.tar", "ask"],
+  ["TAR=bsdtar tar rf prot/a.tar x", "deny"],
+  // The archive under another raw dir than the one touched; the first f of a cluster.
+  ["tar -cf raw2/a.tar prot/x", "deny", multiRaw],
+  ["tar -cfref/raw/a.tar x", "deny", refRaw],
+  ["bsdtar -xf a.tar -C prot", "deny"],
+  ["/usr/bin/bsdtar -xf a.tar -C prot", "deny"],
+  // The operand resolves against workdir.
+  ["tar -cf a.tar x", "deny", inProt],
+  ["tar -cf o.tar prot", "ask"],
+  ["tar -cf o.tar -C prot .", "ask"],
+  ["tar -C prot -cf o.tar .", "ask"],
+  ["tar -cf - prot | wc -c", "ask"],
+  ["bsdtar -tf prot/a.tar", "ask"],
+  ["cat prot/mybsdtar.log", "ask"],
+  ["tar -tvf prot/a.tar -C work", "ask"],
+  ["tar -tf prot/a.tar | grep -c -f prot/pat", "ask"],
+  ["tar -tf prot/a.tar --delay", "ask"],
+  ["tar -cf - x", "ask", inProt],
+  // Documented gap: cd changes the directory a relative operand resolves against.
+  ["cd prot && tar -cf a.tar x", "ask"],
+  ["cd prot; tar -cf a.tar x", "ask"],
+  ["tar -cf protx/a.tar x", "next"],
+  // Accepted false positives: a glued option argument holding a mode letter, tar as text.
+  ["tar -tf prot/a.tar -Hustar", "deny"],
+  ['grep "tar -cf prot/a.tar" prot/log', "deny"],
+];
+test.each(tarArchiveCases)("bash `%j` -> %s (#283 tar archive)", (command, kind, setup) => {
+  expectKind(decideIn(command, setup), kind);
+});
+
+// #283 resource limit: operands are deduplicated and every scan is linear.
+test.each<[string, Kind, string]>([
+  ["'tar -c ' + '-f x ' x 2e5", "next", "tar -c " + "-f x ".repeat(2e5)],
+  ["'tar -c ' + '-f x ' x 2e5 + prot", "ask", "tar -c " + "-f x ".repeat(2e5) + "prot"],
+  ["'tar -c -' + 'a' x 5e5 + ' prot'", "ask", "tar -c -" + "a".repeat(5e5) + " prot"],
+  ["'tar c' + 'f' x 5e5 + '/ prot'", "ask", "tar c" + "f".repeat(5e5) + "/ prot"],
+  ["'ls prot ' + '$(tar ' x 2e5", "ask", "ls prot " + "$(tar ".repeat(2e5)],
+])("bash %s -> %s (#283 adversarial)", (_label, kind, command) => {
+  expectKind(decideIn(command), kind);
 });
