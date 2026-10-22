@@ -154,7 +154,7 @@ const tarArchiveCases: [string, Kind, Setup?][] = [
   ["tar --ca -f prot/a.tar b.tar", "deny"],
   // Review round 1 pins: old-style r u A, cluster letter classes and positions, blanks
   // (double spaces, tabs), a later segment, and a tar inside $( ) or backticks after
-  // bsdtar (deny since #279).
+  // bsdtar (main denies these two; pinned so they are not loosened).
   ["tar rf prot/a.tar x", "deny"],
   ["tar uf prot/a.tar x", "deny"],
   ["tar Af prot/a.tar b.tar", "deny"],
@@ -175,6 +175,16 @@ const tarArchiveCases: [string, Kind, Setup?][] = [
   ["tar -cf prot/a.tar x && ls", "deny"],
   ["bsdtar -tf a.tar $(tar xf b.tar -C prot)", "deny"],
   ["bsdtar -tf a.tar `tar xf b.tar -C prot`", "deny"],
+  // Review round 2 pins: an earlier bsdtar word does not hide a later tar (main denies
+  // the first two), and options after a ( still count (main denies the -C row).
+  ["bsdtar -tf a.tar tar xf b.tar -C prot", "deny"],
+  ["TAR=bsdtar tar xf b.tar -C prot", "deny"],
+  ["TAR=bsdtar tar cf prot/a.tar x", "deny"],
+  ["tar -C $(pwd)/prot -xf a.tar", "deny"],
+  ["tar --exclude=$(cat ex) -cf prot/a.tar x", "deny"],
+  // Only the piece after ( or ` sees the inner tar when the outer word is a plain tar.
+  ["tar -tf a.tar $(tar xf b.tar -C prot)", "deny"],
+  ["tar -tf a.tar `tar xf b.tar -C prot`", "deny"],
   // The archive under another raw dir than the one touched; the first f of a cluster.
   ["tar -cf raw2/a.tar prot/x", "deny", multiRaw],
   ["tar -cfref/raw/a.tar x", "deny", refRaw],
@@ -210,6 +220,7 @@ test.each<[string, Kind, string]>([
   ["'tar -c ' + '-f x ' x 2e5 + prot", "ask", "tar -c " + "-f x ".repeat(2e5) + "prot"],
   ["'tar -c -' + 'a' x 5e5 + ' prot'", "ask", "tar -c -" + "a".repeat(5e5) + " prot"],
   ["'tar c' + 'f' x 5e5 + '/ prot'", "ask", "tar c" + "f".repeat(5e5) + "/ prot"],
+  ["'ls prot ' + '$(tar ' x 2e5", "ask", "ls prot " + "$(tar ".repeat(2e5)],
 ])("bash %s -> %s (#283 adversarial)", (_label, kind, command) => {
   expectKind(decideIn(command), kind);
 });

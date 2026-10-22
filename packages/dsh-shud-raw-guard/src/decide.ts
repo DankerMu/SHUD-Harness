@@ -65,21 +65,25 @@ function unquote(text: string): string {
 // (&>word is already a write or a stripped /dev/null).
 // #279/#283: tar, gtar and bsdtar (any case), not after a path-name character.
 const TAR_COMMAND = /(?<![A-Za-z0-9_.-])(?:[gG]|[bB][sS][dD])?[tT][aA][rR]\s/;
+// tar and gtar only: an earlier bsdtar word must not hide them (TAR=bsdtar tar).
+const PLAIN_TAR_COMMAND = /(?<![A-Za-z0-9_.-])[gG]?[tT][aA][rR]\s/;
 const TAR_EXTRACT_OPTION = /^\s+[A-Za-z]*x|\s(?:-[A-Za-z]*x|--(?:ext[a-z]*|get?)(?![A-Za-z0-9-]))/;
 const COMMAND_SEGMENT = /[;|\n]|(?<![<>])&/;
-// The text after the first tar of each command segment, from the blank after the
-// name. Each segment also yields the pieces after its ( and ` so a tar inside $( )
-// or backticks is not hidden by an earlier tar-like word (bsdtar -tf a $(tar xf b
-// -C <raw>)); pieces only add candidates. Scanning from the first tar of each
-// piece keeps the checks linear.
+// The text after the first tar and after the first plain tar of each command
+// segment, from the blank after the name. Each segment also yields the pieces after
+// its ( and ` so a tar inside $( ) or backticks is not hidden by an earlier tar-like
+// word (bsdtar -tf a $(tar xf b -C <raw>)); pieces only add candidates. Scanning
+// from the first match of each piece keeps the checks linear.
 function tarArguments(text: string): string[] {
   return text
     .split(COMMAND_SEGMENT)
     .flatMap((segment) => [segment, ...segment.split(/[(`]/).slice(1)])
-    .flatMap((segment) => {
-      const tar = TAR_COMMAND.exec(segment);
-      return tar === null ? [] : [segment.slice(tar.index + tar[0].length - 1)];
-    });
+    .flatMap((piece) =>
+      [TAR_COMMAND, PLAIN_TAR_COMMAND].flatMap((name) => {
+        const tar = name.exec(piece);
+        return tar === null ? [] : [piece.slice(tar.index + tar[0].length - 1)];
+      }),
+    );
 }
 function tarExtracts(text: string): boolean {
   return tarArguments(text).some((options) => TAR_EXTRACT_OPTION.test(options));
