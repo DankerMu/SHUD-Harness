@@ -52,13 +52,15 @@ Must add/change:
     return writes || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
     ```
   - 第二遍：`[command, unquote(command)].some((text) => ANCESTOR_DESTRUCTIVE.test(text)) || (pwsh && PWSH_ANCESTOR_DESTRUCTIVE.test(command))`。
-- `decide.test.ts`（`rawDirs: ["prot"]`，workspace 下建 `prot/`；祖先行用既有 `subRaw`/`W` 与 `expectAncestorDecision`）：
+- `decide-spelling.test.ts`（新文件；祖先行在 `decide.test.ts`；`rawDirs: ["prot"]`，workspace 下建 `prot/`；祖先行用既有 `subRaw`/`W` 与 `expectAncestorDecision`）：
   - 拆分动词 deny（`code: "raw-immutable"`）：`r"m" -rf prot`、`r'm' -rf prot`、`r\m -rf prot`、`m"v" a prot/b`、`c\p a prot/b`、`r\` 接换行再接 `m -rf prot`。
   - tar 解包 deny（`code: "raw-immutable"`）：`tar -C prot -xf a.tar`、`tar -f a.tar -x -C prot`、`tar --extract -f a.tar -C prot`、`tar --get -f a.tar -C prot`、`tar xf a.tar -C prot`、`gtar -C prot -xzf a.tgz`、`TAR -C prot -xf a.tar`（不加 runIf：命令名大小写与文件系统无关）。
   - tar 解包补钉住 deny（fixture review r1）：`tar -C prot -zxf a.tgz`（`x` 不在簇首）、`tar zxf a.tgz -C prot`（旧式 `x` 不在首字母）、`"tar" -C prot -xf a.tar`、`tar -C prot -"x"f a.tar`（只在去引号副本里成立）、`tar` 接制表符再接 `-C prot -xf a.tar`、`tar 2>&1 -C prot -xf a.tar`、`tar >&2 -C prot -xf a.tar`、`tar <&0 -C prot -xf a.tar`（重定向里的 `&` 不分段）、`tar -C prot --ext -f a.tar`、`tar -C prot --ge -f a.tar`（长选项缩写）。
   - ask：`cat prot/x`、`tar -tf prot/a.tar`、`tar -tvf prot/a.tar -X excl`、`tar -cf o.tar prot`、`tar -cf o.tar -C prot .`、`tar -tf prot/a.tar | grep -x foo`、`ls prot/a.tar -x`。
   - next：`rm protx/x`、`echo ok > derived.txt`。
-  - 已接受误报 deny：`grep 'r''m' prot/log`、`grep -rn tar prot -x`。
+  - 已接受误报 deny：`grep 'r''m' prot/log`、`grep -rn tar prot -x`；review round 1 补：`grep "c\p" prot/log`、`tar -tvf prot/a.tar -Xexcl`、`grep "tar extracted" prot/log`、`tar -C work -xzf prot/x.tgz`。
+  - review round 1 补 deny（`code: "raw-immutable"`）：`cd w && tar -C prot -xf a.tar`、`ls; tar -C prot -xf a.tar`（非首段）、`tar -C prot -Jxf a.txz`、`tar Jxf a.txz -C prot`（大写字母簇）、`tar -f a.tar -C prot --extract`（长选项在行尾）、`/usr/bin/tar -C prot -xf a.tar`（路径前缀）、`tar` 接两个空格再接 `xf a.tar -C prot`、`tar -C prot` 接制表符再接 `-xf a.tar`、`GTAR -C prot -xf a.tar`、`tar>/dev/null -C prot -xf a.tar`（丢弃重定向剥除后才成立）。
+  - review round 1 补 ask（分段）：`tar -tf prot/a.tar && grep -x foo`、`tar -tf prot/a.tar; ls -x`、`tar -tf prot/a.tar & ls -x`、`tar -tf prot/a.tar` 接换行再接 `ls -x`。
   - 已记录漏报 ask：`tar -C prot --exclude="a|b" -xf a.tar`（引号内的 `|` 仍分段）。
   - 祖先 deny（`code: "raw-ancestor-write"`）：`r"m" -rf sub`、`m\v sub x`。
   - 资源：`"tar " .repeat(2e5) + "prot"` → ask；`"tar -" + "a".repeat(5e5) + " prot"` → ask。均在默认超时内完成。
@@ -98,6 +100,16 @@ Required evidence:
   17. `tarExtracts` 只对原文调用 → `"tar" -C prot -xf a.tar`、`tar -C prot -"x"f a.tar` 变红。
   18. `TAR_COMMAND` 的 `\s` 改为空格 → 制表符行变红。
   19. `COMMAND_SEGMENT` 改回 `/[;&|\n]/` → `tar 2>&1 …`、`tar >&2 …`、`tar <&0 …` 行变红。
+  20. 分段判定 `.some` 改为 `.every` → `cd w && tar …`、`ls; tar …` 行变红。
+  21. 短选项簇字母类 `[A-Za-z]` 改为 `[a-z]` → `-Jxf` 行变红。
+  22. 旧式首词字母类 `[A-Za-z]` 改为 `[a-z]` → `Jxf` 行变红。
+  23. 长选项前瞻 `(?![A-Za-z0-9-])` 改为 `(?=\s)` → 行尾 `--extract` 行变红。
+  24. `TAR_COMMAND` 前一字符排除集加 `/` → `/usr/bin/tar` 行变红。
+  25. 旧式分支 `^\s+` 改为 `^\s` → 两个空格行变红。
+  26. 选项前的 `\s` 改为空格 → 选项前制表符行变红。
+  27. `[gG]?` 改为 `g?` → `GTAR` 行变红。
+  28. `tarExtracts(checked)` 改为 `tarExtracts(text)` → `tar>/dev/null …` 行变红。
+  29. `COMMAND_SEGMENT` 去掉 `;` / 去掉 `&` 分支 / 去掉 `\n` → 对应分段 ask 行变红。
 - `pnpm run check`、`pnpm run build`、`pnpm run test-guardrails` 绿。
 - live `pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变。
 

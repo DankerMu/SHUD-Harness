@@ -7,7 +7,7 @@
 
 tar 解包 SHALL 按以下规则判为写：在 `tar` 或 `gtar`（命令名与 POSIX 动词同样不区分大小写，前一个字符不是路径名字符，判定同样作用于去引号副本）之后、同一命令段内（命令段在 `;`、`|`、换行处结束，在 `&` 处也结束，但重定向 `>&`、`<&` 中的 `&` 除外（`&>word` 本身已按写重定向或丢弃重定向处理）），任意位置出现短选项簇含小写 `x`（`-xf`、`-zxf`、`-C <raw> -xf`、`-f a.tar -x`）、`--extract`、`--get` 或它们的缩写（`--ext`、`--ge`）；或 `tar` 之后的第一个词是不带 `-` 的旧式选项簇且含小写 `x`（`tar xf`、`tar zxf`）。`x` 区分大小写，`-X`（`--exclude-from`）不是解包；`-C <raw>` 本身不是写（`tar -cf o.tar -C <raw> .` 只读 raw）。判定 SHALL 与命令长度成线性关系。引号内出现的 `;`、`|`、`&` 同样结束命令段，因此其后的解包选项不被识别（已记录漏报，如 `tar -C <raw> --exclude="a|b" -xf a.tar` 落 `ask`）。
 
-以下 deny 方向误报已接受：读命令的引号或转义文本拼出写动词，如 `grep 'r''m' <raw>/log`、`grep "c\p" <raw>/log`；短选项与参数连写时参数里的 `x`，如 `tar -tvf <raw>/a.tar -Xexcl`；`tar` 作为普通参数词时，其后同一命令段内任一短选项簇含小写 `x` 或出现 `--ext…`/`--ge…`（如 `grep -rn tar <raw> -x`）。
+以下 deny 方向误报已接受：读命令的引号或转义文本拼出写动词，如 `grep 'r''m' <raw>/log`、`grep "c\p" <raw>/log`；短选项与参数连写时参数里的 `x`，如 `tar -tvf <raw>/a.tar -Xexcl`；`tar` 作为普通参数词时（含引号内的文本），其后第一个词含小写 `x`，或其后同一命令段内任一短选项簇含小写 `x` 或出现 `--ext…`/`--ge…`（如 `grep "tar extracted" <raw>/log`、`grep -rn tar <raw> -x`）；raw 仅作为解包源、解到别处或标准输出的 tar（如 `tar -C work -xzf <raw>/x.tgz`、`tar -O -xf <raw>/a.tar f`），与 raw 仅作为源的 `cp` 同类。
 
 #### Scenario: append redirect into raw
 - **WHEN** 调用 `bash`，`command` 为 `echo bad >> data/raw/obs.csv`
@@ -106,15 +106,15 @@ tar 解包 SHALL 按以下规则判为写：在 `tar` 或 `gtar`（命令名与 
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: tar extraction anywhere in its command segment
-- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -C prot -xf a.tar`、`tar -f a.tar -x -C prot`、`tar --extract -f a.tar -C prot`、`tar --get -f a.tar -C prot`、`tar -C prot --ext -f a.tar`、`tar xf a.tar -C prot`、`tar zxf a.tgz -C prot`、`tar -C prot -zxf a.tgz`、`tar 2>&1 -C prot -xf a.tar`、`gtar -C prot -xzf a.tgz` 或 `TAR -C prot -xf a.tar`
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -C prot -xf a.tar`、`tar -f a.tar -x -C prot`、`tar --extract -f a.tar -C prot`、`tar --get -f a.tar -C prot`、`tar -C prot --ext -f a.tar`、`tar xf a.tar -C prot`、`tar zxf a.tgz -C prot`、`tar -C prot -zxf a.tgz`、`tar 2>&1 -C prot -xf a.tar`、`gtar -C prot -xzf a.tgz`、`TAR -C prot -xf a.tar`、`/usr/bin/tar -C prot -xf a.tar`、`tar -C prot -Jxf a.txz`、`tar -f a.tar -C prot --extract` 或 `cd w && tar -C prot -xf a.tar`
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: tar listing, creation and exclude stay reads
-- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -tf prot/a.tar`、`tar -tvf prot/a.tar -X excl`、`tar -cf o.tar prot`、`tar -cf o.tar -C prot .`、`tar -tf prot/a.tar | grep -x foo` 或 `ls prot/a.tar -x`
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -tf prot/a.tar`、`tar -tvf prot/a.tar -X excl`、`tar -cf o.tar prot`、`tar -cf o.tar -C prot .`、`tar -tf prot/a.tar | grep -x foo`、`tar -tf prot/a.tar && grep -x foo`、`tar -tf prot/a.tar; ls -x`、`tar -tf prot/a.tar & ls -x`、`tar -tf prot/a.tar` 接换行再接 `ls -x`，或 `ls prot/a.tar -x`
 - **THEN** 决策 `kind` 为 `ask`；`rm protx/x` 与 `echo ok > derived.txt` 返回 `next()` 的结果
 
 #### Scenario: quote-spliced read text is an accepted false positive
-- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `grep 'r''m' prot/log` 或 `grep -rn tar prot -x`
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `grep 'r''m' prot/log`、`grep "c\p" prot/log`、`grep -rn tar prot -x`、`grep "tar extracted" prot/log`、`tar -tvf prot/a.tar -Xexcl` 或 `tar -C work -xzf prot/x.tgz`
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: quoted segment separators hide a later tar extract option
