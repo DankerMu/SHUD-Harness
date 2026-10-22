@@ -151,7 +151,9 @@
 
 写动词、工具形态与重定向 SHALL 同时对原文和去引号副本判定，任一命中即为写；去引号副本与「Shell command touches raw」相同，即去掉反斜杠续行（`\` 紧跟换行）与全部 `"`、`'`、`\` 字符。因此动词中段被引号或转义拆开的写法同样 deny，如 `r"m"`、`r'm'`、`r\m`、`m"v"`、`c\p`、`r\` 接换行再接 `m`。pwsh 写动词仍只对原文判定。
 
-tar 解包 SHALL 按以下规则判为写：在 `tar` 或 `gtar`（命令名与 POSIX 动词同样不区分大小写，前一个字符不是路径名字符，判定同样作用于去引号副本）之后、同一命令段内（命令段在 `;`、`|`、换行处结束，在 `&` 处也结束，但重定向 `>&`、`<&` 中的 `&` 除外（`&>word` 本身已按写重定向或丢弃重定向处理）），任意位置出现短选项簇含小写 `x`（`-xf`、`-zxf`、`-C <raw> -xf`、`-f a.tar -x`）、`--extract`、`--get` 或它们的缩写（`--ext`、`--ge`）；或 `tar` 之后的第一个词是不带 `-` 的旧式选项簇且含小写 `x`（`tar xf`、`tar zxf`）。`x` 区分大小写，`-X`（`--exclude-from`）不是解包；`-C <raw>` 本身不是写（`tar -cf o.tar -C <raw> .` 只读 raw）。判定 SHALL 与命令长度成线性关系。引号内出现的 `;`、`|`、`&` 同样结束命令段，因此其后的解包选项不被识别（已记录漏报，如 `tar -C <raw> --exclude="a|b" -xf a.tar` 落 `ask`）。
+tar 解包 SHALL 按以下规则判为写：在 `tar`、`gtar` 或 `bsdtar`（命令名与 POSIX 动词同样不区分大小写，前一个字符不是路径名字符，判定同样作用于去引号副本）之后、同一命令段内（命令段在 `;`、`|`、换行处结束，在 `&` 处也结束，但重定向 `>&`、`<&` 中的 `&` 除外（`&>word` 本身已按写重定向或丢弃重定向处理）），任意位置出现短选项簇含小写 `x`（`-xf`、`-zxf`、`-C <raw> -xf`、`-f a.tar -x`）、`--extract`、`--get` 或它们的缩写（`--ext`、`--ge`）；或 `tar` 之后的第一个词是不带 `-` 的旧式选项簇且含小写 `x`（`tar xf`、`tar zxf`）。`x` 区分大小写，`-X`（`--exclude-from`）不是解包；`-C <raw>` 本身不是写（`tar -cf o.tar -C <raw> .` 只读 raw）。判定 SHALL 与命令长度成线性关系。引号内出现的 `;`、`|`、`&` 同样结束命令段，因此其后的解包选项不被识别（已记录漏报，如 `tar -C <raw> --exclude="a|b" -xf a.tar` 落 `ask`）。
+
+tar 写归档 SHALL 按以下规则判为写：同一命令段内（分段与命令名规则同 tar 解包；命令段内 `(`、反引号之后的部分另作候选，`$( )`、反引号里的 tar 不被段内先出现的 tar 词遮住，先出现的 `bsdtar` 词也不遮住其后的 `tar`/`gtar`；这两条同样适用于 tar 解包）出现写归档模式，且其归档操作数位于 raw 下时判 `deny`。写归档模式为短选项簇含 `c`、`r`、`u` 或 `A`（区分大小写：`-C` 是切换目录），旧式首个选项簇含这些字母（首词本身是 tar 命令名时不算选项簇，如 `TAR=bsdtar tar -tf <raw>/a.tar` 仍为读），或长选项 `--create`、`--append`、`--update`、`--catenate`、`--concatenate`、`--delete` 及其缩写（`--cr…`、`--ap…`、`--up…`、`--ca…`、`--conc…`、`--dele…`；`--del` 与 `--delay-directory-restore` 有歧义，不算）。归档操作数为：短选项簇中第一个 `f` 之后紧接的文本或下一个词（`-cf <raw>/a.tar`、`-c -f <raw>/a.tar`、`-cf<raw>/a.tar`）、`--file=WORD`/`--file WORD`（含 `--fil`），或旧式首簇含 `f` 时其后的第一个词（`tar cf <raw>/a.tar x`）；操作数为 `-`（标准输出）时不算。操作数按 shell 的工作目录（`workdir`，缺省为 session cwd）解析，`-C` 不改变归档路径；操作数位于任一 raw 下即判写（不限于命令所触及的那个 raw）。raw 只作为打包源时（`tar -cf o.tar <raw>`、`tar -cf o.tar -C <raw> .`）不触发本条，仍为 `ask`。判定 SHALL 与命令长度成线性关系。已接受误报（deny 方向）：选项与参数连写且参数含模式字母（如 `tar -tf <raw>/a.tar -Hustar`），以及 `tar` 作为文本出现（如 `grep "tar -cf <raw>/a.tar" <raw>/log`）。已接受误报还包括：选项与参数连写的 `-Cwork` 一类；workdir 在 raw 内时 `~/out.tar`、`$HOME/out.tar` 按字面路径解析为 raw 内。已记录漏报：归档操作数含变量或 `~`（`$PWD/<raw>/a.tar`，无法解析为 raw 内）、经符号链接指向 raw 而命令未字面提及 raw，经 `cd`/`pushd` 改变目录后的相对操作数（`cd <raw> && tar -cf a.tar x`），同一段内另一个 tar 词之后的旧式首簇（`tar -tf a.tar bsdtar xf b.tar -C <raw>`、`TAR=gtar tar uf <raw>/a.tar x`），以及拼写恰为 tar 命令名的旧式首簇（`tar Tar list -f <raw>/a.tar x`），这些仍为 `ask`。
 
 以下 deny 方向误报已接受：读命令的引号或转义文本拼出写动词，如 `grep 'r''m' <raw>/log`、`grep "c\p" <raw>/log`；短选项与参数连写时参数里的 `x`，如 `tar -tvf <raw>/a.tar -Xexcl`；`tar` 作为普通参数词时（含引号内的文本），其后第一个词含小写 `x`，或其后同一命令段内任一短选项簇含小写 `x` 或出现 `--ext…`/`--ge…`（如 `grep "tar extracted" <raw>/log`、`grep -rn tar <raw> -x`）；raw 仅作为解包源、解到别处或标准输出的 tar（如 `tar -C work -xzf <raw>/x.tgz`、`tar -O -xf <raw>/a.tar f`），与 raw 仅作为源的 `cp` 同类。
 
@@ -252,7 +254,7 @@ tar 解包 SHALL 按以下规则判为写：在 `tar` 或 `gtar`（命令名与 
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: tar extraction anywhere in its command segment
-- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -C prot -xf a.tar`、`tar -f a.tar -x -C prot`、`tar --extract -f a.tar -C prot`、`tar --get -f a.tar -C prot`、`tar -C prot --ext -f a.tar`、`tar xf a.tar -C prot`、`tar zxf a.tgz -C prot`、`tar -C prot -zxf a.tgz`、`tar 2>&1 -C prot -xf a.tar`、`gtar -C prot -xzf a.tgz`、`TAR -C prot -xf a.tar`、`/usr/bin/tar -C prot -xf a.tar`、`tar -C prot -Jxf a.txz`、`tar -C prot -zvxf a.tgz`、`tar zvxf a.tgz -C prot`、`tar` 接制表符再接 `xf a.tar -C prot`、`gtar xzf a.tgz -C prot`、`tar -f a.tar -C prot --extract` 或 `cd w && tar -C prot -xf a.tar`
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -C prot -xf a.tar`、`tar -f a.tar -x -C prot`、`tar --extract -f a.tar -C prot`、`tar --get -f a.tar -C prot`、`tar -C prot --ext -f a.tar`、`tar xf a.tar -C prot`、`tar zxf a.tgz -C prot`、`tar -C prot -zxf a.tgz`、`tar 2>&1 -C prot -xf a.tar`、`gtar -C prot -xzf a.tgz`、`TAR -C prot -xf a.tar`、`/usr/bin/tar -C prot -xf a.tar`、`tar -C prot -Jxf a.txz`、`tar -C prot -zvxf a.tgz`、`tar zvxf a.tgz -C prot`、`tar` 接制表符再接 `xf a.tar -C prot`、`gtar xzf a.tgz -C prot`、`tar -f a.tar -C prot --extract` 、`cd w && tar -C prot -xf a.tar` 或 `tar -C $(pwd)/prot -xf a.tar`
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: tar listing, creation and exclude stay reads
@@ -265,6 +267,22 @@ tar 解包 SHALL 按以下规则判为写：在 `tar` 或 `gtar`（命令名与 
 
 #### Scenario: quoted segment separators hide a later tar extract option
 - **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -C prot --exclude="a|b" -xf a.tar`
+- **THEN** 决策 `kind` 为 `ask`（已记录漏报）
+
+#### Scenario: tar writes an archive under raw
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -cf prot/a.tar x`、`tar -rf prot/a.tar x`、`tar -uf prot/a.tar x`、`tar -Af prot/a.tar b.tar`、`tar --delete -f prot/a.tar x`、`tar cf prot/a.tar x`、`tar --create --file=prot/a.tar x`、`tar -c -f prot/sub/a.tar x`、`tar -f prot/a.tar -c x`、`tar -zcf prot/a.tgz x`、`tar cfv prot/a.tar x`、`gtar -rf prot/a.tar x`、`bsdtar -cf prot/a.tar x`、`tar rf prot/a.tar x`、`tar Jcf prot/a.txz x`、`tar -cf prot/a.tar x && ls`、`TAR=bsdtar tar cf prot/a.tar x`、`TAR=bsdtar tar rf prot/a.tar x` 或 `tar --exclude=$(cat ex) -cf prot/a.tar x`；或配置 `rawDirs: ["prot", "raw2"]` 时 `command` 为 `tar -cf raw2/a.tar prot/x`
+- **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
+
+#### Scenario: bsdtar extraction into raw
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `bsdtar -xf a.tar -C prot`、`/usr/bin/bsdtar -xf a.tar -C prot` 、`bsdtar -tf a.tar $(tar xf b.tar -C prot)` 或 `TAR=bsdtar tar xf b.tar -C prot`
+- **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
+
+#### Scenario: raw as an archive source stays a read
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -cf o.tar prot`、`tar -cf o.tar -C prot .`、`tar -cf - prot | wc -c`、`bsdtar -tf prot/a.tar`、`cat prot/mybsdtar.log`、`TAR=bsdtar tar -tf prot/a.tar` 或 `TAR=tar bsdtar -tf prot/a.tar`
+- **THEN** 决策 `kind` 为 `ask`；`tar -cf protx/a.tar x` 返回 `next()` 的结果
+
+#### Scenario: archive operand relative to a changed directory is a documented gap
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `cd prot && tar -cf a.tar x` 或 `cd prot; tar -cf a.tar x`
 - **THEN** 决策 `kind` 为 `ask`（已记录漏报）
 
 ### Requirement: Shell read under raw asks for approval
