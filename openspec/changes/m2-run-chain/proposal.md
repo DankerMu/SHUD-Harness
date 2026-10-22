@@ -37,3 +37,8 @@ M2 的用户可见步骤是"一句话跑 ccw，中途重启 dsh，完成后被�
 - 文档：`docs/03_SPEC/Minimal_Schemas.md`（frozen，随本 change 修订）、`docs/generated/`、`docs/04_IMPLEMENTATION/Phased_Plan.md` §2、`docs/03_SPEC/Park_Resume_Design.md` §5/§9/附录 A、`docs/adr/implemented/0004-dsh-kernel.md` 开放项、`CONTEXT.md` 不变量、`openspec/glossary.md`、`instructions/agents/*`（Runtime Lifecycle 的 `SHUD_BIN`/`shud-jobs` 行、Observability、Verification Matrix 新增 `shud:restart`，经 `instructions:render`）、`constraints.yaml`（review_only 触发项转为 matrix、generate.ts 基线移除）；两份决策记录已由 PI 接受，位于 `docs/adr/implemented/`（0006、0007，`status: accepted`）。
 - 依赖：新包对 `@deepseek-ai/dsh-jobs`、`@deepseek-ai/dsh-jobs-local` 的运行时依赖随钉版 `0.2.1-rc.2`，二者的宿主共享 peer 按宿主发布规则同列 peer 与 dev 依赖（design D9），不引入第三方新依赖。
 - 运行时：SHUD 不套宿主沙箱，单用户工作台前提下由 raw-guard 与 `shud_run`/注册表守住运行目录与 raw 边界；CI 无 SHUD 二进制，`shud:restart` 与 `shud:tiny` 一样只在本机运行。
+
+## Implementation fixture triage
+
+- #296 / task 15.1: Issue type: refactor; Fixture level: expanded; upstream compact overridden because the shared schema writer and its path-safety/self-test contracts are Critical Path #7.
+- #296 blast radius: all eight existing Markdown/JSON Schema projections and generator failure behavior; selected risk packs and evidence are recorded under task 15.1. No schema additions or output changes.

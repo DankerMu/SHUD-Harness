@@ -4,14 +4,14 @@
 
 ## 1. 限时 spike：回答 design Open Questions（O1–O6）
 
-- [ ] 1.1 在 `../dsh-spike`（不进入本仓库）用一次性插件验证：O1 teardown 与 kill 在 producer `cancel` 中能否区分（含覆写 `kill` 写标记的候选）；O2 `detached: true` 直接 spawn 的包装进程能否活过宿主 SIGTERM 与 SIGKILL；O3 脚本能否重启 Web 模板的 dsh 并经 HTTP 接口恢复同一会话观察唤醒（headless 无 `session-controller`，不作候选；记录可用命令）；O4 工具执行上下文能否取得本次响应的 model id 与 Agent 已配置模型 id；O5 只有 preset 作用域控制器时无 owner `start` 抛错、注册表以自身无作用域上下文瞬时挂载的全局控制器使其成功且不改变有 owner 作业的准入、preset 内 `tool-jobs` 与 Web 作业卡能看到并 kill 无 owner 作业、宿主层 `shud-tools` 行对 preset 内 Agent 可见、`ctx.inject(['sessionController', 'sessions'], 回调)` 在 Web 模板中于 `session-controller` apply 后触发且不成环（每项在宿主源码与 spike 中给出证据）；O6 `Config` 并集能否不运行时 import `@deepseek-ai/schemastery` 声明。以用户可见步骤收尾：在 `dsh --profile shud` 的 Web 里跑 ccw，重启 dsh 后 shud 仍在运行（ADR-0004 K13）。验证：`docs/Migration_Plan_dsh.md` 新增 spike 记录（命令、session log 路径、观察结果），design.md 的 O1–O6 改写为已答结论。停止条件：任一结论推翻 D1/D4/D5/D7/D11，或 O3 否定、O4 两者皆不可得、O5 任一否定（含瞬时全局控制器不可行）、O6 需放宽白名单时，停下回报，由编排方重开设计决策；结论只要求改 spec 时，只改受影响的 requirement，并对其走一轮 Stage 3 式并行复审后才进入第 3 组之后的实现
+- [x] 1.1 在 `../dsh-spike`（不进入本仓库）用一次性插件验证：O1 teardown 与 kill 在 producer `cancel` 中能否区分（含覆写 `kill` 写标记的候选）；O2 `detached: true` 直接 spawn 的包装进程能否活过宿主 SIGTERM 与 SIGKILL；O3 脚本能否重启 Web 模板的 dsh 并经 HTTP 接口恢复同一会话观察唤醒（headless 无 `session-controller`，不作候选；记录可用命令）；O4 工具执行上下文能否取得本次响应的 model id 与 Agent 已配置模型 id；O5 只有 preset 作用域控制器时无 owner `start` 抛错、注册表以自身无作用域上下文瞬时挂载的全局控制器使其成功且不改变有 owner 作业的准入、preset 内 `tool-jobs` 与 Web 作业卡能看到并 kill 无 owner 作业、宿主层 `shud-tools` 行对 preset 内 Agent 可见、`ctx.inject(['sessionController', 'sessions'], 回调)` 在 Web 模板中于 `session-controller` apply 后触发且不成环（每项在宿主源码与 spike 中给出证据）；O6 `Config` 并集能否不运行时 import `@deepseek-ai/schemastery` 声明。以用户可见步骤收尾：在 `dsh --profile shud` 的 Web 里跑 ccw，重启 dsh 后 shud 仍在运行（ADR-0004 K13）。验证：`docs/Migration_Plan_dsh.md` 新增 spike 记录（命令、session log 路径、观察结果），design.md 的 O1–O6 改写为已答结论。停止条件：任一结论推翻 D1/D4/D5/D7/D11，或 O3 否定、O4 两者皆不可得、O5 任一否定（含瞬时全局控制器不可行）、O6 需放宽白名单时，停下回报，由编排方重开设计决策；结论只要求改 spec 时，只改受影响的 requirement，并对其走一轮 Stage 3 式并行复审后才进入第 3 组之后的实现
 
 - Suggested fixture level: none - 只产出记录与 design 结论，不合入代码
 - Minimal mergeable slice: atomic: 一份 spike 记录与对应 design 更新，拆开会让结论与依据分离
 
 ## 2. 里程碑边界：dsh 升级评估与规范文档对齐
 
-- [ ] 2.1 按 Phased_Plan §6 评估升级：核对 npm `@deepseek-ai/dsh` 的 latest/next 与钉版 `0.2.1-rc.2`，读 `../deepseek-harness/docs/upgrade-guide/` 中 rc.2 之后的条目（若有），重点看 `jobs`、`jobs-local`、`tool-jobs`、`api/session-controller`、`storage` 与 session 恢复；无新版本时记录"跳过及原因"，#233 保持 open 待真正升级时复核。验证：`docs/Migration_Plan_dsh.md` 日志节新增一条带日期的评估记录；`pnpm run docs:check` 通过
+- [x] 2.1 按 Phased_Plan §6 评估升级：核对 npm `@deepseek-ai/dsh` 的 latest/next 与钉版 `0.2.1-rc.2`，读 `../deepseek-harness/docs/upgrade-guide/` 中 rc.2 之后的条目（若有），重点看 `jobs`、`jobs-local`、`tool-jobs`、`api/session-controller`、`storage` 与 session 恢复；无新版本时记录"跳过及原因"，#233 保持 open 待真正升级时复核。验证：`docs/Migration_Plan_dsh.md` 日志节新增一条带日期的评估记录；`pnpm run docs:check` 通过
 - [ ] 2.2 在实现组（第 4 组起）之前对齐与本设计冲突的规范文档：`docs/04_IMPLEMENTATION/Phased_Plan.md` §2 把"经 `ctx.storage` 域持久化"改为工作区 `runs/<run_id>/` 文件加 `stateDir` 索引（design D2），并把"已退→补 `job/settled`"改为 shud 作业的对账、collect 与 `shud-jobs` 唤醒；`docs/03_SPEC/Park_Resume_Design.md` §5（collect 失败产物改为 `collect-error.json`）、§9 与附录 A（唤醒从运行目录读回而非 `ctx.storage`，审查清单去掉队列项、增加对账表与无 owner 登记项）；`docs/adr/implemented/0004-dsh-kernel.md` 开放项"JobRegistry 记录落点"关闭并链接本 change design D2；`CONTEXT.md` Jobs 上下文的对外契约由"`job/settled` 持久化"改为 shud-run-jobs「Recoverability invariant」的五条断言；`docs/03_SPEC/Minimal_Schemas.md` 按 run-records「Generated projection」标注字段处置（`cwd` 由 `run_dir` 取代、`command` 改 argv、`resources.max_memory_mb`/`cost_budget`/`artifacts.metrics_summary`/`artifacts.plots` 标"M3"）；`instructions/agents/shared.md` Observability 节注明 shud 作业以运行目录与 `shud-jobs` 唤醒消息为准（无 owner 作业无 `job/settled`），`pnpm run instructions:render`。验证：`pnpm run docs:check`、`pnpm run check` 通过，生成物无漂移
 
 - Suggested fixture level: compact - 只读评估记录与规范文档对齐，无产品代码
@@ -133,10 +133,20 @@
 
 先于第 4 组合入。
 
-- [ ] 15.1 把 renderer 等可分离部分抽到同目录模块，使 `generate.ts` 及每个新文件 ≤1000 行，schema 定义表留在可独立增行的模块中，并修掉其 3 处 eslint 类型安全基线；`constraints.yaml` 删除该文件的 `max_file_lines` 与 `eslint_type_safety` 基线条目，同步 `.large-file-guard.json`（若有对应排除）。验证：拆分前后 `pnpm run schema:generate` 产物逐字节相同；`pnpm run schema:check`、`pnpm run lint`、`pnpm run check` 通过
+- [x] 15.1 把 renderer 等可分离部分抽到同目录模块，使 `generate.ts` 及每个新文件 ≤1000 行，schema 定义表留在可独立增行的模块中，并修掉其 3 处 eslint 类型安全基线；`constraints.yaml` 删除该文件的 `max_file_lines` 与 `eslint_type_safety` 基线条目，同步 `.large-file-guard.json`（若有对应排除）。验证：拆分前后 `pnpm run schema:generate` 产物逐字节相同；`pnpm run schema:check`、`pnpm run lint`、`pnpm run check` 通过
 
 - Suggested fixture level: compact - 机械重构，生成物逐字节不变即为证明
 - Minimal mergeable slice: atomic: 拆分与基线移除必须同 PR，否则基线条目指向已不成立的事实
+
+### Issue #296 execution fixture
+
+- Selected: Public API / CLI / script entry — preserve `schema:generate`, `test:schema-generation`, `schema:check` invocation and exit behavior; execute all via `pnpm run check`.
+- Selected: File IO / path safety / overwrite and Error handling / rollback / partial outputs — preserve the existing symlink-ancestor rejection, output-root confinement and registry-before-write checks; existing generator self-tests remain intact and pass.
+- Selected: Schema / columns / units / field names and Legacy compatibility / examples — snapshot SHA-256 of every existing generated file before refactoring; regeneration after refactoring must have identical paths and bytes. No schema changes.
+- Selected: Config / project setup and Documentation / migration notes — remove only generator exemptions from `constraints.yaml`, `.large-file-guard.json` and the executable mirrors in `eslint.config.mjs`; record equivalence evidence here and in the PR. Including the eslint mirror is required to actually clear the baseline, not relax a gate.
+- Not selected: Auth / permissions / secrets, Concurrency / shared state / ordering, Resource limits / large input / discovery, Release / packaging / dependency compatibility — no new authentication, scheduling, input-size behavior or dependencies; existing schema-discovery behavior is preserved by the self-tests.
+- Evidence floor: accepted pre-change generator self-test and generation pass; existing negative semantic/path/registry cases continue rejecting; before/after generated SHA-256 sets match; `wc -l scripts/schema/*.ts` is ≤1000 per file; `pnpm run check` passes with no generator lint exemptions.
+- Execution evidence (2026-10-22): pre-change and post-change `pnpm run check` passed, including generator self-tests and actual regeneration; all 16 generated file SHA-256 values matched the pre-change inventory. Module lines: entrypoint 44, generated-paths 128, registry 264, render 384, self-test 610. The schema table now lives in `scripts/schema/registry.ts`; later task references to the generator table mean this module. Both prior completed slices are recorded: #294 via PR #320; #295 via PR #321. Epic acceptance remains pending.
 
 ## 16. Epic 收口 PI 功能验收（ADR-0007）
 
