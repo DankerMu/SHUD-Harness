@@ -4,7 +4,7 @@
 
 动机见 proposal.md「Why」。设计受以下事实约束（均已在钉版 `dsh-v0.2.1-rc.2` checkout 核查，路径相对 `deepseek-harness/packages/`）：
 
-- dsh `ctx.jobs` 只能有一个实现：第二个 `JobRegistry` 服务注册即抛重复错误（`jobs/jobs/src/index.ts`）。Web 模板的 `jobs` 行在 `bundle/base/cordis.patch.yml:96-97`（`id: jobs`，`@deepseek-ai/dsh-jobs-local`），profile patch 可按 id 覆盖；`tool-jobs` 行在其后（`:289`）。
+- dsh `ctx.jobs` 只能有一个实现：第二个 `JobRegistry` 服务注册即抛重复错误（`jobs/jobs/src/index.ts`）。Web 模板的 `jobs` 行在 `bundle/base/cordis.patch.yml:96-97`（`id: jobs`，`@deepseek-ai/dsh-jobs-local`）。profile patch 按 id 只能改行的 `config`/`disabled` 等字段，不能改 `name`：`name` 不同的按 id patch 被告警 `patch: name mismatch … skipping` 并整条跳过（`deepseek-harness/vendor/include/src/index.ts:115-118`）；`- insert:` 新增的行落在顶层列表末尾并被索引，后续 patch 层（用户 patch、`--patch` overlay）可按其 id 改 `config`（`:94-99`）。`tool-jobs` 行在 `jobs` 行之后（`:289`）。
 - `LocalJobRegistry`（`jobs/jobs-local/src/index.ts`，717 行）公开导出、可继承；私有成员多、无 protected，子类只能经公开方法（`start`、`kill`、`attachController`、`list`、`get` 等）与 `JobSpec.run` 的 producer 钩子介入。其 `Config`（`:131-150`）为 schemastery 对象，`maxConcurrentJobsPerOwner`（默认 10，`:34`、`:48`）、`retainBytes`、`settledRetainBytes`、`pumpPollMs` 均有默认值。
 - 无 owner 登记：`start` 对 `owner` 未定义的作业计入共享的无 owner 桶，超过 `maxConcurrentJobsPerOwner` 时抛错（`:216-221`）；无 owner 作业对所有调用方可见（`assertAccess`，`:410-414`）；不受 owner Agent 释放影响（`disposeOwned` 只处理有 owner 的作业，`:655-660`）；dsh **不**为其写 `job/registered`/`job/settled` 会话事件（`recordSessionEvent` 在无 owner 时直接返回，`:448-449`）；`tool-jobs` 对无 owner 结算不唤醒（`tool-jobs/src/index.ts:279`）。
 - `start` 要求有控制器服务该 owner（`servesOwner`，`:208-210`、`:382-385`）：全局层（无作用域上下文挂载）的控制器服务所有 owner，作用域层的控制器只服务其作用域链上的 Agent；无 owner 作业没有作用域链，**只能**由全局控制器服务（`jobs-local/tests/jobs.spec.ts:199-201`、`:204-214`）。控制器只在 `start` 的准入检查中被读取（`:209`、`:351`、`:382-385`）。`tool-jobs` 在 apply 时 `attachController('tool-jobs')`（`tool-jobs/src/index.ts:248`），但 Web 模板在宿主层禁用 `tool-jobs`（`bundle/web-app/cordis.patch.yml:496-497`）、改在 preset 内挂载（`bundle/web-app/presets/standard.patch.yml:33-34`），其控制器在作用域层，服务不了无 owner 作业。读取与 kill 不受控制器影响：`list` 返回调用方自己的与全部无 owner 作业（`:310-314`），`get`/`read`/`kill` 的访问栅栏放行无 owner 作业（`assertAccess`，`:410-414`）；Web 作业卡的列表同样含全部无 owner 作业，kill 经同一栅栏（`api/job-controller/src/index.ts:68`、`:110-126`）。dsh JobId 形如 `<kind>-<16 位十六进制>`（`:231`），重启后不保留。
@@ -39,9 +39,9 @@ Stage 1 压测与 Stage 4 修订结论（27 个分支、3 个原开放项）是�
 
 ## Decisions
 
-### D1 继承 `LocalJobRegistry`，按 id 替换 `jobs` 行；shud 作业无 owner 登记
+### D1 继承 `LocalJobRegistry`，禁用 `jobs` 行并插入 `shud-jobs` 行；shud 作业无 owner 登记
 
-`@shud-harness/dsh-shud-jobs` 导出 `ShudJobRegistry extends LocalJobRegistry`，profile patch 用 `- id: jobs` 改指向它。非 shud 的 `start` 原样交给父类。shud 作业也经父类 `start` 登记，但**不带 owner**：`job_list`/`job_output`/`job_kill` 与 Web 作业卡照常可用且对所有会话可见；`tool-jobs` 跳过无 owner 结算，因此永不与注册表自己的唤醒（D7）重复；owner Agent 释放不会取消它。发起会话 id 只写进 `run-job.json` 的 `owner_session`，仅用于唤醒投递。持久化、脱离运行、对账与唤醒由子类附加的 shud runner 负责。新增公开方法供工具包调用：提交 shud 作业、按 `job_id`/`run_id` 查记录、幂等 collect。
+`@shud-harness/dsh-shud-jobs` 导出 `ShudJobRegistry extends LocalJobRegistry`，是 profile 中唯一的 `ctx.jobs`。挂载方式：按 id 的 patch 不能改行的 `name`（见 Context），因此 bundle patch 以 `- id: jobs` + `disabled: true` 禁用 Web 模板的 `jobs-local` 行，再以 `- insert:` 插入 id 为 `shud-jobs`、`name` 为 `@shud-harness/dsh-shud-jobs` 的行；后续层（用户 patch、`--patch` overlay）按 id `shud-jobs` 配置它，与 `shud-raw-guard` 的用户 patch 覆写同一机制。两步缺一不可：只插入不禁用会注册第二个 `JobRegistry` 而抛重复错误，只禁用不插入则没有 `ctx.jobs`。非 shud 的 `start` 原样交给父类。shud 作业也经父类 `start` 登记，但**不带 owner**：`job_list`/`job_output`/`job_kill` 与 Web 作业卡照常可用且对所有会话可见；`tool-jobs` 跳过无 owner 结算，因此永不与注册表自己的唤醒（D7）重复；owner Agent 释放不会取消它。发起会话 id 只写进 `run-job.json` 的 `owner_session`，仅用于唤醒投递。持久化、脱离运行、对账与唤醒由子类附加的 shud runner 负责。新增公开方法供工具包调用：提交 shud 作业、按 `job_id`/`run_id` 查记录、幂等 collect。
 
 控制器：无 owner 的 `start` 只能由全局控制器放行，而 Web 模板的 `tool-jobs` 只在 preset 作用域内挂载，因此注册表自带控制器——每次以无 owner 登记 shud 作业时，用自身构造时的（无作用域）上下文经父类 `attachController('shud-jobs')` 挂到全局层，紧接着同步调用父类 `start`，随即在 `finally` 中释放。控制器只在 `start` 准入时被读取，瞬时挂载即足够；不常驻，是因为常驻的全局控制器会服务所有 owner，使没有 `tool-jobs` 的组合也能启动有 owner 的非 shud 作业，违反「非 shud 行为与 `jobs-local` 一致」。因此 shud 登记（提交与对账接管）不依赖 `tool-jobs` 是否挂载、挂在哪一层；preset 内的 `job_list`/`job_output`/`job_kill` 与 Web 作业卡照常能看到并 kill 这些作业（见 Context）。可行性由 O5 确认。
 
@@ -102,7 +102,7 @@ collect 失败（`exit_code` 不可读或非整数、产物目录不可读、Run
 - 循环与其定时器是注册表上下文的 effect：注册表释放或重载时随之停止，重载后的新实例先对账再启动自己的循环，因此同一进程内不会有两个循环对同一条目投递；同一条目同一时刻至多一次投递在途。
 - 崩溃发生在 followup 与置位之间时，重启后的对账（D11）再投递一次（at-least-once，消息内含 `run_id` 便于识别重复）。
 - 消息用 `@deepseek-ai/dsh-llm` 的 `createUserMessage` 构造（ADR-0006 决策 2），`shud-jobs` 来源经扩充 `MessageSourceMap` 声明类型（宿主先例 `schedule/schedule/src/runtime.ts:2-8`）。
-- 就绪：投递只在 `sessionController` 与 `sessions` 都可用后开始——注册表以 `ctx.inject(['sessionController', 'sessions'], 回调)` 使轮询循环的投递步骤生效，二者不是插件行的启动依赖。Web 模板中 `jobs` 行先于 `session-controller` 行 apply（`bundle/base/cordis.patch.yml:96` 对 `bundle/web-app/cordis.patch.yml:121`），apply 时对账产生的待投递条目在回调触发后投递。服务缺失本身**从不**导致 `unreachable`：宿主没有启动完成信号，注册表无法区分"尚未 apply"与"本 profile 没有该行"，因此 headless profile 中条目保持 `notify.status: pending`（`detail` 写明等待会话控制服务），RunRecord 仍可经 `shud_collect` 取得。
+- 就绪：投递只在 `sessionController` 与 `sessions` 都可用后开始——注册表以 `ctx.inject(['sessionController', 'sessions'], 回调)` 使轮询循环的投递步骤生效，二者不是插件行的启动依赖。插入的 `shud-jobs` 行落在顶层列表末尾，与 `session-controller` 行的相对顺序不作依赖；O5(d) 实测注册表 apply 时 `sessionController` 尚不可用，apply 时对账产生的待投递条目在回调触发后投递。服务缺失本身**从不**导致 `unreachable`：宿主没有启动完成信号，注册表无法区分"尚未 apply"与"本 profile 没有该行"，因此 headless profile 中条目保持 `notify.status: pending`（`detail` 写明等待会话控制服务），RunRecord 仍可经 `shud_collect` 取得。
 - 不可达：投递开始后，`owner_session` 为 `null` 或 `resolveAgent` 报告会话不存在 → 立即 `unreachable`；恢复或 flush 失败等暂时性错误计入 `notify.attempts`，由轮询循环在重试间隔后重试（重启后由对账继续），达 core 常量上限（3）后置 `unreachable`。`unreachable` 后不再重试，RunRecord 仍可经 `shud_collect` 查到。
 
 ### D8 raw 与路径边界
@@ -122,7 +122,7 @@ collect 失败（`exit_code` 不可读或非整数、产物目录不可读、Run
 
 ### D10 RunRecord 的 `llm.response_model`
 
-由 `shud_run` 工具在执行时取发起该次工具调用的响应体 model id，经提交参数交注册表写进 `run-job.json`，collect 时复制到 RunRecord，并记 `llm.response_model_source: response`。工具执行上下文拿不到响应体 model 时，记录该 Agent 当前生效的已配置模型 id 并标 `response_model_source: configured`；两者都拿不到时 `shud_run` 返回工具错误，不硬编码。取值途径由 O4 确认。
+由 `shud_run` 工具在执行时取模型 id，经提交参数交注册表写进 `run-job.json`，collect 时复制到 RunRecord。O4 实测 rc.2 不向插件暴露响应体 model，因此恒记 `response_model_source: configured`，取 `exec.agent.session.requestHeader()?.config.model`，缺失时 `exec.agent.options.model`；两者都拿不到时 `shud_run` 返回工具错误，不硬编码。assistant `source.model` 是请求路由，不得记为 `response`。枚举保留 `response`（PI 决定的数据契约），留待宿主暴露响应体 model 的 dsh 升级再启用。
 
 ### D11 启动对账与接管
 
@@ -176,8 +176,8 @@ collect 失败（`exit_code` 不可读或非整数、产物目录不可读、Run
 ## Migration Plan
 
 - 合入顺序（按依赖，不按组号）：1 spike → 2 升级评估与规范文档对齐 → 3 白名单 → 15 `generate.ts` 拆分 → 4 schema → 5 注册表骨架（行为不变的替换）→ 8 `stateDir` 锁与索引 → 6.1/6.2 提交（含瞬时全局控制器）与脱离运行 → 6.3 轮询循环与结算 → 7 collect → 9.1 kill → 10.1 文件级对账 → 9.2 teardown 放手 → 10.2 接管登记 → 11 唤醒投递 → 13 raw-guard → 12 工具与挂载 → 14 验收脚本与矩阵 → 16 Epic 验收。骨架阶段 profile 已改挂 `dsh-shud-jobs`，但非 shud 行为不变，`profile:smoke` 与 `raw-guard:probes` 必须保持绿。
-- 配置：`stateDir`、`shudBin` 是机器路径，bundle patch 不提供；`profile:install` 要求环境变量 `SHUD_BIN`，并在用户 profile patch 写入 `- id: jobs` 行（`shudBin: $SHUD_BIN`、`stateDir: $DSH_HOME/profiles/<name>/shud-jobs`）。`profile:smoke` 与 `raw-guard:probes` 以临时占位可执行文件作为 `SHUD_BIN` 调用 `profile:install`。Runtime Lifecycle 文档在挂载该行的同一 PR（5.2）更新。
-- 回滚：profile patch 删除 `- id: jobs` 覆盖行即恢复 `jobs-local`；`runs/` 目录与 `stateDir` 可保留供人工查阅。
+- 配置：`stateDir`、`shudBin` 是机器路径，bundle patch 不提供；`profile:install` 要求环境变量 `SHUD_BIN`，并在用户 profile patch 写入 `- id: shud-jobs` 行（`shudBin: $SHUD_BIN`、`stateDir: $DSH_HOME/profiles/<name>/shud-jobs`）。`profile:smoke` 与 `raw-guard:probes` 以临时占位可执行文件作为 `SHUD_BIN` 调用 `profile:install`。Runtime Lifecycle 文档在挂载该行的同一 PR（5.2）更新。
+- 回滚：bundle patch 同时删除 `- id: jobs` 的 `disabled: true` 覆盖与 `- insert:` 中的 `shud-jobs` 行，并删去用户 patch 的 `- id: shud-jobs` 行，即恢复 `jobs-local`；只删其一会留下两个 `JobRegistry`（重复注册抛错）或没有 `ctx.jobs`。`runs/` 目录与 `stateDir` 可保留供人工查阅。
 - 文档：与本设计冲突的规范文档在实现组之前（2.2）对齐；`Minimal_Schemas.md`（frozen）在 2.2 标注字段处置、在 schema 任务中按 Zod 修订 id 与状态集，并在文首注明修订来源为本 change。
 
 ## Not yet specified
@@ -188,11 +188,16 @@ collect 失败（`exit_code` 不可读或非整数、产物目录不可读、Run
 
 ## Open Questions
 
-由首个子 issue（限时 spike）回答，结论写回本 design。结论若要求修改 specs，只改受影响的 requirement，并对被改的 requirement 走一轮 Stage 3 式的并行复审后才进入实现；推翻 D1/D4/D5/D7/D11 或下列标明"停下"的情形时停下回报，由编排方重开设计决策。
+O1–O6 已由 #294 的限时 spike 回答，证据（命令、session log、宿主行号）见 `docs/Migration_Plan_dsh.md`「M2 spike：m2-run-chain O1–O6」与 `../dsh-spike` commit `2218e45` 的 `runs/m2/NOTES.md`；宿主包路径同 Context 相对 `deepseek-harness/packages/`，`vendor/` 路径相对 `deepseek-harness/`。O1–O6 均未触发停止条件；spike 另有一项附带发现触发停止条件（见末条），已停下回报并由编排方裁决。结论若要求修改 specs，只改受影响的 requirement，并对被改的 requirement 走一轮 Stage 3 式的并行复审后才进入实现；推翻 D1/D4/D5/D7/D11 或下列标明"停下"的情形时停下回报，由编排方重开设计决策。
 
-- O1：`LocalJobRegistry` 的 producer `cancel(reason)` 能否可靠区分宿主 teardown 与 kill（候选：子类覆写公开 `kill` 写 `cancel_requested_at` 标记，`jobs-local/src/index.ts:332`；或理由字符串 `'jobs service disposed'`）。
-- O2：插件以 `detached: true` 直接 spawn 的包装进程能否活过宿主的 SIGTERM 与 SIGKILL（macOS 进程组与宿主退出钩子）。
-- O3：`shud:restart` 能否以脚本方式重启 Web 模板的 dsh（`--no-open --port`）并经其 HTTP 接口发起会话、恢复同一会话以观察唤醒。headless 模板不挂 `session-controller`，按 D7 唤醒停在 `pending`，不能证明投递，故不作候选。否定时停下。
-- O4：工具执行上下文能否拿到本次响应的 model id，以及该 Agent 当前生效的已配置模型 id（D10）。两者都拿不到时停下。
-- O5：在宿主中确认并记录证据：（a）只有作用域控制器（preset 内的 `tool-jobs`）时无 owner `start` 抛 `no job controller serves this agent`；注册表以自身无作用域上下文瞬时挂载的控制器落在全局层，使无 owner `start` 成功，释放后有 owner 作业的准入与 `jobs-local` 相同；（b）preset 内 `tool-jobs` 的 `job_list`/`job_output`/`job_kill` 与 Web 作业卡能看到并 kill 无 owner 作业；（c）宿主层插入的 `shud-tools` 行对 preset 内的 Agent 可见；（d）`ctx.inject(['sessionController', 'sessions'], 回调)` 在 Web 模板中于 `session-controller` 行 apply 后触发、不成环（`SessionController.inject` 不含 `jobs`，需确认传递依赖）。（a）中瞬时挂载不可行时停下：常驻全局控制器会改变非 shud 作业的准入，须重开决策；其余任一否定时同样停下。
-- O6：`Config` 并集能否在 ADR-0006 白名单内声明（不运行时 import `@deepseek-ai/schemastery`，例如复用 `LocalJobRegistry.Config` 实例自身的组合能力）。需要放宽白名单时停下（白名单修订属 PI 决策）。
+- O1（已答：能区分）：覆写公开 `kill` 先置进程内一次性标记再调父类（父类抛错或返回 `already-finished` 时撤销），producer `cancel` 消费到标记即为 kill，否则为 teardown。实测模型 `job_kill` 与 Web 作业卡 kill 均命中标记，宿主 SIGTERM 不命中且理由为 `'jobs service disposed'`。理由字符串不作判据：模型 `job_kill` 的 `reason` 是自由文本并原样转给作业（`jobs/tool-jobs/src/index.ts:377`、`:403`）。teardown 时在 `cancel` 内同步结束 `done`，宿主约 2 秒退出，不阻塞 `disposeAll`。D5 不变。
+- O2（已答：能）：`child_process.spawn('/bin/sh', …, { detached: true, stdio: ['ignore', fd, fd] })` 加 `unref()` 的包装进程自成进程组，宿主 SIGTERM 与 SIGKILL 后 PPID 变为 1，SHUD 子进程继续运行至写出 `exit_code`。宿主只终止经 `ctx.subprocess` 启动的进程树（`subprocess/subprocess-local/src/spawn.ts:74-79`）。D4 不变。
+- O3（已答：能）：Web 模板 dsh 以 `--no-open --port <p>` 后台启动并从 stdout 取启动 URL；`GET /connect?token=<t>&interactions=none` 换取 API cookie（`client/connection/src/browser-auth.ts:314-348`），一元 Remote 调用为 `POST /api/<ns>/<method>`，体为 `{"type":"client-request","rpcId","method","payload":{"args":{…}}}`（`client/connection/src/client/rpc.ts:39-56`），用 `session/create`、`session/prompt` 与 `job/kill`。每次重启 token 都会变，须重新 `/connect`。唤醒由新进程的注册表经 `resolveAgent` 冷恢复会话后投递，之后经 HTTP 对同一 `sessionId` 发 prompt 正常。完整命令序列是 `shud:restart` 的驱动种子，见 Migration Plan 记录。
+- O4（已答：响应体 model 不可得，已配置 model 可得；未触发停止条件）：`llm-deepseek` 丢弃 `message_start.message.model`（`llm/llm-deepseek/src/translate.ts:110-115`），assistant 消息的 `source.model` 取的是请求 model（`core/agent-loop/src/agent.ts:529-535`）。实测 DMXAPI 对请求 `deepseek-flash-guan` 返回的响应体 model 是 `deepseek/deepseek-flash`，任何插件 seam 都拿不到这个值。因此 `shud_run` 在 rc.2 下恒记 `response_model_source: configured`：取 `exec.agent.session.requestHeader()?.config.model`（发起本步请求的路由），缺失时退回 `exec.agent.options.model`。assistant `source.model` 不得记为 `response`。编排方裁决：保留枚举，spec「Response model capture」与 D10 改为 rc.2 恒记 `configured` 并写明取值顺序与 `source.model` 禁令。
+- O5（已答，四项均成立）：
+  （a）只有作用域控制器时，无 owner `start` 抛 `no job controller serves this agent`。瞬时挂载必须用构造时保存的原始实例调 `LocalJobRegistry.prototype.attachController`：经 `ctx.jobs` 取到的是 cordis 服务代理，其 `ctx` 是调用方上下文（`vendor/cordis/src/utils.ts:176`），在代理上调用会挂进调用方的作用域层。用原始实例挂载期间登记成功，释放后无 owner `start` 再次被拒；不含 `tool-jobs` 的 preset 在多次瞬时挂载前后 `run_in_background` 都被拒，standard preset 照常登记 bash 作业。此依赖属 ADR-0006 记录的 `attachController` 耦合面。
+  （b）preset 内 `job_list`/`job_output`/`job_kill` 可见并能 kill 无 owner 作业，重启后接管的新登记同样可见；Web 作业卡的 kill 端点以另一会话身份也能 kill；作业卡列表侧以源码（`api/job-controller/src/rows.ts:42`）为证。
+  （c）宿主层插入的工具行对 standard preset 内的 Agent 可见。
+  （d）注册表 apply 时 `sessionController` 尚不可用，回调约 250ms 后触发，不成环；退出时回调先于注册表释放。因此投递就绪只能依赖 `ctx.inject`，不能依赖行序。
+- O6（已答：能，白名单不放宽）：cordis 只调用 `Config['~standard'].validate`（`vendor/cordis/src/fiber.ts:50-61`）。注册表 `Config` 写成手写的 Standard Schema：拆出 `stateDir`/`shudBin`，以 `LocalJobRegistry.Config.dict` 的键加这两项为白名单拒绝其余键，父类键交 `LocalJobRegistry.Config['~standard'].validate` 校验。未知键检查必须自写，因为 schemastery 的 `object` 非严格、会透传未知键（`vendor/schemastery/src/index.ts:812-822`）。不得用 `Config.set`，它会就地改父类的 `dict`（`:324-327`）。缺键或出现未知键时插件行 `did not activate`，其余行继续运行。代价：`--dump-config-schema` 把该行投影为 `unsupported`（诊断 `Config is not a native Schemastery schema`，`boot/app-boot/src/config-schema/collect.ts:205-207`），文档 `complete=false`、退出码 1；`profile:smoke` 已容忍宿主 projection 不完整（`scripts/runtime/profile-smoke.sh:36-40`），对 `shud-jobs` 断言 `unsupported` 加上述唯一诊断，不放宽任何既有断言。
+- 附带发现（已裁决）：按 id 的 patch 不能改行的 `name`——`vendor/include/src/index.ts:115-118` 对 `name` 不同的按 id patch 告警 `patch: name mismatch … skipping` 并整条跳过（实测 `../dsh-spike/runs/m2/dump-config-byid-rename.stderr`），原 D1「按 id 替换 `jobs` 行」不可行。spike 改为 `- id: jobs` + `disabled: true`，再以 `- insert:` 新增注册表行（插入在顶层列表末尾，后续层可按新 id 补 `config`，`vendor/include/src/index.ts:94-99`），O1–O6 均在此挂载下得到。D1 挂载方式据此修订为 disable + insert（行 id `shud-jobs`），决策实质不变：`ShudJobRegistry` 继承 `LocalJobRegistry`、是唯一的 `ctx.jobs`，`jobs-local` 不再激活。已随之修订：本文 Context、D1、D7「就绪」、Migration Plan「配置」「回滚」；proposal「What Changes」「Capabilities」「Impact」；`shud-profile`「Profile composition」「Idempotent profile installation」「Local profile smoke」；`shud-run-jobs`「Registry replacement」「Registry configuration」「State directory lock and indexes」「At-least-once wake」；tasks 5.2。

@@ -183,3 +183,48 @@ Web 往返：独立 `DSH_HOME=/Users/danker/.shud-acceptance-m1fix-20261022/dsh-
 | `rm -rf data` | #273 | 164 → 165，无 asked | 祖先目录拒绝文案 |
 
 raw MD5 前后一致：`obs.csv` `406a4b65e6edef2cae087755117da2b9`，`a.tar` `b44f2949186b04ea191dca76e0445468`；`data/raw/new.tar` 不存在，`out/` 下无解包产物。PI 通过即接受：raw 内归档用 bash 解包（`tar -xf <raw>/a.tar -C work`）直接拒绝、无审批通道（#279 起）。宿主 Web 启动时自动选中 Documents 下的默认工作区而非进程 cwd，验收会话须在界面中选定合成工作区后新建；默认工作区内的两次试跑不计入证据。该证据只覆盖上表场景，不扩张为通用 raw 数据安全证明。
+
+### M2 spike：m2-run-chain O1–O6（2026-10-22，#294）
+
+回答 [`m2-run-chain`](../openspec/changes/m2-run-chain/design.md) 的 Open Questions（task 1.1），约 1.5h（含两次 ccw）。spike 仓库 `../dsh-spike` commit `2218e45`：一次性插件 `plugins/shud-spike-m2/jobs.js`（`LocalJobRegistry` 子类，308 行 JS）与 `tools.js`（宿主层工具行 `shud_run_spike`、`spike_probe`，71 行），overlay `overlays/m2.patch.yml`，证据 `runs/m2/`（`NOTES.md` 为逐项记录，注册表事件 `state/probe.log`）。宿主 `dsh-v0.2.1-rc.2` 只读未改；`DSH_HOME=../dsh-spike/home`，`pnpm run profile:install` 建 `shud` Web profile 后叠加 `--patch overlays/m2.patch.yml`（`session-log-deepseek` 仍 `disabled: true`，`runs/m2/dump-config.yml:22-24`）；模型 `deepseek-flash-guan`（DMXAPI，key 仅由环境变量提供）。宿主路径相对 `../deepseek-harness/`。
+
+会话日志在 `../dsh-spike/home/sessions/--Users-danker-Desktop-Hydro-SHUD-dsh-spike-runs-m2-work-ws--/<id>/session.v4.jsonl.zstd`（gitignored），紧凑视图已提交为 `runs/m2/session-S1.txt`、`session-S2-no-jobs.txt`、`session-S3.txt`：S1 `session-1f6f37f6-a2a4-438f-b34d-6c9a20351de3`（standard preset）、S2 `session-258102d3-993a-4a10-90ca-83263f3e5a0b`（overlay 新增的无 `tool-jobs` preset `no-jobs`）、S3 `session-2a1fb198-3242-4f12-95cc-bc6e1dd14cb7`（standard，重启后建）。
+
+| 问题 | 命令 / 会话证据 | 宿主源码 | 结论 |
+|---|---|---|---|
+| O1 kill 与 teardown 可否区分 | S1 seq 45–47 模型 `job_kill`；`POST /api/job/kill`（Web 作业卡端点，以 S2 身份）；`kill -TERM` 宿主；`state/probe.log` 的 `cancel` 事件 | `packages/jobs/jobs-local/src/index.ts:332-334`、`:484-494`、`:674-677`、`:694-713`；`packages/jobs/tool-jobs/src/index.ts:377`、`:403`（`reason` 为模型自由文本）；`packages/api/job-controller/src/index.ts:125` | 能。覆写 `kill` 置一次性标记：模型 kill 与作业卡 kill 均 `marked:true`，SIGTERM 为 `marked:false` + `'jobs service disposed'`；teardown 在 `cancel` 内同步结束 `done`，宿主约 2s 退出。理由字符串可被模型伪造，不作判据 |
+| O2 detached 包装进程活过 SIGTERM/SIGKILL | `runs/m2/restart-sigterm.txt`、`restart-sigkill.txt`（`ps -o pid,ppid,pgid,stat,etime`） | `apps/cli/src/profile-boot.ts:304-310`；`packages/subprocess/subprocess-local/src/spawn.ts:74-79`（只终止 `ctx.subprocess` 进程树） | 能。`spawn('/bin/sh', …, { detached: true })` + `unref()` 的 wrapper 自成进程组，宿主退出后 PPID→1，shud 子进程持续 `R` 至写出 `exit_code` |
+| O3 脚本重启 Web 并经 HTTP 恢复同一会话 | 下方命令；S1 seq 131、163 唤醒消息（`source.kind: shud-spike`）→ turn 9、12 自动汇报；重启后 HTTP 再问 S1（seq 140–141） | `packages/client/connection/src/browser-auth.ts:314-348`（`/connect`）、`client/rpc.ts:39-56`（请求信封）；`packages/api/session-controller/src/index.ts:300-302`、`:461` | 能。每次重启 token 变化须重新 `/connect`；唤醒由新进程的注册表 `resolveAgent` 冷恢复会话投递，无需浏览器 |
+| O4 响应体 model / 已配置 model | S1 seq 17–19 `spike_probe`；`runs/m2/o4-wire.out`（DMXAPI 对请求 `deepseek-flash-guan` 的 `message_start.message.model` 为 `deepseek/deepseek-flash`） | `packages/llm/llm-deepseek/src/translate.ts:110-115`（丢弃 `message.model`）；`packages/core/agent-loop/src/agent.ts:529-535`（`source.model` 取 `request.model`）；`packages/core/session/src/index.ts:912` | 响应体 model 在任何插件 seam 不可得；已配置 model 可得（`requestHeader().config.model`、`agent.options.model`、发起调用的 assistant `source.model` 三者均为 `deepseek-flash-guan`）。未触发停止条件 |
+| O5(a) 瞬时全局控制器 | `probe.log` 的 `o5a` 事件（每次登记含重启接管各一条）；S2 seq 17、30 与 S1 seq 91/98 | `packages/jobs/jobs-local/src/index.ts:207-210`、`:346-354`、`:382-386`；`vendor/cordis/src/utils.ts:176`（服务代理的 `ctx` 是调用方上下文） | 可行。须以构造时保存的原始实例调 `LocalJobRegistry.prototype.attachController`；挂载前/释放后无 owner `start` 均抛 `no job controller serves this agent`，挂载中成功；无 `tool-jobs` 的 preset 在多次瞬时挂载前后有 owner 启动均被拒，standard preset 照常登记 bash 作业 |
+| O5(b) preset `tool-jobs` 与作业卡可见并可 kill | S1 seq 35–47 `job_list`/`job_output`/`job_kill`；S3 重启后 `job_list` 列出接管登记；`job/kill` 以 S2 身份 kill S1 的作业 | `packages/jobs/jobs-local/src/index.ts:310-314`、`:410-414`、`:448-449`；`packages/api/job-controller/src/rows.ts:42`、`:48` | 能。作业卡列表侧未开浏览器，以源码与 `job_list` 为证；shud 作业不产生 `job/*` 会话事件 |
+| O5(c) 宿主层工具行对 preset Agent 可见 | S1 seq 17–19、30–32 | `packages/core/tools/src/index.ts:805` | 可见 |
+| O5(d) `ctx.inject(['sessionController','sessions'])` | 无会话（启动期）；`probe.log`：apply 时 `sessionControllerAtApply:false`，约 250ms 后 `inject-fired`；三次启动一致 | `packages/api/session-controller/src/index.ts:120-132`（`inject` 不含 `jobs`）；`packages/schedule/tool-schedule/src/index.ts:444` | 回调在 `session-controller` 可用后触发，不成环 |
+| O6 `Config` 并集不 import schemastery | 无会话（启动期）；`runs/m2/o6-node-check.out`；`web-o6-missing.log`、`web-o6-unknown.log` | `vendor/cordis/src/fiber.ts:50-61`（只调 `~standard.validate`）；`vendor/schemastery/src/index.ts:324-327`（`set` 就地改父类）、`:812-822`（`object` 非严格，未知键透传） | 能。手写 Standard Schema 拆出 `stateDir`/`shudBin`、自查并集外键、其余交父类校验；缺键或未知键时 stderr `did not activate` + `ValidationError`，其余行继续运行；白名单不需放宽 |
+
+O3 可用命令（`shud:restart` 驱动的种子；`unset ALL_PROXY`，同一 `DSH_HOME`）：
+
+```sh
+out=$(../dsh-spike/runs/m2/dsh-up.sh 47820 web-A)   # 后台 node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --patch <overlay> --no-open --port 47820；打印 "<pid> <launch-url>"
+node ../dsh-spike/runs/m2/api.mjs connect 47820 "${out#* }"   # GET /connect?token=<t>&interactions=none → API cookie
+node ../dsh-spike/runs/m2/api.mjs call 47820 session/create '{"request":{"cwd":"<ws>"}}'
+node ../dsh-spike/runs/m2/api.mjs call 47820 session/prompt '{"request":{"requestId":"<id>","sessionId":"<sid>","mode":"queue","content":[{"type":"text","text":"<prompt>"}]}}'
+kill -TERM "${out%% *}"   # SIGKILL 用例为 kill -KILL
+out=$(../dsh-spike/runs/m2/dsh-up.sh 47820 web-B); node ../dsh-spike/runs/m2/api.mjs connect 47820 "${out#* }"
+node ../dsh-spike/runs/m2/api.mjs call 47820 session/prompt '{"request":{"requestId":"<id2>","sessionId":"<sid>","mode":"queue","content":[{"type":"text","text":"<prompt>"}]}}'
+```
+
+`api.mjs call` 发 `POST /api/<ns>/<method>`，体为 `{"type":"client-request","rpcId":<uuid>,"method":"<ns>/<method>","payload":{"args":{…}}}`。
+
+用户可见步骤（ADR-0004 K13）：`shud` Web 宿主中 S1 的模型调用 `shud_run_spike` 跑完整 ccw（1827 天），运行中重启宿主：
+
+| 时刻（UTC） | 事件 | 进程（pid / PPID） |
+|---|---|---|
+| 13:24:55 | 提交 `RUN-20261022T132455-5beb`，dsh 登记 `shud-11fa45f1ae6047fa` | dsh 47234；wrapper 49092 / 47234；shud 49096 / 49092 |
+| 13:25:19 | `kill -TERM 47234`，约 2s 退出 | wrapper 49092 / **1**；shud 49096 / 49092，`R` |
+| 13:25:29 | 重启 dsh 49351，对账接管为 `shud-3c3948716ec1488c` | 49092、49096 存活 |
+| 13:29:29 | `exit_code` 0、30 个输出文件；S1 seq 131 唤醒 → turn 9 汇报 succeeded | — |
+
+SIGKILL 变体（`END 730`）：13:30:50 `kill -KILL 49351`，wrapper 51886 / 1、shud 51890 存活；重启 dsh 51998 接管为 `shud-93bbde2b93d84bea`；13:32:24 exit 0，S1 seq 163 唤醒 → turn 12。结束时 `pgrep` 无残留 dsh、wrapper 或 shud 进程。
+
+**附带发现（触发停止条件，已裁决）**：按 id 的 patch 不能改行的 `name`（`vendor/include/src/index.ts:115-118` 告警 `patch: name mismatch … skipping`，实测 `runs/m2/dump-config-byid-rename.stderr`），D1「按 id 替换 `jobs` 行」不可行；spike 改用 `- id: jobs` + `disabled: true` 再插入新行（对插入行按 id 补 `config` 可行，`vendor/include/src/index.ts:94-99`）。编排方裁决：D1 挂载方式修订为 disable + insert（行 id `shud-jobs`），决策实质不变，受影响文字已在 design、proposal、specs 与 tasks 中修订（清单见 design「Open Questions」末条）。O4 使 `response` 分支在 rc.2 恒不可达；编排方裁决保留 `response|configured` 枚举，spec「Response model capture」、D10 与 task 12.1 改为 rc.2 恒记 `configured`（先 `requestHeader()?.config.model` 后 `options.model`，`source.model` 不得记为 `response`）。修订后的 requirement 经一轮 Stage 3 式三路并行复审（6 条 P1：O6 Config 投影为 `unsupported`、按 id patch 整体替换 `config`、O4 未落到 spec/任务、#303/#314 过时），全部修复并经独立验证通过。
