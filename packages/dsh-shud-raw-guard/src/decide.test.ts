@@ -741,6 +741,9 @@ const ancestorCases: [string, string, Kind, typeof options, string, string?][] =
   ["pwsh", "Set-Location -Path:x;Remove-Item -Recurse sub", "deny", subRaw, W],
   ["bash", `cd ${W} && rm -rf sub`, "deny", subRaw, W],
   ["bash", "mv abcd sub", "deny", subRaw, W],
+  // #279: a quote-spliced or escaped destructive verb is the verb.
+  ["bash", 'r"m" -rf sub', "deny", subRaw, W],
+  ["bash", "m\\v sub x", "deny", subRaw, W],
   // Accepted false positives: a destructive verb elsewhere in the command.
   ["bash", "mv x.csv sub", "deny", subRaw, W],
   ["bash", "chmod -R g+w sub", "deny", subRaw, W],
