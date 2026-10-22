@@ -9,6 +9,7 @@ import { DataProvenanceSchema } from "../../packages/dsh-shud-core/src/schemas/d
 import { ErrorRecordSchema } from "../../packages/dsh-shud-core/src/schemas/error.ts";
 import { IdempotencyRecordSchema } from "../../packages/dsh-shud-core/src/schemas/idempotency.ts";
 import { LockRecordSchema } from "../../packages/dsh-shud-core/src/schemas/lock.ts";
+import { RunJobSchema } from "../../packages/dsh-shud-core/src/schemas/run-job.ts";
 import { StackLockSchema } from "../../packages/dsh-shud-core/src/schemas/stack-lock.ts";
 import { TaskCardSchema } from "../../packages/dsh-shud-core/src/schemas/task.ts";
 
@@ -104,6 +105,50 @@ export const schemaDefinitions: SchemaDefinition[] = [
     sourcePath: "packages/dsh-shud-core/src/schemas/lock.ts",
     exportName: "LockRecordSchema",
     schema: LockRecordSchema,
+  },
+  {
+    name: "RunJob",
+    slug: "run-job",
+    sourcePath: "packages/dsh-shud-core/src/schemas/run-job.ts",
+    exportName: "RunJobSchema",
+    schema: RunJobSchema,
+    strictInput: true,
+    exampleOverrides: {
+      job_id: "JOB-20261022T031500-a1b2",
+      run_id: "RUN-20261022T031500-a1b2",
+      task_id: null,
+      stack_id: null,
+      data_id: null,
+      backend: "local_job",
+      status: "submitted",
+      project: "ccw",
+      label: "Run the ccw example",
+      input_dir: "/models/input/ccw",
+      run_dir: "/workspace/runs/RUN-20261022T031500-a1b2",
+      command: ["/usr/local/bin/shud", "-o", "output/ccw.out", "ccw"],
+      end_days: 30,
+      owner_session: null,
+      dsh_job_id: null,
+      dsh_job_ids: [],
+      pid: null,
+      pid_started_at: null,
+      input_bytes: 1024,
+      submitted_at: "2026-10-22T03:15:00Z",
+      started_at: null,
+      finished_at: null,
+      cancel_requested_at: null,
+      exit_code: null,
+      llm: {
+        response_model: "deepseek-chat",
+        response_model_source: "response",
+      },
+      notify: {
+        status: "pending",
+        attempts: 0,
+        at: null,
+        detail: null,
+      },
+    },
   },
 ];
 

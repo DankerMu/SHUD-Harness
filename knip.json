@@ -9,7 +9,7 @@
       "project": ["scripts/**/*.ts"]
     },
     "packages/dsh-shud-core": {
-      "entry": ["src/**/*.test.ts"],
+      "entry": ["src/**/*.test.ts", "src/run-identifiers.typecheck.ts"],
       "project": ["src/**/*.ts"]
     },
     "packages/dsh-shud-raw-guard": {

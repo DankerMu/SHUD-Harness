@@ -4,6 +4,9 @@ export * from "./data-provenance.ts";
 export * from "./error.ts";
 export * from "./idempotency.ts";
 export * from "./lock.ts";
+export * from "./run-constants.ts";
+export * from "./run-identifiers.ts";
+export * from "./run-job.ts";
 export * from "./stack-lock.ts";
 export * from "./task.ts";
 

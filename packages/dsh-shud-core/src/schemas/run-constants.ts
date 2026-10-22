@@ -1,0 +1,5 @@
+export const MAX_NOTIFY_ATTEMPTS = 3;
+export const MAX_COLLECT_ATTEMPTS = 3;
+export const NOTIFY_RETRY_INTERVAL_MS = 10_000;
+export const COLLECT_RETRY_INTERVAL_MS = 10_000;
+export const KILL_GRACE_PERIOD_MS = 10_000;
