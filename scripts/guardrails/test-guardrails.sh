@@ -29,13 +29,125 @@ P="packages/dsh-shud-core/src/__guardtest_maxlines.ts"; PLANTED="$PLANTED $P"
 expect_fail "eslint max-lines" pnpm exec eslint "$P"
 rm -f "$P"
 
-# 2b documented dsh seams: reject internals, accept the public type boundary.
-P="packages/dsh-shud-core/src/__guardtest_seam.ts"; PLANTED="$PLANTED $P"
-printf "import '@deepseek-ai/dsh-agent';\n" > "$P"
-expect_fail "eslint dsh internal import" pnpm exec eslint "$P"
-printf "import type {} from '@deepseek-ai/dsh-tools';\n" > "$P"
-expect_pass "eslint dsh public seam" pnpm exec eslint "$P"
-rm -f "$P"
+# 2b ADR-0006 seams: assert the specific gate, never an unrelated lint/parser failure.
+SEAM_DIR="packages/dsh-shud-core/src/__guardtest_seams"
+if ! mkdir "$SEAM_DIR"; then echo "FAIL  cannot create seam fixture directory"; exit 1; fi
+PLANTED="$PLANTED $SEAM_DIR"
+expect_seam() { # name, allow or expected rule ID, filename, source
+  name="$1"; expected="$2"; fixture="$SEAM_DIR/$3"
+  printf '%s\n' "$4" > "$fixture"
+  status=0
+  pnpm exec eslint --format json "$fixture" > "$TMP/seam.json" 2> "$TMP/seam.err" || status=$?
+  if node -e '
+    const fs = require("node:fs");
+    const [report, expected, status] = process.argv.slice(1);
+    const results = JSON.parse(fs.readFileSync(report, "utf8"));
+    const result = results[0];
+    const valid = results.length === 1 && result.fatalErrorCount === 0 &&
+      (expected === "allow"
+        ? status === "0" && result.messages.length === 0
+        : status === "1" && result.messages.length > 0 &&
+          result.messages.every(message => message.ruleId === expected && message.severity === 2));
+    if (!valid) {
+      console.error(`Expected ${expected}, ESLint exited ${status}:`, result.messages);
+      process.exitCode = 1;
+    }
+  ' "$TMP/seam.json" "$expected" "$status"; then
+    echo "PASS  $name ($expected)"
+    pass=$((pass+1))
+  else
+    echo "FAIL  $name — unexpected ESLint result"
+    cat "$TMP/seam.err"
+    fail=$((fail+1))
+  fi
+  rm -f "$fixture"
+}
+
+# Preserve the original runtime-internal rejection and public type-boundary acceptance.
+expect_seam "eslint dsh internal import" no-restricted-imports registry.ts "import '@deepseek-ai/dsh-agent';"
+expect_seam "eslint dsh public seam" allow registry.ts "import type {} from '@deepseek-ai/dsh-tools';"
+
+# Package-wide runtime seams.
+expect_seam "eslint dsh-tools runtime" allow registry.ts "import '@deepseek-ai/dsh-tools';"
+expect_seam "eslint cordis runtime" allow registry.ts "import '@deepseek-ai/cordis';"
+expect_seam "eslint dsh-jobs runtime" allow registry.ts "import { JobRegistry } from '@deepseek-ai/dsh-jobs'; export { JobRegistry };"
+expect_seam "eslint dsh-jobs-local runtime" allow registry.ts "import { LocalJobRegistry } from '@deepseek-ai/dsh-jobs-local'; export { LocalJobRegistry };"
+
+# The message seam grants one named runtime capability, not a whole module.
+expect_seam "eslint createUserMessage runtime" allow registry.ts "import { createUserMessage } from '@deepseek-ai/dsh-llm'; export { createUserMessage };"
+expect_seam "eslint dsh-llm named type" allow registry.ts "import type { MessageSourceMap } from '@deepseek-ai/dsh-llm'; export type { MessageSourceMap };"
+expect_seam "eslint dsh-llm empty type" allow registry.ts "import type {} from '@deepseek-ai/dsh-llm';"
+expect_seam "eslint dsh-llm empty type re-export" allow registry.ts "export type {} from '@deepseek-ai/dsh-llm';"
+expect_seam "eslint dsh-llm other named" no-restricted-imports registry.ts "import { createAssistantMessage } from '@deepseek-ai/dsh-llm'; export { createAssistantMessage };"
+expect_seam "eslint dsh-llm default" no-restricted-imports registry.ts "import llm from '@deepseek-ai/dsh-llm'; export { llm };"
+expect_seam "eslint dsh-llm namespace" no-restricted-imports registry.ts "import * as llm from '@deepseek-ai/dsh-llm'; export { llm };"
+expect_seam "eslint dsh-llm mixed capabilities" no-restricted-imports registry.ts "import { createUserMessage, createAssistantMessage } from '@deepseek-ai/dsh-llm'; export { createUserMessage, createAssistantMessage };"
+expect_seam "eslint dsh-llm side effect" no-restricted-syntax registry.ts "import '@deepseek-ai/dsh-llm';"
+expect_seam "eslint dsh-llm empty runtime" no-restricted-syntax registry.ts "import {} from '@deepseek-ai/dsh-llm';"
+expect_seam "eslint dsh-llm empty runtime re-export" no-restricted-syntax registry.ts "export {} from '@deepseek-ai/dsh-llm';"
+
+# Scope assembly is confined to the two exact test filenames/globs.
+expect_seam "eslint createScope test" allow seam.test.ts "import { createScope } from '@deepseek-ai/dsh-scope'; export { createScope };"
+expect_seam "eslint createScope test harness" allow test-harness.ts "import { createScope } from '@deepseek-ai/dsh-scope'; export { createScope };"
+expect_seam "eslint dsh-scope production type" allow registry.ts "import type { Scope } from '@deepseek-ai/dsh-scope'; export type { Scope };"
+expect_seam "eslint dsh-scope test type" allow seam.test.ts "import type { Scope } from '@deepseek-ai/dsh-scope'; export type { Scope };"
+expect_seam "eslint dsh-scope empty type" allow seam.test.ts "import type {} from '@deepseek-ai/dsh-scope';"
+expect_seam "eslint dsh-scope empty type re-export" allow test-harness.ts "export type {} from '@deepseek-ai/dsh-scope';"
+expect_seam "eslint dsh-scope other named" no-restricted-imports seam.test.ts "import { Scope } from '@deepseek-ai/dsh-scope'; export { Scope };"
+expect_seam "eslint dsh-scope default" no-restricted-imports seam.test.ts "import scope from '@deepseek-ai/dsh-scope'; export { scope };"
+expect_seam "eslint dsh-scope namespace" no-restricted-imports seam.test.ts "import * as scope from '@deepseek-ai/dsh-scope'; export { scope };"
+expect_seam "eslint createScope ordinary harness" no-restricted-imports harness.ts "import { createScope } from '@deepseek-ai/dsh-scope'; export { createScope };"
+expect_seam "eslint createScope production registry" no-restricted-imports registry.ts "import { createScope } from '@deepseek-ai/dsh-scope'; export { createScope };"
+expect_seam "eslint dsh-scope side effect" no-restricted-syntax seam.test.ts "import '@deepseek-ai/dsh-scope';"
+expect_seam "eslint dsh-scope empty runtime" no-restricted-syntax test-harness.ts "import {} from '@deepseek-ai/dsh-scope';"
+expect_seam "eslint dsh-scope empty runtime re-export" no-restricted-syntax seam.test.ts "export {} from '@deepseek-ai/dsh-scope';"
+
+# Type-only host access never permits checkout paths or additional runtime seams.
+expect_seam "eslint dsh-agent type" allow registry.ts "import type { Agent } from '@deepseek-ai/dsh-agent'; export type { Agent };"
+expect_seam "eslint direct checkout runtime" no-restricted-imports registry.ts "import '../../../../../deepseek-harness/packages/core/agent/src/index.ts';"
+expect_seam "eslint direct checkout type" no-restricted-imports registry.ts "import type { Agent } from '../../../../../deepseek-harness/packages/core/agent/src/index.ts'; export type { Agent };"
+expect_seam "eslint direct checkout test type" no-restricted-imports seam.test.ts "import type { Agent } from '../../../../../deepseek-harness/packages/core/agent/src/index.ts'; export type { Agent };"
+expect_seam "eslint dsh testkit runtime" no-restricted-imports seam.test.ts "import '@deepseek-ai/dsh-agent-loop-testkit';"
+expect_seam "eslint dsh-jobs subpath runtime" no-restricted-imports registry.ts "import '@deepseek-ai/dsh-jobs/internal';"
+expect_seam "eslint unlisted host runtime" no-restricted-imports registry.ts "import '@deepseek-ai/schemastery';"
+
+# Inline-only specifiers retain a runtime dependency under verbatimModuleSyntax.
+# Exercise both configurations for named-only, other host, unknown host, and subpath sources.
+for filename in registry.ts seam.test.ts; do
+  for binding in \
+    "@deepseek-ai/dsh-llm:MessageSourceMap" \
+    "@deepseek-ai/dsh-scope:Scope" \
+    "@deepseek-ai/dsh-agent:Agent" \
+    "@deepseek-ai/unlisted-seam:HostType" \
+    "@deepseek-ai/dsh-jobs/internal:JobId"; do
+    source=${binding%:*}; symbol=${binding#*:}
+    expect_seam "eslint inline type import $source in $filename" no-restricted-syntax "$filename" "import { type $symbol } from '$source'; export type { $symbol };"
+    expect_seam "eslint inline type re-export $source in $filename" no-restricted-syntax "$filename" "export { type $symbol } from '$source';"
+    expect_seam "eslint declaration type import $source in $filename" allow "$filename" "import type { $symbol } from '$source'; export type { $symbol };"
+    expect_seam "eslint declaration type re-export $source in $filename" allow "$filename" "export type { $symbol } from '$source';"
+  done
+done
+expect_seam "eslint inline scope type import in test harness" no-restricted-syntax test-harness.ts "import { type Scope } from '@deepseek-ai/dsh-scope'; export type { Scope };"
+expect_seam "eslint inline scope type re-export in test harness" no-restricted-syntax test-harness.ts "export { type Scope } from '@deepseek-ai/dsh-scope';"
+expect_seam "eslint declaration scope type import in test harness" allow test-harness.ts "import type { Scope } from '@deepseek-ai/dsh-scope'; export type { Scope };"
+expect_seam "eslint declaration scope type re-export in test harness" allow test-harness.ts "export type { Scope } from '@deepseek-ai/dsh-scope';"
+
+# A permitted runtime capability can coexist with inline types in imports and re-exports.
+for filename in registry.ts seam.test.ts; do
+  expect_seam "eslint mixed message import in $filename" allow "$filename" "import { createUserMessage, type MessageSourceMap } from '@deepseek-ai/dsh-llm'; export { createUserMessage }; export type { MessageSourceMap };"
+  expect_seam "eslint mixed message re-export in $filename" allow "$filename" "export { createUserMessage, type MessageSourceMap } from '@deepseek-ai/dsh-llm';"
+done
+for filename in seam.test.ts test-harness.ts; do
+  expect_seam "eslint mixed scope import in $filename" allow "$filename" "import { createScope, type Scope } from '@deepseek-ai/dsh-scope'; export { createScope }; export type { Scope };"
+  expect_seam "eslint mixed scope re-export in $filename" allow "$filename" "export { createScope, type Scope } from '@deepseek-ai/dsh-scope';"
+done
+
+# Package-wide runtime seams remain unrestricted, including inline-only declarations.
+for source in @deepseek-ai/dsh-tools @deepseek-ai/cordis @deepseek-ai/dsh-jobs @deepseek-ai/dsh-jobs-local; do
+  expect_seam "eslint runtime seam inline type import $source" allow registry.ts "import { type HostType } from '$source'; export type { HostType };"
+  expect_seam "eslint runtime seam inline type re-export $source" allow registry.ts "export { type HostType } from '$source';"
+done
+rm -rf "$SEAM_DIR"
 
 # 3 jscpd (duplicate block planted in an isolated dir, scanned directly)
 mkdir -p "$ROOT/scripts/__guardtest_dup"; PLANTED="$PLANTED scripts/__guardtest_dup"
