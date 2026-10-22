@@ -56,7 +56,7 @@ Must add/change:
     kind: "deny",
     code: "raw-ancestor-write",
     reason:
-      "Raw data is immutable: this command deletes, moves or re-permissions a directory that contains raw data. Target an explicit path inside that directory instead.",
+      "Raw data is immutable: this command deletes, moves or re-permissions while naming a directory that contains raw data. Target an explicit path inside that directory, or split the command so the destructive part does not name it.",
   };
   // Strict ancestors, nearest first; "/" and spellings ending in . or .. are not.
   function rawAncestors(path: string): string[] { /* 与 r2 版相同 */ }
@@ -96,12 +96,14 @@ Must add/change:
     - 分隔符与引号：`(rm -rf sub)`、`rm -rf sub;ls`、`rm -rf sub&&ls`、`rm -rf sub|cat`、`` `rm -rf sub` ``、`rm -rf sub>x`、`mv x --target-directory=sub`。
     - glob 与 brace：`rm -rf sub/?aw`、`rm -rf sub/[r]aw`、`rm -rf {x,sub}`、`rm -rf sub*`、`rm -rf sub/{raw,x}`、`rm -rf sub{,x}`。
     - 命令替换：`rm -rf $(true)sub`、`` rm -rf `true`sub ``。
+  - 补钉住（review round 2）deny：`rm -rf sub/ x`、`rm -rf sub/&&ls`（`/` 后接空白或分隔符）；`chown -R 0 sub`、`chgrp -R 0 sub`、`unlink sub`、`shred sub`（其余 POSIX 动词）；pwsh `ri -r sub`、`del -Recurse sub`、`Rename-Item sub x`（pwsh 别名与 Rename-Item）；bash `pwsh -c "Remove-Item -Recurse sub"`（pwsh 包裹）；`runIf(caseInsensitive)` 下 `RM -rf sub`（动词大小写）。
+  - 复合命令（已接受误报，deny）：默认配置 `ls <父> && rm -f tmp.csv`。
   - 切换目录 deny：`cd -P&&rm -rf sub`、pwsh `Set-Location -Path:x;Remove-Item -Recurse sub`、`cd ${W} && rm -rf sub`、`mv abcd sub`（`abcd` 不得被当作 `cd` 剥离）。
   - 大小写 deny（`test.runIf(caseInsensitive)`）：`rm -rf SUB`。
   - 多 raw：`rawDirs` 为 `["sub/raw", "protected"]` 与 `["protected", "sub/raw"]` 两种顺序下，`rm -rf sub protected/x` 都为 `deny`、`code` 为 `raw-immutable`；`ls sub && cat protected/x` 为 ask。
   - 已接受误报（deny）：`mv x.csv sub`（移入祖先）、`chmod -R g+w sub`。
   - 非破坏性写入 next（PI 补充决策）：
-    - 默认配置，用 `rawParent` 拼接：`ls <父> > files.txt`、`mkdir -p <父>`、`cp out.csv <父>/`、`tar -xf a.tar -C <父>`；
+    - 默认配置，用 `rawParent` 拼接：`ls <父>`、`grep -r foo <父>`、`ls <父> > files.txt`、`mkdir -p <父>`、`cp out.csv <父>/`、`tar -xf a.tar -C <父>`；
     - heredoc：`cat > scripts/a.py <<'EOF'` 后接一行 `<父> = 1`，再接 `EOF`；
     - 解释器与文本：`python -c "<父> = 1" > out.log`、`Rscript -e '<父> <- 1'`、`echo 'load <父>' >> notes.md`、`grep -rn <父> src > hits.txt`；
     - stand-in：`ls sub > out.txt`、`cp out.csv sub/`。
@@ -132,7 +134,7 @@ Required evidence:
 - 新增 deny 行在改动前的 `decide.ts`（origin/main）上为红（next），改后为绿；next 行与多 raw 行改动前后都为绿；既有行不变。
 - 突变：
   1. 去掉第二遍祖先判定 → 全部祖先 deny 行变红。
-  2. `ANCESTOR_BEFORE` 置空 → `rm -rf mysub`、`rm -rf other/sub` 变红。
+  2. `ANCESTOR_BEFORE` 置空 → `rm -rf mysub`、`rm -rf other/sub` 变红；只去掉 lookbehind 而保留 `(?:\./)*` 时，`./` 对抗行退化为平方复杂度，测试以超时失败（去掉该行后上述两行变红）。
   3. 右边界允许 `/` 加普通路径名 → `rm -rf sub/derived` 变红。
   4. 右边界不接受 `/` 后跟行尾或 glob → `rm -rf sub/`、`rm -rf sub/*` 变红。
   5. `RAW_ANCESTOR_LEVELS = 4` → `rm -rf a` 与第 4 级绝对路径行变红。
@@ -161,6 +163,12 @@ Required evidence:
       - 去掉 `-delete|--remove-files` → `find sub -delete`、`tar --remove-files` 行变红；
       - 去掉 `git clean` → 该行变红。
   22. `CHDIR_OPERAND` 左边界允许字母 → `mv abcd sub` 变红。
+  23. `ANCESTOR_AFTER` 中 `/` 之后的字符类去掉 `\s` → `rm -rf sub/ x` 变红。
+  24. `ANCESTOR_AFTER` 中 `/` 之后的字符类去掉 `;&|()<>` → `rm -rf sub/&&ls` 变红。
+  25. POSIX 破坏性动词表分别去掉 `chown`、`chgrp`、`unlink`、`shred` → 对应行变红。
+  26. pwsh 破坏性动词表只保留 `Remove-Item|Move-Item` → `ri -r sub`、`del -Recurse sub`、`Rename-Item sub x` 变红。
+  27. pwsh 破坏性动词只对 `call.name === "pwsh"` 生效 → bash `pwsh -c "Remove-Item -Recurse sub"` 变红。
+  28. 破坏性动词正则去掉 `/i` → `RM -rf sub` 变红（只在大小写不敏感文件系统上）。
 - `pnpm vitest run packages/dsh-shud-raw-guard` 全绿；`pnpm run check` exit 0，覆盖率不降；`pnpm run build`；`pnpm run test-guardrails`。
 - live `pnpm run raw-guard:probes`（编排方）运行两次：T1–T5 PASS（INCONCLUSIVE 则重跑），md5 不变。
 
@@ -170,7 +178,7 @@ Non-goals:
 - `~` 与变量展开。
 - 非破坏性写入（重定向、`cp`、`tar -x`、`tee`、`mkdir`）对祖先内文件的覆盖。
 - 解释器一行程序删除祖先，如 `python -c "shutil.rmtree('data')"`。
-- 按参数位置区分实际删的是哪个路径：整条命令只要含破坏性动词即判定。
+- 按参数位置区分实际删的是哪个路径：整条命令只要含破坏性动词即判定，含复合命令（`ls data && rm -f tmp.csv`）。
 - 动词被引号拆开（#279）。
 - 前导 `./` 配置（#277）。
 - 文件工具分支；`WRITE_VERBS` 常量本身。

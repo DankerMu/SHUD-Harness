@@ -698,6 +698,18 @@ const ancestorCases: [string, string, Kind, typeof options, string, string?][] =
   ["bash", "rm -rf sub{,x}", "deny", subRaw, W],
   ["bash", "rm -rf $(true)sub", "deny", subRaw, W],
   ["bash", "rm -rf `true`sub", "deny", subRaw, W],
+  // Review round 2 pins: / followed by a blank or a separator, the remaining POSIX
+  // verbs, pwsh aliases and Rename-Item, and a pwsh wrapper run from bash.
+  ["bash", "rm -rf sub/ x", "deny", subRaw, W],
+  ["bash", "rm -rf sub/&&ls", "deny", subRaw, W],
+  ["bash", "chown -R 0 sub", "deny", subRaw, W],
+  ["bash", "chgrp -R 0 sub", "deny", subRaw, W],
+  ["bash", "unlink sub", "deny", subRaw, W],
+  ["bash", "shred sub", "deny", subRaw, W],
+  ["pwsh", "ri -r sub", "deny", subRaw, W],
+  ["pwsh", "del -Recurse sub", "deny", subRaw, W],
+  ["pwsh", "Rename-Item sub x", "deny", subRaw, W],
+  ["bash", 'pwsh -c "Remove-Item -Recurse sub"', "deny", subRaw, W],
   // Change-directory options stop at ; & | ( ) < > (review fixture r2); naming after
   // a cd still names, and abcd is not a cd.
   ["bash", "cd -P&&rm -rf sub", "deny", subRaw, W],
@@ -707,6 +719,7 @@ const ancestorCases: [string, string, Kind, typeof options, string, string?][] =
   // Accepted false positives: a destructive verb elsewhere in the command.
   ["bash", "mv x.csv sub", "deny", subRaw, W],
   ["bash", "chmod -R g+w sub", "deny", subRaw, W],
+  ["bash", `ls ${rawParent} && rm -f tmp.csv`, "deny", defaults, defaultWs],
   // Non-destructive writes naming an ancestor pass through (PI 2026-10-21).
   ["bash", `ls ${rawParent} > files.txt`, "next", defaults, defaultWs],
   ["bash", `mkdir -p ${rawParent}`, "next", defaults, defaultWs],
@@ -724,6 +737,8 @@ const ancestorCases: [string, string, Kind, typeof options, string, string?][] =
   ["bash", `cd ${W} && python run.py > log.txt`, "next", subRaw, W],
   ["pwsh", "Set-Location sub; Remove-Item -Recurse derived", "next", subRaw, W],
   // Read-only ancestor commands pass through (PI 2026-10-21).
+  ["bash", `ls ${rawParent}`, "next", defaults, defaultWs],
+  ["bash", `grep -r foo ${rawParent}`, "next", defaults, defaultWs],
   ["bash", "ls sub", "next", subRaw, W],
   ["bash", "grep -r foo sub", "next", subRaw, W],
   ["bash", "du -sh sub", "next", subRaw, W],
@@ -769,6 +784,10 @@ test.each(ancestorCases)(
 
 test.runIf(caseInsensitive)("case-insensitive filesystem: bash `rm -rf SUB` -> deny (#273)", () => {
   expectAncestorDecision(decide("bash", { command: "rm -rf SUB" }, subRaw, W), "deny");
+});
+
+test.runIf(caseInsensitive)("case-insensitive filesystem: bash `RM -rf sub` -> deny (#273)", () => {
+  expectAncestorDecision(decide("bash", { command: "RM -rf sub" }, subRaw, W), "deny");
 });
 
 // Touching any raw dir keeps the raw decision whatever the rawDirs order.

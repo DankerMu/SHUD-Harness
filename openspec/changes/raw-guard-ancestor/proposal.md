@@ -38,7 +38,7 @@ Blast radius:
 - 切换目录剥离不判断命令位置：任何单独出现的 `cd`/`pushd`/`sl` 词都会吃掉后一个词（如 `rm -rf cd data`），写入漏报清单；其选项子模式不得越过 `;&|()<>`，否则 `cd -P&&rm -rf data` 会放行。
 - 探针 T1–T5 必须不变。
 Selected risk packs: Public API / CLI / script entry; File IO / path safety; Auth / permissions / secrets; Legacy compatibility; Documentation / migration notes; Resource limits
-Evidence floor: 新增 deny 行先红后绿，next 行改前改后都绿；既有全部行不变；22 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
+Evidence floor: 新增 deny 行先红后绿，next 行改前改后都绿；既有全部行不变；28 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
 
 ## Capabilities
 
@@ -48,6 +48,6 @@ Evidence floor: 新增 deny 行先红后绿，next 行改前改后都绿；既�
 
 ## Impact
 
-- 代码：`packages/dsh-shud-raw-guard/src/decide.ts`（约 25 行）、`decide.test.ts`。
+- 代码：`packages/dsh-shud-raw-guard/src/decide.ts`（约 65 行）、`decide.test.ts`。
 - 规范：`openspec/specs/raw-data-guard/spec.md` 改一条 Requirement、加一条 Requirement。
 - 运行时：`lib/decide.js` 由 `pnpm run build` 产出；探针不改。

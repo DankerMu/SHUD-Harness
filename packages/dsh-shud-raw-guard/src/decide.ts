@@ -78,7 +78,7 @@ const ANCESTOR_DENY: RawGuardDecision = {
   kind: "deny",
   code: "raw-ancestor-write",
   reason:
-    "Raw data is immutable: this command deletes, moves or re-permissions a directory that contains raw data. Target an explicit path inside that directory instead.",
+    "Raw data is immutable: this command deletes, moves or re-permissions while naming a directory that contains raw data. Target an explicit path inside that directory, or split the command so the destructive part does not name it.",
 };
 
 type RawGuardOptions = { rawDirs: string[] };

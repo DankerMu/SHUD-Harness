@@ -106,7 +106,7 @@
 
 点名祖先但不含破坏性动词时 SHALL 委托下一个监听器。这包括只读命令，如 `ls data`、`grep -r foo data`，以及非破坏性写入，如 `ls data > files.txt`、`mkdir -p data`、`cp out.csv data/`、heredoc 或 `python -c` 里出现单词 `data`。这些都不弹 provenance 审批卡。
 
-含破坏性动词的命令即按上述规则判定，即使实际删的或移的是别处，例如 `mv x.csv data`、`chmod -R g+w data`。这些 deny 方向的误报已接受；改用 `data/x.csv` 这类明确路径即不再命中。
+含破坏性动词的命令即按上述规则判定，即使实际删的或移的是别处，例如 `mv x.csv data`、`chmod -R g+w data`，以及复合命令中只读或文本里出现祖先、破坏性动词作用于别处的情形（如 `ls data && rm -f tmp.csv`、`git commit -m 'refresh data' && rm -rf build`、`rm -f data/*.tmp`）。reason SHALL 同时提示改用明确路径或拆分命令。这些 deny 方向的误报已接受；改用 `data/x.csv` 这类明确路径即不再命中。
 
 #### Scenario: deleting or moving a raw ancestor is denied
 - **WHEN** 配置 `rawDirs: ["sub/raw"]`，调用 `bash`，`command` 为以下任一：
@@ -141,7 +141,7 @@
 - **THEN** 两种顺序下决策都为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: a destructive verb elsewhere in an ancestor-naming command is denied
-- **WHEN** 配置 `rawDirs: ["sub/raw"]`，`command` 为 `mv x.csv sub` 或 `chmod -R g+w sub`
+- **WHEN** 配置 `rawDirs: ["sub/raw"]`，`command` 为 `mv x.csv sub` 或 `chmod -R g+w sub`；或默认配置下 `command` 为 `ls data && rm -f tmp.csv`
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-ancestor-write`（已接受误报）
 
 #### Scenario: changing into an ancestor is not naming it
