@@ -136,6 +136,8 @@ spike 放在仓库外，不开 openspec change / issue / PR。每项记录：行
 
 - 2026-10-21 M1 收口复审：三项验收门独立重跑全绿后，白盒复审在 raw-guard 决策核发现 shell 文本判定比规范窄（glob/brace 绕过、`/bin/rm` 等落 ask），立 [#245](https://github.com/DankerMu/SHUD-Harness/issues/245) 并以 PR [#246](https://github.com/DankerMu/SHUD-Harness/pull/246) 修复（OpenSpec change `raw-guard-shell-boundary`，已归档）；三轮跨审 + PI 批准一次 fix-pass extend。存量缺口另立 [#247](https://github.com/DankerMu/SHUD-Harness/issues/247)（非字面路径拼写）、[#248](https://github.com/DankerMu/SHUD-Harness/issues/248)（`2>/dev/null` 重定向误报）。Epic #210 不重开。
 
+- 2026-10-22 M1→M2 边界 dsh 升级评估（#295，Phased_Plan §6）：执行 `env -u ALL_PROXY npm view @deepseek-ai/dsh dist-tags --json`，npm `latest` 与 `next` 均为 `0.2.1-rc.2`（`alpha` 为 `0.2.1-alpha.5`），与当前钉版一致；`git -C ../deepseek-harness describe --tags --exact-match HEAD` 返回 `dsh-v0.2.1-rc.2`。只读检查该 checkout 的 `docs/upgrade-guide/`，只有 `v0.1.7-rc.2`、`v0.2.0-rc.2` 与 `v0.2.1-alpha.1`–`alpha.4`，无 rc.2 之后条目，因而没有可评估的新版本 seam 迁移说明。结论：跳过升级，保持钉版与依赖不变；未运行升级后的回归探针。真正升级时仍须核对 `jobs`、`jobs-local`、`tool-jobs`、`api/session-controller`、`storage`、session 恢复及 ADR-0006 要求的 `dsh-llm`/`dsh-scope` 变更。#233 保持 open：本次未重跑 stock Web 与 shud 的 schema 投影对照，不宣称其 carrier projection error 已解决，待真正升级时复核。
+
 ### M1 手工 Web 验收证据（2026-10-21，#223）
 
 PI 选择补采一次真实 Web 会话并亲自在审批卡点击“允许一次”；下列记录补齐上条工程集成日志中的证据缺口。使用持久 `DSH_HOME=/Users/danker/.dsh` 的 `shud` Web profile，模型为 `deepseek-flash-guan`（DMXAPI，key 仅由环境变量提供）。通过宿主现有 workspace API 登记合成工作区，不改宿主代码或 profile 配置；agent 未代批审批。
