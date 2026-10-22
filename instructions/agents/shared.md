@@ -98,11 +98,14 @@ SHUD-Harness/
 
 ```sh
 export DSH_HOME="$(mktemp -d)"
+export SHUD_BIN="/absolute/path/to/shud" # 替换为本机已构建、可执行的普通文件
 pnpm run profile:install
 node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 ```
 
-`profile:install` 默认以 `web` 模板创建 `shud` 并 `link:` 安装本仓库 bundle；安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --no-open --port <p>`（profile 已选择 Web 应用，不再传 `web` 位置参数）。headless 任务改用同一 bundle 的独立 profile：
+`profile:install` 要求 `SHUD_BIN` 是绝对路径、可执行普通文件；缺失或无效时在创建/修改 profile 前失败，不回退默认路径。安装器先以 `web` 模板创建 `shud`，再 `link:` 安装本仓库 bundle：禁用旧 `jobs` 行，并插入 `shud-jobs`（不是按 id 改 name）。安装器仅拥有用户 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 的唯一 `shud-jobs` 项，配置 `shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`；raw 覆写与其它字节保持不变，相同配置重装不改文件。此阶段只配置/校验 stateDir，排他锁与索引尚待 #304，不声称已有跨重启恢复能力。
+
+安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --no-open --port <p>`（profile 已选择 Web 应用，不再传 `web` 位置参数）。headless 任务改用同一 bundle 的独立 profile，并同样保留 `SHUD_BIN`：
 
 ```sh
 PROFILE_NAME=shud-probe PROFILE_TEMPLATE=headless pnpm run profile:install

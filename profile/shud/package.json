@@ -12,6 +12,7 @@
     "@deepseek-ai/dsh": "0.2.1-rc.2"
   },
   "dependencies": {
+    "@shud-harness/dsh-shud-jobs": "workspace:*",
     "@shud-harness/dsh-shud-raw-guard": "workspace:*"
   },
   "dsh": {

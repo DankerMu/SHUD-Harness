@@ -197,8 +197,10 @@ try {
   if (writable.some(path => contains(path, scratch)) || contains(root, scratch)) throw new Error('Scratch is inside a sandbox writable root or repository');
   runDir = fs.mkdtempSync(join(tmpdir(), 'shud-raw-guard-'));
   const home = join(runDir, 'home');
+  const shudBin = join(runDir, 'shud-placeholder');
+  fs.writeFileSync(shudBin, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
   const env = { ...process.env, DSH_HOME: home, PROFILE_NAME: 'shud-probe', PROFILE_TEMPLATE: 'headless' };
-  const install = run('sh', [join(root, 'scripts/runtime/profile-install.sh')], root, env);
+  const install = run('sh', [join(root, 'scripts/runtime/profile-install.sh')], root, { ...env, SHUD_BIN: shudBin });
   fs.writeFileSync(join(runDir, 'install.log'), (install.stdout || '') + (install.stderr || ''));
   if (install.status !== 0) throw new Error('Profile installation failed; see install.log');
   const raw = join(workspace, 'data/raw/obs.csv');
