@@ -34,6 +34,27 @@ test("rejects invalid rawDirs rather than silently using defaults", () => {
   expect(normalizeRawDirs({ rawDirs: ["data/raw/", "/"] })).toEqual({ rawDirs: ["data/raw", "/"] });
 });
 
+// #277: configured text is normalized once: `//` folds, a `/.` segment drops, then
+// one leading `./` drops unless nothing follows; `..` and dot names stay as written.
+test.each([
+  [["./sub/raw"], ["sub/raw"]],
+  [["././sub/raw/"], ["sub/raw"]],
+  [["./sub/./raw"], ["sub/raw"]],
+  [["./"], ["."]],
+  [["."], ["."]],
+  [["./."], ["."]],
+  [["//"], ["/"]],
+  [[".//sub/raw"], ["sub/raw"]],
+  [["/data/./raw/"], ["/data/raw"]],
+  [["/data/raw"], ["/data/raw"]],
+  [
+    [".raw", "../outside/raw", "deep-link/..", "sub/. raw"],
+    [".raw", "../outside/raw", "deep-link/..", "sub/. raw"],
+  ],
+])("normalizeRawDirs %j -> %j (#277 dot prefix)", (rawDirs, expected) => {
+  expect(normalizeRawDirs({ rawDirs })).toEqual({ rawDirs: expected });
+});
+
 const cwd = mkdtempSync(join(tmpdir(), "shud-guard-"));
 mkdirSync(join(cwd, "protected", "nested"), { recursive: true });
 symlinkSync(join(cwd, "protected"), join(cwd, "alias"));
@@ -831,3 +852,48 @@ test("bash `rm -f x ` + './' x 5e5 + subx -> next (#273 adversarial)", () => {
     "next",
   );
 });
+
+// #277: `./` spellings of the configured raw dir decide like the plain spelling.
+// dotWs is not realpathed; the absolute row uses its realpath like other rows.
+const dotWs = mkdtempSync(join(tmpdir(), "shud-guard-dot-"));
+mkdirSync(join(dotWs, "sub", "raw"), { recursive: true });
+afterAll(() => rmSync(dotWs, { recursive: true, force: true }));
+const dotSubRaw = normalizeRawDirs({ rawDirs: ["./sub/raw"] });
+const dotCommands: [string, Kind][] = [
+  ["rm -rf sub/raw", "deny"],
+  ["rm -rf sub/raw/x", "deny"],
+  ["cp a sub/raw/b", "deny"],
+  ["echo hi > sub/raw/f", "deny"],
+  ["rm -rf ./sub/raw", "deny"],
+  [`rm -rf ${realpathSync(dotWs)}/sub/raw`, "deny"],
+  ["cat sub/raw/x", "ask"],
+  ["rm -rf sub/rawx", "next"],
+  ["rm -rf sub/raw.bak", "next"],
+  ["rm -rf sub/raw_old", "next"],
+];
+test.each(
+  ["./sub/raw", "././sub/raw", "./sub/./raw"].flatMap((raw) =>
+    dotCommands.map(([command, kind]) => [raw, command, kind] as const),
+  ),
+)("rawDirs [%s] bash `%s` -> %s (#277 dot prefix)", (raw, command, kind) => {
+  const result = decide("bash", { command }, normalizeRawDirs({ rawDirs: [raw] }), dotWs);
+  expect(result.kind).toBe(kind);
+  if (kind === "ask") expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+  if (kind === "deny") expect(result.code).toBe("raw-immutable");
+});
+
+test("rawDirs [./sub/raw] bash `rm -rf sub` -> deny (#277 dot prefix ancestor)", () => {
+  expectAncestorDecision(decide("bash", { command: "rm -rf sub" }, dotSubRaw, dotWs), "deny");
+});
+
+test.each(["./", "."])("rawDirs [%s] write `x.csv` -> deny (#277 workspace)", (raw) => {
+  const config = normalizeRawDirs({ rawDirs: [raw] });
+  expect(decide("write", { file_path: "x.csv" }, config, dotWs).kind).toBe("deny");
+});
+
+test.each(["sub/raw/x", "./sub/raw/x"])(
+  "rawDirs [./sub/raw] write `%s` -> deny (#277 file tools)",
+  (target) => {
+    expect(decide("write", { file_path: target }, dotSubRaw, dotWs).kind).toBe("deny");
+  },
+);

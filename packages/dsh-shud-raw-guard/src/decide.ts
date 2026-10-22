@@ -97,7 +97,21 @@ export function normalizeRawDirs(config: unknown = {}): RawGuardOptions {
   ) {
     throw new Error("rawDirs must be a non-empty array of non-empty strings, with no unknown keys");
   }
-  return { rawDirs: (dirs as string[]).map((dir) => dir.replace(/\/+$/, "") || "/") };
+  // #277: configured text is normalized once, so mention, ancestor and canonical
+  // checks compare the same spelling: `//` collapses, a `/.` segment (followed by
+  // `/` or end) drops, then one leading `./` (the folding leaves at most one)
+  // drops unless nothing follows it. Unlike commands, no shell boundary ends a
+  // segment here, so `a/. b` stays a path to `. b`.
+  return {
+    rawDirs: (dirs as string[]).map(
+      (dir) =>
+        dir
+          .replace(/\/{2,}/g, "/")
+          .replace(/\/\.(?=\/|$)/g, "")
+          .replace(/^\.\/(?=.)/, "")
+          .replace(/\/+$/, "") || "/",
+    ),
+  };
 }
 
 function canonical(target: string, cwd: string): string {
