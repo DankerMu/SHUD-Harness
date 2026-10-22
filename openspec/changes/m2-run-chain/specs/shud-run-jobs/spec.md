@@ -2,116 +2,263 @@
 
 ## Purpose
 
-定义替换 dsh `jobs-local` 的持久化作业注册表：shud 作业如何落盘、脱离宿主运行、单并发排队、在 dsh 重启（SIGTERM/SIGKILL）后对账、结算时自动生成 RunRecord 并至少一次唤醒发起会话，以及证明这些行为的本机验收脚本与 Epic 收口手工验收。
+定义替换 dsh `jobs-local` 的持久化作业注册表：shud 作业如何落盘、以无 owner 方式在 dsh 登记、并行且脱离宿主运行、在 dsh 重启（SIGTERM/SIGKILL）后对账与接管、结算时自动生成 RunRecord 并经唯一路径至少一次唤醒发起会话、可恢复性不变量如何判定，以及证明这些行为的本机验收脚本与 Epic 收口手工验收。本 spec 中"有效工作目录"与"session cwd"均指 `shud_run` 调用所属会话的 cwd（shud-run-tools「shud_run arguments」）。
 
 ## ADDED Requirements
 
 ### Requirement: Registry replacement
-`shud` profile SHALL 只有一个 `ctx.jobs` 实现，由 `@shud-harness/dsh-shud-jobs` 提供并以 id `jobs` 替换 Web 模板的 `jobs-local` 行。对 `kind` 不是 `shud` 的作业，注册表的行为（登记、输出读取、`job_list`/`job_output`/`job_kill`、并发上限、作用域与事件路由、teardown 时取消并等待结算）SHALL 与 `jobs-local` 一致，且 SHALL NOT 跨重启保留；重启后对这些作业 id 的查询仍为 `unknown job`。
+`shud` profile SHALL 只有一个 `ctx.jobs` 实现，由 `@shud-harness/dsh-shud-jobs` 提供并以 id `jobs` 替换 Web 模板的 `jobs-local` 行。对 `kind` 不是 `shud` 的作业，注册表的行为（登记、owner 与作用域、输出读取、`job_list`/`job_output`/`job_kill`、并发上限、事件路由、owner 释放与 teardown 时取消并等待结算）SHALL 与 `jobs-local` 一致，且 SHALL NOT 跨重启保留；重启后对这些作业 id 的查询仍为 `unknown job`。
 
 #### Scenario: bash background job unchanged
 - **WHEN** 模型以 `bash` 的 `run_in_background` 启动 `sleep 1; echo ok`
 - **THEN** `job_list` 列出该作业，结束后 `job_output` 返回 `ok`，发起会话按 `tool-jobs` 常规路径被唤醒
+
+#### Scenario: non-shud spec through the registry
+- **WHEN** 集成测试经 `ShudJobRegistry` 以有 owner 的非 shud `JobSpec` 启动作业，并分别执行输出读取、kill、超出 `maxConcurrentJobsPerOwner` 的第 N+1 次启动与 owner 释放
+- **THEN** 各步的返回值、事件序列与异常与直接使用 `LocalJobRegistry` 时相同，且不产生运行目录或索引条目
 
 #### Scenario: non-shud job not durable
 - **WHEN** 一个 `bash` 后台作业运行中 dsh 被重启
 - **THEN** 重启后 `job_output` 对该作业 id 报 `unknown job`，不产生运行目录或活动索引条目
 
 ### Requirement: Registry configuration
-插件行 SHALL 要求配置 `stateDir`（绝对路径，可写目录，不存在时创建）与 `shudBin`（可执行文件绝对路径）；任一缺失、为空、不可写或不可执行时，插件行 SHALL 启动失败并给出指明配置键的错误，SHALL NOT 回退到任何内置默认值。未知配置键 SHALL 使启动失败。
+插件行配置 SHALL 为 `LocalJobRegistry.Config` 与 {`stateDir`, `shudBin`} 的并集：父类键（`maxConcurrentJobsPerOwner`、`retainBytes`、`settledRetainBytes`、`pumpPollMs`）沿用父类默认值与校验；`stateDir`（绝对路径，可写目录，不存在时创建）与 `shudBin`（可执行文件绝对路径）为必填。任一必填键缺失、为空、不可写或不可执行，或出现并集之外的键时，插件 apply SHALL 抛出指明配置键的错误，SHALL NOT 回退到任何内置默认值。dsh 不把 `jobs` 视为必需启动项，因此该行激活失败时 dsh 继续启动、在 stderr 打印该行的激活失败诊断（含错误消息）；此时 `ctx.jobs` 不存在，依赖它的插件行（`tool-jobs`、`shud-tools` 等）不激活，`bash run_in_background` 与 Web 作业卡不可用。
 
-#### Scenario: missing shudBin
-- **WHEN** profile 中 `jobs` 行的配置缺少 `shudBin`
-- **THEN** `dsh --profile shud --dump-config` 报告该插件行失败且错误含 `shudBin`
+#### Scenario: missing shudBin at apply
+- **WHEN** vitest 以缺少 `shudBin` 的配置 apply 注册表插件
+- **THEN** apply 抛错且错误消息含 `shudBin`，未注册 `ctx.jobs`
+
+#### Scenario: parent keys accepted, unknown key rejected
+- **WHEN** 以 `maxConcurrentJobsPerOwner: 2` 加两个必填键 apply，另以多出 `shudbin` 键的配置 apply
+- **THEN** 前者成功且第 3 个并发无 owner 作业的启动按父类规则被拒；后者抛错并指出未知键 `shudbin`
+
+#### Scenario: missing shudBin at real boot
+- **WHEN** 以把 `jobs` 行 `shudBin` 置空的 overlay 执行 `dsh --profile shud --patch <overlay> --no-open --port <p>`
+- **THEN** stderr 含 `did not activate`、`jobs` 与 `shudBin`，`tool-jobs` 行未激活
+
+### Requirement: State directory lock and indexes
+注册表 SHALL 在 apply 时于 `stateDir` 取得排他锁文件 `lock`（记录持有者 pid 与进程启动时间）：锁被另一个存活的 dsh 进程持有（pid 存活且启动时间一致）时 apply SHALL 失败并指明 `stateDir` 与持有者 pid；持有者已不存在或 pid 被复用时 SHALL 视为陈旧锁并接管；注册表释放时 SHALL 删除锁。`stateDir` SHALL 含活动索引 `active.json`（尚未完成唤醒的作业的 `run_id`、`job_id`、运行目录绝对路径）与完成索引 `completed.json`（已离开活动索引的作业的 `run_id`、`job_id` 到运行目录绝对路径的映射），二者 SHALL 以临时文件加 rename 原子写；同一注册表实例内对索引的所有修改 SHALL 串行执行。作业离开活动索引时 SHALL 先写入完成索引再从活动索引移除。
+
+#### Scenario: two concurrent submissions
+- **WHEN** 两个会话几乎同时各提交一个 shud 作业
+- **THEN** 两个作业都在 `active.json` 中、各有自己的运行目录，二者都进入 `running`
+
+#### Scenario: second process on the same stateDir
+- **WHEN** 一个 dsh 进程持有 `stateDir` 锁时，另一个 dsh 进程以同一 `stateDir` 启动
+- **THEN** 后者的 `jobs` 行激活失败，诊断含该 `stateDir` 与持有者 pid；前者不受影响
+
+#### Scenario: stale lock reclaimed
+- **WHEN** `lock` 记录的 pid 已不存在（前一个 dsh 被 SIGKILL）时启动注册表
+- **THEN** apply 成功，`lock` 改为记录当前进程
 
 ### Requirement: Shud job submission
-提交 shud 作业时注册表 SHALL：分配 `job_id`/`run_id`；在 `<有效工作目录>/runs/<run_id>/` 建运行目录；把输入目录完整复制到 `input/<project>/`（复制失败则作业以 `failed` 结束、不启动 SHUD）；有 `end_days` 时只在副本的 `<project>.cfg.para` 中改写 `END`；先原子写 `run-job.json`（`status: created`）与活动索引条目，再入队。SHALL NOT 修改原输入目录。作业 SHALL 在 dsh 中以 `kind: shud` 登记，`job_output` SHALL 能读到 `stdout.log` 的增量内容。
+`shud_run` 调用期间注册表 SHALL 同步完成提交，顺序为：分配 `job_id`/`run_id`；创建 `<session cwd>/runs/<run_id>/`，创建前后各以 `lstat` 确认 `runs/` 与 `runs/<run_id>` 均为真实目录（不是符号链接）且 `runs/<run_id>` 由本次非递归 `mkdir` 新建；把输入目录完整复制到 `input/<project>/`（M2 恒为完整复制）；有 `end_days` 时只在副本的 `<project>.cfg.para` 中改写 `END`；原子写 `run-job.json`（`status: created`）并加入活动索引；写 `status: submitted`；经父类 `start` 以无 owner、`kind: shud`、label `<run_id>`（有 `label` 时为 `<run_id> <label>`）登记，并把 `stdout.log` 作为输出源——登记前注册表 SHALL 以自身构造时的无作用域上下文经父类 `attachController` 挂载一个全局层控制器，父类 `start` 返回或抛错后立即释放（无 owner 作业只能由全局控制器放行；该控制器 SHALL NOT 常驻），因此登记不依赖 `tool-jobs` 是否挂载或挂在哪一层；包装进程 spawn 后写 `pid`、`pid_started_at` 与 `status: running`。运行目录复核失败、复制失败或父类 `start` 抛错时，注册表 SHALL 删除本次运行目录（含部分副本）与已加入的索引条目，并以说明原因的错误失败，使 `shud_run` 返回工具错误；此时 SHALL NOT 留下 RunJob、RunRecord 或索引条目。SHALL NOT 修改原输入目录。注册表 SHALL 把 `owner_session` 记为调用所属会话 id，`dsh_job_id` 记为本次登记 id 并追加到 `dsh_job_ids`。
 
 #### Scenario: input copied and END patched
 - **WHEN** 以 `SHUD/input/ccw` 为输入、`end_days: 30` 提交
-- **THEN** `runs/<run_id>/input/ccw/ccw.cfg.para` 的 `END` 为 30，原 `SHUD/input/ccw/ccw.cfg.para` 字节不变，`run-job.json` 存在且 `status` 不早于 `created`
+- **THEN** `runs/<run_id>/input/ccw/ccw.cfg.para` 的 `END` 为 30，原 `SHUD/input/ccw/ccw.cfg.para` 字节不变，`run-job.json` 存在且 `status` 为 `running`
+
+#### Scenario: copy failure leaves nothing
+- **WHEN** 复制过程中某个输入文件不可读
+- **THEN** `shud_run` 返回指出该文件的工具错误，`runs/<run_id>/` 不存在，`active.json` 与 `completed.json` 均无该 `run_id`
+
+#### Scenario: symlinked runs directory rejected
+- **WHEN** `<session cwd>/runs` 是指向任意目录的符号链接时调用 `shud_run`
+- **THEN** 工具返回指出 `runs/` 为符号链接的错误，链接目标内没有新建目录
 
 #### Scenario: job output streams log
-- **WHEN** 作业运行中模型调用 `job_output`
+- **WHEN** 作业运行中模型以 `shud_run` 返回的 `dsh_job_id` 调用 `job_output`
 - **THEN** 返回 `stdout.log` 中自上次读取后新增的内容
 
+#### Scenario: only preset-scoped tool-jobs
+- **WHEN** 装配中唯一的外部控制器是在某个 preset 作用域内挂载的 `tool-jobs`（Web 模板形态）时提交 shud 作业
+- **THEN** 提交成功；该 preset 内的 `job_list` 列出此作业，以其 `dsh_job_id` 调用 `job_output` 与 `job_kill` 成功；提交返回后全局层没有残留控制器
+
+#### Scenario: no resident global controller
+- **WHEN** 提交过 shud 作业后，一个所在组合未挂载任何控制器的 Agent 以有 owner 的非 shud `JobSpec` 调用 `start`
+- **THEN** 与 `jobs-local` 相同，抛出 `no job controller serves this agent`
+
+### Requirement: Concurrent runs
+多个 shud 作业 SHALL 可以同时处于 `running`，各自使用独立运行目录；注册表 SHALL NOT 设 shud 专属并发上限或排队。同时活动的无 owner 作业数受父类 `maxConcurrentJobsPerOwner`（无 owner 桶）约束；超出时 `shud_run` SHALL 返回说明已达上限的工具错误，且按「Shud job submission」清理，不排队、不启动 SHUD。
+
+#### Scenario: parallel runs
+- **WHEN** 一个作业 `running` 时再提交第二个作业
+- **THEN** 第二个作业的 `shud_run` 结果状态为 `running`，两个包装进程同时存在
+
+#### Scenario: limit reached
+- **WHEN** `maxConcurrentJobsPerOwner: 1` 且已有一个 shud 作业 `running` 时再调用 `shud_run`
+- **THEN** 工具返回含上限说明的错误，不存在新的运行目录、索引条目或 SHUD 进程
+
 ### Requirement: Detached execution and exit capture
-shud 作业 SHALL 由注册表直接启动的包装进程运行（不经宿主 subprocess 服务），在运行目录内执行 `<shudBin> -o output/<project>.out <project>`，stdout/stderr 分别写入 `stdout.log`/`stderr.log`；SHUD 结束后包装进程 SHALL 以"写临时文件再 rename"的方式写出 `exit_code`。`run-job.json` SHALL 记录包装进程 `pid` 与其启动时间。宿主进程退出 SHALL NOT 终止包装进程或 SHUD。
+shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不经宿主 subprocess 服务）。包装进程 SHALL 先以"写临时文件再 rename"写出 `wrapper.pid`（自身 pid），再在运行目录内执行 `<shudBin> -o output/<project>.out <project>`，stdout/stderr 分别写入 `stdout.log`/`stderr.log`；SHUD 结束后包装进程 SHALL 以"写临时文件再 rename"写出 `exit_code`；包装进程 SHALL NOT 捕获信号，被 kill 时不写 `exit_code`。`run-job.json` SHALL 记录包装进程 `pid` 与其启动时间。宿主进程退出 SHALL NOT 终止包装进程或 SHUD。
 
 #### Scenario: exit code file
 - **WHEN** 以一个立即 `exit 13` 的伪 `shudBin` 运行作业
-- **THEN** 运行目录出现内容为 `13` 的 `exit_code` 文件，且不存在残留的临时文件
+- **THEN** 运行目录出现内容为 `13` 的 `exit_code` 文件与 `wrapper.pid`，且不存在残留的临时文件
 
 #### Scenario: survives host exit
 - **WHEN** 作业运行中宿主进程收到 SIGKILL
 - **THEN** 包装进程与 SHUD 继续运行，最终写出 `exit_code`
 
-### Requirement: Single-run queue
-同一台机器上通过该注册表启动的 shud 作业 SHALL 同时最多一个处于 `running`；其余 SHALL 按提交顺序以 `submitted` 排队，前一个进入终态后自动启动队首。队列 SHALL 由活动索引持久化，dsh 重启后按原顺序继续。
-
-#### Scenario: second run queues
-- **WHEN** 一个作业 `running` 时再提交第二个作业
-- **THEN** 第二个作业状态为 `submitted`；第一个结束后第二个进入 `running`
-
-#### Scenario: queue survives restart
-- **WHEN** 一个作业 `running`、一个 `submitted` 时 dsh 被重启，随后第一个结束
-- **THEN** 第二个作业被启动，且提交顺序不变
-
 ### Requirement: Cancellation
-模型对 shud 作业调用 `job_kill` 时，注册表 SHALL 对运行中的包装进程组发送 SIGTERM，宽限期后仍存活则 SIGKILL，作业状态置 `cancelled` 并照常 collect；对排队中的作业 SHALL 直接出队并置 `cancelled`，不启动 SHUD。
+对 shud 作业的 kill（模型以 `dsh_job_id` 调用 `job_kill`，或 Web 作业卡的 kill）SHALL 先在 `run-job.json` 写 `cancel_requested_at`，再对包装进程组发送 SIGTERM，宽限期（core 常量）后仍存活则 SIGKILL。结算 SHALL 为 first-wins：结算时 `exit_code` 已存在则按退出码结算，否则作业状态置 `cancelled`。被 kill 的作业 SHALL 照常 collect 并按「At-least-once wake」唤醒发起会话。
 
-#### Scenario: kill queued job
-- **WHEN** 对 `submitted` 状态的作业调用 `job_kill`
-- **THEN** 该作业变为 `cancelled`、生成 `exit_class: cancelled` 的 RunRecord，且从未启动 SHUD
+#### Scenario: kill running job
+- **WHEN** 对 `running` 的作业以其 `dsh_job_id` 调用 `job_kill`
+- **THEN** SHUD 进程退出，生成 `exit_class: cancelled` 的 RunRecord，发起会话收到一条 `shud-jobs` 唤醒消息
+
+#### Scenario: natural exit wins
+- **WHEN** 包装进程已写出内容为 `0` 的 `exit_code` 后、结算前 kill 到达
+- **THEN** RunRecord 的 `exit_class` 为 `ok`，不是 `cancelled`
 
 ### Requirement: Host teardown keeps shud running
-宿主 teardown（SIGTERM 等正常退出、owner Agent 被释放）时，注册表 SHALL NOT 终止 shud 包装进程，SHALL 让该次 dsh 登记以终态结算（detail 说明 shud 在后台继续），`run-job.json` 的 `status` SHALL 保持 `running` 或 `submitted`，活动索引条目 SHALL 保留。该结算 SHALL NOT 触发唤醒，也 SHALL NOT 生成 RunRecord。
+宿主 teardown（SIGTERM 等正常退出、注册表重载，即父类以 teardown 理由调用 producer `cancel`）时，对没有 `cancel_requested_at` 的 shud 作业，注册表 SHALL NOT 终止包装进程，SHALL 让该次 dsh 登记以终态结算（detail 说明 shud 在后台继续），`run-job.json` 的 `status` SHALL 保持不变，活动索引条目 SHALL 保留。该结算 SHALL NOT 触发唤醒，也 SHALL NOT 生成 RunRecord。shud 作业无 owner，owner Agent 释放 SHALL NOT 影响它。
 
 #### Scenario: graceful restart
 - **WHEN** 作业 `running` 时 dsh 收到 SIGTERM 并退出
 - **THEN** SHUD 进程仍在运行，`run-job.json` 仍为 `running`，运行目录中没有 `run-record.json`
 
+#### Scenario: owner session disposed
+- **WHEN** 作业运行中发起会话的 Agent 被释放（会话归档或关闭），宿主保持运行
+- **THEN** SHUD 继续运行，结束后轮询循环照常 collect 并经冷恢复唤醒该会话
+
 ### Requirement: Startup reconciliation
-插件启动时 SHALL 读取活动索引并逐条对账：
-- 有 `exit_code` 文件且未 collect → 补结算、collect、唤醒；
-- 无 `exit_code`、记录的 pid 存活且进程启动时间与记录一致 → 以新 dsh 登记接管（新 JobId 追加到 `dsh_job_ids`），继续监视至结束；
-- 无 `exit_code` 且进程不存在或启动时间不一致 → 作为 `lost` 结算、collect、唤醒；
-- `submitted` → 按原顺序重新入队；
-- 已 `collected` 但 `notify.status` 为 `pending` → 只补唤醒。
-对账 SHALL 在每个条目上幂等，重复执行不产生第二份 RunRecord。
+插件 apply 取得锁后 SHALL 读取活动索引，按（`run-job.json` 的 `status`、`pid`、`pid_started_at`、运行目录中的 `exit_code`）逐条对账。"存活"指 pid 对应进程存在且其启动时间与记录一致；任何判定"不存活"之后 SHALL 再读一次 `exit_code`，仍不存在才判 `lost`。对账表：
+- R1 `created` → 结算为 `lost`（从未启动），collect，唤醒；
+- R2 `submitted` 且有 `exit_code` → 按退出码结算，collect，唤醒；
+- R3 `submitted`、无 `exit_code`、`wrapper.pid` 进程存活且启动时间不早于 `submitted_at` → 补记 `pid`/`pid_started_at`，置 `running` 并按 R5 接管；
+- R4 `submitted` 的其余情形 → 再读 `exit_code`，仍无则 `lost`，collect，唤醒；
+- R5 `running`、无 `cancel_requested_at`、无 `exit_code`、存活 → 接管（见「Takeover registration」）；
+- R6 `running` 且有 `exit_code` → 按退出码结算，collect，唤醒；
+- R7 `running`、无 `exit_code`、不存活 → 再读后仍无则结算为 `lost`（有 `cancel_requested_at` 时为 `cancelled`），collect，唤醒；
+- R8 `running`、有 `cancel_requested_at`、无 `exit_code`、存活 → 重发 SIGTERM，宽限后 SIGKILL，结算为 `cancelled`，collect，唤醒；
+- R9 `succeeded`/`failed`/`cancelled`，且无 `collect-error.json` 或其 `attempts` 未达上限（无论 `run-record.json` 是否已存在）→ collect（`run-record.json` 已存在时原样返回该记录），成功则置 `collected`，唤醒；
+- R10 `succeeded`/`failed`/`cancelled`，`collect-error.json` 的 `attempts` 已达上限，`notify.status: pending` → 不再 collect，状态保持不变（无 `run-record.json` 时 SHALL NOT 置 `collected`），只补投递含失败原因的唤醒；
+- R11 `collected` 且 `notify.status: pending` → 只补投递唤醒；
+- R12 `notify.status` 为 `delivered` 或 `unreachable` → 写入完成索引并移出活动索引。
+对账 SHALL NOT 重新 spawn 任何作业，SHALL NOT 含重新入队的情形。对账 SHALL 在每个条目上幂等，重复执行不产生第二份 RunRecord。结算、collect、`notify` 状态与接管登记 SHALL 在 apply 时执行，不依赖 `tool-jobs` 或 `sessionController`；唤醒按「At-least-once wake」的就绪规则投递，此前 `notify.status` 保持 `pending`。
+
+#### Scenario: created never started
+- **WHEN** `run-job.json` 为 `created`（宿主在登记前退出），随后 dsh 启动
+- **THEN** 生成 `exit_class: lost` 的 RunRecord，运行目录中从未出现 SHUD 进程
+
+#### Scenario: submitted with live wrapper
+- **WHEN** `run-job.json` 为 `submitted`、`pid` 为 `null`，`wrapper.pid` 指向仍在运行且启动时间晚于 `submitted_at` 的包装进程
+- **THEN** 对账后 `run-job.json` 为 `running` 且记录该 pid，未启动第二个 SHUD
+
+#### Scenario: submitted without wrapper
+- **WHEN** `run-job.json` 为 `submitted`，无 `wrapper.pid`、无 `exit_code`
+- **THEN** 作业以 `exit_class: lost` 结算，未重新 spawn
 
 #### Scenario: exited while host down
 - **WHEN** 作业在 dsh 停机期间结束并写出 `exit_code` 为 0，随后 dsh 启动
 - **THEN** 启动对账生成 `exit_class: ok` 的 RunRecord，发起会话收到一次唤醒
 
-#### Scenario: still running after restart
-- **WHEN** dsh 重启时作业仍在运行
-- **THEN** `job_list` 列出一个新的 `kind: shud` 登记，其结束后照常 collect 与唤醒
+#### Scenario: exit code appears during liveness check
+- **WHEN** `running` 作业的进程探测为不存在，而再读时 `exit_code` 已出现且为 19
+- **THEN** RunRecord 的 `exit_class` 为 `cvode`，不是 `lost`
 
 #### Scenario: pid reused
-- **WHEN** 记录的 pid 存活但其进程启动时间与记录不一致，且无 `exit_code`
+- **WHEN** 记录的 pid 存活但其进程启动时间与记录不一致，且两次读取都无 `exit_code`
 - **THEN** 作业以 `exit_class: lost` 结算
 
+#### Scenario: kill interrupted by restart
+- **WHEN** `running` 作业已有 `cancel_requested_at`，宿主在宽限期内退出且 SHUD 仍存活，随后 dsh 启动
+- **THEN** 对账终止该 SHUD，生成 `exit_class: cancelled` 的 RunRecord
+
+#### Scenario: cancelled but not collected
+- **WHEN** `run-job.json` 为 `cancelled` 且无 `run-record.json`
+- **THEN** 对账生成 `exit_class: cancelled` 的 RunRecord 并唤醒
+
+#### Scenario: crash after record before status
+- **WHEN** `run-record.json` 已写出而 `run-job.json` 仍为 `succeeded` 时宿主被 SIGKILL，随后 dsh 启动
+- **THEN** 对账返回已有记录且不改写 `run-record.json`（修改时间不变），`run-job.json` 置 `collected`，发起会话收到一次唤醒
+
+#### Scenario: collect limit reached before restart
+- **WHEN** `run-job.json` 为 `failed`、`collect-error.json` 的 `attempts` 为 3、无 `run-record.json`、`notify.status` 为 `pending`，随后 dsh 启动
+- **THEN** 对账不再 collect，`run-job.json` 仍为 `failed`（不是 `collected`），发起会话收到一条含失败原因的唤醒
+
+#### Scenario: collected but not woken
+- **WHEN** `run-job.json` 为 `collected`、`notify.status` 为 `pending`
+- **THEN** 对账不改写 `run-record.json`，经 followup 与 flush 投递一次唤醒后才置 `delivered`
+
+#### Scenario: delivered but still indexed
+- **WHEN** `notify.status` 为 `delivered` 而条目仍在 `active.json`
+- **THEN** 条目出现在 `completed.json` 并从 `active.json` 移除，不再投递
+
+### Requirement: Takeover registration
+对账中接管的作业（R3、R5）SHALL 立即由「Registry poll loop」继续监视，并在 apply 时以「Shud job submission」相同的瞬时全局控制器、无 owner、相同 label 经父类 `start` 重新登记，把新 `dsh_job_id` 写入 `run-job.json` 并追加到 `dsh_job_ids`；SHALL NOT 等待 `tool-jobs` 挂载。登记失败 SHALL NOT 影响轮询循环、collect 与唤醒：`dsh_job_id` 保持 `null`，失败原因经宿主 logger 记录。
+
+#### Scenario: still running after restart
+- **WHEN** dsh 重启时作业仍在运行
+- **THEN** `job_list` 列出一个新的 `kind: shud` 登记且其 label 含该 `run_id`，`run-job.json` 的 `dsh_job_id` 为该新 id，其结束后照常 collect 与唤醒
+
 ### Requirement: Automatic collect
-作业进入 `succeeded`、`failed` 或 `cancelled` 时注册表 SHALL 立即 collect：按 run-records spec 生成 RunRecord 写入 `run-record.json`，作业状态置 `collected`，之后才唤醒。`run-record.json` 已存在时 collect SHALL 返回已有记录而不改写。
+作业进入 `succeeded`、`failed` 或 `cancelled` 时注册表 SHALL 立即 collect：按 run-records spec 生成 RunRecord（含从 `run-job.json` 复制的 `llm.response_model` 与 `llm.response_model_source`）写入 `run-record.json`，作业状态置 `collected`，之后才唤醒。`run-record.json` 已存在时 collect SHALL 返回已有记录而不改写。collect 失败（`exit_code` 不可读或非整数、产物目录不可读、RunRecord 未通过 schema 校验、写文件失败）时 SHALL 写 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态（`exit_code` 不可读时为 `failed`），SHALL NOT 写 `run-record.json`；`attempts` 未达 core 常量上限时 SHALL 由「Registry poll loop」在下一轮重试（重启后由对账 R9 继续），达到上限后 SHALL 停止自动重试并以失败原因唤醒发起会话。
 
 #### Scenario: collect is idempotent
 - **WHEN** 对同一已 collect 的作业再次 collect
 - **THEN** 返回与 `run-record.json` 相同的记录，文件修改时间不变
 
+#### Scenario: collect failure is terminal and woken
+- **WHEN** `exit_code` 文件内容为 `abc`，三次 collect 均失败
+- **THEN** 运行目录有 `collect-error.json` 且 `attempts` 为 3，无 `run-record.json`，`run-job.json` 为 `failed`，发起会话收到一条含失败原因的 `shud-jobs` 唤醒消息，此后不再自动重试
+
+### Requirement: Registry poll loop
+注册表 SHALL 运行**一个**进程内轮询循环，以父类 `pumpPollMs` 为周期遍历活动索引中 `notify.status` 尚未为 `delivered`/`unreachable` 的条目，条目离开活动索引前一直处理，与是否存在 dsh 登记无关。每一轮对每个条目按状态推进一步：未终态 → 结算检查（见下）；终态未 collect 且 collect `attempts` 未达上限 → collect（「Automatic collect」的失败重试由此驱动）；已 collect 或 collect 达上限且 `notify.status: pending` → 投递（「At-least-once wake」的暂时性失败重试由此驱动）。同一条目同一时刻 SHALL 至多一个步骤在途。循环与其定时器 SHALL 是注册表上下文的 effect：注册表释放或重载时停止，重载后的新实例先对账再启动自己的循环，SHALL NOT 出现两个循环对同一条目投递。结算检查：出现 `exit_code` 时 SHALL 按退出码结算（`succeeded`/`failed`）；进程不存活时 SHALL 再读一次 `exit_code`，仍无则有 `cancel_requested_at` 时结算为 `cancelled`、否则为 `lost`（`failed`）；kill 与自然退出 first-wins（「Cancellation」）。结算 SHALL 先原子写 `run-job.json` 的终态与 `finished_at`、`exit_code`，再以 producer `done` 结束当前 dsh 登记（如有），再交给「Automatic collect」。
+
+#### Scenario: natural exit settles online
+- **WHEN** 宿主在线时伪 `shudBin` 以退出码 13 结束
+- **THEN** `run-job.json` 先变为 `failed` 且 `exit_code` 为 13，当前 dsh 登记随之结算，随后进入 collect
+
+#### Scenario: process vanished without exit code
+- **WHEN** 宿主在线时包装进程被外部 SIGKILL（未写 `exit_code`），且无 `cancel_requested_at`
+- **THEN** 下一次轮询后作业以 `exit_class: lost` 结算并 collect
+
+#### Scenario: in-process retries
+- **WHEN** 宿主在线时第一次 collect 因产物目录暂不可读失败、下一轮可读，随后第一次投递因 flush 返回失败、下一轮成功
+- **THEN** 不经重启即得到 `run-record.json`（`collect-error.json` 的 `attempts` 为 1）与 `notify.status: delivered`（`notify.attempts` 为 1），发起会话恰收到一条唤醒
+
+#### Scenario: no duplicate wake after reload
+- **WHEN** 作业已 collect、投递尚未完成时注册表插件被重载
+- **THEN** 旧循环停止，新实例对账后投递，发起会话恰收到一条唤醒
+
 ### Requirement: At-least-once wake
-每个由会话发起的 shud 作业 collect 后，注册表 SHALL 确保发起会话至少收到一次含 `run_id`、`exit_class` 与产物数量的完成消息：宿主在线时经常规作业唤醒路径；宿主停机期间结算的作业在对账时冷恢复发起会话、投递消息并持久化会话后，才把 `notify.status` 置 `delivered`。发起会话已不存在或无法恢复时 SHALL 置 `notify.status: unreachable` 并记录原因，SHALL NOT 无限重试；之后该条目从活动索引移除。
+所有结算路径（宿主在线时自然退出或被 kill、对账补结算、接管作业结束）SHALL 经同一路径唤醒：「Registry poll loop」结算 → collect → `sessionController.resolveAgent(owner_session)` → `agent.followup`（以 `createUserMessage` 构造的用户消息，`source.kind: shud-jobs`，含 `run_id`、`exit_class` 与产物数量，或 collect 失败原因）→ `ctx.sessions.flush` 成功后才把 `notify.status` 置 `delivered` → 写入完成索引并移出活动索引。每个 collect 完成或 collect 失败达上限的作业 SHALL 唤醒一次，没有豁免（含模型 `job_kill` 的作业与 `job_output` 已读到结果的作业）。就绪：投递 SHALL 只在 `sessionController` 与 `sessions` 均可用后开始，注册表以 `ctx.inject(['sessionController', 'sessions'], 回调)` 启动投递，二者 SHALL NOT 成为插件行的启动依赖；Web 模板中 `jobs` 行先于 `session-controller` 行 apply，此前产生的待投递条目在回调触发后投递。服务缺失本身 SHALL NOT 使条目变为 `unreachable`（宿主无启动完成信号，无法区分"尚未 apply"与"profile 无该行"）：不挂 `session-controller` 的 profile（headless）中条目保持 `notify.status: pending` 并在 `detail` 写明等待会话控制服务。投递开始后，`owner_session` 为 `null` 或会话已不存在时 SHALL 立即置 `notify.status: unreachable` 并记录原因；恢复或 flush 失败等暂时性错误 SHALL 计入 `notify.attempts`，由轮询循环在下一轮重试（重启后由对账继续），达到 core 常量上限后置 `unreachable`；`unreachable` 后 SHALL NOT 再重试。
+
+#### Scenario: wake while host online
+- **WHEN** 宿主在线、发起会话空闲时作业以退出码 0 结束
+- **THEN** 发起会话的 session log 恰出现一条来源为 `shud-jobs` 的用户消息（无 `tool-jobs` 完成通知），`notify.status` 为 `delivered`
 
 #### Scenario: wake after restart
 - **WHEN** 作业在 dsh 停机期间结束，dsh 启动后对账完成
 - **THEN** 发起会话的 session log 出现一条来源为 `shud-jobs` 的用户消息并开启新一轮，`notify.status` 为 `delivered`
 
+#### Scenario: crash before delivered is marked
+- **WHEN** followup 与 flush 已完成但 `notify.status` 置位前宿主被 SIGKILL，随后 dsh 启动
+- **THEN** 发起会话再收到一条含相同 `run_id` 的唤醒消息，`notify.status` 为 `delivered`
+
 #### Scenario: owner gone
 - **WHEN** 发起会话已被删除后对账遇到该作业
 - **THEN** `notify.status` 为 `unreachable`，`run-record.json` 存在，下次启动不再尝试唤醒
 
+#### Scenario: session controller applies after jobs
+- **WHEN** Web 模板中 dsh 重启，`jobs` 行 apply 时对账发现一个停机期间已结束的作业，`session-controller` 行随后才 apply
+- **THEN** 该作业 `notify.status` 先为 `pending`，`session-controller` 可用后投递，最终为 `delivered`，发起会话 session log 有一条 `shud-jobs` 消息
+
+#### Scenario: no session controller
+- **WHEN** 在不挂载 `session-controller` 的 headless profile 中作业结束
+- **THEN** `jobs` 行保持激活，RunRecord 已生成，`notify.status` 保持 `pending` 且 `detail` 指出等待会话控制服务，不变为 `unreachable`
+
+### Requirement: Recoverability invariant
+运行时不变量"shud 作业可恢复（SIGTERM/SIGKILL）"SHALL 以以下可观察断言判定，SHALL NOT 以 `job/settled` 事件判定（dsh 不为无 owner 作业写该事件）：对任一在宿主收到 SIGTERM 或 SIGKILL 前已由 `shud_run` 返回 `job_id` 的作业，重启后（1）`run-job.json` 存在且状态只沿「RunJob record」状态机前进；（2）最终存在 `run-record.json` 或 `collect-error.json`；（3）同一运行目录在任一时刻至多一个 SHUD 进程；（4）在挂载 `session-controller` 的 profile 中，`notify.status` 最终为 `delivered`（发起会话 session log 有一条 `source.kind: shud-jobs` 且含该 `run_id` 的用户消息）或带原因的 `unreachable`；（5）在同一前提下，该作业最终出现在 `completed.json` 且不在 `active.json`。注册表集成测试与 `shud:restart` SHALL 断言这五条。
+
+#### Scenario: invariant after SIGKILL
+- **WHEN** 作业运行中宿主被 SIGKILL，重启后作业结束
+- **THEN** 五条断言全部成立
+
 ### Requirement: Restart acceptance script
-系统 SHALL 提供本机命令 `pnpm run shud:restart`：在临时 `DSH_HOME` 与临时工作区中，以真实 SHUD 与 ccw 输入依次执行两个用例——作业运行中对 dsh 发送 SIGTERM 后重启、作业运行中对 dsh 发送 SIGKILL 后重启——每个用例 SHALL 判定：重启前后 SHUD 进程连续存活、作业最终产出 RunRecord 且含退出码与非空产物清单、发起会话在 session log 中至少被唤醒一次。判据 SHALL 取自 session log 与运行目录，SHALL NOT 取自模型文本；缺少 SHUD 二进制、dsh 或 `DMXAPI_KEY` 时 SHALL 在开始前非 0 退出。该命令 SHALL 登记进 Verification Matrix（本机，block），运行时不变量"`job/settled` 可恢复、SIGTERM/SIGKILL 均可恢复"的伴生测试 SHALL 进入矩阵，`constraints.yaml` 的对应 review_only 条目 SHALL 移除。
+系统 SHALL 提供本机命令 `pnpm run shud:restart`：在临时 `DSH_HOME` 与临时工作区中，以真实 SHUD 与 ccw 输入依次执行两个用例——作业运行中对 dsh 发送 SIGTERM 后重启、作业运行中对 dsh 发送 SIGKILL 后重启——每个用例 SHALL 判定：重启前后 SHUD 进程连续存活、「Recoverability invariant」五条断言成立且其中第（4）条必须为 `delivered`（脚本控制发起会话的存在，`unreachable` 判 FAIL）、RunRecord 含退出码与非空产物清单。脚本 SHALL 驱动 Web 模板的 dsh（headless 模板不挂 `session-controller`，无法投递唤醒）。判据 SHALL 取自 session log（`tool/result` 中的 `shud_run` 结果与 `shud-jobs` 唤醒消息）与运行目录及 `stateDir` 文件，SHALL NOT 取自模型文本；缺少 SHUD 二进制、dsh 或 `DMXAPI_KEY` 时 SHALL 在开始前非 0 退出。该命令 SHALL 登记进 Verification Matrix（本机，block），运行时不变量的伴生测试 SHALL 进入矩阵，`constraints.yaml` 的对应 review_only 条目 SHALL 移除。
 
 #### Scenario: SIGTERM case
 - **WHEN** 执行 `pnpm run shud:restart` 的 SIGTERM 用例
