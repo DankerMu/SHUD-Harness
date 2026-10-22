@@ -53,13 +53,21 @@ const PWSH_COMMAND = /\b(pwsh|powershell)\b/i;
 // /dev/null/x are real files). Used only with replace: the g flag makes
 // test/exec stateful through lastIndex.
 const DISCARD_REDIRECT = /(?:&?>{1,2}|>&|<>)\s*\/dev\/null(?![A-Za-z0-9._/-])/g;
-// #273 (PI 2026-10-21): a write naming a strict ancestor of a raw dir, up to three
-// levels (parent, grandparent, great-grandparent), is denied; reads pass through.
+// #273 (PI 2026-10-21): a destructive command naming a strict ancestor of a raw dir,
+// up to three levels (parent, grandparent, great-grandparent), is denied. Other
+// writes (redirects, cp, mkdir, heredocs, interpreter one-liners) and reads pass
+// through, so a script mentioning the word data is not blocked.
 const RAW_ANCESTOR_LEVELS = 3;
+// Verbs that remove, move or re-permission a whole directory tree (same anchors as
+// WRITE_VERBS); pwsh adds its cmdlets and aliases.
+const ANCESTOR_DESTRUCTIVE =
+  /(?<![A-Za-z0-9_.-])(rm|rmdir|unlink|mv|chmod|chown|chgrp|shred|rsync)(?=$|[\s;&|)}'"`])|(^|\s)(-delete|--remove-files)(?=$|[\s;&|)}'"`])|(?<![A-Za-z0-9_.-])git\s+clean(?=$|[\s;&|)}'"`])/i;
+const PWSH_ANCESTOR_DESTRUCTIVE =
+  /(?<![A-Za-z0-9_.-])(Remove-Item|Move-Item|Rename-Item|del|erase|ri|rd|ren|rni|move|mi)(?=$|[\s;&|)}'"`])/i;
 // Ancestor text stands alone: before it, start or a shell boundary (optionally ./);
-// after it, end, a boundary, a glob, or / followed by those (data/, data/*), never
-// / plus a name (data/derived).
-const ANCESTOR_BEFORE = String.raw`(?<![^\s;&|()<>'"\`=,{])(?:\./)*`;
+// after it, end, a boundary, a glob, a brace, or / followed by those (data/, data/*,
+// data/{raw,x}), never / plus a name (data/derived).
+const ANCESTOR_BEFORE = String.raw`(?<![^\s;&|()<>'"\`=:,{])(?:\./)*`;
 const ANCESTOR_AFTER = String.raw`(?=$|[\s;&|()<>'"\`,{}*?[\]]|/(?=$|[\s;&|()<>'"\`,{}*?[\]]))`;
 // Changing directory is not naming: the operand of cd/pushd (pwsh: Set-Location,
 // sl, Push-Location) is dropped before ancestor matching. Options never cross
@@ -70,7 +78,7 @@ const ANCESTOR_DENY: RawGuardDecision = {
   kind: "deny",
   code: "raw-ancestor-write",
   reason:
-    "Raw data is immutable: this command writes while naming a directory that contains raw data. Write to an explicit path inside that directory instead.",
+    "Raw data is immutable: this command deletes, moves or re-permissions a directory that contains raw data. Target an explicit path inside that directory instead.",
 };
 
 type RawGuardOptions = { rawDirs: string[] };
@@ -193,11 +201,6 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         const normalized = normalizeCommandPaths(text);
         return [text, normalized, foldParentSegments(normalized)];
       });
-    // Ancestor naming reads each candidate once, with chdir operands dropped.
-    const unchdired = texts.map((text) => text.replace(CHDIR_OPERAND, "$1"));
-    const writes = () =>
-      WRITE_VERBS.test(command.replace(DISCARD_REDIRECT, " ")) ||
-      (pwsh && PWSH_WRITES.test(command));
     for (const raw of options.rawDirs) {
       const root = canonical(raw, cwd);
       const flags = caseInsensitiveRoot(root) ? "i" : "";
@@ -207,19 +210,31 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         const pattern = new RegExp(`${escaped}(?![A-Za-z0-9._-])`, flags);
         return texts.some((candidate) => pattern.test(candidate));
       });
-      if (!mentioned && !contains(root, workdir)) {
-        const named = [...rawAncestors(normalizeCommandPaths(raw)), ...rawAncestors(root)].some(
-          (ancestor) => {
-            const escaped = ancestor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            const pattern = new RegExp(`${ANCESTOR_BEFORE}${escaped}${ANCESTOR_AFTER}`, flags);
-            return unchdired.some((candidate) => pattern.test(candidate));
-          },
-        );
-        // Naming without writing keeps checking the remaining raw dirs.
-        if (named && writes()) return ANCESTOR_DENY;
-        continue;
+      if (!mentioned && !contains(root, workdir)) continue;
+      const checked = command.replace(DISCARD_REDIRECT, " ");
+      return WRITE_VERBS.test(checked) || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
+    }
+    // Second pass, only when no raw dir is touched: a destructive verb naming an
+    // ancestor. Ancestors come from the configured spelling, the canonical root and
+    // the literal cwd join (a symlinked cwd), each up to RAW_ANCESTOR_LEVELS.
+    if (ANCESTOR_DESTRUCTIVE.test(command) || (pwsh && PWSH_ANCESTOR_DESTRUCTIVE.test(command))) {
+      const unchdired = texts.map((text) => text.replace(CHDIR_OPERAND, "$1"));
+      for (const raw of options.rawDirs) {
+        const root = canonical(raw, cwd);
+        const flags = caseInsensitiveRoot(root) ? "i" : "";
+        const spelled = normalizeCommandPaths(raw);
+        const ancestors = new Set([
+          ...rawAncestors(spelled),
+          ...rawAncestors(root),
+          ...rawAncestors(resolve(cwd, spelled)),
+        ]);
+        const named = [...ancestors].some((ancestor) => {
+          const escaped = ancestor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const pattern = new RegExp(`${ANCESTOR_BEFORE}${escaped}${ANCESTOR_AFTER}`, flags);
+          return unchdired.some((candidate) => pattern.test(candidate));
+        });
+        if (named) return ANCESTOR_DENY;
       }
-      return writes() ? DENY : ASK;
     }
   }
   return NEXT;
