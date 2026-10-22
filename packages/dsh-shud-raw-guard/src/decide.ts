@@ -53,6 +53,26 @@ const PWSH_COMMAND = /\b(pwsh|powershell)\b/i;
 // /dev/null/x are real files). Used only with replace: the g flag makes
 // test/exec stateful through lastIndex.
 const DISCARD_REDIRECT = /(?:&?>{1,2}|>&|<>)\s*\/dev\/null(?![A-Za-z0-9._/-])/g;
+// Quote splicing, \ escapes and \<newline> join one bash word, so a copy drops them.
+function unquote(text: string): string {
+  return text.replace(/\\\n|["'\\]/g, "");
+}
+// #279: tar extracts (writes) when, after tar in the same command segment, a
+// short-option cluster holds x (tar -C <raw> -xf, tar -f a.tar -x), --extract or
+// --get (or an abbreviation: --ext, --ge) appears, or the first word is an
+// old-style cluster holding x (tar xf). x is case-sensitive: -X is
+// --exclude-from. Segments end at ; | newline and at & except in >& and <&
+// (&>word is already a write or a stripped /dev/null). Scanning from the first
+// tar of each segment keeps the check linear.
+const TAR_COMMAND = /(?<![A-Za-z0-9_.-])[gG]?[tT][aA][rR]\s/;
+const TAR_EXTRACT_OPTION = /^\s+[A-Za-z]*x|\s(?:-[A-Za-z]*x|--(?:ext[a-z]*|get?)(?![A-Za-z0-9-]))/;
+const COMMAND_SEGMENT = /[;|\n]|(?<![<>])&/;
+function tarExtracts(text: string): boolean {
+  return text.split(COMMAND_SEGMENT).some((segment) => {
+    const tar = TAR_COMMAND.exec(segment);
+    return tar !== null && TAR_EXTRACT_OPTION.test(segment.slice(tar.index + tar[0].length - 1));
+  });
+}
 // #273 (PI 2026-10-21): a destructive command naming a strict ancestor of a raw dir,
 // up to three levels (parent, grandparent, great-grandparent), is denied. Other
 // writes (redirects, cp, mkdir, heredocs, interpreter one-liners) and reads pass
@@ -206,11 +226,11 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
     const command = fields.command;
     const workdir = canonical(typeof fields.workdir === "string" ? fields.workdir : cwd, cwd);
     const pwsh = call.name === "pwsh" || PWSH_COMMAND.test(command);
-    // Quote splicing, \ escapes and \<newline> join one bash word, so a copy drops
-    // them; pwsh alone also reads \ as a separator (bash sub\x is subx).
+    // Each spelling also gets an unquoted copy; pwsh alone also reads \ as a
+    // separator (bash sub\x is subx).
     const bases = pwsh ? [command, command.replace(/\\/g, "/")] : [command];
     const texts = bases
-      .flatMap((text) => [text, text.replace(/\\\n|["'\\]/g, "")])
+      .flatMap((text) => [text, unquote(text)])
       .flatMap((text) => {
         const normalized = normalizeCommandPaths(text);
         return [text, normalized, foldParentSegments(normalized)];
@@ -225,13 +245,19 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         return texts.some((candidate) => pattern.test(candidate));
       });
       if (!mentioned && !contains(root, workdir)) continue;
-      const checked = command.replace(DISCARD_REDIRECT, " ");
-      return WRITE_VERBS.test(checked) || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
+      const writes = [command, unquote(command)].some((text) => {
+        const checked = text.replace(DISCARD_REDIRECT, " ");
+        return WRITE_VERBS.test(checked) || tarExtracts(checked);
+      });
+      return writes || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
     }
     // Second pass, only when no raw dir is touched: a destructive verb naming an
     // ancestor. Ancestors come from the configured spelling, the canonical root and
     // the literal cwd join (a symlinked cwd), each up to RAW_ANCESTOR_LEVELS.
-    if (ANCESTOR_DESTRUCTIVE.test(command) || (pwsh && PWSH_ANCESTOR_DESTRUCTIVE.test(command))) {
+    if (
+      [command, unquote(command)].some((text) => ANCESTOR_DESTRUCTIVE.test(text)) ||
+      (pwsh && PWSH_ANCESTOR_DESTRUCTIVE.test(command))
+    ) {
       const unchdired = texts.map((text) => text.replace(CHDIR_OPERAND, "$1"));
       for (const raw of options.rawDirs) {
         const root = canonical(raw, cwd);
