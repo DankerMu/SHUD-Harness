@@ -8,6 +8,8 @@ status: frozen
 **适用范围：** 长时间 SHUD 运行、sensitivity batch、AutoSHUD pipeline、HPC/SLURM job、LLM 会话恢复  
 **目标：** 让 Agent 在长任务期间停止消耗推理资源，并在 job 完成后可复盘、可幂等地恢复。
 
+M2 运行主链以 [m2-run-chain design D2/D6/D7/D11/D12](../../openspec/changes/m2-run-chain/design.md) 为准，本文 §5、§9 与附录 A 是对应落地契约；TaskCard park/resume、批次聚合、邮件、metrics/report 以及 Docker/HPC 内容为后续里程碑规划，不是 M2 已实现能力。
+
 ## 1. 为什么需要 Park/Resume
 
 SHUD 运行可能持续数分钟到数小时，sensitivity 和 calibration 可能提交多个 RunJob。让 LLM 会话持续等待会浪费 token，也会增加状态丢失风险。Park/Resume 的目标是把长运行转换为持久化 job：
@@ -18,7 +20,7 @@ Plan → Submit RunJob → Park TaskCard → Watch Job → Collect RunRecord →
 
 ## 1.1 Out-of-band notification after Resume/Report
 
-dsh Web 会话只覆盖浏览器打开时的实时体验。Park/Resume 的核心场景是长任务运行期间 PI 可能关闭浏览器，因此 long job 完成后的唤醒必须由落盘的 `job/settled` 记录驱动（ADR-0004 K8），不能只依赖活动连接。
+dsh Web 会话只覆盖浏览器打开时的实时体验。M2 shud 作业的唤醒由工作区运行目录中持久化的 RunJob/RunRecord（或 collect 失败记录）与 `stateDir` 索引驱动，不依赖活动连接；无 owner 作业没有 `job/settled`，由注册表投递 `source.kind: shud-jobs` 消息。下列批次与邮件通知仍属后续规划。
 
 通知触发点应在结果可读之后，而不是进程刚退出时：
 
@@ -177,19 +179,11 @@ SLURM watcher 监控：
 
 Collect 必须是幂等的。重复调用 `collect` 不应破坏已完成结果。
 
-Collect 操作包括：
+M2 collect 从 `<session cwd>/runs/<run_id>/` 读取作业与退出信息：按退出码映射 `exit_class`，扫描 `output/<project>.out/` 得到相对路径/字节数清单，计算 `wall_seconds`，复制模型 id 与来源，经 core schema 校验后写 `run-record.json`，再将 RunJob 置为 `collected`，最后进入唤醒步骤。已有 `run-record.json` 原样返回，内容和修改时间不变；`shud_collect` 复用同一逻辑。
 
-1. 读取 job metadata；
-2. 保存 exit code、resource usage、start/end time；
-3. 汇总 stdout/stderr；
-4. 扫描 SHUD 输出目录；
-5. 调用 rSHUD 或解析器生成 metrics；
-6. 生成 artifact manifest；
-7. 写入 RunRecord；
-8. 更新 TaskCard；
-9. 记录 `runrecord.created` 事件（session log），由 dsh 作业卡/完成通知呈现。
+失败写同目录 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态；退出码不可读/非整数时为 `failed`，不写占位 RunRecord、不置 `collected`。唯一轮询循环在距上次尝试至少 10 秒后重试，上限 3 次；达到上限以失败原因唤醒，不再自动 collect，手工 `shud_collect` 仍可重试。重启由 R9/R10 接续。
 
-如果 collect 失败，应写入 `collect_error.yaml`，而不是覆盖 RunJob 状态。
+metrics、数值健康计算、ArtifactManifest、TaskCard 更新与报告生成不属于 M2 collect；它们在后续里程碑按相应对象契约接入。
 
 ## 6. Resume context
 
@@ -256,23 +250,17 @@ workspace/tasks/<task_id>/locks/resume.lock   # resume 是 task 级动作，保�
 
 锁内容记录持有者、开始时间、过期时间。服务重启时，如果锁已过期，可以进入 recovery 流程。
 
+M2 不使用上面的后续 TaskCard/job 级锁布局：注册表在配置的 `stateDir` 持有 `lock`（pid + 进程启动时间）；同实例索引修改串行化，同条目同时至多一个轮询步骤在途，已有 RunRecord 不重写。存活持有者使第二实例激活失败，陈旧锁才可接管；详见 design D2/D7。
+
 ## 9. 服务重启恢复
 
-服务启动时应扫描：
+M2 注册表 apply 时先取得 `stateDir/lock`，读取 `active.json`，按索引中的绝对运行目录读取 `run-job.json`、`wrapper.pid`、`exit_code` 与结果文件。运行记录不从 `ctx.storage` 读取，也不扫描后续 TaskCard 工作区布局。
 
-```text
-workspace/tasks/*/parked_state.yaml
-workspace/jobs/*/job.yaml
-```
+按 [design D11 的 R1–R12](../../openspec/changes/m2-run-chain/design.md) 对账：从未启动或进程丢失者结算，仍存活者接管；存活判定同时比对 pid 和进程启动时间，判定不存活后再读一次 `exit_code`。任何一行都不重新 spawn、不重新入队；R9 返回已有 RunRecord 时不改写文件，R10 不把 collect 耗尽者置为 `collected`。
 
-恢复步骤：
+R3/R5 通过瞬时全局控制器无 owner 重新登记并更新 `dsh_job_id`/`dsh_job_ids`，登记失败也不阻止轮询、collect 或唤醒。shud 发起会话 id 仅用于唤醒；owner Agent 释放不取消作业。
 
-1. 读取 parked task；
-2. 检查 waiting jobs；
-3. 若 job 仍运行，继续 watch；
-4. 若 job 已结束但未 collect，进入 collecting；
-5. 若 collect 已完成但未 report，恢复 Coordinator 到 reporting；
-6. 若状态冲突，标记 blocked 并要求人工检查。
+所有在线结算、对账补结算与接管结束共用唯一轮询路径：collect 成功或失败达上限 → 服务就绪后 `resolveAgent` → `createUserMessage`（`source.kind: shud-jobs`，含 `run_id`）→ `followup` → `sessions.flush` 成功 → `delivered` → 先写完成索引再移出活动索引。服务未就绪保持 `pending`；会话不存在或暂时失败重试耗尽时为带原因的 `unreachable`。崩溃可能导致重投，语义是至少一次，不宣称 exactly-once。
 
 ## 10. 用户体验
 
@@ -303,31 +291,35 @@ workspace/jobs/*/job.yaml
 供 M2 实现与 review 使用；原载 `.agents/skills/shud-gov/reviews/park-resume-audit.md`（Zero SessionDB/AgentLoop 版，2026-10-20 按 ADR-0004 K8 重写）。任何可能导致状态丢失的问题标 critical。
 
 ### Job 提交阶段
-- [ ] 作业记录（id / cmd / cwd / pid / started / log 路径）**先落盘**，再返回工具结果让 turn 结束；不得只存在 `jobs-local` 内存 ring。
-- [ ] 子进程 detach（独立进程组），`./shud` 不被 dsh 的 SIGTERM 连带杀死（spike 1.3 反例）。
-- [ ] 提交后 agent 没有 pending LLM 调用：turn 以工具结果收尾，唤醒只来自 `job/settled` 完成通知。
-- [ ] 子代理在 park 前已结束或其结果已持久化（`ctx.subagents`）。
+- [ ] `run-job.json` 与活动索引先落盘，再返回含持久 id 和当前 `dsh_job_id` 的工具结果；`created`/`submitted` 是启动状态，不是排队。
+- [ ] 运行目录以 lstat 复核，完整复制输入，只改副本 `END`；失败回滚目录和索引，原输入不变。
+- [ ] 无 owner 登记经注册表自身无作用域上下文的瞬时全局控制器完成，`finally` 释放；不改变非 shud owner/作用域准入。
+- [ ] `/bin/sh` 包装进程 detached、stdio 落文件；先原子写 `wrapper.pid`，自然退出再原子写 `exit_code`；不经宿主 subprocess 服务。
+- [ ] 提交在途集合覆盖 `created` 到 `running` 写出的窗口，轮询不误判 `lost`。
 
 ### Collect 阶段
-- [ ] 检查 SHUD 退出码（0 成功，10 NaN，12 文件 IO，13 数据输入，19 CVODE，20 一致性检查；见 `../01_CODEBASE/SHUD_IO_Facts.md`）。
-- [ ] 二进制输出完整性：文件大小按 header + N×(NumVar+1)×8 字节对齐；部分写入判 failed 而非 succeeded。
-- [ ] NaN 扫描（SHUD 不做 NaN 检查）。
-- [ ] collect 幂等：同一 job 重复 collect 产生同一 RunRecord；digest 不用内容 hash（日志追加会改变它，`Spec_Gaps_Register.md` GAP-05 / RACE-03）。
-- [ ] 失败 job 写最小 RunRecord + FailureRecord，不伪造成功。
+- [ ] 退出码 0/10/12/13/19/20/其它及 `cancelled`/`lost` 映射正确，只有 `ok` 对应成功。
+- [ ] 同一 RunRecord 重复 collect 原样返回、mtime 不变；schema 校验前不发布结果。
+- [ ] 失败写 `collect-error.json`，不伪造 RunRecord；自动重试间隔 10 秒、上限 3 次，耗尽后带失败原因唤醒。
+- [ ] 仅记录本次可证的产物与模型 id/来源；数值健康计算与 metrics 留后续里程碑，不伪造结果。
 
 ### Resume / 唤醒阶段
-- [ ] 唤醒 turn 从 `ctx.storage` 读回 RunJob/RunRecord，而不是依赖上一 turn 的内存。
-- [ ] 引用的 artifact 仍存在（retention 可能已清理，GAP-10）。
+- [ ] 从运行目录读取 RunJob/RunRecord 或 collect 失败记录，而非 `ctx.storage` 或上一 turn 的内存。
+- [ ] 所有结算共用 `shud-jobs` 消息路径，`followup` 和 flush 成功后才标记 `delivered`；无 owner 作业不依赖 `job/settled`/tool-jobs 通知。
+- [ ] 服务就绪由 inject 回调控制，不依赖插件行序；服务缺失保持 `pending`，会话消失或重试耗尽为带原因的 `unreachable`。
+- [ ] 至少一次投递允许崩溃窗口重投，消息含 `run_id`；写完成索引先于移出活动索引。
 
-### 并发安全
-- [ ] 同时只有一个 SHUD 进程（OpenMP 全局状态不支持多仿真并行）。
-- [ ] RunJob 状态转换原子（timeout 与 cancel 竞态，RACE-01）。
-- [ ] stale job 检测：running 超时无心跳 → timed_out（GAP-09）。
+### 并发与取消
+- [ ] 不同运行目录允许并行；同一运行目录至多一个 SHUD 进程。只受父类无 owner 桶上限约束，不设 shud 队列。
+- [ ] 唯一轮询循环作为注册表 effect 释放；同条目同一时刻至多一个步骤在途；索引修改串行且原子写。
+- [ ] kill 先记 `cancel_requested_at` 再 SIGTERM/宽限后 SIGKILL；`exit_code` 已存在时自然退出获胜。
+- [ ] teardown 不取消正常后台 SHUD，同步结束本次 dsh 登记但不 collect/唤醒；kill 宽限期 teardown 保留取消意图，交重启对账接续。
 
 ### 重启恢复（K8 对账）
-- [ ] 启动时扫描作业记录：pid 存活 → 重新接管输出；已退出 → 补 `job/settled` 并投递完成通知；SIGTERM 与 SIGKILL 各一条重启用例（Phased_Plan M2 验收门）。
-- [ ] 失败时恢复 last-good StackLock。
+- [ ] R1–R12 每行有可判定输入与证据；pid 复用、退出码在探测期间出现、记录已写但状态未置位均有覆盖；不重新 spawn。
+- [ ] R3/R5 接管登记立即可用，不等待 tool-jobs；新旧 `dsh_job_id` 可追溯。
+- [ ] SIGTERM/SIGKILL 各一用例，断言 CONTEXT.md 的五条可恢复性不变量，不以模型文本或 `job/settled` 代替。
 
 ### SHUD 运行时特有
-- [ ] stdout/stderr 落到 `runs/<run_id>/`，便于事后诊断。
-- [ ] SUNDIALS 路径（Makefile 硬编码 `$(HOME)/sundials`）与 OpenMP 线程数可配置，不在工具里再硬编码。
+- [ ] stdout/stderr 落到 `runs/<run_id>/`；输入在 scratch workspace 内复制，submodule 不变。
+- [ ] `shudBin` 为显式必填绝对可执行路径，不硬编码机器路径；密钥不进记录或日志。

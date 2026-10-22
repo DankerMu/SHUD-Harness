@@ -40,9 +40,9 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 ## 2. M2 运行主链
 
 **交付**
-- `dsh-shud-jobs`：实现 `ctx.jobs`（`JobRegistry` 契约）的 durable backend，替换 `jobs-local`：子进程 detach；作业记录（id、cmd、cwd、pid、started、log 路径）落盘；启动时对账（pid 存活→接管输出；已退→补 `job/settled` 并投递完成通知）；输出落文件而非仅内存 ring。
+- `dsh-shud-jobs`：继承 `LocalJobRegistry`，禁用原 `jobs` 行并插入 `shud-jobs` 行；非 shud 作业保持宿主行为。shud 作业无 owner 登记，包装进程 detach，作业记录与输出落文件；启动按 R1–R12 对账，存活作业接管、已退出作业结算并 collect，统一经 `shud-jobs` 消息唤醒（无 owner 作业不产生 `job/settled`）。
 - `dsh-shud-tools`：`shud_run`（kind=shud 作业）+ `shud_collect`（解析产物 → RunRecord）。
-- `RunJob`/`RunRecord` 记录经 `ctx.storage` 域持久化。
+- `RunJob`/`RunRecord` 记录位于 `<session cwd>/runs/<run_id>/` 的 `run-job.json`/`run-record.json`；必填 `stateDir` 保存 `active.json`、`completed.json` 与排他 `lock`，不经 `ctx.storage` 域保存运行记录。细节以 [m2-run-chain design D2/D7/D11](../../openspec/changes/m2-run-chain/design.md) 为准。
 
 **验收门**：上表 M2 行；另加 SIGTERM 与 SIGKILL 各一次重启用例。
 

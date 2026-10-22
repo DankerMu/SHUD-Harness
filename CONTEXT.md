@@ -12,7 +12,7 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 |---|---|---|---|
 | Governance（策略门） | `tools/pre-execute` 瀑布决策 allow/deny/cancel/ask；角色—工具映射；保留规则 id | `packages/dsh-shud-core/src/governance/` | 决策表为测试常量；`ask` 走 `ctx.approval` |
 | Core objects（8 对象） | TaskCard · StackLock · DataProvenance · RunJob · RunRecord · AnalysisPlan · EvidenceReport · ChangeRequest 的 Zod 权威源与生成投影 | `packages/dsh-shud-core/src/schemas/`，`docs/generated/`，`docs/03_SPEC/Minimal_Schemas.md` | 字段真相 = Zod；Markdown/JSON Schema 只生成不手编 |
-| Jobs / Park-Resume（M2） | 长作业经 `ctx.jobs` 提交、agent 空闲、完成唤醒；durable JobRegistry 跨重启对账 | 规划中的 `dsh-shud-jobs` 包，`docs/03_SPEC/Park_Resume_Design.md` | `job/settled` 持久化；SIGTERM/SIGKILL 均可恢复 |
+| Jobs / Park-Resume（M2） | 长作业经 `ctx.jobs` 提交、agent 空闲、完成唤醒；durable JobRegistry 跨重启对账 | 规划中的 `dsh-shud-jobs` 包，`docs/03_SPEC/Park_Resume_Design.md` | shud 无 owner 登记，以运行目录、索引与 `shud-jobs` 消息满足下列五条可恢复性断言；非 shud 作业保持宿主行为 |
 | Host profile（dsh seam） | 模型路由、出站通道、插件挂载；dsh 只读宿主 | `profile/shud/`，`../deepseek-harness`（钉 `dsh-v0.2.1-rc.2`） | 只用文档化 seam；`--dump-config` 可枚举 |
 | Scientific runtime | SHUD 编译/运行、rSHUD 读输出与水量平衡、ccw fixture | `scripts/runtime/`，`SHUD/ rSHUD/ AutoSHUD/`，`docs/01_CODEBASE/SHUD_IO_Facts.md` | submodule 只读；运行在 scratch workspace |
 | Docs / Spec / Decisions | 规范、里程碑、决策四区、生成指令 | `docs/04_IMPLEMENTATION/Phased_Plan.md`，`docs/adr/`，`instructions/agents/` | 一事一家；生成物由 CI 比对 |
@@ -33,6 +33,12 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 10. **时间单位**：SHUD 内部时间为分钟；forcing ×1440、KsatV ÷1440；`ccw.cfg.para` 的 `END` 为天；每个时间值标注单位，不确定标 `[UNCERTAIN]`。
 11. **Closure 代码化**：TaskCard 进入 reporting/done 由确定性谓词裁决，LLM 分类器只是 advisory（`docs/02_ARCHITECTURE/Agent_Architecture.md` §7）。
 12. **Canonicality**：同一逻辑一个实现；禁止 `_v2`/`_new` 等并行版本（naming guard）。
+13. **shud 作业可恢复（M2）**：对 SIGTERM/SIGKILL 前已经返回 `job_id` 的 shud 作业，重启后满足 [Recoverability invariant](openspec/changes/m2-run-chain/specs/shud-run-jobs/spec.md)：
+    1. `run-job.json` 存在，状态只沿 RunJob 状态机前进。
+    2. 最终存在 `run-record.json` 或 `collect-error.json`。
+    3. 同一运行目录在任一时刻至多一个 SHUD 进程；不同运行目录可并行。
+    4. 挂载 `session-controller` 时，`notify.status` 最终为 `delivered`（发起会话 session log 有 `source.kind: shud-jobs` 且含该 `run_id` 的消息）或带原因的 `unreachable`。
+    5. 同一前提下，作业最终在 `completed.json` 且不在 `active.json`。无 owner 作业不以 `job/settled` 判定；伴生集成测试与本机重启命令的矩阵登记由 M2 task 14.2 落地。
 
 ## Forbidden Logic
 

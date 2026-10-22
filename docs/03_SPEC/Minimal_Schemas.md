@@ -124,6 +124,8 @@ uncertainty_notes: "降水空间插值可能低估高海拔降水量"
 
 ## 4. RunJob
 
+M2 字段处置依据 [m2-run-chain「Generated projection」](../../openspec/changes/m2-run-chain/specs/run-records/spec.md)：`cwd` 由 `run_dir` 取代，`command` 改为 argv 数组；执行资源限制与计算预算推迟 M3。下列 id 与状态集正文在 task 4.1 随 RunJob Zod 一并修订，此处只登记字段处置，不表示 M2 schema 已实现。
+
 ```yaml
 job_id: JOB-0001                      # 格式: JOB-NNNN
 task_id: TASK-0001
@@ -135,13 +137,13 @@ backend: local_direct | local_job | docker_job
 #   docker_job   — 可选，固定环境容器执行
 #   slurm        — 仅定义接口，不在 MVP 实现
 status: created | submitted | running | succeeded | failed | cancelled | timed_out | collected
-command: "cd repos/SHUD && make shud && ./shud ccw"
-cwd: "workspaces/TASK-0001/worktrees/SHUD"
-resources:
-  max_wall_minutes: 30
-  max_memory_mb: 4096
-cost_budget:
-  max_compute_minutes: 60
+command: ["<shudBin>", "-o", "output/ccw.out", "ccw"] # argv；不经 shell 拼接
+run_dir: "<session cwd>/runs/<run_id>"               # 取代 cwd
+resources:                                          # M3；M2 不含执行限制
+  max_wall_minutes: 30                               # M3
+  max_memory_mb: 4096                                # M3
+cost_budget:                                        # M3
+  max_compute_minutes: 60                            # M3
 pid: null                             # 仅 local_job 填写
 submitted_at: null
 finished_at: null
@@ -158,6 +160,8 @@ created → submitted → running → succeeded | failed | cancelled | timed_out
 
 ## 5. RunRecord
 
+M2 字段处置：`command` 为 argv 数组；`artifacts.metrics_summary` 与 `artifacts.plots` 推迟 M3。id、完整字段与 M2 取值约束在 task 4.2 随 RunRecord Zod 修订，当前不是已实现投影。
+
 ```yaml
 run_id: RUN-0001                      # 格式: RUN-NNNN
 job_id: JOB-0001
@@ -165,13 +169,13 @@ task_id: TASK-0001
 stack_id: STACK-0001
 data_id: DATA-0001
 status: succeeded | failed            # 终态，只有两个值
-command: "cd repos/SHUD && make shud && ./shud ccw"
+command: ["<shudBin>", "-o", "output/ccw.out", "ccw"] # argv
 artifacts:
   stdout: "artifacts/RUN-0001/stdout.log"
   stderr: "artifacts/RUN-0001/stderr.log"
   shud_output: "runs/RUN-0001/output/"
-  metrics_summary: "artifacts/RUN-0001/metrics.yaml"
-  plots: ["artifacts/RUN-0001/hydrograph.png"]
+  metrics_summary: "artifacts/RUN-0001/metrics.yaml" # M3
+  plots: ["artifacts/RUN-0001/hydrograph.png"]       # M3
 numerical_health:
   water_balance_residual: 0.0008
   cvode_failures: 0
