@@ -62,19 +62,24 @@ function unquote(text: string): string {
 // --get (or an abbreviation: --ext, --ge) appears, or the first word is an
 // old-style cluster holding x (tar xf). x is case-sensitive: -X is
 // --exclude-from. Segments end at ; | newline and at & except in >& and <&
-// (&>word is already a write or a stripped /dev/null). Scanning from the first
-// tar of each segment keeps the check linear.
+// (&>word is already a write or a stripped /dev/null).
 // #279/#283: tar, gtar and bsdtar (any case), not after a path-name character.
 const TAR_COMMAND = /(?<![A-Za-z0-9_.-])(?:[gG]|[bB][sS][dD])?[tT][aA][rR]\s/;
 const TAR_EXTRACT_OPTION = /^\s+[A-Za-z]*x|\s(?:-[A-Za-z]*x|--(?:ext[a-z]*|get?)(?![A-Za-z0-9-]))/;
 const COMMAND_SEGMENT = /[;|\n]|(?<![<>])&/;
 // The text after the first tar of each command segment, from the blank after the
-// name; scanning from the first tar keeps the checks linear.
+// name. Each segment also yields the pieces after its ( and ` so a tar inside $( )
+// or backticks is not hidden by an earlier tar-like word (bsdtar -tf a $(tar xf b
+// -C <raw>)); pieces only add candidates. Scanning from the first tar of each
+// piece keeps the checks linear.
 function tarArguments(text: string): string[] {
-  return text.split(COMMAND_SEGMENT).flatMap((segment) => {
-    const tar = TAR_COMMAND.exec(segment);
-    return tar === null ? [] : [segment.slice(tar.index + tar[0].length - 1)];
-  });
+  return text
+    .split(COMMAND_SEGMENT)
+    .flatMap((segment) => [segment, ...segment.split(/[(`]/).slice(1)])
+    .flatMap((segment) => {
+      const tar = TAR_COMMAND.exec(segment);
+      return tar === null ? [] : [segment.slice(tar.index + tar[0].length - 1)];
+    });
 }
 function tarExtracts(text: string): boolean {
   return tarArguments(text).some((options) => TAR_EXTRACT_OPTION.test(options));

@@ -152,6 +152,29 @@ const tarArchiveCases: [string, Kind, Setup?][] = [
   ["tar zcf prot/a.tgz x", "deny"],
   ["tar cfv prot/a.tar x", "deny"],
   ["tar --ca -f prot/a.tar b.tar", "deny"],
+  // Review round 1 pins: old-style r u A, cluster letter classes and positions, blanks
+  // (double spaces, tabs), a later segment, and a tar inside $( ) or backticks after
+  // bsdtar (deny since #279).
+  ["tar rf prot/a.tar x", "deny"],
+  ["tar uf prot/a.tar x", "deny"],
+  ["tar Af prot/a.tar b.tar", "deny"],
+  ["tar Jcf prot/a.txz x", "deny"],
+  ["tar zvcf prot/a.tgz x", "deny"],
+  ["tar cfvP prot/a.tar x", "deny"],
+  ["tar  cf prot/a.tar x", "deny"],
+  ["tar\tcf prot/a.tar x", "deny"],
+  ["tar\t-cf prot/a.tar x", "deny"],
+  ["tar -c\t-f prot/a.tar x", "deny"],
+  ["tar -cf  prot/a.tar x", "deny"],
+  ["tar -cf\tprot/a.tar x", "deny"],
+  ["tar cf  prot/a.tar x", "deny"],
+  ["tar cf\tprot/a.tar x", "deny"],
+  ["tar -c --file  prot/a.tar x", "deny"],
+  ["tar -c --file\tprot/a.tar x", "deny"],
+  ["tar -c\t--file=prot/a.tar x", "deny"],
+  ["tar -cf prot/a.tar x && ls", "deny"],
+  ["bsdtar -tf a.tar $(tar xf b.tar -C prot)", "deny"],
+  ["bsdtar -tf a.tar `tar xf b.tar -C prot`", "deny"],
   // The archive under another raw dir than the one touched; the first f of a cluster.
   ["tar -cf raw2/a.tar prot/x", "deny", multiRaw],
   ["tar -cfref/raw/a.tar x", "deny", refRaw],
@@ -169,6 +192,9 @@ const tarArchiveCases: [string, Kind, Setup?][] = [
   ["tar -tf prot/a.tar | grep -c -f prot/pat", "ask"],
   ["tar -tf prot/a.tar --delay", "ask"],
   ["tar -cf - x", "ask", inProt],
+  // Documented gap: cd changes the directory a relative operand resolves against.
+  ["cd prot && tar -cf a.tar x", "ask"],
+  ["cd prot; tar -cf a.tar x", "ask"],
   ["tar -cf protx/a.tar x", "next"],
   // Accepted false positives: a glued option argument holding a mode letter, tar as text.
   ["tar -tf prot/a.tar -Hustar", "deny"],
@@ -179,11 +205,11 @@ test.each(tarArchiveCases)("bash `%j` -> %s (#283 tar archive)", (command, kind,
 });
 
 // #283 resource limit: operands are deduplicated and every scan is linear.
-test.each<[string, string, Kind]>([
-  ["'tar -c ' + '-f x ' x 2e5", "tar -c " + "-f x ".repeat(2e5), "next"],
-  ["'tar -c ' + '-f x ' x 2e5 + prot", "tar -c " + "-f x ".repeat(2e5) + "prot", "ask"],
-  ["'tar -c -' + 'a' x 5e5 + ' prot'", "tar -c -" + "a".repeat(5e5) + " prot", "ask"],
-  ["'tar c' + 'f' x 5e5 + '/ prot'", "tar c" + "f".repeat(5e5) + "/ prot", "ask"],
-])("bash %s -> %s (#283 adversarial)", (_label, command, kind) => {
+test.each<[string, Kind, string]>([
+  ["'tar -c ' + '-f x ' x 2e5", "next", "tar -c " + "-f x ".repeat(2e5)],
+  ["'tar -c ' + '-f x ' x 2e5 + prot", "ask", "tar -c " + "-f x ".repeat(2e5) + "prot"],
+  ["'tar -c -' + 'a' x 5e5 + ' prot'", "ask", "tar -c -" + "a".repeat(5e5) + " prot"],
+  ["'tar c' + 'f' x 5e5 + '/ prot'", "ask", "tar c" + "f".repeat(5e5) + "/ prot"],
+])("bash %s -> %s (#283 adversarial)", (_label, kind, command) => {
   expectKind(decideIn(command), kind);
 });
