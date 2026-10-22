@@ -12,6 +12,10 @@
       "entry": ["src/**/*.test.ts", "src/run-identifiers.typecheck.ts"],
       "project": ["src/**/*.ts"]
     },
+    "packages/dsh-shud-jobs": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
     "packages/dsh-shud-raw-guard": {
       "entry": ["src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
