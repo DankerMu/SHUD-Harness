@@ -134,6 +134,34 @@ describe("RunRecord contract", () => {
   });
 
   test.each([
+    ["numerical_health", "cvode_failures", -1],
+    ["numerical_health", "cvode_failures", 0.5],
+    ["numerical_health", "negative_state_count", -1],
+    ["numerical_health", "negative_state_count", 0.5],
+    ["numerical_health", "max_solver_dt", -1],
+    ["resources", "wall_seconds", -1],
+    ["resources", "peak_memory_mb", -1],
+  ] as const)("rejects invalid measurement %s.%s=%s", (group, field, value) => {
+    const record = validRunRecord();
+    const candidate = { ...record, [group]: { ...record[group], [field]: value } };
+    const result = RunRecordSchema.safeParse(candidate);
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain(`${group}.${field}`);
+  });
+
+  test.each([0, 0.5])("accepts measured fractions and zero boundaries %s", (value) => {
+    const numerical_health = {
+      water_balance_residual: -0.125,
+      cvode_failures: 0,
+      negative_state_count: 0,
+      max_solver_dt: value,
+    };
+    const resources = { wall_seconds: value, peak_memory_mb: value };
+    const candidate = { ...validRunRecord(), numerical_health, resources };
+    expect(RunRecordSchema.parse(candidate)).toEqual(candidate);
+  });
+
+  test.each([
     ["job_id", "JOB-0001"],
     ["job_id", "shud-0123456789abcdef"],
     ["run_id", "RUN-20261022T031500-A1B2"],
