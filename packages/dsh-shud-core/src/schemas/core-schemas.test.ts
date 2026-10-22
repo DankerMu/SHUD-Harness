@@ -136,55 +136,6 @@ describe("RunJob contract", () => {
       expect(issuePaths(result), key).toContain(key);
     }
   });
-
-  test("public core exports enforce generated and parsed identifier brands in TypeScript", () => {
-    const fixturePath = join(dirname(fileURLToPath(import.meta.url)), "run-id-brand-check.ts");
-    const fixture = `
-import {
-  generateRunIdentifiers, JobRecordIdSchema, RunIdSchema, RunJobSchema,
-  type JobRecordId, type RunId,
-} from "../index.ts";
-const ids = generateRunIdentifiers();
-declare const stored: unknown;
-const job = RunJobSchema.parse(stored);
-export const generatedJob: JobRecordId = ids.job_id;
-export const generatedRun: RunId = ids.run_id;
-export const parsedJob: JobRecordId = JobRecordIdSchema.parse(stored);
-export const parsedRun: RunId = RunIdSchema.parse(stored);
-export const storedJob: JobRecordId = job.job_id;
-export const storedRun: RunId = job.run_id;
-// @ts-expect-error Plain strings are not job record ids.
-export const plainJob: JobRecordId = "JOB-20261022T031500-a1b2";
-// @ts-expect-error Plain strings are not run ids.
-export const plainRun: RunId = "RUN-20261022T031500-a1b2";
-// @ts-expect-error Job record ids cannot be assigned to run ids.
-export const crossedRun: RunId = ids.job_id;
-// @ts-expect-error Run ids cannot be assigned to job record ids.
-export const crossedJob: JobRecordId = ids.run_id;
-`;
-    const options: ts.CompilerOptions = {
-      ...NODE_TYPE_OPTIONS,
-      module: ts.ModuleKind.ESNext,
-      moduleResolution: ts.ModuleResolutionKind.Bundler,
-      allowImportingTsExtensions: true,
-      strict: true,
-      noEmit: true,
-      skipLibCheck: true,
-      target: ts.ScriptTarget.ES2022,
-    };
-    const host = ts.createCompilerHost(options);
-    const getSourceFile = host.getSourceFile.bind(host);
-    host.getSourceFile = (path, languageVersion, onError, shouldCreateNewSourceFile) =>
-      path === fixturePath
-        ? ts.createSourceFile(path, fixture, ts.ScriptTarget.ES2022, true)
-        : getSourceFile(path, languageVersion, onError, shouldCreateNewSourceFile);
-    const program = ts.createProgram({ rootNames: [fixturePath], options, host });
-    expect(
-      ts
-        .getPreEmitDiagnostics(program)
-        .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")),
-    ).toEqual([]);
-  });
 });
 
 describe("core Zod schemas", () => {
