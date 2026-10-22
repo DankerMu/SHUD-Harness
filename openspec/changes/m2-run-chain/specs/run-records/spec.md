@@ -56,7 +56,7 @@ RunRecord SHALL 含：`run_id`、`job_id`、`task_id`、`stack_id`、`data_id`�
 - **THEN** 解析成功，记录表明该值不是响应体原值
 
 ### Requirement: Generated projection
-RunJob 与 RunRecord 的 Zod schema SHALL 位于 `packages/dsh-shud-core/src/schemas/`，SHALL 登记进 `scripts/schema/generate.ts` 的 schema 定义表，经 `pnpm run schema:generate` 投影到 `docs/generated/`；`pnpm run schema:check` SHALL 在二者不一致时失败。`docs/03_SPEC/Minimal_Schemas.md` 的 RunJob/RunRecord 段 SHALL 与本 spec 一致，并逐项写明相对原文的处置：id 格式由 `JOB-NNNN`/`RUN-NNNN` 改为本 spec 格式；RunJob `status` 去掉 `timed_out`（推迟 M3）；`backend` 在 M2 只有 `local_job`；`cwd` 删除、由 `run_dir` 取代；`command` 由字符串改为 argv 数组；`resources.max_memory_mb`、`resources.max_wall_minutes`、`cost_budget.max_compute_minutes` 推迟 M3（标注"M3"）；新增 `project`、`label`、`input_dir`、`run_dir`、`end_days`、`owner_session`、`dsh_job_id`、`dsh_job_ids`、`pid_started_at`、`input_bytes`、`started_at`、`cancel_requested_at`、`exit_code`、`llm`、`notify`；RunRecord `artifacts.metrics_summary` 与 `artifacts.plots` 推迟 M3（标注"M3"），新增 `artifacts.files`、`exit_class`、`llm.response_model_source`、`collected_at`；`task_id`/`stack_id`/`data_id` 在 M2 可空、M3 收紧为必填。
+RunJob 与 RunRecord 的 Zod schema SHALL 位于 `packages/dsh-shud-core/src/schemas/`，SHALL 登记进 `scripts/schema/registry.ts` 的 schema 定义表（由 `scripts/schema/generate.ts` 入口调用），经 `pnpm run schema:generate` 投影到 `docs/generated/`；`pnpm run schema:check` SHALL 在二者不一致时失败。`docs/03_SPEC/Minimal_Schemas.md` 的 RunJob/RunRecord 段 SHALL 与本 spec 一致，并逐项写明相对原文的处置：id 格式由 `JOB-NNNN`/`RUN-NNNN` 改为本 spec 格式；RunJob `status` 去掉 `timed_out`（推迟 M3）；`backend` 在 M2 只有 `local_job`；`cwd` 删除、由 `run_dir` 取代；`command` 由字符串改为 argv 数组；`resources.max_memory_mb`、`resources.max_wall_minutes`、`cost_budget.max_compute_minutes` 推迟 M3（标注"M3"）；新增 `project`、`label`、`input_dir`、`run_dir`、`end_days`、`owner_session`、`dsh_job_id`、`dsh_job_ids`、`pid_started_at`、`input_bytes`、`started_at`、`cancel_requested_at`、`exit_code`、`llm`、`notify`；RunRecord `artifacts.metrics_summary` 与 `artifacts.plots` 推迟 M3（标注"M3"），新增 `artifacts.files`、`exit_class`、`llm.response_model_source`、`collected_at`；`task_id`/`stack_id`/`data_id` 在 M2 可空、M3 收紧为必填。
 
 #### Scenario: drift detected
 - **WHEN** 修改 RunRecord 的 Zod 字段而未重新生成
@@ -65,3 +65,14 @@ RunJob 与 RunRecord 的 Zod schema SHALL 位于 `packages/dsh-shud-core/src/sch
 #### Scenario: schemas registered for generation
 - **WHEN** 执行 `pnpm run schema:generate`
 - **THEN** `docs/generated/` 下出现 RunJob 与 RunRecord 的 Markdown 与 JSON Schema 投影
+
+### Requirement: Generator refactor preserves existing projections
+The generator refactor SHALL preserve every existing generated path and byte, its CLI entrypoints, registry completeness checks, and fail-closed generated-output path checks. The schema definition table SHALL remain independently extensible for subsequent RunJob/RunRecord registration. Every generator module SHALL contain at most 1000 lines, and generator-specific lint/type-safety and large-file exemptions SHALL be removed.
+
+#### Scenario: unchanged schemas retain identical projections
+- **WHEN** the eight existing schemas are generated before and after the module split
+- **THEN** the complete generated file path and SHA-256 inventories are identical and the existing generator self-test passes
+
+#### Scenario: unsafe paths remain rejected
+- **WHEN** the existing self-test attempts generation through a symlink ancestor or supplies an incomplete schema registry
+- **THEN** the refactored generator rejects the input before mutating the protected output destination, as before the split

@@ -110,9 +110,6 @@ baseline:
     - path: "packages/dsh-shud-core/src/governance/policy-gate-core.test.ts"
       lines: 1675
       target: "M3 follows the source split"
-    - path: "scripts/schema/generate.ts"
-      lines: 1304
-      target: "M2 ≤1000 (extract renderers)"
   eslint_type_safety:
     - path: "packages/dsh-shud-core/src/governance/policy-gate-core.ts"
       rules: ["@typescript-eslint/no-unsafe-assignment"]
@@ -122,10 +119,6 @@ baseline:
       rules: ["@typescript-eslint/no-unsafe-return"]
       findings: 2
       target: "M3 split"
-    - path: "scripts/schema/generate.ts"
-      rules: ["@typescript-eslint/no-base-to-string", "preserve-caught-error"]
-      findings: 3
-      target: "M2 split"
   knip_duplicates:
     - path: "packages/dsh-shud-core/src/governance/policy-gate-core.ts"
       symbol: "isReservedAuthorityPolicyEvidenceId (alias of isReservedAuthorityPolicyErrorId)"
