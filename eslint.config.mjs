@@ -52,6 +52,19 @@ function emptyRuntimeImportRestriction(source) {
   };
 }
 
+// With verbatimModuleSyntax, all-inline-type declarations still load the source module.
+// Zero-specifier declarations are covered by the existing package/named-only restrictions.
+const INLINE_TYPE_RUNTIME_IMPORT = {
+  selector:
+    ":matches(" +
+    "ImportDeclaration[importKind!='type']:not(:has(ImportSpecifier[importKind!='type'], ImportDefaultSpecifier, ImportNamespaceSpecifier)), " +
+    "ExportNamedDeclaration[exportKind!='type']:not(:has(ExportSpecifier[exportKind!='type']))" +
+    ")[specifiers.length>0]" +
+    "[source.value=/^@deepseek-ai\\u002F(?!(?:dsh-tools|cordis|dsh-jobs|dsh-jobs-local)$)/]",
+  message:
+    "Inline type specifiers retain a runtime host dependency; use declaration-level import type or export type (ADR-0006).",
+};
+
 export default tseslint.config(
   {
     ignores: [
@@ -95,7 +108,11 @@ export default tseslint.config(
           patterns: HOST_IMPORT_PATTERNS,
         },
       ],
-      "no-restricted-syntax": ["error", emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name)],
+      "no-restricted-syntax": [
+        "error",
+        emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name),
+        INLINE_TYPE_RUNTIME_IMPORT,
+      ],
     },
   },
   {
@@ -112,6 +129,7 @@ export default tseslint.config(
         "error",
         emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name),
         emptyRuntimeImportRestriction(HOST_SCOPE_IMPORT.name),
+        INLINE_TYPE_RUNTIME_IMPORT,
       ],
     },
   },

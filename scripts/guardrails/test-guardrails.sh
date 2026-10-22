@@ -110,6 +110,43 @@ expect_seam "eslint direct checkout test type" no-restricted-imports seam.test.t
 expect_seam "eslint dsh testkit runtime" no-restricted-imports seam.test.ts "import '@deepseek-ai/dsh-agent-loop-testkit';"
 expect_seam "eslint dsh-jobs subpath runtime" no-restricted-imports registry.ts "import '@deepseek-ai/dsh-jobs/internal';"
 expect_seam "eslint unlisted host runtime" no-restricted-imports registry.ts "import '@deepseek-ai/schemastery';"
+
+# Inline-only specifiers retain a runtime dependency under verbatimModuleSyntax.
+# Exercise both configurations for named-only, other host, unknown host, and subpath sources.
+for filename in registry.ts seam.test.ts; do
+  for binding in \
+    "@deepseek-ai/dsh-llm:MessageSourceMap" \
+    "@deepseek-ai/dsh-scope:Scope" \
+    "@deepseek-ai/dsh-agent:Agent" \
+    "@deepseek-ai/unlisted-seam:HostType" \
+    "@deepseek-ai/dsh-jobs/internal:JobId"; do
+    source=${binding%:*}; symbol=${binding#*:}
+    expect_seam "eslint inline type import $source in $filename" no-restricted-syntax "$filename" "import { type $symbol } from '$source'; export type { $symbol };"
+    expect_seam "eslint inline type re-export $source in $filename" no-restricted-syntax "$filename" "export { type $symbol } from '$source';"
+    expect_seam "eslint declaration type import $source in $filename" allow "$filename" "import type { $symbol } from '$source'; export type { $symbol };"
+    expect_seam "eslint declaration type re-export $source in $filename" allow "$filename" "export type { $symbol } from '$source';"
+  done
+done
+expect_seam "eslint inline scope type import in test harness" no-restricted-syntax test-harness.ts "import { type Scope } from '@deepseek-ai/dsh-scope'; export type { Scope };"
+expect_seam "eslint inline scope type re-export in test harness" no-restricted-syntax test-harness.ts "export { type Scope } from '@deepseek-ai/dsh-scope';"
+expect_seam "eslint declaration scope type import in test harness" allow test-harness.ts "import type { Scope } from '@deepseek-ai/dsh-scope'; export type { Scope };"
+expect_seam "eslint declaration scope type re-export in test harness" allow test-harness.ts "export type { Scope } from '@deepseek-ai/dsh-scope';"
+
+# A permitted runtime capability can coexist with inline types in imports and re-exports.
+for filename in registry.ts seam.test.ts; do
+  expect_seam "eslint mixed message import in $filename" allow "$filename" "import { createUserMessage, type MessageSourceMap } from '@deepseek-ai/dsh-llm'; export { createUserMessage }; export type { MessageSourceMap };"
+  expect_seam "eslint mixed message re-export in $filename" allow "$filename" "export { createUserMessage, type MessageSourceMap } from '@deepseek-ai/dsh-llm';"
+done
+for filename in seam.test.ts test-harness.ts; do
+  expect_seam "eslint mixed scope import in $filename" allow "$filename" "import { createScope, type Scope } from '@deepseek-ai/dsh-scope'; export { createScope }; export type { Scope };"
+  expect_seam "eslint mixed scope re-export in $filename" allow "$filename" "export { createScope, type Scope } from '@deepseek-ai/dsh-scope';"
+done
+
+# Package-wide runtime seams remain unrestricted, including inline-only declarations.
+for source in @deepseek-ai/dsh-tools @deepseek-ai/cordis @deepseek-ai/dsh-jobs @deepseek-ai/dsh-jobs-local; do
+  expect_seam "eslint runtime seam inline type import $source" allow registry.ts "import { type HostType } from '$source'; export type { HostType };"
+  expect_seam "eslint runtime seam inline type re-export $source" allow registry.ts "export { type HostType } from '$source';"
+done
 rm -rf "$SEAM_DIR"
 
 # 3 jscpd (duplicate block planted in an isolated dir, scanned directly)
