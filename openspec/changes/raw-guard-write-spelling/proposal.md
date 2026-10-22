@@ -23,7 +23,7 @@ Fixture level: expanded
 Upstream suggested level: absent（issue-scribe，Readiness implementation-ready）；触发词：策略门决策与 raw 保护（Critical Paths #1/#2）、ask→deny 收紧
 Blast radius: 去引号副本让读命令的引号文本拼出写动词，判 deny（误报方向，需写明并钉住）；tar `x` 若不区分大小写，`-X excl` 读命令被误判；tar 检测若用跨段或回溯正则，长命令退化为平方复杂度；探针 T1–T5 必须不变
 Selected risk packs: Public API / CLI / script entry; File IO / path safety; Auth / permissions / secrets; Legacy compatibility; Documentation / migration notes; Resource limits
-Evidence floor: 新增 deny 行先红后绿，ask/next 钉住行改前改后都绿；既有全部行不变；29 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
+Evidence floor: 新增 deny 行先红后绿，ask/next 钉住行改前改后都绿；既有全部行不变；30 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
 
 ## Capabilities
 

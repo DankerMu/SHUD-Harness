@@ -55,6 +55,9 @@ const spellingWriteCases: [string, Kind][] = [
   ["tar -C prot\t-xf a.tar", "deny"],
   ["GTAR -C prot -xf a.tar", "deny"],
   ["tar>/dev/null -C prot -xf a.tar", "deny"],
+  // Review round 2 pins: x third in an old-style or short-option cluster.
+  ["tar zvxf a.tgz -C prot", "deny"],
+  ["tar -C prot -zvxf a.tgz", "deny"],
   ["cat prot/x", "ask"],
   ["tar -tf prot/a.tar", "ask"],
   ["tar -tvf prot/a.tar -X excl", "ask"],

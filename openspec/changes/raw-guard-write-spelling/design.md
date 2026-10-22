@@ -59,7 +59,7 @@ Must add/change:
   - ask：`cat prot/x`、`tar -tf prot/a.tar`、`tar -tvf prot/a.tar -X excl`、`tar -cf o.tar prot`、`tar -cf o.tar -C prot .`、`tar -tf prot/a.tar | grep -x foo`、`ls prot/a.tar -x`。
   - next：`rm protx/x`、`echo ok > derived.txt`。
   - 已接受误报 deny：`grep 'r''m' prot/log`、`grep -rn tar prot -x`；review round 1 补：`grep "c\p" prot/log`、`tar -tvf prot/a.tar -Xexcl`、`grep "tar extracted" prot/log`、`tar -C work -xzf prot/x.tgz`。
-  - review round 1 补 deny（`code: "raw-immutable"`）：`cd w && tar -C prot -xf a.tar`、`ls; tar -C prot -xf a.tar`（非首段）、`tar -C prot -Jxf a.txz`、`tar Jxf a.txz -C prot`（大写字母簇）、`tar -f a.tar -C prot --extract`（长选项在行尾）、`/usr/bin/tar -C prot -xf a.tar`（路径前缀）、`tar` 接两个空格再接 `xf a.tar -C prot`、`tar -C prot` 接制表符再接 `-xf a.tar`、`GTAR -C prot -xf a.tar`、`tar>/dev/null -C prot -xf a.tar`（丢弃重定向剥除后才成立）。
+  - review round 1 补 deny（`code: "raw-immutable"`）：`cd w && tar -C prot -xf a.tar`、`ls; tar -C prot -xf a.tar`（非首段）、`tar -C prot -Jxf a.txz`、`tar Jxf a.txz -C prot`（大写字母簇）、`tar -f a.tar -C prot --extract`（长选项在行尾）、`/usr/bin/tar -C prot -xf a.tar`（路径前缀）、`tar` 接两个空格再接 `xf a.tar -C prot`、`tar -C prot` 接制表符再接 `-xf a.tar`、`GTAR -C prot -xf a.tar`、`tar>/dev/null -C prot -xf a.tar`（丢弃重定向剥除后才成立）；review round 2 补：`tar zvxf a.tgz -C prot`、`tar -C prot -zvxf a.tgz`（`x` 在簇内第 3 位）。
   - review round 1 补 ask（分段）：`tar -tf prot/a.tar && grep -x foo`、`tar -tf prot/a.tar; ls -x`、`tar -tf prot/a.tar & ls -x`、`tar -tf prot/a.tar` 接换行再接 `ls -x`。
   - 已记录漏报 ask：`tar -C prot --exclude="a|b" -xf a.tar`（引号内的 `|` 仍分段）。
   - 祖先 deny（`code: "raw-ancestor-write"`）：`r"m" -rf sub`、`m\v sub x`。
@@ -110,6 +110,7 @@ Required evidence:
   27. `[gG]?` 改为 `g?` → `GTAR` 行变红。
   28. `tarExtracts(checked)` 改为 `tarExtracts(text)` → `tar>/dev/null …` 行变红。
   29. `COMMAND_SEGMENT` 去掉 `;` / 去掉 `&` 分支 / 去掉 `\n` → 对应分段 ask 行变红。
+  30. 旧式分支 `[A-Za-z]*x` 改为 `[A-Za-z]?x` / 短选项簇 `-[A-Za-z]*x` 改为 `-[A-Za-z]?x` → `tar zvxf a.tgz -C prot` / `tar -C prot -zvxf a.tgz` 变红（`x` 在簇内第 3 位，review round 2）。
 - `pnpm run check`、`pnpm run build`、`pnpm run test-guardrails` 绿。
 - live `pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变。
 

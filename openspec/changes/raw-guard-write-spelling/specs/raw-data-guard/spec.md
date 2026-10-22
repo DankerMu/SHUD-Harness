@@ -106,7 +106,7 @@ tar 解包 SHALL 按以下规则判为写：在 `tar` 或 `gtar`（命令名与 
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: tar extraction anywhere in its command segment
-- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -C prot -xf a.tar`、`tar -f a.tar -x -C prot`、`tar --extract -f a.tar -C prot`、`tar --get -f a.tar -C prot`、`tar -C prot --ext -f a.tar`、`tar xf a.tar -C prot`、`tar zxf a.tgz -C prot`、`tar -C prot -zxf a.tgz`、`tar 2>&1 -C prot -xf a.tar`、`gtar -C prot -xzf a.tgz`、`TAR -C prot -xf a.tar`、`/usr/bin/tar -C prot -xf a.tar`、`tar -C prot -Jxf a.txz`、`tar -f a.tar -C prot --extract` 或 `cd w && tar -C prot -xf a.tar`
+- **WHEN** 配置 `rawDirs: ["prot"]`，调用 `bash`，`command` 为 `tar -C prot -xf a.tar`、`tar -f a.tar -x -C prot`、`tar --extract -f a.tar -C prot`、`tar --get -f a.tar -C prot`、`tar -C prot --ext -f a.tar`、`tar xf a.tar -C prot`、`tar zxf a.tgz -C prot`、`tar -C prot -zxf a.tgz`、`tar 2>&1 -C prot -xf a.tar`、`gtar -C prot -xzf a.tgz`、`TAR -C prot -xf a.tar`、`/usr/bin/tar -C prot -xf a.tar`、`tar -C prot -Jxf a.txz`、`tar -C prot -zvxf a.tgz`、`tar zvxf a.tgz -C prot`、`tar -f a.tar -C prot --extract` 或 `cd w && tar -C prot -xf a.tar`
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: tar listing, creation and exclude stay reads

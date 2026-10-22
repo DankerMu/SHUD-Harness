@@ -4,7 +4,7 @@
 
 - [x] 1.1 先加测试：design 列出的拆分动词、tar 解包、大小写、ask/next 钉住、已接受误报、祖先、资源行。验证：对未改的 `decide.ts` 运行 `pnpm vitest run packages/dsh-shud-raw-guard`，红绿划分须与 design「Required evidence」一致，既有行全绿。记录红行数。
 - [x] 1.2 按 design 加 `unquote`、`TAR_COMMAND`、`TAR_EXTRACT_OPTION`、`tarExtracts`，改两遍判定。验证：同一命令全绿，既有行不变；`git diff` 中 `decide.ts` 只动这些位置。
-- [x] 1.3 design 列出的二十九项突变各自让对应行变红（证据记入报告，不提交）。
+- [x] 1.3 design 列出的三十项突变各自让对应行变红（证据记入报告，不提交）。
 - [x] 1.4 `pnpm run check` exit 0（覆盖率不降）；`pnpm run build`；`pnpm run test-guardrails`。
 
 ## 2. Spec
@@ -22,7 +22,7 @@ Minimal mergeable slice: atomic（写判定候选集与 tar 检测同属第一�
 ## Risk packs
 
 - Public API / CLI / script entry — selected：`decideRawAccess` 决策契约；由 1.1、1.2 覆盖。
-- File IO / path safety — selected：`-X`、`-C`、分段与 `a.tar` 文件名不得误判；由 ask 钉住行与突变 5、6、8、10 覆盖。
+- File IO / path safety — selected：`-X`、`-C`、分段与 `a.tar` 文件名不得误判；由 ask 钉住行与突变 5、6、8、10、20–30 覆盖。
 - Auth / permissions / secrets — selected：ask→deny 收紧与已接受误报；由误报行覆盖。
 - Legacy compatibility — selected：既有全部行与探针不变；由 1.1、3.1 覆盖。
 - Documentation / migration notes — selected：两条 Requirement 的 delta；由 2.1 覆盖。
