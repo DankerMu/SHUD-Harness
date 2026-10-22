@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Raw directory configuration
-策略门 SHALL 接受 `rawDirs: string[]` 配置，默认 `["data/raw"]`。`apply` 时 SHALL 校验配置：非数组、空数组、含空串或含未知键（如 `rawDir`）SHALL 抛错使插件行启动失败，SHALL NOT 静默回退默认值。校验通过后，每一项配置原文 SHALL 做一次词法规范化，之后的提及判定、祖先推导与路径解析都只使用规范化后的文本：连续 `/` 折叠为一个；作为路径段的 `/.` 去除；前导 `./` 去除（整串只剩 `./` 时保留 `.`）；结尾 `/` 去掉（整串只剩 `/` 时保留 `/`）。`//` 折叠 SHALL 先于前导 `./` 去除（`.//sub/raw` 规范化为 `sub/raw`，SHALL NOT 成为绝对路径）。`/.` 只在后接 `/` 或结尾时算路径段。`..` 段与 `.` 开头的名字（如 `.raw`、`. raw`）SHALL 保持原样。本规范其他 Requirement 所说的「配置原文」均指规范化后的文本。相对项 SHALL 以当前 session 的 cwd 解析（cwd 不可得时用进程 cwd）；绝对项 SHALL 原样使用。路径匹配 SHALL 基于解析后真实路径（realpath）的前缀；目标路径或 rawDir 本身不存在时以其最近存在祖先的 realpath 拼接余段，SHALL NOT 抛错；`data/rawx` 之类的同前缀名 SHALL NOT 匹配 `data/raw`。
+策略门 SHALL 接受 `rawDirs: string[]` 配置，默认 `["data/raw"]`。`apply` 时 SHALL 校验配置：非数组、空数组、含空串或含未知键（如 `rawDir`）SHALL 抛错使插件行启动失败，SHALL NOT 静默回退默认值。校验通过后，每一项配置原文 SHALL 做一次词法规范化，之后的提及判定、祖先推导与路径解析都只使用规范化后的文本：连续 `/` 折叠为一个；作为路径段的 `/.` 去除；前导 `./` 去除（整串只剩 `./` 时保留 `.`）；结尾 `/` 去掉（整串只剩 `/` 时保留 `/`）。`//` 折叠 SHALL 先于前导 `./` 去除（`.//sub/raw` 规范化为 `sub/raw`，SHALL NOT 成为绝对路径）。配置侧的 `/.` 只在后接 `/` 或结尾时算路径段（命令侧规则见「Shell command touches raw」）。连续出现的 `//` 与 `/.` SHALL 全部处理（如 `./././sub/raw`、`.//.//sub/raw`、`.///sub/raw` 都规范化为 `sub/raw`）。`..` 段与 `.` 开头的名字（如 `.raw`、`. raw`）SHALL 保持原样。本规范其他 Requirement 所说的「配置原文」均指规范化后的文本。相对项 SHALL 以当前 session 的 cwd 解析（cwd 不可得时用进程 cwd）；绝对项 SHALL 原样使用。路径匹配 SHALL 基于解析后真实路径（realpath）的前缀；目标路径或 rawDir 本身不存在时以其最近存在祖先的 realpath 拼接余段，SHALL NOT 抛错；`data/rawx` 之类的同前缀名 SHALL NOT 匹配 `data/raw`。
 
 #### Scenario: relative raw dir under session cwd
 - **WHEN** 配置为默认值，session cwd 为 `/ws`，调用 `write` 且 `file_path` 为 `data/raw/obs.csv`

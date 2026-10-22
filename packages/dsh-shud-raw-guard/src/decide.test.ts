@@ -45,6 +45,10 @@ test.each([
   [["./."], ["."]],
   [["//"], ["/"]],
   [[".//sub/raw"], ["sub/raw"]],
+  [["./././sub/raw"], ["sub/raw"]],
+  [[".//.//sub/raw"], ["sub/raw"]],
+  [[".///sub/raw"], ["sub/raw"]],
+  [["sub/raw/."], ["sub/raw"]],
   [["/data/./raw/"], ["/data/raw"]],
   [["/data/raw"], ["/data/raw"]],
   [

@@ -4,7 +4,7 @@
 
 - [x] 1.1 先加测试：design 列出的 `normalizeRawDirs` 单测、shell 决策表、祖先行、工作区行、文件工具行。验证：对未改的 `decide.ts` 运行 `pnpm vitest run packages/dsh-shud-raw-guard/src/decide.test.ts`，红绿划分须与 design「Required evidence」一致（改前就为绿的钉住行不得删除），既有行全绿。记录红行数。
 - [x] 1.2 按 design 改 `normalizeRawDirs` 返回值。验证：同一命令全绿，既有行不变；`git diff` 中 `decide.ts` 只动该返回值与其注释。
-- [x] 1.3 design 列出的七项突变各自让对应行变红（证据记入报告，不提交）。
+- [x] 1.3 design 列出的十一项突变各自让对应行变红（证据记入报告，不提交）。
 - [x] 1.4 `pnpm run check` exit 0（覆盖率不降）；`pnpm run build`；`pnpm run test-guardrails`。
 
 ## 2. Spec

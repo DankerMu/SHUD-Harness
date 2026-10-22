@@ -44,7 +44,7 @@ Must add/change:
   - `.//sub/raw` → `sub/raw`；`/data/./raw/` → `/data/raw`；
   - `../outside/raw`、`deep-link/..`、`.raw`、`sub/. raw` 不变。
 - `decide.test.ts`：
-  - `normalizeRawDirs` 单测：`["./sub/raw"]` → `["sub/raw"]`；`["././sub/raw/"]` → `["sub/raw"]`；`["./sub/./raw"]` → `["sub/raw"]`；`["./"]`、`["."]`、`["./."]` → `["."]`；`["//"]` → `["/"]`；`[".//sub/raw"]` → `["sub/raw"]`；`["/data/./raw/"]` → `["/data/raw"]`；`["/data/raw"]`、`[".raw", "../outside/raw", "deep-link/..", "sub/. raw"]` 不变；既有默认值与 `["data/raw/", "/"]` 行不变。
+  - `normalizeRawDirs` 单测：`["./sub/raw"]` → `["sub/raw"]`；`["././sub/raw/"]` → `["sub/raw"]`；`["./sub/./raw"]` → `["sub/raw"]`；`["./"]`、`["."]`、`["./."]` → `["."]`；`["//"]` → `["/"]`；`[".//sub/raw"]` → `["sub/raw"]`；`["./././sub/raw"]`、`[".//.//sub/raw"]`、`[".///sub/raw"]` → `["sub/raw"]`（review round 1）；`["sub/raw/."]` → `["sub/raw"]`；`["/data/./raw/"]` → `["/data/raw"]`；`["/data/raw"]`、`[".raw", "../outside/raw", "deep-link/..", "sub/. raw"]` 不变；既有默认值与 `["data/raw/", "/"]` 行不变。
   - shell 决策表（`rawDirs` 依次为 `["./sub/raw"]`、`["././sub/raw"]`、`["./sub/./raw"]`，workspace 下已建 `sub/raw/`）：
     - deny（`code: "raw-immutable"`）：`rm -rf sub/raw`、`rm -rf sub/raw/x`、`cp a sub/raw/b`、`echo hi > sub/raw/f`、`rm -rf ./sub/raw`、`rm -rf <abs>/sub/raw`（`<abs>` 取 `realpathSync(cwd)`，同既有绝对路径行；不加直接拼 cwd 的写法，它在 macOS `/var` → `/private/var` 下改前为红、Linux 下为绿）；
     - ask：`cat sub/raw/x`；
@@ -69,7 +69,7 @@ Seams under test: `normalizeRawDirs(config)`、`decideRawAccess(call, options)`�
 Required evidence:
 - 改动前（origin/main 的 `decide.ts`）的红绿划分，改后全部为绿，既有行不变：
   - 改前为红：
-    - 单测 `["./sub/raw"]`、`["././sub/raw/"]`、`["./sub/./raw"]`、`["./."]`、`[".//sub/raw"]`、`["/data/./raw/"]`；
+    - 单测 `["./sub/raw"]`、`["././sub/raw/"]`、`["./sub/./raw"]`、`["./."]`、`[".//sub/raw"]`、`["/data/./raw/"]`、`["./././sub/raw"]`、`[".//.//sub/raw"]`、`[".///sub/raw"]`、`["sub/raw/."]`；
     - 三种配置下的 `rm -rf sub/raw`、`rm -rf sub/raw/x`、`cp a sub/raw/b`、`echo hi > sub/raw/f`（deny）与 `cat sub/raw/x`（ask）；
     - 祖先行 `rm -rf sub`。
   - 改前就为绿（钉住行，不得删除；其中 `["./"]` 是突变 3 唯一的击杀行）：
@@ -85,6 +85,10 @@ Required evidence:
   5. 前导规则改为 `^\.+\/`（吞掉 `..`）→ `["../outside/raw"]` 单测变红。
   6. 去掉 `//` 折叠 → `[".//sub/raw"]` 单测变红（变为 `/sub/raw`）。
   7. `//` 与 `/.` 两步改用 `normalizeCommandPaths`（`/.` 后接 shell 边界也去除），前导 `./` 规则保留 → `["sub/. raw"]` 单测变红。
+  8. `/.` 规则去掉 `g` → `["./././sub/raw"]` 单测变红（变为 `./sub/raw`）。
+  9. `//` 规则去掉 `g` → `[".//.//sub/raw"]` 单测变红（变为 `/sub/raw`）。
+  10. `\/{2,}` 改为 `\/{2}` → `[".///sub/raw"]` 单测变红（变为 `/sub/raw`）。
+  11. `/.` 规则的前瞻去掉 `$` → `["sub/raw/."]` 单测变红。
 - `pnpm run check`、`pnpm run build`、`pnpm run test-guardrails` 绿。
 - live `pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变。
 

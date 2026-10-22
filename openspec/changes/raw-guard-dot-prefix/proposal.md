@@ -19,7 +19,7 @@ Fixture level: expanded
 Upstream suggested level: absent（issue-scribe，Readiness implementation-ready）；触发词：path safety、raw 保护（Critical Path #2）、next→deny/ask 收紧
 Blast radius: 规范化过宽会改变既有配置语义（`..`、`.raw`、绝对路径必须不变）；`./` 被处理成空串会变成 `/`，把整个文件系统当 raw（fail-closed 但不可用）；探针 T1–T5 用默认配置，必须不变
 Selected risk packs: Config / project setup; File IO / path safety; Auth / permissions / secrets; Legacy compatibility; Documentation / migration notes
-Evidence floor: 新增 deny/ask 行与单测先红后绿，next 反例与文件工具行改前改后都绿；既有全部行不变；7 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
+Evidence floor: 新增 deny/ask 行与单测先红后绿，next 反例与文件工具行改前改后都绿；既有全部行不变；11 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
 
 ## Capabilities
 
