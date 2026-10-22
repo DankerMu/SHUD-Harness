@@ -6,6 +6,7 @@
   },
   "workspaces": {
     ".": {
+      "entry": ["scripts/runtime/profile-patch.ts"],
       "project": ["scripts/**/*.ts"]
     },
     "packages/dsh-shud-core": {

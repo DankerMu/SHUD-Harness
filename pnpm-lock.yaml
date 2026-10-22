@@ -47,6 +47,9 @@ importers:
       vitest:
         specifier: 4.1.12
         version: 4.1.12(@types/node@24.19.2)(@vitest/coverage-v8@4.1.12)(jiti@2.7.0)(yaml@2.9.1)
+      yaml:
+        specifier: 2.9.1
+        version: 2.9.1
       zod:
         specifier: 4.6.7
         version: 4.6.7
@@ -132,6 +135,9 @@ importers:
 
   profile/shud:
     dependencies:
+      '@shud-harness/dsh-shud-jobs':
+        specifier: workspace:*
+        version: link:../../packages/dsh-shud-jobs
       '@shud-harness/dsh-shud-raw-guard':
         specifier: workspace:*
         version: link:../../packages/dsh-shud-raw-guard

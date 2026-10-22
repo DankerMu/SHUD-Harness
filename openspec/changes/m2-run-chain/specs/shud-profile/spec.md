@@ -42,6 +42,21 @@
 - **WHEN** `PROFILE_NAME=shud-probe PROFILE_TEMPLATE=headless` 且设置 `SHUD_BIN` 执行 `pnpm run profile:install`
 - **THEN** `$DSH_HOME/profiles/shud-probe/package.json` 的 `dsh.profile.bundles` 以 `@shud-harness/dsh-profile-shud` 结尾且不含 `@deepseek-ai/dsh-web-app`，`stateDir` 为 `$DSH_HOME/profiles/shud-probe/shud-jobs`，`dsh --profile shud-probe --dump-config-schema` 中 `shud-raw-guard` 与 `shud-jobs` 行 `status` 不是 `error`
 
+### Requirement: Deployment raw directory override
+默认 `rawDirs: ["data/raw"]` 是开发与探针口径。部署期真实 raw 目录 SHALL 由用户在 `$DSH_HOME/profiles/shud/cordis.patch.yml` 中以 `- id: shud-raw-guard` + `config: { rawDirs: ["<绝对路径>", ...] }` 行覆写；`profile:install` SHALL NOT 生成或改写该行，该行及其它非 `shud-jobs` 内容 SHALL 逐字节保留；该覆写 SHALL 在 `dsh --profile shud --dump-config` 中可见。升级已有 profile 时允许按「Idempotent profile installation」新增或更新唯一 `shud-jobs` 行；该行已为相同目标配置时，重复安装 SHALL 保持整个用户 patch 的 sha256 不变。
+
+#### Scenario: user patch overrides rawDirs
+- **WHEN** 用户 patch 含 `- id: shud-raw-guard` 且 `config.rawDirs` 为 `["/srv/data_root/raw"]`，执行 `dsh --profile shud --dump-config`
+- **THEN** `shud-raw-guard` 行的 `rawDirs` 为 `["/srv/data_root/raw"]`，不再含 `data/raw`
+
+#### Scenario: install keeps the user patch
+- **WHEN** 用户 patch 已含上述 raw 覆写行及安装器按相同 `SHUD_BIN` 写入的目标 `shud-jobs` 配置，再次执行 `pnpm run profile:install`
+- **THEN** 该文件 sha256 不变
+
+#### Scenario: existing raw override migrates without byte changes
+- **WHEN** 已有 profile 的用户 patch 含 raw 覆写及其它用户内容但没有 `shud-jobs` 行，以有效 `SHUD_BIN` 执行 `pnpm run profile:install`
+- **THEN** 安装器新增唯一目标 `shud-jobs` 行，raw 覆写及其它原有内容逐字节不变；以相同参数再执行时，整个用户 patch 的 sha256 与升级后相同
+
 ### Requirement: Local profile smoke
 `pnpm run profile:smoke` SHALL 先构建插件包（`PROFILE_SMOKE_SKIP_BUILD=1` 时跳过构建），再在临时 `DSH_HOME` 以指向临时占位可执行文件的 `SHUD_BIN` 执行 `profile:install`，再对 `dsh --profile shud` 的 dump-config 与 dump-config-schema 执行「Profile composition」的全部断言，并断言输出中不含密钥材料（`DMXAPI_KEY=` 或 `sk-` 开头的长 token）。随后 SHALL 做一次真实启动检查：以 `shud-jobs` 行 `config` 为安装时的 `stateDir` 加空 `shudBin` 的 overlay（按 id 的 patch 整体替换 `config`，`vendor/include/src/index.ts:120-123`，故 overlay 须带上 `stateDir`）执行 `dsh --profile shud --patch <overlay> --no-open --port <p>`，断言 stderr 含 `did not activate`、`shud-jobs` 与 `shudBin`，再终止该进程。任一断言失败 SHALL 以非 0 退出并打印失败的断言名；SHALL NOT 在 dsh 缺失或版本不符时静默通过。
 

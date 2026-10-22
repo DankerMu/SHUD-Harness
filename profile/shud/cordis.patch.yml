@@ -22,8 +22,14 @@
 - id: session-log-deepseek
   disabled: true
 
+# The old row cannot be renamed by an id patch: disable it, then insert the replacement.
+- id: jobs
+  disabled: true
+
 - insert:
     - id: shud-raw-guard
       name: "@shud-harness/dsh-shud-raw-guard"
       config:
         rawDirs: ["data/raw"]
+    - id: shud-jobs
+      name: "@shud-harness/dsh-shud-jobs"

@@ -39,7 +39,7 @@ SHUD-Harness/
 
 每个 `dsh-shud-*` 包：`src/` TS strict，`tsc` 到 `lib/`，`vitest` 测试，`package.json` 声明 `peerDependencies["@deepseek-ai/dsh"] = "0.2.1-rc.2"`。Host 侧插件入口 `export const name` + `export function apply(ctx, config)`。不发 npm；profile 以 workspace 包说明符 `insert` 挂载（bundle 声明 `workspace:*` 依赖）：`profile/shud/package.json` 的 `dependencies["@shud-harness/dsh-shud-raw-guard"] = "workspace:*"`，patch 行的 `name: '@shud-harness/dsh-shud-raw-guard'`。
 
-默认 `rawDirs: ["data/raw"]` 仅用于开发与探针；部署期真实 `<data_root>/raw` 必须在 workspace root 之外，由用户在 `$DSH_HOME/profiles/shud/cordis.patch.yml` 中以 `- id: shud-raw-guard` + `config: { rawDirs: ["<workspace 外的绝对路径>", ...] }` 覆写。`profile:install` 不生成或改写用户 patch，覆写结果可用 `--profile shud --dump-config` 查看。
+默认 `rawDirs: ["data/raw"]` 仅用于开发与探针；部署期真实 `<data_root>/raw` 必须在 workspace root 之外，由用户在 `$DSH_HOME/profiles/shud/cordis.patch.yml` 中以 `- id: shud-raw-guard` + `config: { rawDirs: ["<workspace 外的绝对路径>", ...] }` 覆写。`profile:install` 要求 `SHUD_BIN` 为绝对路径、可执行普通文件，仅新增/更新安装器拥有的唯一 `shud-jobs` 项（`shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`），其余用户 patch 字节不变；已有 raw-only patch 升级后再次安装保持整文件 hash 不变。覆写结果可用 `--profile shud --dump-config` 查看。stateDir 锁与索引尚待 #304。
 
 ## 2. 运行时资产（不进代码仓）
 
