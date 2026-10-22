@@ -53,6 +53,9 @@ status: living
 | 收集 | collect | 作业 terminal 后解析产物、生成 RunRecord（job 级 `collect.lock`） | [Execution_Jobs_Runs](../docs/03_SPEC/Execution_Jobs_Runs.md) |
 | 看护进程 | watcher | 监视 RunJob 状态变迁并触发 collect 的进程 | 同上 |
 | 作业注册表 | `JobRegistry` / `ctx.jobs` | dsh 后台作业 seam；SHUD 自写 durable backend（detach + pid 对账）替换 `jobs-local` | [ADR-0004](../docs/adr/implemented/0004-dsh-kernel.md) K8 + 上游 `docs/subsystems/jobs.md` |
+| 退出类别 | `exit_class` | RunRecord 对退出证据的九类归因：数值退出码确定分类，缺码时显式 cancelled/lost；仅 ok 对应 succeeded | [RunRecord 契约](changes/m2-run-chain/specs/run-records/spec.md#requirement-runrecord-record) + [Minimal_Schemas §5](../docs/03_SPEC/Minimal_Schemas.md#5-runrecord) |
+| 运行目录 | `run_dir` | RunJob 的绝对运行目录，取代 cwd；提交时位于 `<session cwd>/runs/<run_id>`，保存输入副本与运行记录 | [Minimal_Schemas §4](../docs/03_SPEC/Minimal_Schemas.md#4-runjob) |
+| 宿主登记作业 ID | `dsh_job_id` | 当前宿主进程中的 `shud-` + 16 位十六进制登记标识，供 job_output/job_kill 使用；重启接管可变化，不等同持久 job_id/run_id，历次值存入 dsh_job_ids | [运行标识符契约](changes/m2-run-chain/specs/run-records/spec.md#requirement-run-identifiers) + [Minimal_Schemas §4](../docs/03_SPEC/Minimal_Schemas.md#4-runjob) |
 | 发件箱 | outbox | 通知先落盘后发送的事务化模式（防蒸发） | [Notification_Design](../docs/03_SPEC/Notification_Design.md) §8 |
 | 去重键 | `dedupe_key` | 通知幂等键：`task_id + trigger + target_id + recipient` | 同上 §5 + [Idempotency_Concurrency_Locking_Spec](../docs/03_SPEC/Idempotency_Concurrency_Locking_Spec.md) §4 |
 | 快照 | snapshot | workspace 状态快照（`latest_seq` 必填，事件回放锚点） | Workspace_Snapshot_And_Recovery_Spec（已删，见 tag archive/zero-v0.8.3） |
