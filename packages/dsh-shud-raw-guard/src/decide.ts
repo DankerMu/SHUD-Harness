@@ -53,6 +53,25 @@ const PWSH_COMMAND = /\b(pwsh|powershell)\b/i;
 // /dev/null/x are real files). Used only with replace: the g flag makes
 // test/exec stateful through lastIndex.
 const DISCARD_REDIRECT = /(?:&?>{1,2}|>&|<>)\s*\/dev\/null(?![A-Za-z0-9._/-])/g;
+// #273 (PI 2026-10-21): a write naming a strict ancestor of a raw dir, up to three
+// levels (parent, grandparent, great-grandparent), is denied; reads pass through.
+const RAW_ANCESTOR_LEVELS = 3;
+// Ancestor text stands alone: before it, start or a shell boundary (optionally ./);
+// after it, end, a boundary, a glob, or / followed by those (data/, data/*), never
+// / plus a name (data/derived).
+const ANCESTOR_BEFORE = String.raw`(?<![^\s;&|()<>'"\`=,{])(?:\./)*`;
+const ANCESTOR_AFTER = String.raw`(?=$|[\s;&|()<>'"\`,{}*?[\]]|/(?=$|[\s;&|()<>'"\`,{}*?[\]]))`;
+// Changing directory is not naming: the operand of cd/pushd (pwsh: Set-Location,
+// sl, Push-Location) is dropped before ancestor matching. Options never cross
+// ; & | ( ) < >, so cd -P&&rm -rf data still names data. Used only with replace.
+const CHDIR_OPERAND =
+  /(^|[\s;&|(`{])(?:cd|pushd|set-location|push-location|sl)(?:\s+-[^\s;&|()<>]*)*\s+[^\s;&|()<>]+/gi;
+const ANCESTOR_DENY: RawGuardDecision = {
+  kind: "deny",
+  code: "raw-ancestor-write",
+  reason:
+    "Raw data is immutable: this command writes while naming a directory that contains raw data. Write to an explicit path inside that directory instead.",
+};
 
 type RawGuardOptions = { rawDirs: string[] };
 
@@ -116,6 +135,20 @@ function foldParentSegments(text: string): string {
   });
 }
 
+// Strict ancestors, nearest first; "/" and spellings ending in . or .. are not.
+function rawAncestors(path: string): string[] {
+  const ancestors: string[] = [];
+  let current = path;
+  while (ancestors.length < RAW_ANCESTOR_LEVELS) {
+    const cut = current.lastIndexOf("/");
+    if (cut <= 0) break;
+    current = current.slice(0, cut);
+    if (/(?:^|\/)\.\.?$/.test(current)) break;
+    ancestors.push(current);
+  }
+  return ancestors;
+}
+
 // A canonical root is on a case-insensitive filesystem when its other-case
 // spelling (upper if that differs, else lower) natively resolves back to it.
 // Missing roots, failed probes and letterless roots count as case-sensitive.
@@ -160,6 +193,11 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         const normalized = normalizeCommandPaths(text);
         return [text, normalized, foldParentSegments(normalized)];
       });
+    // Ancestor naming reads each candidate once, with chdir operands dropped.
+    const unchdired = texts.map((text) => text.replace(CHDIR_OPERAND, "$1"));
+    const writes = () =>
+      WRITE_VERBS.test(command.replace(DISCARD_REDIRECT, " ")) ||
+      (pwsh && PWSH_WRITES.test(command));
     for (const raw of options.rawDirs) {
       const root = canonical(raw, cwd);
       const flags = caseInsensitiveRoot(root) ? "i" : "";
@@ -169,9 +207,19 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         const pattern = new RegExp(`${escaped}(?![A-Za-z0-9._-])`, flags);
         return texts.some((candidate) => pattern.test(candidate));
       });
-      if (!mentioned && !contains(root, workdir)) continue;
-      const checked = command.replace(DISCARD_REDIRECT, " ");
-      return WRITE_VERBS.test(checked) || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
+      if (!mentioned && !contains(root, workdir)) {
+        const named = [...rawAncestors(normalizeCommandPaths(raw)), ...rawAncestors(root)].some(
+          (ancestor) => {
+            const escaped = ancestor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const pattern = new RegExp(`${ANCESTOR_BEFORE}${escaped}${ANCESTOR_AFTER}`, flags);
+            return unchdired.some((candidate) => pattern.test(candidate));
+          },
+        );
+        // Naming without writing keeps checking the remaining raw dirs.
+        if (named && writes()) return ANCESTOR_DENY;
+        continue;
+      }
+      return writes() ? DENY : ASK;
     }
   }
   return NEXT;

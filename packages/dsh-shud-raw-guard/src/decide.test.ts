@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterAll, expect, test } from "vitest";
 import {
   caseInsensitiveRoot,
@@ -637,4 +637,126 @@ test.runIf(!caseInsensitive)("case-sensitive filesystem: a separate PROTECTED/ i
   mkdirSync(join(caseWs, "PROTECTED"));
   expect(caseInsensitiveRoot(caseRoot)).toBe(false);
   expect(decide("bash", { command: "rm -rf PROTECTED" }, options, caseWs).kind).toBe("next");
+});
+
+// #273 (PI 2026-10-21): a write naming a parent, grandparent or great-grandparent
+// of a raw dir is denied; reads, deeper ancestors and implicit writes pass. The
+// workspace sits two levels below a real temp dir, so it and both parents are real.
+const ancestorBase = realpathSync.native(mkdtempSync(join(tmpdir(), "shud-guard-ancestor-")));
+const W = join(ancestorBase, "w1", "w2");
+for (const dir of ["sub/raw", "sub/rawx", "sub/derived", "a/b/c/d/raw"])
+  mkdirSync(join(W, dir), { recursive: true });
+afterAll(() => rmSync(ancestorBase, { recursive: true, force: true }));
+const deepRaw = normalizeRawDirs({ rawDirs: ["a/b/c/d/raw"] });
+const outsideRaw = normalizeRawDirs({ rawDirs: ["../outside/raw"] });
+const ancestorCases: [string, string, Kind, typeof options, string, string?][] = [
+  ["bash", "rm -rf sub", "deny", subRaw, W],
+  ["bash", "rm -rf sub/", "deny", subRaw, W],
+  ["bash", "rm -rf ./sub", "deny", subRaw, W],
+  ["bash", "rm -rf sub/*", "deny", subRaw, W],
+  ["bash", "rm -rf {sub,x}", "deny", subRaw, W],
+  ["bash", 'rm -rf "sub"', "deny", subRaw, W],
+  ["bash", "mv sub x", "deny", subRaw, W],
+  ["bash", "chmod -R 000 sub", "deny", subRaw, W],
+  ["bash", "rm -rf sub/rawx/..", "deny", subRaw, W],
+  ["bash", "rm -rf sub/.", "deny", subRaw, W],
+  ["pwsh", "Remove-Item -Recurse sub", "deny", subRaw, W],
+  ["pwsh", "Remove-Item -Recurse .\\sub", "deny", subRaw, W],
+  // Absolute ancestors: W/sub, W and dirname(W) are levels 1-3 of W/sub/raw.
+  ["bash", `rm -rf ${W}/sub`, "deny", subRaw, W],
+  ["bash", `rm -rf ${W}`, "deny", subRaw, W],
+  ["bash", `rm -rf ${dirname(W)}`, "deny", subRaw, W],
+  ["bash", `rm -rf ${rawParent}`, "deny", defaults, defaultWs],
+  ["bash", "rm -rf a/b/c/d", "deny", deepRaw, W],
+  ["bash", "rm -rf a/b", "deny", deepRaw, W],
+  // Boundary characters (review fixture r1): every shell metacharacter and glob.
+  ["bash", "(rm -rf sub)", "deny", subRaw, W],
+  ["bash", "rm -rf sub;ls", "deny", subRaw, W],
+  ["bash", "rm -rf sub&&ls", "deny", subRaw, W],
+  ["bash", "rm -rf sub|cat", "deny", subRaw, W],
+  ["bash", "`rm -rf sub`", "deny", subRaw, W],
+  ["bash", "rm -rf sub>x", "deny", subRaw, W],
+  ["bash", "cp -r x --target-directory=sub", "deny", subRaw, W],
+  ["bash", "rm -rf sub/?aw", "deny", subRaw, W],
+  ["bash", "rm -rf sub/[r]aw", "deny", subRaw, W],
+  ["bash", "rm -rf {x,sub}", "deny", subRaw, W],
+  // Accepted false positives: the whole command writes while naming the ancestor.
+  ["bash", "ls sub > out.txt", "deny", subRaw, W],
+  ["bash", "cp out.csv sub/", "deny", subRaw, W],
+  ["bash", "mv x.csv sub", "deny", subRaw, W],
+  // Change-directory options stop at ; & | ( ) < > (review fixture r2).
+  ["bash", "cd -P&&rm -rf sub", "deny", subRaw, W],
+  ["pwsh", "Set-Location -Path:x;Remove-Item -Recurse sub", "deny", subRaw, W],
+  // Changing directory is not naming; naming after it still is.
+  ["bash", "cd sub && rm -rf derived", "next", subRaw, W],
+  ["bash", `cd ${W} && python run.py > log.txt`, "next", subRaw, W],
+  ["pwsh", "Set-Location sub; Remove-Item -Recurse derived", "next", subRaw, W],
+  ["bash", `cd ${W} && rm -rf sub`, "deny", subRaw, W],
+  // Documented gap: a glob prefix shorter than the raw leaf.
+  ["bash", "rm -rf sub/r*", "next", subRaw, W],
+  // Read-only ancestor commands pass through (PI 2026-10-21).
+  ["bash", "ls sub", "next", subRaw, W],
+  ["bash", "grep -r foo sub", "next", subRaw, W],
+  ["bash", "du -sh sub", "next", subRaw, W],
+  ["bash", "ls sub 2>/dev/null", "next", subRaw, W],
+  // Counterexamples: / plus a plain name, siblings, prefixes and other parents.
+  ["bash", "rm -rf sub/derived", "next", subRaw, W],
+  ["bash", "rm sub/rawx/y", "next", subRaw, W],
+  ["bash", "rm -rf subx", "next", subRaw, W],
+  ["bash", "rm -rf mysub", "next", subRaw, W],
+  ["bash", "rm -rf other/sub", "next", subRaw, W],
+  ["bash", "rm -rf sub.bak", "next", subRaw, W],
+  ["bash", "echo ok > sub/derived.txt", "next", subRaw, W],
+  // Level cap: the fourth ancestor, absolute and configured.
+  ["bash", `rm -rf ${dirname(dirname(W))}`, "next", subRaw, W],
+  ["bash", "rm -rf a", "next", deepRaw, W],
+  // A configured ancestor ending in `..` is not one.
+  ["bash", "mv out.csv ..", "next", outsideRaw, W],
+  // Documented gaps: implicit writes.
+  ["bash", "rm -rf .", "next", subRaw, W],
+  ["bash", "rm -rf *", "next", subRaw, W],
+  ["bash", "cd sub && rm -rf raw", "next", subRaw, W],
+  ["bash", "rm -rf raw", "next", subRaw, W, "sub"],
+];
+function expectAncestorDecision(result: ReturnType<typeof decide>, kind: Kind) {
+  expect(result.kind).toBe(kind);
+  if (kind === "deny") {
+    expect(result.reason).toMatch(/immutable/);
+    expect(result.code).toBe("raw-ancestor-write");
+  }
+}
+test.each(ancestorCases)(
+  "%s `%s` -> %s (#273 raw ancestor)",
+  (name, command, kind, config, ws, workdir) => {
+    expectAncestorDecision(
+      decide(name, workdir ? { command, workdir } : { command }, config, ws),
+      kind,
+    );
+  },
+);
+
+test.runIf(caseInsensitive)("case-insensitive filesystem: bash `rm -rf SUB` -> deny (#273)", () => {
+  expectAncestorDecision(decide("bash", { command: "rm -rf SUB" }, subRaw, W), "deny");
+});
+
+test("a read-only ancestor still checks the next raw dir (#273 multi raw)", () => {
+  const config = normalizeRawDirs({ rawDirs: ["sub/raw", "protected"] });
+  const result = decide("bash", { command: "ls sub && cat protected/x" }, config, W);
+  expect(result.kind).toBe("ask");
+  expect(result.reason).toBe(RAW_READ_PROVENANCE_REASON);
+});
+
+// #273 resource limit: both commands reach the ancestor branch and stay linear.
+test("bash `rm -rf` + ' sub/' x 2e5 -> deny (#273 adversarial)", () => {
+  expectAncestorDecision(
+    decide("bash", { command: "rm -rf" + " sub/".repeat(2e5) }, subRaw, W),
+    "deny",
+  );
+});
+
+test("bash `ls ` + './' x 5e5 + subx -> next (#273 adversarial)", () => {
+  expectAncestorDecision(
+    decide("bash", { command: "ls " + "./".repeat(5e5) + "subx" }, subRaw, W),
+    "next",
+  );
 });
