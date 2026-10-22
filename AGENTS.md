@@ -168,7 +168,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 
 - 结构化日志 = dsh session log（`session.v4.jsonl.zstd`）；插件事件走 dsh 事件而非 `console.log`。
 - 禁止记录：`DMXAPI_KEY`、任何 `sk-` 形态 token、`data/raw` 内容。`profile:smoke` 断言 dump-config 无密钥。
-- 作业状态以 `job/settled` 为准；RunRecord 记录 exit code（0/10/12/13/19/20）与 artifact 路径。
+- 非 shud 作业状态以宿主 `job/settled` 为准；M2 shud 无 owner 作业不产生该事件，以运行目录 `run-job.json`、`run-record.json` 或 `collect-error.json`、索引与 session log 中的 `shud-jobs` 唤醒消息为证。RunRecord 记录退出码及类别与 artifact 路径，不以终端回忆或模型文本代替。
 - 无 tracing/metrics（单机单用户，不装空壳）。
 
 ## Agent Operating Rules
