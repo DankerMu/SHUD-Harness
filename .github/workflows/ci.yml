@@ -20,7 +20,7 @@ jobs:
     name: lint (eslint + prettier + naming + jscpd + knip)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - uses: pnpm/action-setup@v4
@@ -41,7 +41,7 @@ jobs:
     name: test (typecheck + vitest coverage + schema drift)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - uses: pnpm/action-setup@v4
@@ -60,7 +60,7 @@ jobs:
     name: docs-gate (links + path claims + generated instructions + decision records)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - uses: pnpm/action-setup@v4
@@ -77,7 +77,7 @@ jobs:
     name: secrets (gitleaks)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
           fetch-depth: 0
@@ -91,7 +91,7 @@ jobs:
     container:
       image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - run: semgrep scan --config p/typescript --config p/secrets --error --metrics=off --exclude SHUD --exclude rSHUD --exclude AutoSHUD
@@ -100,7 +100,7 @@ jobs:
     name: pr-size (constraints.yaml pr_diff_lines_max; label size-exempt bypass is logged)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
           fetch-depth: 0
@@ -118,7 +118,7 @@ jobs:
     name: profile-smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
       - uses: pnpm/action-setup@v4
