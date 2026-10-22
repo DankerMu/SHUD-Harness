@@ -19,11 +19,23 @@
 
 ## 3. seam 白名单放宽（ADR-0006）
 
-- [ ] 3.1 修改 `eslint.config.mjs` 的 `no-restricted-imports`：运行时允许 `@deepseek-ai/dsh-tools`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-jobs`、`@deepseek-ai/dsh-jobs-local`，以及 `@deepseek-ai/dsh-llm` 的具名导入 `createUserMessage`（其它具名运行时导入拒绝）；只在测试文件 glob `**/*.test.ts` 与 `**/test-harness.ts`（跨测试共享的作用域装配文件只能叫 `test-harness.ts`）下额外允许运行时 import `@deepseek-ai/dsh-scope` 的 `createScope`；其它 `@deepseek-ai/*` 只允许 `import type`；`deepseek-harness/**` 路径仍全部拒绝（ADR-0006 决策 1–4）。验证：`pnpm run lint` 0 错 0 警
-- [ ] 3.2 `scripts/guardrails/test-guardrails.sh` 增加正反例（ADR-0006 决策 5）：`dsh-jobs`/`dsh-jobs-local` 运行时 import 通过；`import { createUserMessage } from "@deepseek-ai/dsh-llm"` 通过、`dsh-llm` 其它具名运行时导入被拒；`*.test.ts` 与 `test-harness.ts` 中 `import { createScope } from "@deepseek-ai/dsh-scope"` 通过、其它非测试 `.ts`（如 `harness.ts`、`registry.ts`）中同一导入被拒；`@deepseek-ai/dsh-agent` 运行时 import 被拒、`import type { ... } from "@deepseek-ai/dsh-agent"` 通过；`deepseek-harness/` 相对路径 import 被拒；`*.test.ts` 中运行时 import `@deepseek-ai/dsh-agent-loop-testkit` 被拒。验证：`pnpm run test-guardrails` 全绿且新增用例计入总数
+- [x] 3.1 修改 `eslint.config.mjs` 的 `no-restricted-imports`：运行时允许 `@deepseek-ai/dsh-tools`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-jobs`、`@deepseek-ai/dsh-jobs-local`，以及 `@deepseek-ai/dsh-llm` 的具名导入 `createUserMessage`（其它具名运行时导入拒绝）；只在测试文件 glob `**/*.test.ts` 与 `**/test-harness.ts`（跨测试共享的作用域装配文件只能叫 `test-harness.ts`）下额外允许运行时 import `@deepseek-ai/dsh-scope` 的 `createScope`；其它 `@deepseek-ai/*` 只允许 `import type`；`deepseek-harness/**` 路径仍全部拒绝（ADR-0006 决策 1–4）。验证：`pnpm run lint` 0 错 0 警
+- [x] 3.2 `scripts/guardrails/test-guardrails.sh` 增加正反例（ADR-0006 决策 5）：`dsh-jobs`/`dsh-jobs-local` 运行时 import 通过；`import { createUserMessage } from "@deepseek-ai/dsh-llm"` 通过、`dsh-llm` 其它具名运行时导入被拒；`*.test.ts` 与 `test-harness.ts` 中 `import { createScope } from "@deepseek-ai/dsh-scope"` 通过、其它非测试 `.ts`（如 `harness.ts`、`registry.ts`）中同一导入被拒；`@deepseek-ai/dsh-agent` 运行时 import 被拒、`import type { ... } from "@deepseek-ai/dsh-agent"` 通过；`deepseek-harness/` 相对路径 import 被拒；`*.test.ts` 中运行时 import `@deepseek-ai/dsh-agent-loop-testkit` 被拒。验证：`pnpm run test-guardrails` 全绿且新增用例计入总数
 
 - Suggested fixture level: compact - 改共享 lint 闸与其自证，无运行时行为
 - Minimal mergeable slice: atomic: 规则与其闸自证必须同 PR，否则 Enforcement Index 声明无证据
+
+### Issue #298 execution fixture
+
+- Selected: Config / project setup and Auth / permissions / secrets — ADR-0006 exact import allow/deny matrix, exercised by `pnpm run test-guardrails`; no other gate relaxation.
+- Selected: Public API / CLI / script entry and Legacy compatibility / examples — existing self-test command and all old cases still pass; new import cases reject before the rule change and pass afterward.
+- Selected: Documentation / migration notes — record the applied gate contract and before/after self-test counts in this fixture and PR evidence.
+- Not selected: File IO / path safety / overwrite, Schema / columns / units / field names, Concurrency / shared state / ordering, Resource limits / large input / discovery, Error handling / rollback / partial outputs, Release / packaging / dependency compatibility — no corresponding runtime behavior or dependency change; temporary lint fixtures retain existing cleanup.
+- Evidence floor: new positive imports fail under the old rules; ADR-0006 positive/negative cases pass under new rules; `pnpm run test-guardrails` reports both case counts; `pnpm run check` passes. No product imports or host edits.
+- Named-only grants must reject `dsh-llm` default and namespace imports and reject `dsh-scope` non-`createScope` named/default/namespace imports even in test files; add these negative self-test cases so the exact-capability invariant is exercised.
+- Update both import-denial diagnostics to describe ADR-0006 rather than the obsolete two-package allowlist; retain the direct host-checkout ban unchanged.
+- Named-only grants also reject bare/empty runtime imports and empty runtime re-exports while preserving explicit type-only forms. ESLint 10's `allowImportNames` examines only named specifiers, so these zero-specifier forms require a narrowly scoped `no-restricted-syntax` companion. Prove the bypass with the companion disabled in an in-memory ESLint probe, then prove rejection with the production configuration; new negative cases must inspect the relevant gate rule id rather than accepting arbitrary lint errors.
+- Execution evidence (2026-10-22): public ESLint tracer for `dsh-jobs` runtime import failed under the original gate with `no-restricted-imports`, then passed after implementation. Six zero-specifier mutants passed with the companion disabled but were rejected by the real configuration. `test-guardrails` grew from 51 to 87 passing cases (36 additions: 15 positive, 21 negative), zero failures; `pnpm run check` and strict OpenSpec validation passed. No host/runtime dependency changed.
 
 ## 4. RunJob/RunRecord schema（Critical Path #7）
 

@@ -13,6 +13,45 @@ const FROZEN_OVERSIZED_FILES = [
   "packages/dsh-shud-core/src/governance/policy-gate-core.test.ts",
 ];
 
+// ADR-0006: package-wide runtime seams and the named-only message capability.
+const HOST_IMPORT_PATTERNS = [
+  {
+    group: ["**/deepseek-harness/**"],
+    message:
+      "Direct host-checkout imports, including types, are forbidden; use documented package seams (ADR-0006).",
+  },
+  {
+    regex: "^@deepseek-ai/(?!(?:dsh-tools|cordis|dsh-jobs|dsh-jobs-local|dsh-llm|dsh-scope)$)",
+    allowTypeImports: true,
+    message:
+      "This host package is type-only; runtime imports require an explicit documented seam (ADR-0006).",
+  },
+];
+
+const HOST_MESSAGE_IMPORT = {
+  name: "@deepseek-ai/dsh-llm",
+  allowImportNames: ["createUserMessage"],
+  allowTypeImports: true,
+  message: "Only the named createUserMessage runtime import is allowed from dsh-llm (ADR-0006).",
+};
+
+const HOST_SCOPE_IMPORT = {
+  name: "@deepseek-ai/dsh-scope",
+  allowTypeImports: true,
+  message:
+    "Only named createScope in *.test.ts or test-harness.ts may import dsh-scope at runtime (ADR-0006).",
+};
+
+// no-restricted-imports cannot check allowImportNames when there are no specifiers.
+function emptyRuntimeImportRestriction(source) {
+  return {
+    selector:
+      `:matches(ImportDeclaration[importKind!='type'], ExportNamedDeclaration[exportKind!='type'])` +
+      `[source.value='${source}'][specifiers.length=0]`,
+    message: `Runtime imports from ${source} must name an allowed capability (ADR-0006).`,
+  };
+}
+
 export default tseslint.config(
   {
     ignores: [
@@ -52,19 +91,27 @@ export default tseslint.config(
       "no-restricted-imports": [
         "error",
         {
-          patterns: [
-            {
-              group: ["**/deepseek-harness/**"],
-              message:
-                "dsh is the host: import documented seams only via @deepseek-ai/dsh-tools or @deepseek-ai/cordis (ADR-0004 K2).",
-            },
-            {
-              regex: "^@deepseek-ai/(?!(?:dsh-tools|cordis)$)",
-              message:
-                "Only @deepseek-ai/dsh-tools and @deepseek-ai/cordis are documented dsh seams (ADR-0004 K2).",
-            },
-          ],
+          paths: [HOST_MESSAGE_IMPORT, HOST_SCOPE_IMPORT],
+          patterns: HOST_IMPORT_PATTERNS,
         },
+      ],
+      "no-restricted-syntax": ["error", emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name)],
+    },
+  },
+  {
+    files: ["**/*.test.ts", "**/test-harness.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [HOST_MESSAGE_IMPORT, { ...HOST_SCOPE_IMPORT, allowImportNames: ["createScope"] }],
+          patterns: HOST_IMPORT_PATTERNS,
+        },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name),
+        emptyRuntimeImportRestriction(HOST_SCOPE_IMPORT.name),
       ],
     },
   },
