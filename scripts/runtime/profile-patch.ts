@@ -48,6 +48,8 @@ function parsePatch(file: string, source: string): ParsedPatch {
   const document = parseDocument(source, {
     keepSourceTokens: true,
     prettyErrors: false,
+    merge: false,
+    schema: "core",
     lineCounter: lines,
   });
   const error = document.errors[0];
@@ -136,7 +138,13 @@ function updatePatch(file: string, source: string, shudBin: string, stateDir: st
     const offset = parsed.document.directives.docEnd ? parsed.document.range[1] : source.length;
     const prefix = source.slice(0, offset);
     const separator = prefix.length > 0 && !prefix.endsWith("\n") ? newline : "";
-    rendered = prefix + separator + `- ${serialized}${newline}` + source.slice(offset);
+    const token = parsed.root?.srcToken;
+    if (parsed.root && token?.type !== "block-seq") {
+      fail(file, parsed.lines, offset, "missing block sequence tokens");
+    }
+    const indentation = token?.type === "block-seq" ? " ".repeat(token.indent) : "";
+    rendered =
+      prefix + separator + `${indentation}- ${serialized}${newline}` + source.slice(offset);
   }
   const checked = parsePatch(file, rendered);
   if (

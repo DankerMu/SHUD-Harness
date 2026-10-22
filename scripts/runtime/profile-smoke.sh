@@ -19,17 +19,101 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import { parseDocument } from "yaml";
 const root = process.argv[2];
-function run(label, executable, args, schemaDump = false, env = process.env, acceptFailure = false) {
-  const result = spawnSync(executable, args, {
-    encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 60_000, env,
+async function run(label, executable, args, schemaDump = false, env = process.env, acceptFailure = false, limits = {}) {
+  // Self-contained so the isolated cleanup regressions execute this exact implementation.
+  const child = spawn(executable, args, { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  const stdout = [], stderr = [];
+  let captured = 0, failure, spawnError, closed = false;
+  let finish, markClosed;
+  const finished = new Promise((resolve) => { finish = resolve; });
+  const closing = new Promise((resolve) => { markClosed = resolve; });
+  const fail = (reason) => { failure ??= reason; finish(); };
+  const capture = (chunks) => (chunk) => {
+    captured += chunk.length;
+    if (captured > (limits.maxBytes ?? 16 * 1024 * 1024)) {
+      fail("output limit");
+    } else if (!failure) {
+      chunks.push(chunk);
+    }
+  };
+  child.stdout.on("data", capture(stdout));
+  child.stderr.on("data", capture(stderr));
+  child.once("error", (error) => {
+    spawnError = error;
+    fail(`spawn ${error.code ?? "error"}`);
   });
-  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-  const key = process.env.DMXAPI_KEY;
+  child.once("close", () => { closed = true; markClosed(); finish(); });
+  const timeout = setTimeout(() => fail("timeout"), limits.timeoutMs ?? 60_000);
+  const interrupts = new Map();
+  for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    const interrupt = () => fail(`interrupted by ${name}`);
+    interrupts.set(name, interrupt);
+    process.on(name, interrupt);
+  }
+  function groupAlive() {
+    if (!child.pid) return false;
+    try { process.kill(-child.pid, 0); return true; }
+    catch (error) {
+      if (error.code === "ESRCH") return false;
+      throw new Error(`${label}: cannot inspect child process group; output suppressed`);
+    }
+  }
+  function signal(name) {
+    if (!child.pid) return;
+    try { process.kill(-child.pid, name); }
+    catch (error) {
+      if (error.code !== "ESRCH") {
+        throw new Error(`${label}: cannot terminate child process group; output suppressed`);
+      }
+    }
+  }
+  async function waitForGroup(milliseconds) {
+    const deadline = Date.now() + milliseconds;
+    while (groupAlive() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return !groupAlive();
+  }
+  try {
+    await finished;
+  } finally {
+    clearTimeout(timeout);
+    try {
+      if (groupAlive()) {
+        signal("SIGTERM");
+        if (!(await waitForGroup(1000))) {
+          signal("SIGKILL");
+          if (!(await waitForGroup(1000))) failure ??= "child process group did not terminate";
+        }
+      }
+      let closeTimer;
+      await Promise.race([
+        closing,
+        new Promise((resolve) => { closeTimer = setTimeout(resolve, 500); }),
+      ]);
+      clearTimeout(closeTimer);
+      if (!closed) failure ??= "child streams did not close";
+    } finally {
+      child.stdout.destroy();
+      child.stderr.destroy();
+      for (const [name, interrupt] of interrupts) process.removeListener(name, interrupt);
+    }
+  }
+  const result = {
+    stdout: Buffer.concat(stdout).toString("utf8"),
+    stderr: Buffer.concat(stderr).toString("utf8"),
+    status: child.exitCode,
+    signal: child.signalCode,
+    error: spawnError,
+  };
+  const output = `${result.stdout}\n${result.stderr}`;
+  const key = env.DMXAPI_KEY;
   if (/DMXAPI_KEY=|sk-[A-Za-z0-9]{20,}/.test(output) || (key && output.includes(key))) {
     throw new Error(`${label}: secret material detected; output suppressed`);
   }
-  if (result.error || (!acceptFailure && result.status !== 0 && !(schemaDump && result.status === 1))) {
-    throw new Error(`${label} failed (exit ${result.status ?? "none"}, ${result.error?.code ?? result.signal ?? "command error"}); output suppressed`);
+  if (failure) throw new Error(`${label} failed (${failure}); output suppressed`);
+  if (!acceptFailure && result.status !== 0 && !(schemaDump && result.status === 1)) {
+    throw new Error(`${label} failed (exit ${result.status ?? "none"}, ${result.signal ?? "command error"}); output suppressed`);
   }
   return result;
 }
@@ -44,11 +128,11 @@ for (const path of [shudBin, alternateBin]) {
   writeFileSync(path, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
 }
 process.env.SHUD_BIN = shudBin;
-function install(label, name, binary, template = "web", acceptFailure = false) {
+async function install(label, name, binary, template = "web", acceptFailure = false) {
   const env = { ...process.env, PROFILE_NAME: name, PROFILE_TEMPLATE: template };
   if (binary === undefined) delete env.SHUD_BIN;
   else env.SHUD_BIN = binary;
-  return run(label, "sh", [installerPath], false, env, acceptFailure);
+  return await run(label, "sh", [installerPath], false, env, acceptFailure);
 }
 function bytes(path) { return existsSync(path) ? readFileSync(path) : null; }
 function hash(path) {
@@ -60,7 +144,7 @@ function profilePaths(name) {
   return { directory, manifest: join(directory, "package.json"), patch: join(directory, "cordis.patch.yml") };
 }
 function patchRows(source, label) {
-  const document = parseDocument(source, { prettyErrors: false });
+  const document = parseDocument(source, { prettyErrors: false, merge: false, schema: "core" });
   if (document.errors.length) {
     throw new Error(`${label}: invalid YAML (${document.errors[0].code}); source suppressed`);
   }
@@ -78,22 +162,22 @@ function checkJobsPatch(name, binary, label) {
   check(`${label}: configured shudBin`, jobs[0]?.config?.shudBin === binary);
   check(`${label}: configured stateDir`, jobs[0]?.config?.stateDir === join(paths.directory, "shud-jobs"));
 }
-function preservedInstall(name, binary, label) {
+async function preservedInstall(name, binary, label) {
   const paths = profilePaths(name);
   const before = [hash(paths.manifest), hash(paths.patch)];
   const beforeStat = existsSync(paths.patch) ? lstatSync(paths.patch) : null;
-  install(label, name, binary);
+  await install(label, name, binary);
   check(`${label}: package hash unchanged`, hash(paths.manifest) === before[0]);
   check(`${label}: patch hash unchanged`, hash(paths.patch) === before[1]);
   const afterStat = existsSync(paths.patch) ? lstatSync(paths.patch) : null;
   check(`${label}: unchanged patch was not rewritten`,
     beforeStat === null ? afterStat === null : beforeStat.ino === afterStat?.ino && beforeStat.mtimeMs === afterStat?.mtimeMs);
 }
-function rejectedBinary(name, binary, label) {
+async function rejectedBinary(name, binary, label) {
   const paths = profilePaths(name);
   const existed = existsSync(paths.directory);
   const before = [hash(paths.manifest), hash(paths.patch)];
-  const result = install(label, name, binary, "web", true);
+  const result = await install(label, name, binary, "web", true);
   check(`${label}: installer rejects invalid binary`, result.status !== 0);
   check(`${label}: SHUD_BIN diagnostic`, /SHUD_BIN/.test(`${result.stdout}\n${result.stderr}`));
   check(`${label}: profile creation unchanged`, existsSync(paths.directory) === existed);
@@ -191,6 +275,89 @@ async function checkInvalidBoot(bin, profile) {
   check("negative boot: shud-jobs reported shudBin", found.key);
   check("negative boot: tool-jobs waits for missing jobs service", found.dependency);
 }
+async function checkRunnerCleanup(kind) {
+  const prefix = join(scratch, `runner-${kind}`);
+  const fixture = `${prefix}.sh`;
+  writeFileSync(fixture, `#!/bin/sh
+set -eu
+sleep 60 &
+child=$!
+printf '%s\\n' "$$" > "$PROFILE_SMOKE_RUNNER_PREFIX.shell"
+printf '%s\\n' "$child" > "$PROFILE_SMOKE_RUNNER_PREFIX.child"
+ps -o lstart=,command= -p "$child" > "$PROFILE_SMOKE_RUNNER_PREFIX.identity"
+trap 'wait "$child" || :; exit 0' TERM INT
+if [ "$PROFILE_SMOKE_RUNNER_KIND" = overflow ]; then
+  while :; do printf 'bounded runner overflow fixture\\n'; done
+fi
+wait "$child"
+`);
+  // Execute the actual runner in an isolated group: its synchronous baseline cannot supervise itself.
+  const workerSource = `
+import { spawn, spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const run = ${run.toString()};
+const [fixture, prefix, kind] = process.argv.slice(1);
+const started = Date.now();
+let failed = false, reason = "";
+try {
+  await run("runner " + kind, "/bin/sh", [fixture], false, {
+    ...process.env, PROFILE_SMOKE_RUNNER_PREFIX: prefix, PROFILE_SMOKE_RUNNER_KIND: kind,
+  }, false, { timeoutMs: 1000, maxBytes: 4096 });
+} catch (error) {
+  failed = true;
+  reason = error instanceof Error ? error.message : "non-error rejection";
+}
+writeFileSync(prefix + ".result", JSON.stringify({ failed, reason, elapsed: Date.now() - started }));
+`;
+  const worker = spawn(process.execPath, ["--input-type=module", "-e", workerSource, fixture, prefix, kind],
+    { detached: true, stdio: "ignore", env: process.env });
+  const exited = new Promise((resolve) => {
+    worker.once("exit", () => resolve(true));
+    worker.once("error", () => resolve(false));
+  });
+  let shellPid;
+  let timer;
+  try {
+    const completed = await Promise.race([
+      exited,
+      new Promise((resolve) => { timer = setTimeout(() => resolve(false), 5000); }),
+    ]);
+    clearTimeout(timer);
+    const pidFile = `${prefix}.child`;
+    const ready = existsSync(pidFile) && existsSync(`${prefix}.identity`) && existsSync(`${prefix}.shell`);
+    check(`runner ${kind}: descendant identity captured`, ready);
+    if (ready) {
+      shellPid = Number(readFileSync(`${prefix}.shell`, "utf8").trim());
+      const pid = Number(readFileSync(pidFile, "utf8").trim());
+      const identity = readFileSync(`${prefix}.identity`, "utf8").trim();
+      check(`runner ${kind}: valid descendant identity`, Number.isSafeInteger(pid) && pid > 1 && identity.length > 0);
+      if (Number.isSafeInteger(pid) && pid > 1) {
+        const current = spawnSync("ps", ["-o", "lstart=,command=", "-p", String(pid)], { encoding: "utf8" });
+        const observed = current.stdout?.trim() ?? "";
+        check(`runner ${kind}: descendant gone before fallback cleanup`, observed === "");
+        check(`runner ${kind}: PID identity did not change`, observed === "" || observed === identity);
+      }
+    }
+    const result = existsSync(`${prefix}.result`) ? JSON.parse(readFileSync(`${prefix}.result`, "utf8")) : null;
+    check(`runner ${kind}: bounded failure`, completed && result?.failed === true && result.elapsed < 4500);
+    check(`runner ${kind}: limit-specific diagnostic`,
+      typeof result?.reason === "string" && /ETIMEDOUT|ENOBUFS|timeout|output limit/i.test(result.reason));
+  } finally {
+    clearTimeout(timer);
+    if (shellPid === undefined && existsSync(`${prefix}.shell`)) {
+      shellPid = Number(readFileSync(`${prefix}.shell`, "utf8").trim());
+    }
+    const groups = [worker.pid, shellPid].filter((pid) => Number.isSafeInteger(pid) && pid > 1);
+    for (const signal of ["SIGTERM", "SIGKILL"]) {
+      for (const pid of new Set(groups)) {
+        try { process.kill(-pid, signal); }
+        catch (error) { if (error.code !== "ESRCH") throw error; }
+      }
+      if (signal === "SIGTERM") await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 1000))]);
+  }
+}
 try {
   const notExecutable = join(scratch, "not-executable");
   writeFileSync(notExecutable, "not executable\n", { mode: 0o600 });
@@ -199,21 +366,21 @@ try {
     ["non-executable", notExecutable], ["directory", scratch],
   ];
   for (const [kind, binary] of invalidBins) {
-    rejectedBinary(`invalid-${kind}`, binary, `new profile ${kind} SHUD_BIN`);
+    await rejectedBinary(`invalid-${kind}`, binary, `new profile ${kind} SHUD_BIN`);
   }
-  run("profile installation", "sh", [join(root, "scripts/runtime/profile-install.sh")]);
+  await run("profile installation", "sh", [join(root, "scripts/runtime/profile-install.sh")]);
   const web = profilePaths("shud");
   check("first Web install: exact bundle order", JSON.stringify(
     JSON.parse(readFileSync(web.manifest, "utf8")).dsh.profile.bundles,
   ) === JSON.stringify(["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@shud-harness/dsh-profile-shud"]));
   checkJobsPatch("shud", shudBin, "first Web install");
-  preservedInstall("shud", shudBin, "second Web install");
+  await preservedInstall("shud", shudBin, "second Web install");
   for (const [kind, binary] of invalidBins) {
-    rejectedBinary("shud", binary, `existing profile ${kind} SHUD_BIN`);
+    await rejectedBinary("shud", binary, `existing profile ${kind} SHUD_BIN`);
   }
   const bin = process.env.DSH_BIN;
-  const dump = run("dump-config", process.execPath, [bin, "--profile", "shud", "--dump-config"]).stdout;
-  const schemaResult = run("dump-config-schema", process.execPath, [bin, "--profile", "shud", "--dump-config-schema"], true);
+  const dump = (await run("dump-config", process.execPath, [bin, "--profile", "shud", "--dump-config"])).stdout;
+  const schemaResult = await run("dump-config-schema", process.execPath, [bin, "--profile", "shud", "--dump-config-schema"], true);
   const schema = JSON.parse(schemaResult.stdout);
   if (schemaResult.status === 1) {
     if (schema["x-cordis"]?.complete !== false) throw new Error("schema exit 1 without incomplete-projection metadata");
@@ -258,61 +425,117 @@ try {
   const rawOnly = "# existing deployment bytes\r\n- id: 'shud-raw-guard'\r\n  config: { rawDirs: ['/srv/data_root/raw'] }\r\n# preserve missing final newline";
   writeFileSync(web.patch, rawOnly, { mode: 0o640 });
   chmodSync(web.patch, 0o640);
-  install("raw-only profile migration", "shud", shudBin);
+  await install("raw-only profile migration", "shud", shudBin);
   const migrated = readFileSync(web.patch, "utf8");
   check("raw-only migration: every previous byte retained", migrated.startsWith(rawOnly));
   check("raw-only migration: file mode retained", (lstatSync(web.patch).mode & 0o777) === 0o640);
   checkJobsPatch("shud", shudBin, "raw-only profile migration");
-  preservedInstall("shud", shudBin, "raw-only migration repeated");
-  const rawDump = run("raw override dump", process.execPath, [bin, "--profile", "shud", "--dump-config"]).stdout;
+  await preservedInstall("shud", shudBin, "raw-only migration repeated");
+  const rawDump = (await run("raw override dump", process.execPath, [bin, "--profile", "shud", "--dump-config"])).stdout;
   const rawRows = patchRows(rawDump, "raw override dump").filter((entry) => entry?.id === "shud-raw-guard");
   check("deployment raw override remains visible", JSON.stringify(rawRows[0]?.config?.rawDirs) === JSON.stringify(["/srv/data_root/raw"]));
+
+  for (const docEnd of [false, true]) {
+    const label = `indented root ${docEnd ? "with" : "without"} document end`;
+    const original = "# indented deployment\n  - id: shud-raw-guard\n    config: {rawDirs: ['/srv/indented/raw']}\n";
+    const trailer = docEnd ? "... # preserve document-end trailer\n" : "";
+    writeFileSync(web.patch, original + trailer);
+    try {
+      const result = await install(label, "shud", shudBin, "web", true);
+      check(`${label}: installer accepts valid patch`, result.status === 0);
+      const updated = readFileSync(web.patch, "utf8");
+      check(`${label}: original prefix unchanged`, updated.startsWith(original));
+      if (docEnd) check(`${label}: document-end bytes unchanged`, updated.endsWith(trailer));
+      checkJobsPatch("shud", shudBin, label);
+      const composed = patchRows((await run(`${label} composition`, process.execPath,
+        [bin, "--profile", "shud", "--dump-config"])).stdout, label);
+      const raw = composed.find((row) => row.id === "shud-raw-guard");
+      const jobs = composed.find((row) => row.id === "shud-jobs");
+      check(`${label}: actual raw configuration`, JSON.stringify(raw?.config?.rawDirs) === JSON.stringify(["/srv/indented/raw"]));
+      check(`${label}: actual jobs configuration`, jobs?.config?.shudBin === shudBin && jobs?.config?.stateDir === join(web.directory, "shud-jobs"));
+      if (result.status === 0) await preservedInstall("shud", shudBin, `${label} repeated`);
+    } catch {
+      check(`${label}: installer/composition completed`, false);
+    } finally {
+      writeFileSync(web.patch, migrated);
+    }
+  }
+
+  for (const directive of [false, true]) {
+    const label = `literal merge key ${directive ? "with YAML 1.1" : "without directive"}`;
+    const header = directive ? "%YAML 1.1\n---\n" : "";
+    const literal = header + `- id: shud-raw-guard\n  config:\n    rawDirs: ['/srv/literal/raw']\n    anchor: &defaults {id: shud-jobs, config: {shudBin: ${JSON.stringify(shudBin)}, stateDir: ${JSON.stringify(join(web.directory, "shud-jobs"))}}}\n- <<: *defaults\n`;
+    const trailer = "# preserve literal-key trailer\n";
+    writeFileSync(web.patch, literal + "- id: shud-jobs\n  <<: *defaults\n" + trailer);
+    try {
+      const result = await install(label, "shud", shudBin, "web", true);
+      check(`${label}: installer accepts literal key`, result.status === 0);
+      const updated = readFileSync(web.patch, "utf8");
+      check(`${label}: unrelated literal-key bytes unchanged`, updated.startsWith(literal));
+      check(`${label}: trailing bytes unchanged`, updated.endsWith(trailer));
+      checkJobsPatch("shud", shudBin, label);
+      const composed = patchRows((await run(`${label} actual host composition`, process.execPath,
+        [bin, "--profile", "shud", "--dump-config"])).stdout, label);
+      const raw = composed.find((row) => row.id === "shud-raw-guard");
+      const jobs = composed.filter((row) => row.id === "shud-jobs");
+      check(`${label}: host keeps original raw configuration`, JSON.stringify(raw?.config?.rawDirs) === JSON.stringify(["/srv/literal/raw"]));
+      check(`${label}: host sees exactly one configured jobs row`, jobs.length === 1 &&
+        jobs[0].config?.shudBin === shudBin && jobs[0].config?.stateDir === join(web.directory, "shud-jobs"));
+      if (result.status === 0) await preservedInstall("shud", shudBin, `${label} repeated`);
+    } catch {
+      check(`${label}: installer/composition completed`, false);
+    } finally {
+      writeFileSync(web.patch, migrated);
+    }
+  }
+  await checkRunnerCleanup("timeout");
+  await checkRunnerCleanup("overflow");
 
   const prefix = "# keep this prefix\r\n- id: shud-raw-guard\r\n  config: {rawDirs: ['/srv/data_root/raw']}\r\n";
   const suffix = "# keep this suffix\r\n- id: agent-default-model\r\n  config: {model: deepseek-flash-guan} # unchanged";
   const oldJob = `- config: {shudBin: ${JSON.stringify(shudBin)}, stateDir: ${JSON.stringify(join(web.directory, "shud-jobs"))}}\r\n  id: 'shud-jobs'\r\n`;
   writeFileSync(web.patch, prefix + oldJob + suffix);
-  install("alternate binary preserves unrelated bytes", "shud", alternateBin);
+  await install("alternate binary preserves unrelated bytes", "shud", alternateBin);
   const updated = readFileSync(web.patch, "utf8");
   check("alternate binary: prefix byte-identical", updated.startsWith(prefix));
   check("alternate binary: suffix byte-identical", updated.endsWith(suffix));
   checkJobsPatch("shud", alternateBin, "alternate binary");
-  preservedInstall("shud", alternateBin, "alternate binary repeated");
+  await preservedInstall("shud", alternateBin, "alternate binary repeated");
 
   const nested = "- id: agent-default-model\n  config:\n    note: |-\n      - id: shud-jobs\n# literal nested lookalike remains\n";
   writeFileSync(web.patch, nested);
-  install("nested jobs lookalike is not a target", "shud", shudBin);
+  await install("nested jobs lookalike is not a target", "shud", shudBin);
   check("nested lookalike bytes preserved", readFileSync(web.patch, "utf8").startsWith(nested));
   checkJobsPatch("shud", shudBin, "nested jobs lookalike");
-  preservedInstall("shud", shudBin, "nested lookalike repeated");
+  await preservedInstall("shud", shudBin, "nested lookalike repeated");
 
   const flowPrefix = "[{id: shud-raw-guard, config: {rawDirs: ['/srv/data_root/raw']}}, ";
   const flowSuffix = ", {id: agent-default-model, config: {model: deepseek-flash-guan}}]";
   writeFileSync(web.patch, flowPrefix + "{config: {shudBin: /old}, id: \"shud-jobs\"}" + flowSuffix);
-  install("flow sequence jobs update", "shud", alternateBin);
+  await install("flow sequence jobs update", "shud", alternateBin);
   const flowUpdated = readFileSync(web.patch, "utf8");
   check("flow update prefix unchanged", flowUpdated.startsWith(flowPrefix));
   check("flow update suffix unchanged", flowUpdated.endsWith(flowSuffix));
   checkJobsPatch("shud", alternateBin, "flow sequence update");
-  preservedInstall("shud", alternateBin, "flow sequence repeated");
+  await preservedInstall("shud", alternateBin, "flow sequence repeated");
 
   const flowInsertPrefix = "[{id: shud-raw-guard, config: {rawDirs: ['/srv/data_root/raw']}}";
   const flowInsertSuffix = "] # preserve flow trailer\r\n";
   writeFileSync(web.patch, flowInsertPrefix + flowInsertSuffix);
-  install("flow sequence jobs insertion", "shud", shudBin);
+  await install("flow sequence jobs insertion", "shud", shudBin);
   const flowInserted = readFileSync(web.patch, "utf8");
   check("flow insertion prefix unchanged", flowInserted.startsWith(flowInsertPrefix));
   check("flow insertion trailer unchanged", flowInserted.endsWith(flowInsertSuffix));
   checkJobsPatch("shud", shudBin, "flow sequence insertion");
-  preservedInstall("shud", shudBin, "flow insertion repeated");
+  await preservedInstall("shud", shudBin, "flow insertion repeated");
 
   const sharedDesired = `- &shared {id: shud-jobs, config: {shudBin: ${JSON.stringify(shudBin)}, stateDir: ${JSON.stringify(join(web.directory, "shud-jobs"))}}}\n- id: other\n  config: *shared\n`;
   writeFileSync(web.patch, sharedDesired);
-  preservedInstall("shud", shudBin, "shared target already desired");
+  await preservedInstall("shud", shudBin, "shared target already desired");
   checkJobsPatch("shud", shudBin, "shared target already desired");
   const sharedHash = hash(web.patch);
   const sharedStat = lstatSync(web.patch);
-  const changedShared = install("shared target changed binary", "shud", alternateBin, "web", true);
+  const changedShared = await install("shared target changed binary", "shud", alternateBin, "web", true);
   check("shared target changed binary: rejected", changedShared.status !== 0);
   check("shared target changed binary: patch hash unchanged", hash(web.patch) === sharedHash);
   const rejectedSharedStat = lstatSync(web.patch);
@@ -327,7 +550,7 @@ try {
   ]) {
     writeFileSync(web.patch, source);
     const before = hash(web.patch);
-    const result = install(label, "shud", shudBin, "web", true);
+    const result = await install(label, "shud", shudBin, "web", true);
     check(`${label}: installer rejects ambiguous patch`, result.status !== 0);
     check(`${label}: patch bytes unchanged`, hash(web.patch) === before);
     check(`${label}: diagnostic omits source content`, !`${result.stdout}\n${result.stderr}`.includes("DO_NOT_ECHO_USER_PATCH"));
@@ -338,14 +561,14 @@ try {
   }
   writeFileSync(web.patch, migrated);
 
-  install("headless profile installation", "shud-probe", shudBin, "headless");
+  await install("headless profile installation", "shud-probe", shudBin, "headless");
   const headless = profilePaths("shud-probe");
   const headlessBundles = JSON.parse(readFileSync(headless.manifest, "utf8")).dsh.profile.bundles;
   check("headless profile excludes Web bundle", !headlessBundles.includes("@deepseek-ai/dsh-web-app"));
   check("headless profile ends with SHUD bundle", headlessBundles.at(-1) === "@shud-harness/dsh-profile-shud");
   checkJobsPatch("shud-probe", shudBin, "headless profile");
-  const headlessSchema = JSON.parse(run("headless schema", process.execPath,
-    [bin, "--profile", "shud-probe", "--dump-config-schema"], true).stdout);
+  const headlessSchema = JSON.parse((await run("headless schema", process.execPath,
+    [bin, "--profile", "shud-probe", "--dump-config-schema"], true)).stdout);
   checkJobsSchema(headlessSchema, "headless import");
   const headlessGuards = (headlessSchema["x-cordis"]?.entries ?? []).filter((entry) => entry.id === "shud-raw-guard");
   check("headless raw-guard imports", headlessGuards.length === 1 && ["absent", "schema"].includes(headlessGuards[0].status));
