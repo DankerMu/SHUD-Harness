@@ -112,11 +112,15 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **THEN** RunRecord 的 `exit_class` 为 `ok`，不是 `cancelled`
 
 ### Requirement: Host teardown keeps shud running
-宿主 teardown（SIGTERM 等正常退出、注册表重载，即父类以 teardown 理由调用 producer `cancel`）时，对没有 `cancel_requested_at` 的 shud 作业，注册表 SHALL NOT 终止包装进程，SHALL 让该次 dsh 登记以终态结算（detail 说明 shud 在后台继续），`run-job.json` 的 `status` SHALL 保持不变，活动索引条目 SHALL 保留。该结算 SHALL NOT 触发唤醒，也 SHALL NOT 生成 RunRecord。shud 作业无 owner，owner Agent 释放 SHALL NOT 影响它。
+宿主 teardown（SIGTERM 等正常退出、注册表重载，即父类调用 producer `cancel` 而该调用不是由 `kill` 覆写发起）时，注册表 SHALL NOT 终止包装进程，SHALL 在 producer `cancel` 内同步以 `failed` 结束该次 dsh 登记（不依赖已随注册表释放而停止的轮询循环，使父类等待结算的 teardown 不会挂起），`run-job.json` 的 `status` SHALL 保持不变，活动索引条目 SHALL 保留。无 `cancel_requested_at` 时 detail SHALL 说明 shud 在后台继续；已有 `cancel_requested_at`（kill 宽限期内 teardown）时 SHALL 先对包装进程组重发 SIGTERM，detail SHALL 说明 kill 进行中，其余终止与 `cancelled` 结算留给下次启动对账（R7/R8）。该结算 SHALL NOT 触发唤醒，也 SHALL NOT 生成 RunRecord。shud 作业无 owner，owner Agent 释放 SHALL NOT 影响它。
 
 #### Scenario: graceful restart
 - **WHEN** 作业 `running` 时 dsh 收到 SIGTERM 并退出
 - **THEN** SHUD 进程仍在运行，`run-job.json` 仍为 `running`，运行目录中没有 `run-record.json`
+
+#### Scenario: teardown during kill grace period
+- **WHEN** 对 `running` 作业 kill 后、宽限期结束前注册表被释放，且 SHUD 尚未退出
+- **THEN** 注册表释放在宽限期内完成而不挂起，该次 dsh 登记以 `failed`（detail 含 kill 进行中）结算，`run-job.json` 仍为 `running` 且保留 `cancel_requested_at`，活动索引条目保留，下次启动按 R8 结算为 `cancelled`
 
 #### Scenario: owner session disposed
 - **WHEN** 作业运行中发起会话的 Agent 被释放（会话归档或关闭），宿主保持运行
@@ -194,7 +198,7 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **THEN** `job_list` 列出一个新的 `kind: shud` 登记且其 label 含该 `run_id`，`run-job.json` 的 `dsh_job_id` 为该新 id，其结束后照常 collect 与唤醒
 
 ### Requirement: Automatic collect
-作业进入 `succeeded`、`failed` 或 `cancelled` 时注册表 SHALL 立即 collect：按 run-records spec 生成 RunRecord（含从 `run-job.json` 复制的 `llm.response_model` 与 `llm.response_model_source`）写入 `run-record.json`，作业状态置 `collected`，之后才唤醒。`run-record.json` 已存在时 collect SHALL 返回已有记录而不改写。collect 失败（`exit_code` 不可读或非整数、产物目录不可读、RunRecord 未通过 schema 校验、写文件失败）时 SHALL 写 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态（`exit_code` 不可读时为 `failed`），SHALL NOT 写 `run-record.json`；`attempts` 未达 core 常量上限时 SHALL 由「Registry poll loop」在下一轮重试（重启后由对账 R9 继续），达到上限后 SHALL 停止自动重试并以失败原因唤醒发起会话。
+作业进入 `succeeded`、`failed` 或 `cancelled` 时注册表 SHALL 立即 collect：按 run-records spec 生成 RunRecord（含从 `run-job.json` 复制的 `llm.response_model` 与 `llm.response_model_source`）写入 `run-record.json`，作业状态置 `collected`，之后才唤醒。`run-record.json` 已存在时 collect SHALL 返回已有记录而不改写。collect 失败（`exit_code` 不可读或非整数、产物目录不可读、RunRecord 未通过 schema 校验、写文件失败）时 SHALL 写 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态（`exit_code` 不可读时为 `failed`），SHALL NOT 写 `run-record.json`；`attempts` 未达 core 常量上限时 SHALL 由「Registry poll loop」在重试间隔后重试（重启后由对账 R9 继续），达到上限后 SHALL 停止自动重试并以失败原因唤醒发起会话。
 
 #### Scenario: collect is idempotent
 - **WHEN** 对同一已 collect 的作业再次 collect
@@ -205,7 +209,7 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **THEN** 运行目录有 `collect-error.json` 且 `attempts` 为 3，无 `run-record.json`，`run-job.json` 为 `failed`，发起会话收到一条含失败原因的 `shud-jobs` 唤醒消息，此后不再自动重试
 
 ### Requirement: Registry poll loop
-注册表 SHALL 运行**一个**进程内轮询循环，以父类 `pumpPollMs` 为周期遍历活动索引中 `notify.status` 尚未为 `delivered`/`unreachable` 的条目，条目离开活动索引前一直处理，与是否存在 dsh 登记无关。每一轮对每个条目按状态推进一步：未终态 → 结算检查（见下）；终态未 collect 且 collect `attempts` 未达上限 → collect（「Automatic collect」的失败重试由此驱动）；已 collect 或 collect 达上限且 `notify.status: pending` → 投递（「At-least-once wake」的暂时性失败重试由此驱动）。同一条目同一时刻 SHALL 至多一个步骤在途。循环与其定时器 SHALL 是注册表上下文的 effect：注册表释放或重载时停止，重载后的新实例先对账再启动自己的循环，SHALL NOT 出现两个循环对同一条目投递。结算检查：出现 `exit_code` 时 SHALL 按退出码结算（`succeeded`/`failed`）；进程不存活时 SHALL 再读一次 `exit_code`，仍无则有 `cancel_requested_at` 时结算为 `cancelled`、否则为 `lost`（`failed`）；kill 与自然退出 first-wins（「Cancellation」）。结算 SHALL 先原子写 `run-job.json` 的终态与 `finished_at`、`exit_code`，再以 producer `done` 结束当前 dsh 登记（如有），再交给「Automatic collect」。
+注册表 SHALL 运行**一个**进程内轮询循环，以父类 `pumpPollMs` 为周期遍历活动索引中 `notify.status` 尚未为 `delivered`/`unreachable` 的条目，条目离开活动索引前一直处理，与是否存在 dsh 登记无关。本进程提交在途的条目（`run_id` 在进程内在途集合中：写 `created` 前加入，写出 `running` 或回滚后移出；父类 `start` 同步返回 hooks 后 `pid`、`pid_started_at` 与 `running` 才异步写入）SHALL 被跳过，SHALL NOT 被结算；前一进程遗留的此类条目由「Startup reconciliation」处理。每一轮对每个其余条目按状态推进一步：未终态 → 结算检查（见下）；终态未 collect 且 collect `attempts` 未达上限 → collect（「Automatic collect」的失败重试由此驱动）；已 collect 或 collect 达上限且 `notify.status: pending` → 投递（「At-least-once wake」的暂时性失败重试由此驱动）。collect 与投递的重试 SHALL 在距上次尝试（`collect-error.json` 或 `notify` 的 `at`）不少于 core 常量重试间隔（10 秒，与 `pumpPollMs` 无关）后才进行。同一条目同一时刻 SHALL 至多一个步骤在途。循环与其定时器 SHALL 是注册表上下文的 effect：注册表释放或重载时停止，重载后的新实例先对账再启动自己的循环，SHALL NOT 出现两个循环对同一条目投递。结算检查：出现 `exit_code` 时 SHALL 按退出码结算（`succeeded`/`failed`）；进程不存活时 SHALL 再读一次 `exit_code`，仍无则有 `cancel_requested_at` 时结算为 `cancelled`、否则为 `lost`（`failed`）；kill 与自然退出 first-wins（「Cancellation」）。结算 SHALL 先原子写 `run-job.json` 的终态与 `finished_at`、`exit_code`，再以 producer `done` 结束当前 dsh 登记（如有），再交给「Automatic collect」。
 
 #### Scenario: natural exit settles online
 - **WHEN** 宿主在线时伪 `shudBin` 以退出码 13 结束
@@ -216,15 +220,23 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **THEN** 下一次轮询后作业以 `exit_class: lost` 结算并 collect
 
 #### Scenario: in-process retries
-- **WHEN** 宿主在线时第一次 collect 因产物目录暂不可读失败、下一轮可读，随后第一次投递因 flush 返回失败、下一轮成功
+- **WHEN** 宿主在线时第一次 collect 因产物目录暂不可读失败、重试间隔内恢复可读，随后第一次投递因 flush 返回失败、重试间隔内恢复
 - **THEN** 不经重启即得到 `run-record.json`（`collect-error.json` 的 `attempts` 为 1）与 `notify.status: delivered`（`notify.attempts` 为 1），发起会话恰收到一条唤醒
+
+#### Scenario: poll during in-flight submission
+- **WHEN** 提交已写出 `submitted` 与活动索引条目、包装进程已 spawn 但 `pid` 与 `running` 尚未写入时，轮询循环恰好运行一轮
+- **THEN** 该条目被跳过，不被结算为 `lost`；随后 `run-job.json` 为 `running`，作业正常结束并 collect
+
+#### Scenario: transient failure outlasting several polls
+- **WHEN** 投递的 flush 连续失败约 1 秒（远多于 3 个 `pumpPollMs`）后恢复
+- **THEN** `notify.attempts` 只增加 1，重试间隔后的下一次尝试成功，`notify.status` 为 `delivered`，不变为 `unreachable`
 
 #### Scenario: no duplicate wake after reload
 - **WHEN** 作业已 collect、投递尚未完成时注册表插件被重载
 - **THEN** 旧循环停止，新实例对账后投递，发起会话恰收到一条唤醒
 
 ### Requirement: At-least-once wake
-所有结算路径（宿主在线时自然退出或被 kill、对账补结算、接管作业结束）SHALL 经同一路径唤醒：「Registry poll loop」结算 → collect → `sessionController.resolveAgent(owner_session)` → `agent.followup`（以 `createUserMessage` 构造的用户消息，`source.kind: shud-jobs`，含 `run_id`、`exit_class` 与产物数量，或 collect 失败原因）→ `ctx.sessions.flush` 成功后才把 `notify.status` 置 `delivered` → 写入完成索引并移出活动索引。每个 collect 完成或 collect 失败达上限的作业 SHALL 唤醒一次，没有豁免（含模型 `job_kill` 的作业与 `job_output` 已读到结果的作业）。就绪：投递 SHALL 只在 `sessionController` 与 `sessions` 均可用后开始，注册表以 `ctx.inject(['sessionController', 'sessions'], 回调)` 启动投递，二者 SHALL NOT 成为插件行的启动依赖；Web 模板中 `jobs` 行先于 `session-controller` 行 apply，此前产生的待投递条目在回调触发后投递。服务缺失本身 SHALL NOT 使条目变为 `unreachable`（宿主无启动完成信号，无法区分"尚未 apply"与"profile 无该行"）：不挂 `session-controller` 的 profile（headless）中条目保持 `notify.status: pending` 并在 `detail` 写明等待会话控制服务。投递开始后，`owner_session` 为 `null` 或会话已不存在时 SHALL 立即置 `notify.status: unreachable` 并记录原因；恢复或 flush 失败等暂时性错误 SHALL 计入 `notify.attempts`，由轮询循环在下一轮重试（重启后由对账继续），达到 core 常量上限后置 `unreachable`；`unreachable` 后 SHALL NOT 再重试。
+所有结算路径（宿主在线时自然退出或被 kill、对账补结算、接管作业结束）SHALL 经同一路径唤醒：「Registry poll loop」结算 → collect → `sessionController.resolveAgent(owner_session)` → `agent.followup`（以 `createUserMessage` 构造的用户消息，`source.kind: shud-jobs`，含 `run_id`、`exit_class` 与产物数量，或 collect 失败原因）→ `ctx.sessions.flush` 成功后才把 `notify.status` 置 `delivered` → 写入完成索引并移出活动索引。每个 collect 完成或 collect 失败达上限的作业 SHALL 唤醒一次，没有豁免（含模型 `job_kill` 的作业与 `job_output` 已读到结果的作业）。就绪：投递 SHALL 只在 `sessionController` 与 `sessions` 均可用后开始，注册表以 `ctx.inject(['sessionController', 'sessions'], 回调)` 启动投递，二者 SHALL NOT 成为插件行的启动依赖；Web 模板中 `jobs` 行先于 `session-controller` 行 apply，此前产生的待投递条目在回调触发后投递。服务缺失本身 SHALL NOT 使条目变为 `unreachable`（宿主无启动完成信号，无法区分"尚未 apply"与"profile 无该行"）：不挂 `session-controller` 的 profile（headless）中条目保持 `notify.status: pending` 并在 `detail` 写明等待会话控制服务。投递开始后，`owner_session` 为 `null` 或会话已不存在时 SHALL 立即置 `notify.status: unreachable` 并记录原因；恢复或 flush 失败等暂时性错误 SHALL 计入 `notify.attempts`，由轮询循环在不少于 core 常量重试间隔后重试（重启后由对账继续），达到 core 常量上限后置 `unreachable`；`unreachable` 后 SHALL NOT 再重试。
 
 #### Scenario: wake while host online
 - **WHEN** 宿主在线、发起会话空闲时作业以退出码 0 结束

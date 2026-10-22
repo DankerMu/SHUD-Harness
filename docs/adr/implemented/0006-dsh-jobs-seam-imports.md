@@ -13,9 +13,9 @@ ADR-0004 K2 规定插件只经文档化 seam 接入宿主，`eslint.config.mjs` 
 
 1. 运行时 import 白名单增加 `@deepseek-ai/dsh-jobs`（抽象契约与类型）与 `@deepseek-ai/dsh-jobs-local`（`LocalJobRegistry` 父类）。
 2. 运行时 import 白名单增加 `@deepseek-ai/dsh-llm`，但只允许具名导入 `createUserMessage`（构造唤醒消息；宿主先例 `deepseek-harness/packages/schedule/schedule/src/runtime.ts:2`、`:119`）；该包的类型（含为 `shud-jobs` 消息来源扩充 `MessageSourceMap`）照常 `import type`。
-3. 测试文件（eslint 以测试文件 glob 限定，如 `**/*.test.ts`）额外允许运行时 import `@deepseek-ai/dsh-scope` 的 `createScope`（`deepseek-harness/packages/core/scope/src/index.ts:137`），用于在测试中构造 preset 式作用域；生产代码仍禁止运行时 import 该包。
+3. 测试文件额外允许运行时 import `@deepseek-ai/dsh-scope` 的 `createScope`（`deepseek-harness/packages/core/scope/src/index.ts:137`），用于在测试中构造 preset 式作用域。eslint 以两个 glob 限定：`**/*.test.ts` 与 `**/test-harness.ts`；跨测试共享的作用域装配只能放在名为 `test-harness.ts` 的文件中。`test-harness.ts` 由所在包 `tsconfig.json` 的 `exclude` 排除出构建产物，经测试文件引用而对 knip 可达，计入 vitest 覆盖率（`vitest.config.ts` 不改）。其它文件（生产代码）仍禁止运行时 import 该包。
 4. 其余宿主包只允许 `import type`，用于 `ctx.inject` 取得的服务（`sessionController`、`sessions`、Agent 等）的静态类型（如 `import type {} from '@deepseek-ai/dsh-api-session-controller'`）；运行时一律经 `ctx.inject` 取服务（含可选服务的回调形式 `ctx.inject([...], 回调)`，见 OpenSpec change `m2-run-chain` design D7），不 import 宿主实现。
-5. `scripts/guardrails/test-guardrails.sh` 为上述各类加正反例：`dsh-jobs`/`dsh-jobs-local` 运行时 import 通过；`dsh-llm` 的 `createUserMessage` 通过、该包其它具名运行时导入被拒；测试文件中运行时 import `dsh-scope` 的 `createScope` 通过、生产文件中同样的导入被拒；其它宿主包运行时 import 被拒（含测试文件中的 `dsh-agent-loop-testkit`）；其它宿主包 `import type` 通过。
+5. `scripts/guardrails/test-guardrails.sh` 为上述各类加正反例：`dsh-jobs`/`dsh-jobs-local` 运行时 import 通过；`dsh-llm` 的 `createUserMessage` 通过、该包其它具名运行时导入被拒；`*.test.ts` 与 `test-harness.ts` 中运行时 import `dsh-scope` 的 `createScope` 通过、其它非测试文件（如 `harness.ts`）中同样的导入被拒；其它宿主包运行时 import 被拒（含测试文件中的 `dsh-agent-loop-testkit`）；其它宿主包 `import type` 通过。
 
 ## 权衡
 
