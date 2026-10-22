@@ -175,7 +175,7 @@ collect 失败（`exit_code` 不可读或非整数、产物目录不可读、Run
 
 ## Migration Plan
 
-- 合入顺序（按依赖，不按组号）：1 spike → 2 升级评估与规范文档对齐 → 3 白名单 → 15 `generate.ts` 拆分 → 4 schema → 5 注册表骨架（行为不变的替换）→ 8 `stateDir` 锁与索引 → 6.1/6.2 提交（含瞬时全局控制器）与脱离运行 → 6.3 轮询循环与结算 → 7 collect → 9 取消与 teardown → 10.1 文件级对账 → 10.2 接管登记 → 11 唤醒投递 → 13 raw-guard → 12 工具与挂载 → 14 验收脚本与矩阵 → 16 Epic 验收。骨架阶段 profile 已改挂 `dsh-shud-jobs`，但非 shud 行为不变，`profile:smoke` 与 `raw-guard:probes` 必须保持绿。
+- 合入顺序（按依赖，不按组号）：1 spike → 2 升级评估与规范文档对齐 → 3 白名单 → 15 `generate.ts` 拆分 → 4 schema → 5 注册表骨架（行为不变的替换）→ 8 `stateDir` 锁与索引 → 6.1/6.2 提交（含瞬时全局控制器）与脱离运行 → 6.3 轮询循环与结算 → 7 collect → 9.1 kill → 10.1 文件级对账 → 9.2 teardown 放手 → 10.2 接管登记 → 11 唤醒投递 → 13 raw-guard → 12 工具与挂载 → 14 验收脚本与矩阵 → 16 Epic 验收。骨架阶段 profile 已改挂 `dsh-shud-jobs`，但非 shud 行为不变，`profile:smoke` 与 `raw-guard:probes` 必须保持绿。
 - 配置：`stateDir`、`shudBin` 是机器路径，bundle patch 不提供；`profile:install` 要求环境变量 `SHUD_BIN`，并在用户 profile patch 写入 `- id: jobs` 行（`shudBin: $SHUD_BIN`、`stateDir: $DSH_HOME/profiles/<name>/shud-jobs`）。`profile:smoke` 与 `raw-guard:probes` 以临时占位可执行文件作为 `SHUD_BIN` 调用 `profile:install`。Runtime Lifecycle 文档在挂载该行的同一 PR（5.2）更新。
 - 回滚：profile patch 删除 `- id: jobs` 覆盖行即恢复 `jobs-local`；`runs/` 目录与 `stateDir` 可保留供人工查阅。
 - 文档：与本设计冲突的规范文档在实现组之前（2.2）对齐；`Minimal_Schemas.md`（frozen）在 2.2 标注字段处置、在 schema 任务中按 Zod 修订 id 与状态集，并在文首注明修订来源为本 change。

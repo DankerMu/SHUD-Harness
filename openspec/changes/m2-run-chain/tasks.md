@@ -1,6 +1,6 @@
 # Tasks
 
-合入顺序按依赖而非组号，见 design.md「Migration Plan」：1 → 2 → 3 → 15 → 4 → 5 → 8 → 6.1 → 6.2 → 6.3 → 7 → 9 → 10.1 → 10.2 → 11 → 13 → 12 → 14 → 16。各任务写明的"依赖"是硬前置。
+合入顺序按依赖而非组号，见 design.md「Migration Plan」：1 → 2 → 3 → 15 → 4 → 5 → 8 → 6.1 → 6.2 → 6.3 → 7 → 9.1 → 10.1 → 9.2 → 10.2 → 11 → 13 → 12 → 14 → 16。各任务写明的"依赖"是硬前置。
 
 ## 1. 限时 spike：回答 design Open Questions（O1–O6）
 
@@ -75,7 +75,7 @@
 
 ## 9. 取消与宿主 teardown
 
-依赖：6.3（kill 的 first-wins 结算由轮询循环的结算步骤完成）。
+依赖：6.3（kill 的 first-wins 结算由轮询循环的结算步骤完成）；9.2 另依赖 10.1（其验证断言新实例对账按 R8 得 `cancelled`）。
 
 - [ ] 9.1 实现 kill：覆写公开 `kill`，对 shud 作业先写 `cancel_requested_at` 再交父类；producer `cancel` 见标记即对包装进程组 SIGTERM，宽限后 SIGKILL；结算 first-wins（「Cancellation」）。验证：以 `dsh_job_id` kill 运行中作业得 `cancelled`；`exit_code` 已写出后 kill 得按退出码结算；Web 作业卡路径（以 `'cancelled by the user'` 理由调用 `kill`）与模型路径结果相同
 - [ ] 9.2 实现 teardown 放手：按 spike O1 结论识别宿主 teardown（producer `cancel` 未消费到 `kill` 覆写设的一次性标记），不杀包装进程，在 `cancel` 内同步以 `failed` 结束本次登记的 producer `done`；已有 `cancel_requested_at` 时先重发 SIGTERM、detail 写 kill 进行中；`run-job.json` 与索引保持（「Host teardown keeps shud running」）。验证：释放注册表实例后包装进程存活、无 `run-record.json`、无唤醒；kill 后宽限期内释放注册表的集成测试中释放在宽限期内返回、登记 detail 含 kill 进行中、`cancel_requested_at` 保留，新实例对账按 R8 得 `cancelled`（「teardown during kill grace period」）；释放发起会话 Agent 的替身后作业照常结束并被 collect
