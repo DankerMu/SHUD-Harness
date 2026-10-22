@@ -58,6 +58,13 @@ const spellingWriteCases: [string, Kind][] = [
   // Review round 2 pins: x third in an old-style or short-option cluster.
   ["tar zvxf a.tgz -C prot", "deny"],
   ["tar -C prot -zvxf a.tgz", "deny"],
+  // Review round 3 pins: a tab after tar before an old-style cluster, x fourth in a
+  // cluster, gtar's longer word before the cluster, and --extract before ).
+  ["tar\txf a.tar -C prot", "deny"],
+  ["tar zvvxf a.tgz -C prot", "deny"],
+  ["tar -C prot -zvvxf a.tgz", "deny"],
+  ["gtar xzf a.tgz -C prot", "deny"],
+  ["(tar -C prot -f a.tar --extract)", "deny"],
   ["cat prot/x", "ask"],
   ["tar -tf prot/a.tar", "ask"],
   ["tar -tvf prot/a.tar -X excl", "ask"],
