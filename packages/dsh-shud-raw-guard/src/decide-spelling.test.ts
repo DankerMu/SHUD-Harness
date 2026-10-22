@@ -185,6 +185,15 @@ const tarArchiveCases: [string, Kind, Setup?][] = [
   // Only the piece after ( or ` sees the inner tar when the outer word is a plain tar.
   ["tar -tf a.tar $(tar xf b.tar -C prot)", "deny"],
   ["tar -tf a.tar `tar xf b.tar -C prot`", "deny"],
+  // Review round 3 pins: an old-style first word that is itself a tar name is not a
+  // mode cluster (its r or A is no write); a later plain tar still sees rf.
+  ["TAR=bsdtar tar -tf prot/a.tar", "ask"],
+  ["env TAR=bsdtar tar -tvf prot/a.tar", "ask"],
+  ["TAR=gtar tar --list -f prot/a.tar", "ask"],
+  ["echo bsdtar tar -tf prot/a.tar", "ask"],
+  ["TAR=tar bsdtar -tf prot/a.tar", "ask"],
+  ["TAR=bsdtar TAR -tf prot/a.tar", "ask"],
+  ["TAR=bsdtar tar rf prot/a.tar x", "deny"],
   // The archive under another raw dir than the one touched; the first f of a cluster.
   ["tar -cf raw2/a.tar prot/x", "deny", multiRaw],
   ["tar -cfref/raw/a.tar x", "deny", refRaw],

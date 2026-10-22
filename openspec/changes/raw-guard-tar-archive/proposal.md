@@ -11,7 +11,7 @@
   - 新增写归档检测：同一命令段内出现写归档模式（短选项簇或旧式首簇含 `c`/`r`/`u`/`A`，或 `--create`/`--append`/`--update`/`--catenate`/`--concatenate`/`--delete` 及缩写），取其归档操作数（第一个 `f` 后的 `-f WORD`、`-cfWORD`、`--file[=]WORD`、旧式 `cf WORD`；`-` 除外），按 workdir 解析后位于任一 raw 下时判 `deny`；
   - 提出 `tarArguments`，`tarExtracts` 与新检测共用（按段及 `(`、反引号子段，取第一个 tar 词与第一个 `tar`/`gtar`，线性）。
 - 测试：写归档、bsdtar、workdir、ask/next 钉住、资源行，放 `decide-spelling.test.ts`。
-- 规范 `raw-data-guard`：MODIFIED "Shell write under raw is denied"（bsdtar、写归档规则，3 个场景）。
+- 规范 `raw-data-guard`：MODIFIED "Shell write under raw is denied"（bsdtar、写归档规则，4 个场景）。
 
 备选（issue 列出）：写归档模式加任意 raw 提及一律 deny，不解析操作数。会把 #279 钉住的 `tar -cf o.tar <raw>`（把 raw 打包到别处，正常读流程）改成 deny，需要 PI 决定，不取。
 
@@ -22,7 +22,7 @@ Fixture level: expanded
 Upstream suggested level: absent（issue-scribe，Readiness implementation-ready）；触发词：策略门决策与 raw 保护（Critical Paths #1/#2）、ask→deny 收紧
 Blast radius: 操作数解析错会把 raw 作为打包源的读判成 deny，或漏掉写 raw 归档；模式字母若不区分大小写，`-C` 会被当作写模式；`-` 若不排除，workdir 在 raw 内时 `tar -cf - x` 误判；探针 T1–T5 必须不变
 Selected risk packs: Public API / CLI / script entry; File IO / path safety; Auth / permissions / secrets; Legacy compatibility; Documentation / migration notes; Resource limits
-Evidence floor: 新增 deny 行先红后绿，ask/next 钉住行改前改后都绿；既有全部行不变；27 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
+Evidence floor: 新增 deny 行先红后绿，ask/next 钉住行改前改后都绿；既有全部行不变；30 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
 
 ## Capabilities
 

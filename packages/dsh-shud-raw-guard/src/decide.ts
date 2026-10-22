@@ -92,9 +92,10 @@ function tarExtracts(text: string): boolean {
 // or delete mode (c r u A, case-sensitive: -C changes directory). The archive is
 // the word after the first f of a short cluster (or glued to it), after
 // --file/--fil, or after an old-style first cluster holding f. - is stdout.
-// Stopping at the first f keeps the operand scan linear.
+// Stopping at the first f keeps the operand scan linear. An old-style first word
+// that is itself a tar name (TAR=bsdtar tar -tf) is not a mode cluster.
 const TAR_ARCHIVE_WRITE =
-  /^\s+[A-Za-z]*[cruA]|\s(?:-[A-Za-z]*[cruA]|--(?:cr|ap|up|ca|conc|dele)[a-z]*(?![A-Za-z0-9-]))/;
+  /^\s+(?!(?:[gG]|[bB][sS][dD])?[tT][aA][rR]\s)[A-Za-z]*[cruA]|\s(?:-[A-Za-z]*[cruA]|--(?:cr|ap|up|ca|conc|dele)[a-z]*(?![A-Za-z0-9-]))/;
 const TAR_ARCHIVE_OPERAND =
   /^\s+[A-Za-eg-z]*f[A-Za-z]*\s+(\S+)|\s-[A-Za-eg-z]*f\s*(\S+)|\s--file?(?:=|\s+)(\S+)/g;
 function tarArchives(text: string): string[] {

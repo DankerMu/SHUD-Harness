@@ -48,9 +48,10 @@ Must add/change:
   // catenate or delete mode (c r u A, case-sensitive: -C changes directory). The
   // archive is the word after the first f of a short cluster (or glued to it),
   // after --file/--fil, or after an old-style first cluster holding f. - is
-  // stdout. Stopping at the first f keeps the operand scan linear.
+  // stdout. Stopping at the first f keeps the operand scan linear. An old-style
+  // first word that is itself a tar name (TAR=bsdtar tar -tf) is not a mode cluster.
   const TAR_ARCHIVE_WRITE =
-    /^\s+[A-Za-z]*[cruA]|\s(?:-[A-Za-z]*[cruA]|--(?:cr|ap|up|ca|conc|dele)[a-z]*(?![A-Za-z0-9-]))/;
+    /^\s+(?!(?:[gG]|[bB][sS][dD])?[tT][aA][rR]\s)[A-Za-z]*[cruA]|\s(?:-[A-Za-z]*[cruA]|--(?:cr|ap|up|ca|conc|dele)[a-z]*(?![A-Za-z0-9-]))/;
   const TAR_ARCHIVE_OPERAND =
     /^\s+[A-Za-eg-z]*f[A-Za-z]*\s+(\S+)|\s-[A-Za-eg-z]*f\s*(\S+)|\s--file?(?:=|\s+)(\S+)/g;
   function tarArchives(text: string): string[] {
@@ -86,6 +87,9 @@ Must add/change:
     - 先出现的 `bsdtar` 词不遮住其后的 `tar`：`bsdtar -tf a.tar tar xf b.tar -C prot`、`TAR=bsdtar tar xf b.tar -C prot`（这两行 main 上为 deny，不得放宽）、`TAR=bsdtar tar cf prot/a.tar x`；
     - 子段（外层为普通 tar，只有子段能看到内层 tar）：`tar -tf a.tar $(tar xf b.tar -C prot)`、`` tar -tf a.tar `tar xf b.tar -C prot` ``；
     - 选项跨过 `(`（整段候选不可去掉）：`tar -C $(pwd)/prot -xf a.tar`（main 上为 deny，不得放宽）、`tar --exclude=$(cat ex) -cf prot/a.tar x`。
+  - review round 3 补（旧式首词本身是 tar 名时不算写模式）：
+    - ask：`TAR=bsdtar tar -tf prot/a.tar`、`env TAR=bsdtar tar -tvf prot/a.tar`、`TAR=gtar tar --list -f prot/a.tar`、`echo bsdtar tar -tf prot/a.tar`、`TAR=tar bsdtar -tf prot/a.tar`、`TAR=bsdtar TAR -tf prot/a.tar`；
+    - deny：`TAR=bsdtar tar rf prot/a.tar x`（由 `PLAIN_TAR_COMMAND` 候选判写）。
   - review round 1 补 ask（已记录漏报，`cd` 改变目录后的相对操作数）：`cd prot && tar -cf a.tar x`、`cd prot; tar -cf a.tar x`。
   - 多 raw deny：`rawDirs: ["prot", "raw2"]`（workspace 下建 `raw2/`）时 `tar -cf raw2/a.tar prot/x`。
   - 第一个 `f` deny：`rawDirs: ["ref/raw"]`（workspace 下建 `ref/raw/`）时 `tar -cfref/raw/a.tar x`（贪婪取最后一个 `f` 会得到 `/raw/a.tar`）。
@@ -106,14 +110,15 @@ Governing invariant:
 Sibling surfaces:
 - `WRITE_VERBS` 里的 `g?tar\s+-[a-zA-Z]*x` 子式保留；`bsdtar -x…` 由 `tarExtracts` 覆盖。
 - 归档操作数经符号链接指向 raw、或用变量拼写（`$PWD/<raw>/a.tar`、`$(pwd)/…`）而命令未字面提及 raw 时，不进入第一遍循环或解析不到，与其他 shell 写同属已记录漏报，不改。
-- 同一段（子段）内另一个 tar 词之后的旧式首簇不被识别（如 `tar -tf a.tar bsdtar xf b.tar -C prot`，main 上同类），属已记录漏报。
+- 同一段（子段）内另一个 tar 词之后的旧式首簇不被识别（如 `tar -tf a.tar bsdtar xf b.tar -C prot`、`TAR=gtar tar uf prot/a.tar x`：`PLAIN_TAR_COMMAND` 先匹配 `gtar`，main 上同类），属已记录漏报。
+- 拼写恰为 tar 命令名的旧式首簇（`tar Tar list -f prot/a.tar x`，GNU tar 下 `r` 为追加）被 tar 名前瞻排除，落 `ask`（main 上同为 ask），属已记录漏报。
 - `TAPE` 环境变量、默认设备、`cbf 20 a.tar` 这类多参数旧式簇（取第一个词）不在范围。
 - `lib/decide.js` 由 build 生成。
 
 Seams under test: `decideRawAccess(call, options)`（vitest）；live 探针 T1–T5。
 
 Required evidence:
-- 改动前（origin/main 的 `decide.ts`）：design 列出的全部 deny 行（写归档、bsdtar、workdir、多 raw、`ref/raw`、已接受误报、review round 1 补行）为红（ask），main 上已为 deny 的不放宽钉住行除外（两条子段行、`bsdtar -tf a.tar tar xf b.tar -C prot`、`TAR=bsdtar tar xf b.tar -C prot`、`tar -C $(pwd)/prot -xf a.tar`）；ask/next 行与资源行为绿。对 `71ed466f` 的 `decide.ts`：恰好 `bsdtar -tf a.tar tar xf …`、`TAR=bsdtar tar xf …`、`TAR=bsdtar tar cf …` 三行为红。改后全部为绿，既有行不变。
+- 改动前（origin/main 的 `decide.ts`）：design 列出的全部 deny 行（写归档、bsdtar、workdir、多 raw、`ref/raw`、已接受误报、review round 1 补行）为红（ask），main 上已为 deny 的不放宽钉住行除外（两条子段行、`bsdtar -tf a.tar tar xf b.tar -C prot`、`TAR=bsdtar tar xf b.tar -C prot`、`tar -C $(pwd)/prot -xf a.tar`）；ask/next 行与资源行为绿。对 `c129235f` 的 `decide.ts`：恰好 review round 3 补的六条 ask 行为红。对 `71ed466f` 的 `decide.ts`：恰好 `bsdtar -tf a.tar tar xf …`、`TAR=bsdtar tar xf …`、`TAR=bsdtar tar cf …` 三行为红。改后全部为绿，既有行不变。
 - 突变，每项至少让一行变红：
   1. 不检查 `writesArchive` → 写归档 deny 行变红。
   2. `TAR_COMMAND` 去掉 `bsdtar` 分支 → 全部 `bsdtar` deny 行变红。
@@ -142,6 +147,9 @@ Required evidence:
   25. 去掉整段候选（`segment.split(/[(`]/)` 或只留 `.slice(1)`）→ `tar -C $(pwd)/prot -xf a.tar`、`tar --exclude=$(cat ex) -cf prot/a.tar x` 变红。
   26. 去掉 `PLAIN_TAR_COMMAND` 候选 → `bsdtar -tf a.tar tar xf …`、`TAR=bsdtar tar xf …`、`TAR=bsdtar tar cf …` 变红。
   27. 子段改为每个 `(`、反引号之后的全部后缀 → `"ls prot " + "$(tar ".repeat(2e5)` 资源行平方级超时。
+  28. 去掉旧式写分支的 tar 名前瞻 → review round 3 补的六条 ask 行变红。
+  29. 前瞻去掉 `bsdtar` 分支（`[gG]?[tT][aA][rR]`）→ `TAR=tar bsdtar -tf prot/a.tar` 变红。
+  30. 前瞻只认小写（`(?:g|bsd)?tar`）→ `TAR=bsdtar TAR -tf prot/a.tar` 变红。
 - `pnpm run check`、`pnpm run build`、`pnpm run test-guardrails` 绿。
 - live `pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变。
 
