@@ -790,6 +790,19 @@ test.runIf(caseInsensitive)("case-insensitive filesystem: bash `RM -rf sub` -> d
   expectAncestorDecision(decide("bash", { command: "RM -rf sub" }, subRaw, W), "deny");
 });
 
+// PowerShell names are case-insensitive: every destructive cmdlet and alias, as
+// spelled and with flipped case, denies an ancestor; no row is a POSIX verb.
+const PWSH_ANCESTOR_VERBS =
+  "Remove-Item Move-Item Rename-Item del erase ri rd ren rni move mi".split(" ");
+test.each(
+  PWSH_ANCESTOR_VERBS.flatMap((verb) => [
+    verb,
+    verb === verb.toLowerCase() ? verb.toUpperCase() : verb.toLowerCase(),
+  ]),
+)("pwsh `%s -Recurse sub` -> deny (#273 pwsh case)", (verb) => {
+  expectAncestorDecision(decide("pwsh", { command: `${verb} -Recurse sub` }, subRaw, W), "deny");
+});
+
 // Touching any raw dir keeps the raw decision whatever the rawDirs order.
 test.each([[["sub/raw", "protected"]], [["protected", "sub/raw"]]])(
   "rawDirs %j: touching one raw keeps its decision (#273 multi raw)",

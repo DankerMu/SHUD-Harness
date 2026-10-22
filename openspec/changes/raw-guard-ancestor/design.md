@@ -96,6 +96,7 @@ Must add/change:
     - 分隔符与引号：`(rm -rf sub)`、`rm -rf sub;ls`、`rm -rf sub&&ls`、`rm -rf sub|cat`、`` `rm -rf sub` ``、`rm -rf sub>x`、`mv x --target-directory=sub`。
     - glob 与 brace：`rm -rf sub/?aw`、`rm -rf sub/[r]aw`、`rm -rf {x,sub}`、`rm -rf sub*`、`rm -rf sub/{raw,x}`、`rm -rf sub{,x}`。
     - 命令替换：`rm -rf $(true)sub`、`` rm -rf `true`sub ``。
+  - pwsh 动词逐个钉住（review round 3）：`test.each` 覆盖 11 个 pwsh 破坏性动词，每个词一行原样拼写、一行改变大小写，形如 `<verb> -Recurse sub` → deny（pwsh 工具，`rawDirs: ["sub/raw"]`）。
   - 补钉住（review round 2）deny：`rm -rf sub/ x`、`rm -rf sub/&&ls`（`/` 后接空白或分隔符）；`chown -R 0 sub`、`chgrp -R 0 sub`、`unlink sub`、`shred sub`（其余 POSIX 动词）；pwsh `ri -r sub`、`del -Recurse sub`、`Rename-Item sub x`（pwsh 别名与 Rename-Item）；bash `pwsh -c "Remove-Item -Recurse sub"`（pwsh 包裹）；`runIf(caseInsensitive)` 下 `RM -rf sub`（动词大小写）。
   - 复合命令（已接受误报，deny）：默认配置 `ls <父> && rm -f tmp.csv`。
   - 切换目录 deny：`cd -P&&rm -rf sub`、pwsh `Set-Location -Path:x;Remove-Item -Recurse sub`、`cd ${W} && rm -rf sub`、`mv abcd sub`（`abcd` 不得被当作 `cd` 剥离）。
@@ -168,7 +169,9 @@ Required evidence:
   25. POSIX 破坏性动词表分别去掉 `chown`、`chgrp`、`unlink`、`shred` → 对应行变红。
   26. pwsh 破坏性动词表只保留 `Remove-Item|Move-Item` → `ri -r sub`、`del -Recurse sub`、`Rename-Item sub x` 变红。
   27. pwsh 破坏性动词只对 `call.name === "pwsh"` 生效 → bash `pwsh -c "Remove-Item -Recurse sub"` 变红。
-  28. 破坏性动词正则去掉 `/i` → `RM -rf sub` 变红（只在大小写不敏感文件系统上）。
+  28. POSIX 破坏性动词正则去掉 `/i` → `RM -rf sub` 变红（只在大小写不敏感文件系统上）。
+  29. pwsh 破坏性动词正则去掉 `/i` → pwsh 大小写变体行（如 `remove-item -Recurse sub`、`DEL -Recurse sub`）变红（与文件系统无关：PowerShell 命令名不区分大小写）。
+  30. pwsh 破坏性动词表分别去掉任一词（`Remove-Item`、`Move-Item`、`Rename-Item`、`del`、`erase`、`ri`、`rd`、`ren`、`rni`、`move`、`mi`）→ 该词对应行变红。
 - `pnpm vitest run packages/dsh-shud-raw-guard` 全绿；`pnpm run check` exit 0，覆盖率不降；`pnpm run build`；`pnpm run test-guardrails`。
 - live `pnpm run raw-guard:probes`（编排方）运行两次：T1–T5 PASS（INCONCLUSIVE 则重跑），md5 不变。
 

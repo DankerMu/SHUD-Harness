@@ -72,7 +72,7 @@
 ## ADDED Requirements
 
 ### Requirement: Shell write to a raw ancestor is denied
-对 `bash`（含 persistent 变体）与 `pwsh`，命令不触及任何 raw 目录（见「Shell command touches raw」），但点名某个 raw 目录的严格祖先、且含**破坏性动词**时，策略门 SHALL 返回 `deny`。返回的 `code` 为 `raw-ancestor-write`，`reason` 含 `immutable`，说明命令在删除、移动或改权限一个包含 raw 的目录，应改为针对该目录下的明确路径（reason 中不写具体路径）。
+对 `bash`（含 persistent 变体）与 `pwsh`，命令不触及任何 raw 目录（见「Shell command touches raw」），但点名某个 raw 目录的严格祖先、且含**破坏性动词**时，策略门 SHALL 返回 `deny`。返回的 `code` 为 `raw-ancestor-write`，`reason` 含 `immutable`，说明命令在删除、移动或改权限时点名了一个包含 raw 的目录，应改为针对该目录下的明确路径或拆分命令（reason 中不写具体路径）。
 
 破坏性动词 SHALL 为以下两组（不区分大小写，前后锚点与「Shell write under raw is denied」的 POSIX 动词相同）：
 - POSIX：`rm`、`rmdir`、`unlink`、`mv`、`chmod`、`chown`、`chgrp`、`shred`、`rsync`、`-delete`、`--remove-files`、`git clean`；

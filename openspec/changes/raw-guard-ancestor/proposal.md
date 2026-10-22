@@ -38,7 +38,7 @@ Blast radius:
 - 切换目录剥离不判断命令位置：任何单独出现的 `cd`/`pushd`/`sl` 词都会吃掉后一个词（如 `rm -rf cd data`），写入漏报清单；其选项子模式不得越过 `;&|()<>`，否则 `cd -P&&rm -rf data` 会放行。
 - 探针 T1–T5 必须不变。
 Selected risk packs: Public API / CLI / script entry; File IO / path safety; Auth / permissions / secrets; Legacy compatibility; Documentation / migration notes; Resource limits
-Evidence floor: 新增 deny 行先红后绿，next 行改前改后都绿；既有全部行不变；28 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
+Evidence floor: 新增 deny 行先红后绿，next 行改前改后都绿；既有全部行不变；30 项突变；`pnpm run check`；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
 
 ## Capabilities
 
