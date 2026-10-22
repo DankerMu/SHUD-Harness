@@ -42,19 +42,19 @@
     "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test:coverage && pnpm run dup && pnpm run deadcode && pnpm run naming:check && pnpm run schema:check && pnpm run docs:check"
   },
   "devDependencies": {
-    "@commitlint/cli": "21.2.3",
-    "@commitlint/config-conventional": "21.2.3",
+    "@commitlint/cli": "21.2.4",
+    "@commitlint/config-conventional": "21.2.4",
     "@eslint/js": "10.0.1",
-    "@vitest/coverage-v8": "4.1.11",
+    "@vitest/coverage-v8": "4.1.12",
     "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
     "jscpd": "5.4.1",
-    "knip": "6.41.0",
+    "knip": "6.42.0",
     "lint-staged": "17.6.0",
     "prettier": "3.9.10",
-    "typescript": "5.8.3",
+    "typescript": "5.9.3",
     "typescript-eslint": "8.71.2",
-    "vitest": "4.1.11",
+    "vitest": "4.1.12",
     "zod": "4.6.7"
   }
 }
