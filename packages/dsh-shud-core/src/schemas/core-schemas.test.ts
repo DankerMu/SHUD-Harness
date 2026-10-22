@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
@@ -12,11 +13,179 @@ import {
   StackLockSchema,
   TaskCardSchema,
 } from "./index.ts";
+import {
+  COLLECT_RETRY_INTERVAL_MS,
+  generateRunIdentifiers,
+  JobRecordIdSchema,
+  KILL_GRACE_PERIOD_MS,
+  MAX_COLLECT_ATTEMPTS,
+  MAX_NOTIFY_ATTEMPTS,
+  NOTIFY_RETRY_INTERVAL_MS,
+  RunIdSchema,
+  RunJobSchema,
+} from "../index.ts";
 
 const STACK_ID = "STACK-11111111-1111-4111-8111-111111111111";
 const DATA_ID = "DATA-22222222-2222-4222-8222-222222222222";
 const MANIFEST_ID = "MANIFEST-33333333-3333-4333-8333-333333333333";
 const SUCCESSOR_MANIFEST_ID = "MANIFEST-44444444-4444-4444-8444-444444444444";
+const NODE_TYPE_OPTIONS: ts.CompilerOptions = {
+  types: ["node"],
+  typeRoots: [dirname(dirname(createRequire(import.meta.url).resolve("@types/node/package.json")))],
+};
+
+describe("RunJob contract", () => {
+  test("paired identifiers use UTC seconds and one lowercase random suffix", () => {
+    const ids = generateRunIdentifiers(new Date("2026-10-22T11:15:00.987+08:00"));
+    expect(ids.job_id).toMatch(/^JOB-20261022T031500-[0-9a-f]{4}$/u);
+    expect(ids.run_id).toBe(`RUN-${ids.job_id.slice(4)}`);
+    expect(JobRecordIdSchema.parse(ids.job_id)).toBe(ids.job_id);
+    expect(RunIdSchema.parse(ids.run_id)).toBe(ids.run_id);
+    expect(generateRunIdentifiers().run_id).toMatch(/^RUN-\d{8}T\d{6}-[0-9a-f]{4}$/u);
+  });
+
+  test("retry limits and timer units match the run contract", () => {
+    expect(MAX_NOTIFY_ATTEMPTS).toBe(3);
+    expect(MAX_COLLECT_ATTEMPTS).toBe(3);
+    expect(NOTIFY_RETRY_INTERVAL_MS).toBe(10_000);
+    expect(COLLECT_RETRY_INTERVAL_MS).toBe(10_000);
+    expect(KILL_GRACE_PERIOD_MS).toBe(10_000);
+  });
+
+  test("submitted records preserve nullable references and process identity", () => {
+    expect(RunJobSchema.parse(validRunJob())).toEqual(validRunJob());
+    expect(
+      RunJobSchema.parse({
+        ...validRunJob(),
+        ...generateRunIdentifiers(new Date("2026-10-22T03:15:00Z")),
+      }).status,
+    ).toBe("submitted");
+  });
+
+  test.each(["created", "submitted", "running", "succeeded", "failed", "cancelled", "collected"])(
+    "accepts the M2 state %s with process identity recorded",
+    (status) => {
+      expect(
+        RunJobSchema.safeParse({
+          ...validRunJob(),
+          status,
+          pid: 1234,
+          pid_started_at: "2026-10-22T03:15:01Z",
+        }).success,
+      ).toBe(true);
+    },
+  );
+
+  test.each([
+    ["job_id", "JOB-0001"],
+    ["job_id", "shud-0123456789abcdef"],
+    ["job_id", "JOB-20261022T031500-A1B2"],
+    ["job_id", "RUN-20261022T031500-a1b2"],
+    ["run_id", "RUN-20261022T031500-A1B2"],
+    ["run_id", "RUN-0001"],
+    ["run_id", "JOB-20261022T031500-a1b2"],
+  ])("rejects malformed %s: %s", (field, value) => {
+    const result = RunJobSchema.safeParse({ ...validRunJob(), [field]: value });
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain(field);
+  });
+
+  test.each(["pid", "pid_started_at"])("running requires %s", (field) => {
+    const result = RunJobSchema.safeParse({
+      ...validRunJob(),
+      status: "running",
+      pid: 1234,
+      pid_started_at: "2026-10-22T03:15:01Z",
+      [field]: null,
+    });
+    expect(result.success).toBe(false);
+    expect(issuePaths(result)).toContain(field);
+  });
+
+  test.each([
+    ["status", "timed_out"],
+    ["command", "shud ccw"],
+    ["input_dir", "input/ccw"],
+    ["run_dir", "runs/example"],
+    ["label", "two\nlines"],
+    ["end_days", 0],
+    ["input_bytes", -1],
+    ["exit_code", 0.5],
+    ["submitted_at", "2026-10-22T03:15:00+08:00"],
+    ["llm", { response_model: "", response_model_source: "response" }],
+    ["notify", { status: "pending", attempts: -1, at: null, detail: null }],
+  ])("rejects invalid %s", (field, value) => {
+    expect(RunJobSchema.safeParse({ ...validRunJob(), [field]: value }).success).toBe(false);
+  });
+
+  test("rejects cwd and unknown nested fields instead of stripping them", () => {
+    expect(RunJobSchema.safeParse({ ...validRunJob(), cwd: "/tmp" }).success).toBe(false);
+    for (const field of ["llm", "notify"] as const) {
+      const job = validRunJob();
+      expect(
+        RunJobSchema.safeParse({ ...job, [field]: { ...job[field], extra: true } }).success,
+      ).toBe(false);
+    }
+  });
+
+  test("all RunJob fields are required even when nullable", () => {
+    const job = validRunJob();
+    for (const key of Object.keys(job) as Array<keyof typeof job>) {
+      const result = RunJobSchema.safeParse(removeKey(job, key));
+      expect(result.success, key).toBe(false);
+      expect(issuePaths(result), key).toContain(key);
+    }
+  });
+
+  test("public core exports enforce generated and parsed identifier brands in TypeScript", () => {
+    const fixturePath = join(dirname(fileURLToPath(import.meta.url)), "run-id-brand-check.ts");
+    const fixture = `
+import {
+  generateRunIdentifiers, JobRecordIdSchema, RunIdSchema, RunJobSchema,
+  type JobRecordId, type RunId,
+} from "../index.ts";
+const ids = generateRunIdentifiers();
+declare const stored: unknown;
+const job = RunJobSchema.parse(stored);
+export const generatedJob: JobRecordId = ids.job_id;
+export const generatedRun: RunId = ids.run_id;
+export const parsedJob: JobRecordId = JobRecordIdSchema.parse(stored);
+export const parsedRun: RunId = RunIdSchema.parse(stored);
+export const storedJob: JobRecordId = job.job_id;
+export const storedRun: RunId = job.run_id;
+// @ts-expect-error Plain strings are not job record ids.
+export const plainJob: JobRecordId = "JOB-20261022T031500-a1b2";
+// @ts-expect-error Plain strings are not run ids.
+export const plainRun: RunId = "RUN-20261022T031500-a1b2";
+// @ts-expect-error Job record ids cannot be assigned to run ids.
+export const crossedRun: RunId = ids.job_id;
+// @ts-expect-error Run ids cannot be assigned to job record ids.
+export const crossedJob: JobRecordId = ids.run_id;
+`;
+    const options: ts.CompilerOptions = {
+      ...NODE_TYPE_OPTIONS,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      allowImportingTsExtensions: true,
+      strict: true,
+      noEmit: true,
+      skipLibCheck: true,
+      target: ts.ScriptTarget.ES2022,
+    };
+    const host = ts.createCompilerHost(options);
+    const getSourceFile = host.getSourceFile.bind(host);
+    host.getSourceFile = (path, languageVersion, onError, shouldCreateNewSourceFile) =>
+      path === fixturePath
+        ? ts.createSourceFile(path, fixture, ts.ScriptTarget.ES2022, true)
+        : getSourceFile(path, languageVersion, onError, shouldCreateNewSourceFile);
+    const program = ts.createProgram({ rootNames: [fixturePath], options, host });
+    expect(
+      ts
+        .getPreEmitDiagnostics(program)
+        .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")),
+    ).toEqual([]);
+  });
+});
 
 describe("core Zod schemas", () => {
   test("TaskCard accepts a valid stored object and rejects missing required fields", () => {
@@ -73,6 +242,7 @@ describe("core Zod schemas", () => {
     const program = ts.createProgram({
       rootNames: [barrelPath],
       options: {
+        ...NODE_TYPE_OPTIONS,
         module: ts.ModuleKind.ESNext,
         moduleResolution: ts.ModuleResolutionKind.Bundler,
         allowImportingTsExtensions: true,
@@ -699,6 +869,37 @@ function validLockRecord() {
     expires_at: "2026-04-25T10:01:00Z",
     status: "held",
     reason: "task snapshot write",
+  };
+}
+
+function validRunJob() {
+  return {
+    job_id: "JOB-20261022T031500-a1b2",
+    run_id: "RUN-20261022T031500-a1b2",
+    task_id: null,
+    stack_id: null,
+    data_id: null,
+    backend: "local_job",
+    status: "submitted",
+    project: "ccw",
+    label: null,
+    input_dir: "/models/input/ccw",
+    run_dir: "/workspace/runs/RUN-20261022T031500-a1b2",
+    command: ["/usr/local/bin/shud", "ccw"],
+    end_days: null,
+    owner_session: null,
+    dsh_job_id: null,
+    dsh_job_ids: [],
+    pid: null,
+    pid_started_at: null,
+    input_bytes: 1024,
+    submitted_at: "2026-10-22T03:15:00Z",
+    started_at: null,
+    finished_at: null,
+    cancel_requested_at: null,
+    exit_code: null,
+    llm: { response_model: "deepseek-chat", response_model_source: "response" },
+    notify: { status: "pending", attempts: 0, at: null, detail: null },
   };
 }
 

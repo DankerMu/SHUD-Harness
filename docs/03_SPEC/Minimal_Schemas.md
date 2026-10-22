@@ -11,6 +11,8 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 
 > **Canonical Source 说明：** Support schema（Artifact、ErrorRecord、PiGate、PiGateDecision、NotificationRecord、ReportExport、AnalysisProgressPayload、User、Session、AuditEvent、LockRecord、IdempotencyRecord 等）的权威定义不在本文件，见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md)。本文件仅定义 8 个核心对象 + MemoryNote。
 
+> **M2 修订来源：** RunJob（§4）已按 OpenSpec [m2-run-chain「Run identifiers / RunJob record」](../../openspec/changes/m2-run-chain/specs/run-records/spec.md) task 4.1 与 `packages/dsh-shud-core/src/schemas/run-job.ts` 对齐；下述 RunRecord 仍待 task 4.2 修订。该修订不改变其余对象的当前契约。
+
 ---
 
 ## 1. TaskCard
@@ -124,37 +126,58 @@ uncertainty_notes: "降水空间插值可能低估高海拔降水量"
 
 ## 4. RunJob
 
-M2 字段处置依据 [m2-run-chain「Generated projection」](../../openspec/changes/m2-run-chain/specs/run-records/spec.md)：`cwd` 由 `run_dir` 取代，`command` 改为 argv 数组；执行资源限制与计算预算推迟 M3。下列 id 与状态集正文在 task 4.1 随 RunJob Zod 一并修订，此处只登记字段处置，不表示 M2 schema 已实现。
+M2 的实现源为 `packages/dsh-shud-core/src/schemas/run-job.ts`；以下示例是可解析的 `submitted` 记录。所有列出的字段都必填，可空字段必须显式传 `null`。根对象与 `llm`、`notify` 均拒绝未知字段。
 
 ```yaml
-job_id: JOB-0001                      # 格式: JOB-NNNN
-task_id: TASK-0001
-stack_id: STACK-0001                  # submit 时从 TaskCard 固化——RunRecord 的 stack/data 绑定由 job 携带，
-data_id: DATA-0001                    # collect 不回猜（对抗审查 A01-3）
-backend: local_direct | local_job | docker_job
-#   local_direct — 短命令，同步 bash 执行
-#   local_job    — 长命令，后台进程 + pid/status file + Park/Resume
-#   docker_job   — 可选，固定环境容器执行
-#   slurm        — 仅定义接口，不在 MVP 实现
-status: created | submitted | running | succeeded | failed | cancelled | timed_out | collected
-command: ["<shudBin>", "-o", "output/ccw.out", "ccw"] # argv；不经 shell 拼接
-run_dir: "<session cwd>/runs/<run_id>"               # 取代 cwd
-resources:                                          # M3；M2 不含执行限制
-  max_wall_minutes: 30                               # M3
-  max_memory_mb: 4096                                # M3
-cost_budget:                                        # M3
-  max_compute_minutes: 60                            # M3
-pid: null                             # 仅 local_job 填写
-submitted_at: null
+job_id: JOB-20261022T031500-a1b2
+run_id: RUN-20261022T031500-a1b2
+task_id: null                       # M2 允许 null；M3 绑定 TaskCard
+stack_id: null                      # M2 允许 null；非空引用由 job 携带，collect 不回猜
+data_id: null                       # M2 允许 null
+backend: local_job                 # M2 唯一后端
+status: submitted                  # 启动意图已持久化，尚未记录 pid
+project: ccw
+label: "Run the ccw example"        # 非空单行描述或 null
+input_dir: /models/input/ccw        # 原始输入目录绝对路径
+run_dir: /workspace/runs/RUN-20261022T031500-a1b2 # 运行目录绝对路径，取代 cwd
+command: ["/usr/local/bin/shud", "-o", "output/ccw.out", "ccw"] # 非空 argv 数组
+end_days: 30                        # END 覆写正整数，或 null
+owner_session: null                 # 发起会话 id，仅用于唤醒投递
+dsh_job_id: null                    # 当前宿主登记 id：shud- + 16 位小写十六进制，或 null
+dsh_job_ids: []                     # 历次宿主登记 id
+pid: null                          # 包装进程正整数 pid，未记录时为 null
+pid_started_at: null               # 包装进程启动时间，ISO 8601 UTC
+input_bytes: 1024                  # 非负整数字节数
+submitted_at: "2026-10-22T03:15:00Z"
+started_at: null
 finished_at: null
+cancel_requested_at: null
+exit_code: null                     # 整数或 null
+llm:
+  response_model: deepseek-chat     # 非空字符串
+  response_model_source: response   # response | configured
+notify:
+  status: pending                   # pending | delivered | unreachable
+  attempts: 0                       # 非负整数
+  at: null                          # ISO 8601 UTC 或 null
+  detail: null                      # 字符串或 null
 ```
 
-**废弃字段**: `backend: local`（歧义，不区分同步/异步）、`backend: slurm | k8s`（MVP 不实现）、`resources.cpu`（改用 max_memory_mb + max_wall_minutes）。
+**ID 规范：** `JOB-YYYYMMDDTHHMMSS-xxxx` / `RUN-YYYYMMDDTHHMMSS-xxxx` 取代 `JOB-NNNN` / `RUN-NNNN`；时间为 UTC、精确到秒，`xxxx` 为 4 位小写十六进制。同一次 `generateRunIdentifiers()` 调用共享时间戳和随机段，分别返回品牌类型 `JobRecordId` / `RunId`。旧格式、大写随机段或将 dsh 登记 id 填入 `job_id` 均被拒绝。运行目录与索引的碰撞检查由提交层负责，不由 schema/id 生成函数访问文件系统。
 
-**状态机**:
+**状态机：**
+
+```text
+created → submitted → running → succeeded | failed | cancelled → collected
 ```
-created → submitted → running → succeeded | failed | cancelled | timed_out → collected
-```
+
+`created` 表示输入已复制、记录与活动索引已写；`submitted` 不再表示排队，而是启动意图已持久化、接下来登记并 spawn 的窗口。`running` 必须同时具有非空 `pid` 与 `pid_started_at`，否则 schema 在对应字段报错。时间字段使用 ISO 8601 UTC，未发生时为 `null`。
+
+**Core 常量：** `MAX_NOTIFY_ATTEMPTS = 3`、`MAX_COLLECT_ATTEMPTS = 3`；`NOTIFY_RETRY_INTERVAL_MS`、`COLLECT_RETRY_INTERVAL_MS`、`KILL_GRACE_PERIOD_MS` 均为 `10_000` 毫秒（10 秒）。`notify.attempts` 记录非负次数，重试调度按这些常量执行。
+
+**相对原文的处置：** `command` 从命令字符串改为 argv 数组；`cwd` 被删除并由 `run_dir` 取代。新增 `run_id`、`project`、`label`、`input_dir`、`run_dir`、`end_days`、`owner_session`、`dsh_job_id`、`dsh_job_ids`、`pid_started_at`、`input_bytes`、`started_at`、`cancel_requested_at`、`exit_code`、`llm` 与 `notify`。M2 不接受 `timed_out`、`local_direct`、`docker_job`、`slurm`、`k8s` 或旧 `backend: local`。
+
+**M3（不属于 M2 字段）：** `timed_out` 及其超时转换、`resources.max_wall_minutes`、`resources.max_memory_mb`、`cost_budget.max_compute_minutes` 延后；M2 对 `resources`、`cost_budget`、旧 `resources.cpu` 与 `cwd` 均不接收。
 
 ---
 

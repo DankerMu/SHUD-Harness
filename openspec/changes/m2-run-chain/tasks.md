@@ -40,13 +40,23 @@
 
 ## 4. RunJob/RunRecord schema（Critical Path #7）
 
-依赖：15.1（`scripts/schema/generate.ts` 现为 1395 行，`large-file-guard` 阻断触碰 >1000 行文件的提交，而本组必须在其 schema 定义表登记新 schema）。
+依赖：15.1 已由 #296 / PR #323 完成；schema 定义表位于 `scripts/schema/registry.ts`，生成入口仍为 `scripts/schema/generate.ts`，后续 schema 在定义表登记。
 
-- [ ] 4.1 在 `packages/dsh-shud-core/src/schemas/` 新增 id 品牌类型与生成函数（`JOB-`/`RUN-` + UTC `YYYYMMDDTHHMMSS` + 4 位小写十六进制，同作业共享随机段）、core 常量（唤醒尝试上限 3、collect 重试上限 3、collect 与唤醒重试间隔 10 秒、kill 宽限 10 秒）与 RunJob Zod schema（run-records spec「Run identifiers」「RunJob record」，含 `running` 必有 `pid` 的约束）；在 `scripts/schema/generate.ts`（拆分后）的 schema 定义表登记 RunJob；`pnpm run schema:generate` 刷新 `docs/generated/`；按 Zod 修订 `docs/03_SPEC/Minimal_Schemas.md` 的 RunJob 段（id 规范、M2 状态集与 `submitted` 新含义、新增字段，文首注明修订来源 `m2-run-chain`）。验证：`core-schemas.test.ts` 对每条 scenario 有正反例；`pnpm run schema:check`、`pnpm run test:coverage` 通过
+- [x] 4.1 在 `packages/dsh-shud-core/src/schemas/` 新增 id 品牌类型与生成函数（`JOB-`/`RUN-` + UTC `YYYYMMDDTHHMMSS` + 4 位小写十六进制，同作业共享随机段）、core 常量（唤醒尝试上限 3、collect 重试上限 3、collect 与唤醒重试间隔 10 秒、kill 宽限 10 秒）与 RunJob Zod schema（run-records spec「Run identifiers」「RunJob record」，含 `running` 必有 `pid` 的约束）；在 `scripts/schema/registry.ts` 的 schema 定义表登记 RunJob；`pnpm run schema:generate` 刷新 `docs/generated/`；按 Zod 修订 `docs/03_SPEC/Minimal_Schemas.md` 的 RunJob 段（id 规范、M2 状态集与 `submitted` 新含义、新增字段，文首注明修订来源 `m2-run-chain`）。验证：`core-schemas.test.ts` 对每条 scenario 有正反例；`pnpm run schema:check`、`pnpm run test:coverage` 通过
 - [ ] 4.2 新增退出码类别映射与 RunRecord Zod schema（「RunRecord record」，含 `exit_class` 九值、可空 `numerical_health`、必填 `llm.response_model` 与 `llm.response_model_source`、`artifacts.files` 的 `size_bytes` 与 `ArtifactSchema` 同语义）；登记进 schema 定义表；`schema:generate`；按 Zod 修订 Minimal_Schemas 的 RunRecord 段；`openspec/glossary.md` 补 `exit_class`、`run_dir`、`dsh_job_id` 两态术语。验证：同上，覆盖退出码 0/10/12/13/19/20/其它、`cancelled`、`lost`、`configured` 来源各一例
 
 - Suggested fixture level: expanded - Critical Path #7（schema 与生成投影），字段契约为后续所有组的上游
 - Minimal mergeable slice: 4.1 首刀（id + 常量 + RunJob 连同其生成投影与文档段，可独立保绿）；4.2 为后继
+
+### Issue #299 execution fixture
+
+- Selected: Public API / CLI / script entry and Schema / columns / units / field names — branded id generation and RunJob parse through core exports; tests cover all task 4.1 scenarios plus required `pid_started_at`, strict unknown fields, UTC pairing, and constants mandated by the contract.
+- Selected: File IO / path safety / overwrite, Config / project setup and Legacy compatibility / examples — register only the new schema in `registry.ts`, run actual `schema:generate`, validate generated examples, retain existing projection bytes and generator safety self-tests; stage intended generated artifacts before the existing drift check.
+- Selected: Error handling / rollback / partial outputs and Documentation / migration notes — invalid records fail with relevant field paths; no fallback fields; Minimal_Schemas RunJob text matches code and marks M3 exclusions; full `pnpm run check` and docs gate.
+- Not selected: Auth / permissions / secrets, Concurrency / shared state / ordering, Resource limits / large input / discovery, Release / packaging / dependency compatibility — this is a pure schema/id contract with no new credential access, jobs, global uniqueness registry, new dependency or runtime resource behavior. Collision deduplication belongs to task 6.1.
+- Evidence floor: tests precede each custom predicate implementation, retain failing-before/passing-after evidence; focused core tests, public API parse/id smoke, real generation with old projections unchanged, `schema:check`, `test:coverage` and full `check` pass. No tests that merely inspect source text or re-pin incidental wording.
+- Brand evidence must execute TypeScript compilation through the public core exports: generated/parsed values assign to their intended `JobRecordId`/`RunId`, while plain-string and cross-brand assignments produce compiler errors. Use the existing compiler-API testing pattern or an explicitly typechecked fixture; Vitest-only `expectTypeOf` or unchecked `@ts-expect-error` comments are not evidence because package typecheck excludes test files.
+- Execution evidence (2026-10-22): parent pre-predicate run had nine semantic failures (seven malformed ids, two missing running process fields) with 46 other cases passing; actual compiler-brand assertions passed after explicit installed Node type resolution. Completed predicates: all 55 focused tests pass; full check 925 passed / 1 skipped, build passes. Actual regeneration adds only RunJob projections, old 16 hashes unchanged; built public-core API smoke accepts submitted paired-id record and rejects running-without-identity plus legacy id. Core test file is 938 lines, no limit exemption added.
 
 ## 5. 作业注册表骨架：行为不变的替换（Critical Path #4）
 

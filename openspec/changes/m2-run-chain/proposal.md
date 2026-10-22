@@ -44,3 +44,4 @@ M2 的用户可见步骤是"一句话跑 ccw，中途重启 dsh，完成后被�
 - #296 blast radius: all eight existing Markdown/JSON Schema projections and generator failure behavior; selected risk packs and evidence are recorded under task 15.1. No schema additions or output changes.
 - #298 / tasks 3.1–3.2: Issue type: feature; Fixture level: expanded; upstream compact overridden because a shared import-permission gate is production engineering configuration.
 - #298 blast radius: every TypeScript host import; selected risk packs and evidence are recorded under task group 3. ADR-0006 is the sole authority for newly allowed imports.
+- #299 / task 4.1: Issue type: feature; Fixture level: expanded (agrees with upstream); blast radius: shared RunJob/id contract consumed by future jobs/tools and generated projections. Risk packs/evidence under task group 4; no RunRecord or runtime job implementation in this slice.
