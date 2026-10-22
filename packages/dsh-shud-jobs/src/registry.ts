@@ -2,6 +2,7 @@ import { accessSync, constants, mkdirSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import { LocalJobRegistry, type Config as ParentConfig } from "@deepseek-ai/dsh-jobs-local";
+import { StateIndexStore } from "./state-indexes.ts";
 
 export interface Config extends ParentConfig {
   /** Absolute writable directory for registry state; created when absent. */
@@ -44,6 +45,8 @@ const ParentRegistry: new (
 
 /** LocalJobRegistry with fail-loud SHUD configuration; non-shud behavior remains inherited. */
 export class ShudJobRegistry extends ParentRegistry {
+  readonly indexes: StateIndexStore;
+
   static Config: { "~standard": StandardProps } = {
     "~standard": {
       version: 1,
@@ -82,7 +85,16 @@ export class ShudJobRegistry extends ParentRegistry {
   constructor(ctx: Context, config: Config) {
     assertExecutableFile(config.shudBin);
     prepareStateDir(config.stateDir);
-    super(ctx, config);
+    const store = new StateIndexStore(config.stateDir);
+    try {
+      super(ctx, config);
+      this.indexes = store;
+      // Cordis disposes sibling effects concurrently. Only the store owns its drain/unlock.
+      ctx.effect(() => () => store.close());
+    } catch (error) {
+      void store.close().catch((cleanup: unknown) => ctx.logger.error(cleanup));
+      throw error;
+    }
   }
 }
 

@@ -1,5 +1,5 @@
 import { accessSync, constants } from "node:fs";
-import { chmod, mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
@@ -26,6 +26,20 @@ function caughtError(operation: () => unknown): string {
     throw error;
   }
   throw new Error("expected the operation to reject");
+}
+
+async function indexEntries(stateDir: string) {
+  return Promise.all(
+    ["active.json", "completed.json"].map(async (name): Promise<unknown> => {
+      try {
+        return JSON.parse(await readFile(join(stateDir, name), "utf8")) as unknown;
+      } catch (error) {
+        // The real parent never creates SHUD indexes.
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
+        throw error;
+      }
+    }),
+  );
 }
 
 async function operationTrace(registry: Plugin) {
@@ -76,7 +90,7 @@ async function operationTrace(registry: Plugin) {
     expect(beforeRegistryDisposal.status).toBe("running");
     await fiber.dispose();
     const afterTeardown = jobs.list();
-    const stateFiles = await readdir(h.stateDir);
+    const stateEntries = await indexEntries(h.stateDir);
     const workspaceFiles = await readdir(h.cwd);
     await h.apply(registry, h.config);
     const forgotten = caughtError(() => h.ctx.jobs.get(liveUnownedId));
@@ -96,7 +110,7 @@ async function operationTrace(registry: Plugin) {
     expect(second.cancels).toEqual(["jobs service disposed"]);
     expect(afterOwnerRelease.map((job) => job.id)).toEqual(ids.slice(2, 4));
     expect(afterTeardown).toEqual([]);
-    expect(stateFiles).toEqual([]);
+    expect(stateEntries).toEqual([[], []]);
     expect(workspaceFiles).toEqual([]);
     expect(h.sessionEvents.filter((event) => event.type === "job/settled")).toHaveLength(3);
     expect(scopedEvents.filter((event) => event.type === "settled")).toHaveLength(3);
@@ -125,7 +139,7 @@ async function operationTrace(registry: Plugin) {
         beforeRegistryDisposal,
         afterTeardown,
         forgotten,
-        stateFiles,
+        stateEntries,
         workspaceFiles,
         events,
         scopedEvents,
@@ -270,14 +284,14 @@ describe("registry apply configuration", () => {
     }
   });
 
-  test("creates a missing stateDir without index or run files", async () => {
+  test("creates a missing stateDir with zero index entries and no runs", async () => {
     const h = await createHarness();
     const stateDir = join(h.root, "new", "state");
     try {
       await h.apply(ShudJobRegistry, { ...h.config, stateDir });
       expect(await readdir(h.root)).toContain("new");
       expect((await stat(stateDir)).isDirectory()).toBe(true);
-      expect(await readdir(stateDir)).toEqual([]);
+      expect(await indexEntries(stateDir)).toEqual([[], []]);
       expect(await readdir(h.cwd)).toEqual([]);
     } finally {
       await h.dispose();

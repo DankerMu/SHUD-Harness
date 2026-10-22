@@ -7,8 +7,8 @@ import type { SessionController } from "@deepseek-ai/dsh-api-session-controller"
 import type { Session, SessionId } from "@deepseek-ai/dsh-session";
 import type { JobEvent, JobHandle, JobId, JobOutcome, JobSpec } from "@deepseek-ai/dsh-jobs";
 
-export async function createHarness() {
-  const root = await mkdtemp(join(tmpdir(), "shud-jobs-test-"));
+export async function createHarness(parentDir = tmpdir()) {
+  const root = await mkdtemp(join(parentDir, "shud-jobs-test-"));
   const stateDir = join(root, "state");
   const cwd = join(root, "workspace");
   const shudBin = join(root, "shud");

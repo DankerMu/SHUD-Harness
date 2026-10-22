@@ -135,10 +135,25 @@
 
 依赖：5.1；先于 6.1。
 
-- [ ] 8.1 实现 `stateDir/lock`（pid + 进程启动时间；存活持有者使 apply 失败并指明 `stateDir` 与 pid；陈旧锁接管；释放时删除），`active.json` 与 `completed.json` 的原子写，以及同一实例内索引修改的串行化（先写完成索引再移出活动索引）（shud-run-jobs「State directory lock and indexes」）。验证：两个并发提交都进入 `active.json`；第二个注册表实例以同一 `stateDir` apply 失败且诊断含持有者 pid；持有者 pid 已退出时接管成功；移出活动索引前崩溃（模拟）后条目仍可经完成或活动索引找到
+- [x] 8.1 实现 `stateDir/lock`（pid + 进程启动时间；存活持有者使 apply 失败并指明 `stateDir` 与 pid；陈旧锁接管；释放时删除），`active.json` 与 `completed.json` 的原子写，以及同一实例内索引修改的串行化（先写完成索引再移出活动索引）（shud-run-jobs「State directory lock and indexes」）。验证：两个并发提交都进入 `active.json`；第二个注册表实例以同一 `stateDir` apply 失败且诊断含持有者 pid；持有者 pid 已退出时接管成功；移出活动索引前崩溃（模拟）后条目仍可经完成或活动索引找到
 
 - Suggested fixture level: expanded - 跨进程互斥与索引一致性，Critical Path #4
 - Minimal mergeable slice: atomic: 锁与索引写共用同一互斥假设，拆开会出现无锁的索引写窗口
+
+### Issue #304 execution fixture
+
+- Selected: Concurrency / shared state / ordering and Error handling / rollback / partial outputs — lifetime kernel exclusion, complete-transaction queue, failure recovery, drain-before-release, completed-before-active ordering. Real process barriers and deterministic write-failure/interruption cases exercise each invariant.
+- Selected: File IO / path safety / overwrite and Schema / columns / units / field names — atomic replacements, permanent coordination inode versus removable owner metadata, core-branded ids/absolute run paths, corrupt/duplicate persisted records fail closed without overwriting evidence.
+- Selected: Public API / CLI / script entry, Config / project setup and Release / packaging / dependency compatibility — actual Cordis registry apply/dispose, same-process and cross-process contention, Darwin lockf/Linux flock prerequisites, missing primitive failure, jobs-to-core workspace resolution from clean build outputs.
+- Selected: Legacy compatibility / examples, Auth / permissions / secrets and Documentation / migration notes — preserve non-shud parent traces and raw/model/profile behavior; no raw/secret access, no ownership bypass; lifecycle docs name implemented locking and internal guard file. No new scientific defaults or limits.
+- Selected: Resource limits / large input / discovery — no resident lock helper, leaked inherited descriptor or unbounded lock wait; held resources survive only for the owning registry and release on close/SIGKILL. Unrelated children must not retain the guard.
+- Evidence floor: tests before implementation and semantic RED; actual registry/storage runtime smoke and final focused/full checks GREEN. Cover every issue criterion plus simultaneous initial/stale contenders, same-process second registry, queue recovery, corrupted state, initialization failure, release during pending writes and crash between completed/active writes. Parent owns command execution; no test merely checks method wiring or empty directories.
+- Build integration is required, not a separate feature: core runtime/types point to `lib`, so root typecheck first builds the workspace and CI lint receives the same prerequisite. No test-only source alias, compiler-proof weakening or dependency auto-install policy change.
+- Stamp precision and ownership-publication diagnostics follow the explicit design boundary; no inferred holder pid or claim that second-resolution metadata proves every PID generation. Wrapper process identity is a later independent contract, not implemented by this slice.
+- Fixture-review revision: require actual built registry/store qualification on both Darwin and Linux with `ps` available (install `procps` in disposable `node:24.13.1-slim` qualification containers). Exercise process-start inspection, live matching-owner rejection, dead/differing-start takeover and disposal, not only fd locking. Also prove missing/indeterminate `ps` rejects apply before jobs publication and preserves prior metadata/index bytes; the slim image without procps is a real missing-prerequisite negative.
+- Execution evidence: initial five actual-registry behavior cases fail semantically before production implementation; an IPC harness cleanup issue was separately diagnosed/fixed before accepting the cross-process RED. Actual built registry/store passes Darwin and Linux Node 24.13.1 identity, live-owner rejection, concurrent additions, completion/reload, differing-start takeover, real child SIGKILL takeover and disposal. Darwin indeterminate-ps and Linux missing-ps negatives preserve all prior metadata/index bytes, publish no jobs service and release kernel ownership.
+- Local implementation checks: 75 focused jobs cases are included in the full 1055-passed/1-skipped suite; coverage is 86.90% statements, 85.58% branches, 90.12% functions and 87.75% lines. Subclass storage is `indexes`, not the parent's private `store`; the initial compiler collision was fixed without casts. Automatic-disposal tests synchronize on actual store-close invocation, not the earlier return of Cordis's deferred dispose call; no timeout relaxation or parent lifecycle modification.
+
 
 ## 9. 取消与宿主 teardown
 

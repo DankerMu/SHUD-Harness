@@ -51,6 +51,26 @@
 - **WHEN** `lock` 记录的 pid 已不存在（前一个 dsh 被 SIGKILL）时启动注册表
 - **THEN** apply 成功，`lock` 改为记录当前进程
 
+#### Scenario: process identity differs
+- **WHEN** `lock` 中 pid 仍存在，但操作系统报告的进程启动时间与记录不同，且没有注册表持有内核协调锁
+- **THEN** 接管成功并记录当前注册表进程，原索引条目不丢失
+
+#### Scenario: concurrent stale takeover
+- **WHEN** 两个进程同时尝试接管同一陈旧锁
+- **THEN** 至多一个注册表成功 apply，失败者不删除或改写成功者的锁与索引
+
+#### Scenario: completed index precedes active removal
+- **WHEN** 完成索引写入成功后、活动索引移除前进程中断
+- **THEN** 重启后该条目仍可从完成或活动索引读出，不出现两份索引都缺失的窗口
+
+#### Scenario: mutation failure does not poison the queue
+- **WHEN** 一次索引写入失败后，同实例再次提交一个可成功写入的索引修改
+- **THEN** 第一位调用者收到错误，后一次修改成功，已提交条目保持存在
+
+#### Scenario: disposal drains admitted mutations
+- **WHEN** 注册表释放时仍有已接收的索引修改未完成
+- **THEN** 拒绝新修改，等待已接收索引修改完成后才删除 `lock` 并释放索引排他所有权；非 shud 作业的父类 teardown 仍由整体注册表释放等待，行为不变
+
 ### Requirement: Shud job submission
 `shud_run` 调用期间注册表 SHALL 同步完成提交，顺序为：分配 `job_id`/`run_id`；创建 `<session cwd>/runs/<run_id>/`，创建前后各以 `lstat` 确认 `runs/` 与 `runs/<run_id>` 均为真实目录（不是符号链接）且 `runs/<run_id>` 由本次非递归 `mkdir` 新建；把输入目录完整复制到 `input/<project>/`（M2 恒为完整复制）；有 `end_days` 时只在副本的 `<project>.cfg.para` 中改写 `END`；原子写 `run-job.json`（`status: created`）并加入活动索引；写 `status: submitted`；经父类 `start` 以无 owner、`kind: shud`、label `<run_id>`（有 `label` 时为 `<run_id> <label>`）登记，并把 `stdout.log` 作为输出源——登记前注册表 SHALL 以自身构造时的无作用域上下文经父类 `attachController` 挂载一个全局层控制器，父类 `start` 返回或抛错后立即释放（无 owner 作业只能由全局控制器放行；该控制器 SHALL NOT 常驻），因此登记不依赖 `tool-jobs` 是否挂载或挂在哪一层；包装进程 spawn 后写 `pid`、`pid_started_at` 与 `status: running`。运行目录复核失败、复制失败或父类 `start` 抛错时，注册表 SHALL 删除本次运行目录（含部分副本）与已加入的索引条目，并以说明原因的错误失败，使 `shud_run` 返回工具错误；此时 SHALL NOT 留下 RunJob、RunRecord 或索引条目。SHALL NOT 修改原输入目录。注册表 SHALL 把 `owner_session` 记为调用所属会话 id，`dsh_job_id` 记为本次登记 id 并追加到 `dsh_job_ids`。
 

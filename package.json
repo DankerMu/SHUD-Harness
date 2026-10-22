@@ -9,7 +9,7 @@
   },
   "scripts": {
     "prepare": "git config core.hooksPath .git-hooks",
-    "typecheck": "pnpm -r run typecheck",
+    "typecheck": "pnpm run build && pnpm -r run typecheck",
     "build": "pnpm -r run build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
