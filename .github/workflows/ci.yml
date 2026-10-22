@@ -136,7 +136,7 @@ jobs:
           printf '{"name":"dsh-ci","private":true}\n' > "$RUNNER_TEMP/dsh/package.json"
           printf 'auto-install-peers=true\n' > "$RUNNER_TEMP/dsh/.npmrc"
           node -e 'console.log("DSH_VERSION=" + JSON.parse(require("node:fs").readFileSync("profile/shud/package.json", "utf8")).peerDependencies["@deepseek-ai/dsh"])' >> "$GITHUB_ENV"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/dsh/node_modules
           key: ${{ runner.os }}-dsh-${{ env.DSH_VERSION }}-pnpm-11.28.5-node-24
