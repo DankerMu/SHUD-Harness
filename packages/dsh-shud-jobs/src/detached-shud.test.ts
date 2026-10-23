@@ -100,12 +100,20 @@ test.each([0, 13])(
       expect(identity.pid_started_at).toBe(receipt?.observed);
       expect(record.started_at).toBe(receipt?.observed);
       expect(registry.isSubmissionInFlight(record.run_id)).toBe(false);
-      expect(JSON.parse(await readFile(join(record.run_dir, "run-job.json"), "utf8"))).toEqual(
-        record,
-      );
       await expect
         .poll(() => textIfPresent(join(record.run_dir, "exit_code")), { timeout: 5000 })
         .toBe(`${code}\n`);
+      await registry.pollOnce();
+      const terminal = RunJobSchema.parse(
+        JSON.parse(await readFile(join(record.run_dir, "run-job.json"), "utf8")),
+      );
+      expect(terminal.finished_at).not.toBeNull();
+      expect(terminal).toEqual({
+        ...record,
+        status: code === 0 ? "succeeded" : "failed",
+        exit_code: code,
+        finished_at: terminal.finished_at,
+      });
       expect(Number(await readFile(join(record.run_dir, "wrapper.pid"), "utf8"))).toBe(record.pid);
       const invocation = await ready(record.run_dir);
       expect(invocation.ppid).toBe(record.pid);
@@ -114,8 +122,10 @@ test.each([0, 13])(
       expect(await readFile(join(record.run_dir, "stdout.log"), "utf8")).toBe("fake stdout\n");
       expect(await readFile(join(record.run_dir, "stderr.log"), "utf8")).toBe("fake stderr\n");
       expect((await readdir(record.run_dir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
-      // Process exit is not the later durable-settlement policy or registration resource settlement.
-      expect(registry.get(execution.registration.handles[0].id).status).toBe("running");
+      // Exit evidence is consumed by the registry poll path, not classified by child exit events.
+      await expect
+        .poll(() => registry.get(execution.registration.handles[0].id).status)
+        .toBe(code === 0 ? "completed" : "failed");
       expect(execution.registration.cancellations).toEqual([]);
     } finally {
       await stopObservedChildren();

@@ -119,6 +119,7 @@ test("copied input is independent, running clears in-flight membership, and repl
     await writeFile(join(record.run_dir, "input", "tiny", "binary.dat"), "solver writeback");
     expect(await readFile(join(h.inputDir, "binary.dat"))).toEqual(h.originals["binary.dat"]);
     await fiber.dispose();
+    await expect.poll(() => readdir(h.stateDir)).not.toContain("lock");
     await h.apply(ShudJobRegistry, h.config);
     const replacement = actualRegistry(h.ctx);
     expect(replacement.isSubmissionInFlight(record.run_id)).toBe(false);

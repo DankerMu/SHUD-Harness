@@ -41,7 +41,7 @@ SHUD-Harness/
 
 默认 `rawDirs: ["data/raw"]` 仅用于开发与探针；部署期真实 `<data_root>/raw` 必须在 workspace root 之外，由用户在 `$DSH_HOME/profiles/shud/cordis.patch.yml` 中以 `- id: shud-raw-guard` + `config: { rawDirs: ["<workspace 外的绝对路径>", ...] }` 覆写。`profile:install` 要求 `SHUD_BIN` 为绝对路径、可执行普通文件，仅新增/更新安装器拥有的唯一 `shud-jobs` 项（`shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`），其余用户 patch 字节不变；已有 raw-only patch 升级后再次安装保持整文件 hash 不变。覆写结果可用 `--profile shud --dump-config` 查看。`shud-jobs` 已实现 stateDir 排他所有权及原子串行索引；永久 `.lock-guard`、可移除 `lock` 与平台工具前提见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
 
-注册表现提供 `submitShud(request, producer)`，完成输入复制、提交记录/索引持久化、瞬时无 owner 登记与真实包装进程启动，原子写入 pid/启动时间后返回 `running` RunJob。必需的 `producer(prepared, handle, pumpPollMs)` 返回 `ShudExecution`；已导出的 `startDetachedShud(prepared, hooks, pumpPollMs)` 要求显式登记生命周期 hooks，并沿用注册表统一解析的父类轮询间隔。detached 包装进程原子发布 `wrapper.pid`/`exit_code`，回滚先证明执行组静止并回收本地子进程，再清理登记与自有文件。正常轮询/持久终态结算、kill 分类、detach/清理策略与启动对账尚未接入；完整提交释放顺序、身份边界及运行前提见上述 Runtime Lifecycle，不以独立 `shud:tiny` 的执行成功代替注册表包装进程证据。
+注册表现提供 `submitShud(request, producer)`，完成输入复制、提交记录/索引持久化、瞬时无 owner 登记与真实包装进程启动，原子写入 pid/启动时间后返回 `running` RunJob。必需的 `producer(prepared, handle, pumpPollMs)` 返回 `ShudExecution`；已导出的 `startDetachedShud(prepared, hooks, pumpPollMs)` 要求显式 `ShudLifecycle`（JobHooks 加幂等同步/异步 `settle`），并沿用注册表统一解析的父类轮询间隔。detached 包装进程原子发布 `wrapper.pid`/`exit_code`；唯一调度器与公开 `pollOnce()` 共享逐条目排他状态，先原子持久化终态再完成登记，完成回调失败可重试而不改写终态。组合生命周期先停止轮询/提交准入，等待两类已接受工作结束再释放索引锁。回滚仍先证明执行组静止并回收本地子进程，再清理登记与自有文件。collect、用户 kill 覆写、启动对账/接管、完整 detach/清理策略、唤醒与工具提交尚未接入；详细结算顺序、身份边界及运行前提见上述 Runtime Lifecycle，不以独立 `shud:tiny` 的执行成功代替注册表包装进程和在线结算证据。
 
 ## 2. 运行时资产（不进代码仓）
 

@@ -87,7 +87,7 @@ async function stopChildren(): Promise<void> {
 }
 
 test("abort reaps an already-exited wrapper after an independent native Z barrier", async () => {
-  const h = await submissionFixture();
+  const h = await submissionFixture(undefined, "immediate");
   const registration = registrationResource();
   const receipt: {
     execution?: ShudExecution;
@@ -239,7 +239,7 @@ test.each(["live", "indeterminate", "quiescent"] as const)(
 );
 
 test("abort refuses an observable replacement leader after its original wrapper has been reaped", async () => {
-  const h = await submissionFixture();
+  const h = await submissionFixture(undefined, "immediate");
   const registration = registrationResource();
   const receipt: { execution?: ShudExecution } = {};
   const nativeKill = process.kill.bind(process);
@@ -263,6 +263,8 @@ test("abort refuses an observable replacement leader after its original wrapper 
     await child.exited;
     expect(child.hasExited).toBe(true);
     expect(activeGroup(record.pid)).toEqual([]);
+    await registry.pollOnce();
+    const durableBeforeAbort = await io.readFile(join(record.run_dir, "run-job.json"));
     // Replay OS evidence of a replacement only after the real original leader has been reaped.
     observed.reusedPid = record.pid;
     const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
@@ -279,9 +281,7 @@ test("abort refuses an observable replacement leader after its original wrapper 
     expect(foreignSignals).toBe(0);
     expect(registration.cancellations).toEqual([]);
     expect(registry.indexes.lookup(record.run_id)?.run_dir).toBe(record.run_dir);
-    expect(JSON.parse(await io.readFile(join(record.run_dir, "run-job.json"), "utf8"))).toEqual(
-      record,
-    );
+    expect(await io.readFile(join(record.run_dir, "run-job.json"))).toEqual(durableBeforeAbort);
   } finally {
     restoreKill?.();
     observed.reusedPid = 0;

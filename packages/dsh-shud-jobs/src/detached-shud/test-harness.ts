@@ -4,7 +4,7 @@ import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { JobHandle } from "@deepseek-ai/dsh-jobs";
+import type { JobHandle, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import * as jobs from "../index.ts";
 import type { SubmitShudRequest } from "../index.ts";
@@ -259,6 +259,7 @@ export function detachedProducer(onCancel?: () => void) {
       const hooks = registration.open(record, handle);
       const lifecycle = {
         done: hooks.done,
+        settle: (outcome: JobOutcome) => hooks.settle(outcome),
         cancel(reason?: string) {
           onCancel?.();
           hooks.cancel(reason);
