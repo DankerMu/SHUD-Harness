@@ -87,6 +87,8 @@ test.each([0, 13])(
       const record = await pending;
       if (record.pid === null) throw new Error("No actual wrapper identity");
       await replaceRecord(record, { cancel_requested_at: "2026-10-22T03:15:01.000Z" });
+      // Drain any pre-mutation snapshot while the wrapper is still live and no exit is published.
+      await h.registry.pollOnce();
       fault.pid = record.pid;
       fault.exitPath = join(record.run_dir, "exit_code");
       fault.code = code;
@@ -258,6 +260,8 @@ test.each(["corrupt", "run-id", "job-id", "run-dir"])(
       const path = join(record.run_dir, "run-job.json");
       await io.writeFile(`${path}.corruption`, bytes);
       await io.rename(`${path}.corruption`, path);
+      // Drain accepted valid snapshots before exit evidence can authorize a terminal write.
+      await h.registry.pollOnce();
       await io.writeFile(join(record.run_dir, "exit_code"), "0\n");
       await releaseRun(healthy);
       await h.registry.pollOnce();

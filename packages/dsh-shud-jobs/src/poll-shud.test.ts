@@ -58,6 +58,8 @@ test.each([0, 13])(
       const record = await pending;
       const cancelledAt = "2026-10-22T03:15:01.000Z";
       await replaceRecord(record, { cancel_requested_at: cancelledAt });
+      // Existing snapshots must finish while the held wrapper still has no exit evidence.
+      await h.registry.pollOnce();
       await releaseRun(record);
       await h.registry.pollOnce();
       const terminal = await readRecord(record.run_dir);
@@ -81,8 +83,10 @@ test.each([false, true])(
     try {
       const record = await pending;
       if (record.pid === null) throw new Error("Actual wrapper identity is missing");
-      if (cancelRequested)
+      if (cancelRequested) {
         await replaceRecord(record, { cancel_requested_at: "2026-10-22T03:15:01.000Z" });
+        await h.registry.pollOnce();
+      }
       await terminateGroup(record.pid);
       await expect(io.readFile(join(record.run_dir, "exit_code"))).rejects.toMatchObject({
         code: "ENOENT",
