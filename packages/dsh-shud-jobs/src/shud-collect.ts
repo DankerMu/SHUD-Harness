@@ -20,6 +20,8 @@ import {
   regularFile,
   validationFailure,
   verifyRunFile,
+  isTerminal,
+  updateRunJob,
   type RoutedRun,
 } from "./shud-run-file.ts";
 
@@ -84,12 +86,19 @@ function fullJob(routed: RoutedRun): RunJob {
 
 async function projectCollected(entry: IndexEntry, routed: RoutedRun): Promise<void> {
   try {
-    const job = fullJob(routed);
-    if (job.status === "collected") return;
-    verifyRunFile(entry, routed);
+    fullJob(routed);
     const path = join(entry.run_dir, "run-job.json");
     await regularFile(path, "collected status projection");
-    await writeJson(path, RunJobSchema.parse({ ...job, status: "collected" }));
+    updateRunJob(
+      entry,
+      (current) => {
+        if (current.status === "collected") return current;
+        if (!isTerminal(current.status))
+          throw new CollectFailure("collected status projection", "NOT_TERMINAL");
+        return { ...current, status: "collected" };
+      },
+      routed,
+    );
   } catch (error) {
     throw collectFailure("collected status projection", error);
   }
@@ -177,10 +186,18 @@ async function failedAttempt(
   }
   if (failure.exitEvidence && job && job.status !== "failed") {
     try {
-      verifyRunFile(entry, routed);
       const path = join(entry.run_dir, "run-job.json");
       await regularFile(path, "failure status projection");
-      await writeJson(path, RunJobSchema.parse({ ...job, status: "failed" }));
+      updateRunJob(
+        entry,
+        (current) => {
+          if (current.status === "collected" || current.status === "failed") return current;
+          if (!isTerminal(current.status))
+            throw new CollectFailure("failure status projection", "NOT_TERMINAL");
+          return { ...current, status: "failed" };
+        },
+        routed,
+      );
     } catch (error) {
       failures.push(collectFailure("failure status projection", error));
     }

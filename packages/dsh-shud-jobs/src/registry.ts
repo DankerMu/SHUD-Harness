@@ -7,6 +7,7 @@ import type { SubmitShudRequest } from "./shud-input.ts";
 import { ShudSubmissions, type ShudProducer } from "./shud-submissions.ts";
 import { StateIndexStore } from "./state-indexes.ts";
 import { ShudPoll, type CompletionReceipt } from "./shud-poll.ts";
+import { ShudCancellation } from "./shud-cancellation.ts";
 
 export interface Config extends ParentConfig {
   /** Absolute writable directory for registry state; created when absent. */
@@ -70,6 +71,7 @@ export class ShudJobRegistry extends ParentRegistry {
   readonly isSubmissionInFlight: (id: RunId) => boolean;
   readonly pollOnce: () => Promise<void>;
   readonly collectShud: (id: RunId | JobRecordId) => Promise<RunRecord>;
+  override readonly kill: LocalJobRegistry["kill"];
 
   static Config: { "~standard": StandardProps } = {
     "~standard": {
@@ -117,10 +119,19 @@ export class ShudJobRegistry extends ParentRegistry {
       this.indexes = store;
       // Capture the actual instance here; scoped Cordis proxies must not choose registration scope.
       const receipts = new Map<RunId, CompletionReceipt>();
-      const submissions = new ShudSubmissions(this, store, config, pumpPollMs, receipts);
+      const cancellations = new ShudCancellation();
+      const submissions = new ShudSubmissions(
+        this,
+        store,
+        config,
+        pumpPollMs,
+        receipts,
+        cancellations,
+      );
       const dispatcher = new ShudPoll(
         store,
         receipts,
+        cancellations,
         (id) => submissions.isInFlight(id),
         pumpPollMs,
         (error) => ctx.logger.error(error),
@@ -130,13 +141,27 @@ export class ShudJobRegistry extends ParentRegistry {
       this.isSubmissionInFlight = (id) => submissions.isInFlight(id);
       this.pollOnce = () => dispatcher.pollOnce();
       this.collectShud = (id) => dispatcher.collectShud(id);
+      this.kill = (id, caller, reason) => {
+        if (!cancellations.owns(id)) return super.kill(id, caller, reason);
+        // Public parent preflight preserves access and already-finished behavior before any write.
+        const view = this.get(id, caller);
+        if (view.status !== "running" && view.status !== "stopping") {
+          return super.kill(id, caller, reason);
+        }
+        return cancellations.request(id, submissions.isInFlight(cancellations.runId(id)), () =>
+          super.kill(id, caller, reason),
+        );
+      };
       let closing: Promise<void> | undefined;
       // Cordis disposes sibling effects concurrently; all SHUD ownership ordering lives here.
       ctx.effect(() => () => {
+        cancellations.stopAdmission();
         dispatcher.stopAdmission();
         submissions.stopAdmission();
         return (closing ??= Promise.all([dispatcher.drain(), submissions.drain()]).then(() => {
           receipts.clear();
+          // Retain managed classification while the concurrent parent disposer may still call cancel.
+          // Normally completed/rolled-back runs release their entries; closed leftovers die with this instance.
           return store.close();
         }));
       });

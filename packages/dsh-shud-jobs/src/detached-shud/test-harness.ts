@@ -1,5 +1,5 @@
 import { fork, spawnSync } from "node:child_process";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -8,7 +8,7 @@ import type { JobHandle, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import * as jobs from "../index.ts";
 import type { SubmitShudRequest } from "../index.ts";
-import { createHarness } from "../test-harness.ts";
+import { createHarness, installScriptFixture } from "../test-harness.ts";
 import { actualRegistry, registrationResource } from "../submit-shud/test-harness.ts";
 
 const HOST_ARGUMENT = "--detached-shud-host";
@@ -191,7 +191,7 @@ export async function terminateGroup(pid: number): Promise<void> {
 export async function installFakeShud(
   path: string,
   code: number,
-  mode: "immediate" | "held" | "descendant" = "immediate",
+  mode: "immediate" | "held" | "descendant" | "resistant" = "immediate",
 ): Promise<void> {
   const driver = `${path}.cjs`;
   await writeFile(
@@ -205,7 +205,11 @@ function publish(port) {
   fs.writeSync(1, 'fake stdout\\n');
   fs.writeSync(2, 'fake stderr\\n');
 }
-if (${JSON.stringify(mode)} === 'descendant' && !descendant) {
+if (${JSON.stringify(mode)} === 'resistant') {
+  process.on('SIGTERM', () => fs.writeFileSync('sigterm-seen', 'SIGTERM\\n'));
+  publish(null);
+  setInterval(() => fs.appendFileSync('live-output', 'x'), 10);
+} else if (${JSON.stringify(mode)} === 'descendant' && !descendant) {
   const child = require('node:child_process').spawn(process.execPath, [__filename, '--descendant', ...process.argv.slice(2)], { stdio: ['ignore', 1, 2] });
   child.unref();
   process.exit(${code});
@@ -225,8 +229,7 @@ if (${JSON.stringify(mode)} === 'descendant' && !descendant) {
   );
   const node = process.execPath.replaceAll("'", "'\\''");
   const program = driver.replaceAll("'", "'\\''");
-  await writeFile(path, `#!/bin/sh\nexec '${node}' '${program}' "$@"\n`);
-  await chmod(path, 0o700);
+  await installScriptFixture(path, `#!/bin/sh\nexec '${node}' '${program}' "$@"\n`);
 }
 
 export async function releaseInvocation(invocation: Invocation): Promise<void> {

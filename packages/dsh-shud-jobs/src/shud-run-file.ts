@@ -1,9 +1,11 @@
 import type { Stats } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import * as io from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import { realDirectory, verifyRun } from "./shud-input.ts";
 import type { IndexEntry } from "./state-indexes.ts";
+import { writeJsonSync } from "./state-files.ts";
 
 /** Messages crossing the collection persistence/log boundary contain controlled facts, never raw causes. */
 export class CollectFailure extends Error {
@@ -101,7 +103,10 @@ export interface RoutedRun {
   directory: Stats;
 }
 
-export function verifyRunFile(entry: IndexEntry, routed: RoutedRun): void {
+export function verifyRunFile(
+  entry: IndexEntry,
+  routed: Pick<RoutedRun, "parent" | "directory">,
+): void {
   try {
     verifyRun(dirname(entry.run_dir), routed.parent, entry.run_dir, routed.directory);
   } catch (error) {
@@ -127,6 +132,10 @@ export async function readRunFile(entry: IndexEntry): Promise<RoutedRun> {
   } catch (error) {
     throw collectFailure("run metadata JSON", error);
   }
+  return routeRun(entry, raw, parent, directory);
+}
+
+function routeRun(entry: IndexEntry, raw: unknown, parent: Stats, directory: Stats): RoutedRun {
   if (
     typeof raw !== "object" ||
     raw === null ||
@@ -144,6 +153,36 @@ export async function readRunFile(entry: IndexEntry): Promise<RoutedRun> {
   const status = RunJobSchema.shape.status.safeParse(value.status);
   if (!status.success) throw new CollectFailure("run status", "INVALID_STATUS");
   return { raw: value, status: status.data, parent, directory };
+}
+
+/** No yield between the fresh validated read, transition and atomic publication. */
+export function updateRunJob(
+  entry: IndexEntry,
+  transition: (current: RunJob) => RunJob,
+  expected?: Pick<RoutedRun, "parent" | "directory">,
+): RunJob {
+  try {
+    if (expected) verifyRunFile(entry, expected);
+    const parent = realDirectory(dirname(entry.run_dir));
+    const directory = realDirectory(entry.run_dir);
+    const path = join(entry.run_dir, "run-job.json");
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) throw new CollectFailure("run metadata", "SYMLINK");
+    if (!stat.isFile()) throw new CollectFailure("run metadata", "NOT_REGULAR");
+    const routed = routeRun(entry, JSON.parse(readFileSync(path, "utf8")), parent, directory);
+    const parsed = RunJobSchema.safeParse(routed.raw);
+    if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
+    const next = transition(parsed.data);
+    if (next === parsed.data) return next;
+    const checked = RunJobSchema.safeParse(next);
+    if (!checked.success) throw validationFailure("RunJob", checked.error.issues);
+    routeRun(entry, checked.data, parent, directory);
+    verifyRunFile(entry, routed);
+    writeJsonSync(path, checked.data);
+    return checked.data;
+  } catch (error) {
+    throw collectFailure("run-job publication", error);
+  }
 }
 
 export function isTerminal(status: RunJob["status"]): boolean {

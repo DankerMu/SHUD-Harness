@@ -1,11 +1,21 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Context, type Plugin } from "@deepseek-ai/cordis";
 import { createScope } from "@deepseek-ai/dsh-scope";
 import type { SessionController } from "@deepseek-ai/dsh-api-session-controller";
 import type { Session, SessionId } from "@deepseek-ai/dsh-session";
 import type { JobEvent, JobHandle, JobId, JobOutcome, JobSpec } from "@deepseek-ai/dsh-jobs";
+
+export async function installScriptFixture(path: string, script: string): Promise<void> {
+  await writeFile(`${path}.script`, script);
+  await rm(path, { force: true });
+  await symlink(
+    fileURLToPath(new URL("../../../scripts/fixtures/exec-script.sh", import.meta.url)),
+    path,
+  );
+}
 
 export async function createHarness(parentDir = tmpdir()) {
   const root = await mkdtemp(join(parentDir, "shud-jobs-test-"));
@@ -14,8 +24,7 @@ export async function createHarness(parentDir = tmpdir()) {
   const shudBin = join(root, "shud");
   await mkdir(stateDir);
   await mkdir(cwd);
-  await writeFile(shudBin, "#!/bin/sh\nexit 0\n");
-  await chmod(shudBin, 0o700);
+  await installScriptFixture(shudBin, "#!/bin/sh\nexit 0\n");
   const ctx = new Context();
   const sessionEvents: Array<{ type: string; data: unknown }> = [];
   const flushes: SessionId[] = [];

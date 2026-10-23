@@ -175,6 +175,22 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** 包装进程已写出内容为 `0` 的 `exit_code` 后、结算前 kill 到达
 - **THEN** RunRecord 的 `exit_class` 为 `ok`，不是 `cancelled`
 
+#### Scenario: synchronous durable cancellation admission
+- **WHEN** 对已完成提交的 SHUD 登记调用公开 `kill(id, caller, reason)`，或对该运行重复请求 kill
+- **THEN** 调用保持宿主同步返回契约，第一次有效请求在发送进程组信号前原子持久化取消时间；重复请求不延后原宽限期限；理由文本不决定 kill 与 teardown 的分类
+
+#### Scenario: cancellation races a terminal snapshot
+- **WHEN** 轮询已读取尚无取消标记的快照，公开 kill 随后持久化取消意图，而进程最终消失且未留下退出码
+- **THEN** 终态写入保留新取消标记并结算 cancelled，不得以旧快照覆盖标记或误记 lost；producer done 仍在终态持久化之后
+
+#### Scenario: wrapper exits before a resistant descendant
+- **WHEN** kill 的 SIGTERM 使包装进程退出，但同一受控进程组中的子进程仍可运行并忽略 SIGTERM
+- **THEN** 不因包装进程单独退出而提前完成取消；原宽限期到达后对仍受控且活跃的进程组发送 SIGKILL，并在组静止后按退出文件 first-wins 结算
+
+#### Scenario: cancellation intent cannot be persisted
+- **WHEN** 取消前的 RunJob 校验或原子持久化失败
+- **THEN** kill 明确失败，不向进程组发信号、不留下进程内 kill 标记，原有证据保持；未知、无权限、提交仍在进行或已关闭准入的请求同样不得越过各自边界写入或发信号
+
 ### Requirement: Host teardown keeps shud running
 宿主 teardown（SIGTERM 等正常退出、注册表重载，即父类调用 producer `cancel` 而该调用不是由 `kill` 覆写发起）时，注册表 SHALL NOT 终止包装进程，SHALL 在 producer `cancel` 内同步以 `failed` 结束该次 dsh 登记（不依赖已随注册表释放而停止的轮询循环，使父类等待结算的 teardown 不会挂起），`run-job.json` 的 `status` SHALL 保持不变，活动索引条目 SHALL 保留。无 `cancel_requested_at` 时 detail SHALL 说明 shud 在后台继续；已有 `cancel_requested_at`（kill 宽限期内 teardown）时 SHALL 先对包装进程组重发 SIGTERM，detail SHALL 说明 kill 进行中，其余终止与 `cancelled` 结算留给下次启动对账（R7/R8）。该结算 SHALL NOT 触发唤醒，也 SHALL NOT 生成 RunRecord。shud 作业无 owner，owner Agent 释放 SHALL NOT 影响它。
 
