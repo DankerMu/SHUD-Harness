@@ -179,6 +179,8 @@ SLURM watcher 监控：
 
 Collect 必须是幂等的。重复调用 `collect` 不应破坏已完成结果。
 
+当前实现（#308）：`dsh-shud-jobs` 已提供自动收集与后端 `collectShud(RunId | JobRecordId): Promise<RunRecord>`，共用逐条目队列并等待本地完成回执；先发布不可变 RunRecord，再投影 `collected`。状态投影失败只修复投影，不重做生成或消耗生成尝试；成功重试保留历史错误记录。有效且身份匹配的已有 RunRecord 优先返回；否则损坏的重试记录阻止新的生成尝试，保留且不重置次数。手动 API 可越过正常重试间隔/次数上限。以下 `shud_collect` 工具、耗尽后唤醒与 R9/R10 启动对账仍为待接入契约，不是当前工具或恢复能力；活动索引在收集后仍保留，待 #313 投递阶段迁移。实现边界与安全规则见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
+
 M2 collect 从 `<session cwd>/runs/<run_id>/` 读取作业与退出信息：按退出码映射 `exit_class`，扫描 `output/<project>.out/` 得到相对路径/字节数清单，计算 `wall_seconds`，复制模型 id 与来源，经 core schema 校验后写 `run-record.json`，再将 RunJob 置为 `collected`，最后进入唤醒步骤。已有 `run-record.json` 原样返回，内容和修改时间不变；`shud_collect` 复用同一逻辑。
 
 失败写同目录 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态；退出码不可读/非整数时为 `failed`，不写占位 RunRecord、不置 `collected`。唯一轮询循环在距上次尝试至少 10 秒后重试，上限 3 次；达到上限以失败原因唤醒，不再自动 collect，手工 `shud_collect` 仍可重试。重启由 R9/R10 接续。

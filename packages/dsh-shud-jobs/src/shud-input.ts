@@ -46,9 +46,13 @@ export function realDirectory(path: string): Stats {
   return stat;
 }
 
+export function isProjectComponent(project: string): boolean {
+  return project.length > 0 && project !== "." && project !== ".." && !/[\\/\0]/u.test(project);
+}
+
 export function prepareInput(request: SubmitShudRequest, stateDir: string): PreparedInput {
   const project = RunJobSchema.shape.project.parse(request.project);
-  if (project === "." || project === ".." || /[\\/\0]/u.test(project)) {
+  if (!isProjectComponent(project)) {
     throw new Error("project must be one contained path component");
   }
   const endDays = RunJobSchema.shape.end_days.parse(request.end_days ?? null);

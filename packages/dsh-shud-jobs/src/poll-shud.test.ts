@@ -24,7 +24,7 @@ test.each([0, 13])(
       // No further manual tick: the actual registry-owned timer must notice natural completion.
       await expect.poll(() => producer.completed.length, { timeout: 5000 }).toBe(1);
       await producer.doneObserved;
-      const terminal = await readRecord(record.run_dir);
+      const terminal = producer.durableAtSettle[0];
       expect(terminal.status).toBe(code === 0 ? "succeeded" : "failed");
       expect(terminal.exit_code).toBe(code);
       expect(terminal.finished_at).not.toBeNull();
@@ -40,7 +40,11 @@ test.each([0, 13])(
       expect(producer.attempts).toHaveLength(1);
       expect(h.registry.indexes.lookup(record.run_id)?.run_dir).toBe(record.run_dir);
       expect(terminal.notify.status).toBe("pending");
-      expect(await io.readdir(record.run_dir)).not.toContain("run-record.json");
+      expect(await h.registry.collectShud(record.run_id)).toMatchObject({
+        exit_code: code,
+        exit_class: code === 0 ? "ok" : "input",
+      });
+      expect((await readRecord(record.run_dir)).status).toBe("collected");
       expect(h.flushes).toEqual([]);
     } finally {
       await h.close();
@@ -62,7 +66,7 @@ test.each([0, 13])(
       await h.registry.pollOnce();
       await releaseRun(record);
       await h.registry.pollOnce();
-      const terminal = await readRecord(record.run_dir);
+      const terminal = producer.durableAtSettle[0];
       expect(terminal.status).toBe(code === 0 ? "succeeded" : "failed");
       expect(terminal.exit_code).toBe(code);
       expect(terminal.cancel_requested_at).toBe(cancelledAt);
@@ -92,7 +96,7 @@ test.each([false, true])(
         code: "ENOENT",
       });
       await h.registry.pollOnce();
-      const terminal = await readRecord(record.run_dir);
+      const terminal = producer.durableAtSettle[0];
       expect(terminal.status).toBe(cancelRequested ? "cancelled" : "failed");
       expect(terminal.exit_code).toBeNull();
       expect(terminal.finished_at).not.toBeNull();
@@ -113,9 +117,10 @@ test("a running indexed record settles without any current dsh registration", as
     expect(h.registry.list()).toEqual([]);
     await io.writeFile(join(record.run_dir, "exit_code"), "13\n");
     await h.registry.pollOnce();
+    expect(await h.registry.collectShud(record.run_id)).toMatchObject({ exit_code: 13 });
     const terminal = await readRecord(record.run_dir);
     expect(terminal).toMatchObject({
-      status: "failed",
+      status: "collected",
       exit_code: 13,
       dsh_job_id: null,
       dsh_job_ids: [],
@@ -145,7 +150,8 @@ test.each(["", " \n\t", "13junk", "1.5", "9007199254740992", "NaN"])(
       expect(producer.completed[0].detail).toMatch(/invalid|integer|empty/iu);
       expect(producer.completed[0].detail).not.toMatch(/lost/iu);
       expect(await io.readFile(evidence, "utf8")).toBe(bytes);
-      expect(await io.readdir(record.run_dir)).not.toContain("collect-error.json");
+      await expect(h.registry.collectShud(record.run_id)).rejects.toThrow(/exit evidence/iu);
+      expect(await io.readdir(record.run_dir)).toContain("collect-error.json");
     } finally {
       await h.close();
     }
@@ -185,14 +191,22 @@ test.each(["created", "submitted", "collected", "delivered", "unreachable"] as c
   },
 );
 
-test("terminal records without local completion receipts are not repeatedly rewritten", async () => {
+test("collected records without local completion receipts are not repeatedly rewritten", async () => {
   const h = await pollFixture();
   try {
-    const record = await seedRun(h, {
-      status: "succeeded",
-      exit_code: 0,
-      finished_at: "2026-10-22T03:15:02.000Z",
-    });
+    const record = await seedRun(
+      h,
+      {
+        status: "succeeded",
+        exit_code: 0,
+        started_at: "2026-10-22T03:15:00.000Z",
+        finished_at: "2026-10-22T03:15:02.000Z",
+      },
+      async (record) => {
+        await io.writeFile(join(record.run_dir, "exit_code"), "0\n");
+      },
+    );
+    await h.registry.collectShud(record.run_id);
     const path = join(record.run_dir, "run-job.json");
     const before = await io.readFile(path);
     const stat = await io.stat(path, { bigint: true });

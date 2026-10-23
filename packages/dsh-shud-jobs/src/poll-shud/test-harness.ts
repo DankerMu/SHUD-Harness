@@ -210,6 +210,7 @@ export async function releaseRun(record: RunJob): Promise<void> {
 export async function seedRun(
   h: Awaited<ReturnType<typeof pollFixture>>,
   changes: Partial<RunJob> = {},
+  prepareBeforeAdmission?: (record: RunJob) => Promise<void>,
 ): Promise<RunJob> {
   const ids = generateRunIdentifiers();
   const runDir = join(h.cwd, "runs", ids.run_id);
@@ -244,6 +245,7 @@ export async function seedRun(
     ...changes,
   });
   await io.writeFile(join(runDir, "run-job.json"), JSON.stringify(record));
+  await prepareBeforeAdmission?.(record);
   await h.registry.indexes.addActive({ run_id: ids.run_id, job_id: ids.job_id, run_dir: runDir });
   return record;
 }

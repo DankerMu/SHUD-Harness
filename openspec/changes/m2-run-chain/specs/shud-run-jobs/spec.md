@@ -272,6 +272,22 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** `exit_code` 文件内容为 `abc`，三次 collect 均失败
 - **THEN** 运行目录有 `collect-error.json` 且 `attempts` 为 3，无 `run-record.json`，`run-job.json` 为 `failed`，发起会话收到一条含失败原因的 `shud-jobs` 唤醒消息，此后不再自动重试
 
+#### Scenario: successful retry retains its error history
+- **WHEN** 第一次 collect 失败，重试间隔后第二次成功
+- **THEN** run-record.json 存在且符合 core schema，RunJob 为 collected；已有 collect-error.json 的 attempts 仍为 1，内容和修改时间不因成功而改变
+
+#### Scenario: immutable record survives a collected-state write failure
+- **WHEN** run-record.json 已原子发布，而紧接着写 RunJob collected 状态失败
+- **THEN** 已发布记录保持不变，下一次处理只补状态投影，不改写记录、重新扫描产物或增加生成失败次数
+
+#### Scenario: never-started lost run has no output directory
+- **WHEN** 已结算为 lost 的作业从未启动，退出码和求解器产物目录均不存在
+- **THEN** collect 生成 exit_code 为 null、exit_class 为 lost 的 RunRecord，产物清单为空，未观测的运行时长和数值指标为 null
+
+#### Scenario: corrupted retry ledger does not reopen the attempt budget
+- **WHEN** collect-error.json 的 JSON、字段、attempts 或 at 不合法
+- **THEN** 保留该文件内容和修改时间并明确报告错误，不重置计数或启动新的自动 collect 尝试
+
 ### Requirement: Registry poll loop
 注册表 SHALL 运行**一个**进程内轮询循环，以父类 `pumpPollMs` 为周期遍历活动索引中 `notify.status` 尚未为 `delivered`/`unreachable` 的条目，条目离开活动索引前一直处理，与是否存在 dsh 登记无关。本进程提交在途的条目（`run_id` 在进程内在途集合中：写 `created` 前加入，写出 `running` 或回滚后移出；父类 `start` 同步返回 hooks 后 `pid`、`pid_started_at` 与 `running` 才异步写入）SHALL 被跳过，SHALL NOT 被结算；前一进程遗留的此类条目由「Startup reconciliation」处理。每一轮对每个其余条目按状态推进一步：未终态 → 结算检查（见下）；终态未 collect 且 collect `attempts` 未达上限 → collect（「Automatic collect」的失败重试由此驱动）；已 collect 或 collect 达上限且 `notify.status: pending` → 投递（「At-least-once wake」的暂时性失败重试由此驱动）。collect 与投递的重试 SHALL 在距上次尝试（`collect-error.json` 或 `notify` 的 `at`）不少于 core 常量重试间隔（10 秒，与 `pumpPollMs` 无关）后才进行。同一条目同一时刻 SHALL 至多一个步骤在途。循环与其定时器 SHALL 是注册表上下文的 effect：注册表释放或重载时停止，重载后的新实例先对账再启动自己的循环，SHALL NOT 出现两个循环对同一条目投递。结算检查：出现 `exit_code` 时 SHALL 按退出码结算（`succeeded`/`failed`）；进程不存活时 SHALL 再读一次 `exit_code`，仍无则有 `cancel_requested_at` 时结算为 `cancelled`、否则为 `lost`（`failed`）；kill 与自然退出 first-wins（「Cancellation」）。结算 SHALL 先原子写 `run-job.json` 的终态与 `finished_at`、`exit_code`，再以 producer `done` 结束当前 dsh 登记（如有），再交给「Automatic collect」。
 

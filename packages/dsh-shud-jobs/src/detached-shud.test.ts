@@ -104,13 +104,14 @@ test.each([0, 13])(
         .poll(() => textIfPresent(join(record.run_dir, "exit_code")), { timeout: 5000 })
         .toBe(`${code}\n`);
       await registry.pollOnce();
+      expect(await registry.collectShud(record.run_id)).toMatchObject({ exit_code: code });
       const terminal = RunJobSchema.parse(
         JSON.parse(await readFile(join(record.run_dir, "run-job.json"), "utf8")),
       );
       expect(terminal.finished_at).not.toBeNull();
       expect(terminal).toEqual({
         ...record,
-        status: code === 0 ? "succeeded" : "failed",
+        status: "collected",
         exit_code: code,
         finished_at: terminal.finished_at,
       });
