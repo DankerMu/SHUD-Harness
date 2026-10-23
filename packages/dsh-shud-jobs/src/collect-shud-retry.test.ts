@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type * as NodeIo from "node:fs/promises";
 import { pollFixture, readRecord } from "./poll-shud/test-harness.ts";
 import {
+  existingResult,
   expectAbsent,
   outputRoot,
   publishExit,
@@ -138,6 +139,57 @@ test("repaired output permissions retry no earlier than ten seconds and retain a
     await h.close();
   }
 });
+
+test.each(["exhausted", "recent", "corrupt"] as const)(
+  "automatic projection repair prioritizes a committed RunRecord over an %s retry ledger",
+  async (kind) => {
+    const h = await pollFixture();
+    const ledgerBytes =
+      kind === "corrupt"
+        ? "{not-json\n"
+        : JSON.stringify({
+            attempts: kind === "exhausted" ? 3 : 1,
+            last_error: "prior generation failure",
+            at: kind === "exhausted" ? "2026-10-22T03:15:00.000Z" : "2026-10-23T03:15:00.000Z",
+          });
+    let recordBytes = "";
+    let recordMtime = 0n;
+    let ledgerMtime = 0n;
+    try {
+      const job = await seedTerminal(h, {}, async (record) => {
+        const resultPath = join(record.run_dir, "run-record.json");
+        const ledgerPath = join(record.run_dir, "collect-error.json");
+        recordBytes = JSON.stringify(existingResult(record));
+        await io.writeFile(resultPath, recordBytes);
+        await io.writeFile(ledgerPath, ledgerBytes);
+        // A regenerated manifest would differ from the already committed empty manifest.
+        await io.writeFile(join(outputRoot(record), "after-commit.dat"), "later output");
+        const oldTime = new Date("2026-10-21T03:15:00.000Z");
+        await io.utimes(resultPath, oldTime, oldTime);
+        await io.utimes(ledgerPath, oldTime, oldTime);
+        recordMtime = (await io.stat(resultPath, { bigint: true })).mtimeNs;
+        ledgerMtime = (await io.stat(ledgerPath, { bigint: true })).mtimeNs;
+        fault.output = outputRoot(record);
+        fault.exit = join(record.run_dir, "exit_code");
+      });
+      // All checkpoints and counters exist before index admission; a live timer may repair first.
+      await h.registry.pollOnce();
+      expect(await readRecord(job.run_dir)).toEqual({ ...job, status: "collected" });
+      const resultPath = join(job.run_dir, "run-record.json");
+      const ledgerPath = join(job.run_dir, "collect-error.json");
+      expect(await io.readFile(resultPath, "utf8")).toBe(recordBytes);
+      expect((await io.stat(resultPath, { bigint: true })).mtimeNs).toBe(recordMtime);
+      expect(await readResult(job.run_dir)).toEqual(existingResult(job));
+      expect(await io.readFile(ledgerPath, "utf8")).toBe(ledgerBytes);
+      expect((await io.stat(ledgerPath, { bigint: true })).mtimeNs).toBe(ledgerMtime);
+      expect(fault.exitReads).toBe(0);
+      expect(fault.scans).toBe(0);
+      expect(h.errors).toEqual([]);
+    } finally {
+      await h.close();
+    }
+  },
+);
 
 const malformedLedgers: Record<string, string> = {
   json: "{not-json",

@@ -16,6 +16,7 @@ import {
   pollFixture,
   readRecord,
   releaseRun,
+  replaceRecord,
   seedRun,
   waitForOwnershipRelease,
 } from "./poll-shud/test-harness.ts";
@@ -55,6 +56,49 @@ function observe(operation: Promise<RunRecord>) {
     (error: unknown) => ({ ok: false as const, error }),
   );
 }
+
+test("collectShud rejects CLOSED admission without touching an eligible terminal checkpoint", async () => {
+  const h = await pollFixture();
+  try {
+    // Keep the real timer live but give it no exit evidence before disposal.
+    // This disk-only entry uses the genuine live test-host identity, not a SHUD child.
+    const running = await seedRun(h, {}, async (record) => {
+      await io.mkdir(outputRoot(record), { recursive: true });
+      await io.writeFile(join(outputRoot(record), "artifact.dat"), "abc");
+    });
+    await h.fiber.dispose();
+    await waitForOwnershipRelease(h.stateDir);
+    // Publish eligibility only after the ownership barrier, so automatic collect cannot race setup.
+    // Without the CLOSED guard this indexed terminal entry is fully collectable.
+    const terminal = await replaceRecord(running, {
+      status: "succeeded",
+      exit_code: 0,
+      started_at: "2026-10-22T03:15:00.000Z",
+      finished_at: "2026-10-22T03:15:02.500Z",
+    });
+    await publishExit(terminal, "0\n");
+    expect(h.registry.indexes.lookup(terminal.run_id)).toEqual({
+      run_id: terminal.run_id,
+      job_id: terminal.job_id,
+      run_dir: terminal.run_dir,
+    });
+    const jobPath = join(terminal.run_dir, "run-job.json");
+    const before = await io.readFile(jobPath);
+    const mtime = (await io.stat(jobPath, { bigint: true })).mtimeNs;
+    const files = (await io.readdir(terminal.run_dir)).sort();
+    await expect(h.registry.collectShud(terminal.run_id)).rejects.toThrow(/\bCLOSED\b/u);
+    expect(await readRecord(terminal.run_dir)).toEqual(terminal);
+    expect(await io.readFile(jobPath)).toEqual(before);
+    expect((await io.stat(jobPath, { bigint: true })).mtimeNs).toBe(mtime);
+    expect((await io.readdir(terminal.run_dir)).sort()).toEqual(files);
+    expect(await io.readFile(join(terminal.run_dir, "exit_code"), "utf8")).toBe("0\n");
+    expect(await io.readFile(join(outputRoot(terminal), "artifact.dat"), "utf8")).toBe("abc");
+    await expectAbsent(join(terminal.run_dir, "run-record.json"));
+    await expectAbsent(join(terminal.run_dir, "collect-error.json"));
+  } finally {
+    await h.close();
+  }
+}, 15000);
 
 test("RunRecord publication is the commit boundary and a failed collected projection repairs without regeneration", async () => {
   const h = await pollFixture();
