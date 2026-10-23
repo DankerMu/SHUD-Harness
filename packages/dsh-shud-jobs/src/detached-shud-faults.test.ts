@@ -56,6 +56,15 @@ vi.mock("node:child_process", async (original) => {
         fault.mode = "";
         return { pid: 0, output: [], stdout: "", stderr: "", status: 0, signal: null };
       }
+      if (fault.mode === "malformed-group" && command === "ps" && args[0] === "-axo") {
+        fault.mode = "";
+        const result = actual.spawnSync(command, args, options);
+        // Preserve the target pid/pgid but truncate its required state column.
+        return {
+          ...result,
+          stdout: `${String(result.stdout).trimEnd()}\n${fault.replayPid} ${fault.replayPid}\n`,
+        };
+      }
       if (fault.mode === "transient-state" && command === "ps" && args[0] === "-axo") {
         fault.groupReads++;
         const result = actual.spawnSync(command, args, options);
@@ -293,65 +302,79 @@ test("captured Darwin ?s state keeps rollback waiting until the owned group is q
   }
 }, 15000);
 
-test("indeterminate group cleanup retains the run and both failure causes instead of claiming rollback", async () => {
-  const h = await submissionFixture();
-  const execution = detachedProducer();
-  const persistenceFailure = new Error("injected running persistence failure");
-  let pending: Promise<RunJob> | undefined;
-  let running: RunJob | undefined;
-  try {
-    await installFakeShud(h.shudBin, 0, "held");
-    await h.apply(ShudJobRegistry, h.config);
-    const registry = actualRegistry(h.ctx);
-    vi.mocked(io.rename).mockImplementation(async (source, target) => {
-      if (typeof target === "string" && target.endsWith("/run-job.json")) {
-        const candidate = RunJobSchema.parse(JSON.parse(await io.readFile(source, "utf8")));
-        if (candidate.status === "running") {
-          running = candidate;
-          fault.mode = "group";
-          throw persistenceFailure;
+test.each(["indeterminate", "malformed"] as const)(
+  "%s group snapshot retains the run and both failure causes instead of claiming rollback",
+  async (snapshot) => {
+    const h = await submissionFixture();
+    const execution = detachedProducer();
+    const persistenceFailure = new Error("injected running persistence failure");
+    let pending: Promise<RunJob> | undefined;
+    let running: RunJob | undefined;
+    try {
+      await installFakeShud(h.shudBin, 0, snapshot === "malformed" ? "immediate" : "held");
+      await h.apply(ShudJobRegistry, h.config);
+      const registry = actualRegistry(h.ctx);
+      vi.mocked(io.rename).mockImplementation(async (source, target) => {
+        if (typeof target === "string" && target.endsWith("/run-job.json")) {
+          const candidate = RunJobSchema.parse(JSON.parse(await io.readFile(source, "utf8")));
+          if (candidate.status === "running") {
+            running = candidate;
+            if (snapshot === "malformed") {
+              const child = fault.children.find((entry) => entry.pid === candidate.pid);
+              if (!child) throw new Error("Malformed snapshot requires the actual wrapper receipt");
+              // Reap before the fault: skipping the bad row must wrongly clean up, not hang on live I/O.
+              await child.exited;
+              expect(activeGroup(child.pid)).toEqual([]);
+              fault.replayPid = child.pid;
+            }
+            fault.mode = snapshot === "malformed" ? "malformed-group" : "group";
+            throw persistenceFailure;
+          }
         }
-      }
-      await actualIo.rename(source, target);
-    });
-    pending = registry.submitShud(h.request, execution.start);
-    const failure: unknown = await pending.then(
-      () => null,
-      (error: unknown) => error,
-    );
-    expect(failure).toBeInstanceOf(AggregateError);
-    if (!(failure instanceof AggregateError) || !running)
-      throw new Error("Expected retained failed submission");
-    expect(failure.message).toContain(running.run_dir);
-    expect(failure.errors).toHaveLength(2);
-    expect(failure.errors[0]).toBe(persistenceFailure);
-    const cleanup: unknown = failure.errors[1];
-    expect(cleanup).toBeInstanceOf(Error);
-    expect(cleanup instanceof Error ? cleanup.message : null).toContain(
-      "Cannot inspect owned process group",
-    );
-    expect(failure.cause).toBe(cleanup);
-    expect(registry.indexes.lookup(running.run_id)?.run_dir).toBe(running.run_dir);
-    expect(registry.isSubmissionInFlight(running.run_id)).toBe(true);
-    expect(registry.list()).toHaveLength(1);
-    expect(execution.registration.cancellations).toEqual([]);
-    const retained = RunJobSchema.parse(
-      JSON.parse(await io.readFile(join(running.run_dir, "run-job.json"), "utf8")),
-    );
-    expect(retained.status).toBe("submitted");
-    expect(retained.dsh_job_id).toBe(running.dsh_job_id);
-    expect(retained.pid).toBeNull();
-  } finally {
-    fault.mode = "";
-    await stopObservedChildren();
-    await pending?.catch(() => undefined);
-    await stopObservedChildren();
-    // The memoized abort rejection is the tested outcome, not a successful cleanup receipt.
-    // Independently prove quiescence before releasing the real registration resource.
-    execution.registration.finish();
-    await h.dispose();
-  }
-}, 15000);
+        await actualIo.rename(source, target);
+      });
+      pending = registry.submitShud(h.request, execution.start);
+      const failure: unknown = await pending.then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(AggregateError);
+      if (!(failure instanceof AggregateError) || !running)
+        throw new Error("Expected retained failed submission");
+      expect(failure.message).toContain(running.run_dir);
+      expect(failure.errors).toHaveLength(2);
+      expect(failure.errors[0]).toBe(persistenceFailure);
+      const cleanup: unknown = failure.errors[1];
+      expect(cleanup).toBeInstanceOf(Error);
+      expect(cleanup instanceof Error ? cleanup.message : null).toContain(
+        snapshot === "malformed"
+          ? "Cannot determine members of owned process group"
+          : "Cannot inspect owned process group",
+      );
+      expect(failure.cause).toBe(cleanup);
+      expect(registry.indexes.lookup(running.run_id)?.run_dir).toBe(running.run_dir);
+      expect(registry.isSubmissionInFlight(running.run_id)).toBe(true);
+      expect(registry.list()).toHaveLength(1);
+      expect(execution.registration.cancellations).toEqual([]);
+      const retained = RunJobSchema.parse(
+        JSON.parse(await io.readFile(join(running.run_dir, "run-job.json"), "utf8")),
+      );
+      expect(retained.status).toBe("submitted");
+      expect(retained.dsh_job_id).toBe(running.dsh_job_id);
+      expect(retained.pid).toBeNull();
+    } finally {
+      fault.mode = "";
+      await stopObservedChildren();
+      await pending?.catch(() => undefined);
+      await stopObservedChildren();
+      // The memoized abort rejection is the tested outcome, not a successful cleanup receipt.
+      // Independently prove quiescence before releasing the real registration resource.
+      execution.registration.finish();
+      await h.dispose();
+    }
+  },
+  15000,
+);
 
 test("automatic disposal retains state ownership while an accepted running write is held", async () => {
   const h = await submissionFixture();
