@@ -29,7 +29,7 @@ describe("submission filesystem boundaries", () => {
         expect(await readFile(join(alias, name))).toEqual(bytes);
       }
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
@@ -56,7 +56,7 @@ describe("submission filesystem boundaries", () => {
         "lexical input\n",
       );
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
@@ -85,7 +85,7 @@ describe("submission filesystem boundaries", () => {
         h.originals["nested/forcing.dat"],
       );
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
@@ -107,7 +107,7 @@ describe("submission filesystem boundaries", () => {
       expect(registry.list()).toEqual([]);
       expect(execution.handles).toEqual([]);
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
@@ -133,7 +133,7 @@ describe("submission filesystem boundaries", () => {
         expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
         expect(execution.handles).toEqual([]);
       } finally {
-        execution.finish();
+        await execution.finish();
         await h.dispose();
       }
     },
@@ -155,7 +155,7 @@ describe("submission filesystem boundaries", () => {
       expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
       expect(execution.handles).toEqual([]);
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
@@ -173,7 +173,7 @@ describe("submission filesystem boundaries", () => {
       expect(await readdir(h.cwd)).not.toContain("runs");
       expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
@@ -193,7 +193,7 @@ describe("submission filesystem boundaries", () => {
         expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
         expect(execution.handles).toEqual([]);
       } finally {
-        execution.finish();
+        await execution.finish();
         await h.dispose();
       }
     },

@@ -1,7 +1,7 @@
 import type { Stats } from "node:fs";
 import * as io from "node:fs/promises";
 import { join } from "node:path";
-import type { JobHandle, JobHooks, JobId } from "@deepseek-ai/dsh-jobs";
+import type { JobHandle, JobId } from "@deepseek-ai/dsh-jobs";
 import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import {
   generateRunIdentifiers,
@@ -25,8 +25,13 @@ import {
   type SubmitShudRequest,
 } from "./shud-input.ts";
 import { registerUnowned } from "./shud-registration.ts";
+import type { ShudExecution, ShudProcessIdentity } from "./detached-shud.ts";
 
-export type ShudProducer = (prepared: RunJob, handle: JobHandle) => JobHooks;
+export type ShudProducer = (
+  prepared: RunJob,
+  handle: JobHandle,
+  pumpPollMs: number,
+) => ShudExecution;
 
 interface Reservation {
   run_id: RunId;
@@ -131,7 +136,10 @@ export class ShudSubmissions {
     let owned: Stats | undefined;
     let created = false;
     let indexed = false;
-    const execution: { hooks?: JobHooks } = {};
+    const execution: {
+      value?: ShudExecution;
+      startup?: Promise<{ identity: ShudProcessIdentity } | { error: unknown }>;
+    } = {};
     let registered: JobId | undefined;
     let releaseReservation = true;
     try {
@@ -213,9 +221,14 @@ export class ShudSubmissions {
         kind: "shud",
         label: record.label === null ? record.run_id : `${record.run_id} ${record.label}`,
         output: [stdoutSource(join(record.run_dir, "stdout.log"))],
-        run(handle) {
-          execution.hooks = producer(record, handle);
-          return execution.hooks;
+        run: (handle) => {
+          execution.value = producer(record, handle, this.waitMs);
+          // Observe rejection before the identified-record write yields; keep its error for rollback.
+          execution.startup = execution.value.started.then(
+            (identity) => ({ identity }),
+            (error: unknown) => ({ error }),
+          );
+          return execution.value.hooks;
         },
       });
       record = RunJobSchema.parse({
@@ -224,12 +237,25 @@ export class ShudSubmissions {
         dsh_job_ids: [...record.dsh_job_ids, registered],
       });
       await writeJson(recordPath, record);
+      if (!execution.startup) throw new Error("SHUD producer did not provide startup identity");
+      const startup = await execution.startup;
+      if ("error" in startup) throw startup.error;
+      record = RunJobSchema.parse({
+        ...record,
+        status: "running",
+        pid: startup.identity.pid,
+        pid_started_at: startup.identity.pid_started_at,
+        started_at: startup.identity.pid_started_at,
+      });
+      await writeJson(recordPath, record);
+      this.inFlight.delete(record.run_id);
       return record;
     } catch (error) {
       try {
-        if (execution.hooks) {
-          execution.hooks.cancel("SHUD submission rolled back");
-          await execution.hooks.done;
+        if (execution.value) {
+          await execution.value.abort();
+          execution.value.hooks.cancel("SHUD submission rolled back");
+          await execution.value.hooks.done;
         }
         if (registered) {
           // Teardown may already have removed the entry; otherwise wait for the parent's final drain.
@@ -266,7 +292,7 @@ export class ShudSubmissions {
     }
   }
 
-  /** One lifecycle effect drains submissions (not submitted-stage D7 ids), then closes indexes. */
+  /** One lifecycle effect drains accepted execution transactions before releasing index ownership. */
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.accepting = false;

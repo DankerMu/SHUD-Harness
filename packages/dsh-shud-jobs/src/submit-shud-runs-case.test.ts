@@ -83,7 +83,7 @@ test("existing Runs used as input rejects its runs case alias before producer or
     expect(io.mkdir).not.toHaveBeenCalled();
     expect(io.rename).not.toHaveBeenCalled();
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -124,7 +124,7 @@ test("existing Runs with disjoint input records the physical run path and preser
       expect(await io.readFile(join(h.inputDir, name))).toEqual(bytes);
     }
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });

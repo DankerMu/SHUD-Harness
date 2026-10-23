@@ -31,7 +31,7 @@ test.each(["equal", "nested"])(
       expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
       expect(execution.handles).toEqual([]);
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   },
@@ -63,7 +63,7 @@ test("case aliases cannot hide a run root inside input on a case-insensitive fil
     expect(await readdir(workspace)).not.toContain("runs");
     expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -87,7 +87,7 @@ test.each([
     expect(await readdir(h.cwd)).not.toContain("runs");
     expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -107,14 +107,15 @@ test("there is no default non-executing producer", async () => {
   }
 });
 
-test("copied input is independent, submitted ids remain in-flight, and replacement starts with no local in-flight ids", async () => {
+test("copied input is independent, running clears in-flight membership, and replacement retains its index", async () => {
   const h = await submissionFixture();
   const execution = submissionProducer();
   try {
     const fiber = await h.apply(ShudJobRegistry, h.config);
     const registry = actualRegistry(h.ctx);
     const record = await registry.submitShud(h.request, execution.start);
-    expect(registry.isSubmissionInFlight(record.run_id)).toBe(true);
+    expect(record.status).toBe("running");
+    expect(registry.isSubmissionInFlight(record.run_id)).toBe(false);
     await writeFile(join(record.run_dir, "input", "tiny", "binary.dat"), "solver writeback");
     expect(await readFile(join(h.inputDir, "binary.dat"))).toEqual(h.originals["binary.dat"]);
     await fiber.dispose();
@@ -124,7 +125,7 @@ test("copied input is independent, submitted ids remain in-flight, and replaceme
     expect(replacement.indexes.lookup(record.run_id)?.run_dir).toBe(record.run_dir);
     expect(execution.cancellations).toContain("jobs service disposed");
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });

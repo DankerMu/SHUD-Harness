@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import type { JobHandle, JobHooks, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
-import { ShudJobRegistry } from "../index.ts";
+import { ShudJobRegistry, startDetachedShud, type ShudExecution } from "../index.ts";
 import { createHarness } from "../test-harness.ts";
 
 export async function writeInputTree(
@@ -67,8 +67,8 @@ export async function injectedRegistry(ctx: Context) {
   return registry;
 }
 
-/** Test-only producer: owns a real output descriptor until its done promise settles. */
-export function submissionProducer() {
+/** Registration resource only: process execution and quiescence have a separate owner. */
+export function registrationResource() {
   let resolveDone!: (outcome: JobOutcome) => void;
   const done = new Promise<JobOutcome>((resolve) => {
     resolveDone = resolve;
@@ -91,7 +91,7 @@ export function submissionProducer() {
     persistedAtStart,
     cancellations,
     finish,
-    start: (record: RunJob, handle: JobHandle): JobHooks => {
+    open: (record: RunJob, handle: JobHandle): JobHooks => {
       if (handles.length > 0) throw new Error("test producer was registered more than once");
       prepared.push(RunJobSchema.parse(record));
       persistedAtStart.push(
@@ -112,10 +112,42 @@ export function submissionProducer() {
         },
       };
     },
-    append(bytes: string | Buffer) {
+    append: (bytes: string | Buffer) => {
       if (fd === undefined) throw new Error("test producer has no live output descriptor");
       if (typeof bytes === "string") writeSync(fd, bytes);
       else writeSync(fd, bytes);
+    },
+  };
+}
+
+/** Every submitted fixture uses the actual detached component, with the registry's resolved cadence. */
+export function submissionProducer() {
+  const registration = registrationResource();
+  const executions: ShudExecution[] = [];
+  return {
+    handles: registration.handles,
+    prepared: registration.prepared,
+    persistedAtStart: registration.persistedAtStart,
+    cancellations: registration.cancellations,
+    append: registration.append,
+    executions,
+    start: (record: RunJob, handle: JobHandle, pumpPollMs: number): ShudExecution => {
+      const execution = startDetachedShud(record, registration.open(record, handle), pumpPollMs);
+      executions.push(execution);
+      return execution;
+    },
+    async finish() {
+      const failures: unknown[] = [];
+      for (const execution of executions) {
+        try {
+          await execution.abort();
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      registration.finish();
+      if (failures.length)
+        throw new AggregateError(failures, "Submission fixture execution cleanup failed");
     },
   };
 }

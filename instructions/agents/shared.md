@@ -107,11 +107,15 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 `shud-jobs` 在 apply 时取得 `stateDir` 的排他所有权，维护 `active.json`/`completed.json`：索引修改在实例内串行执行，以临时文件 + rename 原子替换，先写 completed 再移出 active。内部 `stateDir/.lock-guard` 是永久协调 inode，不可删除或改名；`lock` 保存 `{pid, pid_started_at}`。生命周期 effect 开始释放时关闭新提交准入，等待已接收提交完成或回滚，再关闭索引修改准入、等待已接收索引写入完成，最后删除锁元数据并释放内核锁；索引保留。第二个持有者被拒绝；已发布持有者的诊断包含 stateDir 与 pid。
 
-运行前提：Darwin 的 `/usr/bin/lockf` 或 Linux 的 `/usr/bin/flock`，以及用于进程身份检查的 `ps`（Linux slim 环境需安装 `procps`）。检查固定 locale/时区；不支持的平台、缺失工具或无法确定的进程检查均明确失败，不作不安全回退。这里的 `ps lstart` 启动戳只有秒级精度：PID 复用但报告戳相同会保守拒绝，不声称能区分所有 PID 代次；这不是后续 SHUD 包装进程的身份协议。
+运行前提：Darwin 的 `/usr/bin/lockf` 或 Linux 的 `/usr/bin/flock`，以及用于进程身份检查的 `ps`（Linux slim 环境需安装 `procps`）。检查固定 locale/时区；不支持的平台、缺失工具或无法确定的进程检查均明确失败，不作不安全回退。锁和包装进程共用规范化的 `ps lstart` 检查：锁保留原始启动戳，RunJob 转为 ISO UTC；实际分辨率仍是秒级。锁持有者 PID 复用但报告戳相同会保守拒绝，不声称能区分所有 PID 代次。
 
-注册表已提供 `submitShud(request, producer)`：请求显式携带会话 cwd、输入路径、project、owner_session 与模型元数据，producer 是必需的执行依赖，没有默认空实现。提交按物理路径解析 cwd/输入根（保留符号链接与 `..` 的实际遍历语义）；已存在的 runs 根先以 lstat 拒绝链接/非目录，再以 native realpath 解析实际拼写（包括文件系统大小写别名），用于包含关系检查和运行目录记录；尚不存在的根仍从物理 cwd 派生。完整复制普通文件/目录，只在副本改写可选的 END；拒绝内部链接/特殊文件、符号链接运行目录，以及运行根或 stateDir 位于输入树内的布局。持久化顺序为 created → 活动索引 → submitted（dsh id 为 null）→ 瞬时全局控制器下的无 owner 登记 → 写回 dsh id/历史；stdout.log 经父类输出控制提供增量内容，控制器不常驻。
+注册表已提供 `submitShud(request, producer)`：请求显式携带会话 cwd、输入路径、project、owner_session 与模型元数据。必需的 `producer(prepared, handle, pumpPollMs)` 返回 `ShudExecution`；可调用已导出的 `startDetachedShud(prepared, hooks, pumpPollMs)`，其中 hooks 是调用方显式提供的真实登记生命周期依赖，没有默认空实现。`pumpPollMs` 由注册表统一解析父类配置并传入，不新增默认值。提交按物理路径解析 cwd/输入根（保留符号链接与 `..` 的实际遍历语义）；已存在的 runs 根先以 lstat 拒绝链接/非目录，再以 native realpath 解析实际拼写（包括文件系统大小写别名），用于包含关系检查和运行目录记录；尚不存在的根仍从物理 cwd 派生。完整复制普通文件/目录，只在副本改写可选的 END；拒绝内部链接/特殊文件、符号链接运行目录，以及运行根或 stateDir 位于输入树内的布局。持久化顺序为 created → 活动索引 → submitted（dsh id 为 null）→ 瞬时全局控制器下的无 owner 登记 → 写回 dsh id/历史 → 等待真实启动身份 → 原子写 running、pid、pid_started_at、started_at，最后才清除进程内在途标记并返回校验过的 `running` RunJob；stdout.log 经父类输出控制提供增量内容，控制器不常驻。
 
-当前 API 返回校验过的 `submitted` RunJob，pid/启动时间仍为 null；包装进程执行、running 状态推进、轮询、对账及完整跨重启恢复尚未接入。submitted id 仍保留在进程内在途集合；释放等待的是已接收提交的事务 promise，不等待该集合清空。`pnpm run shud:tiny` 是独立的真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，其成功不代表注册表已实现包装进程。
+实际执行使用 detached `/bin/sh` 包装进程，以位置参数 `"$@"` 传递命令，stdout/stderr 追加到运行目录日志，宿主关闭自身日志描述符并 unref 子进程。包装进程须先成功原子发布 `wrapper.pid` 才能启动 SHUD；自然结束后原子发布 `exit_code`，包括非零退出码。包装进程可在宿主 SIGKILL 后继续运行；`exit_code` 是求解器退出证据，子进程事件不直接结算 RunJob。
+
+`ShudExecution` 包含 `hooks`、真实身份的 `started` promise 与回滚专用 `abort()`。回滚先证明执行组已不能继续 I/O 并完成本地子进程回收，再取消/等待登记资源、移除父类登记与自有索引/目录；`hooks.done` 本身不是进程终止证据。原生未知非 Z 状态仍按可能 I/O 处理；权限拒绝仅在重新检查明确静止后才可继续，否则保留运行路径与错误原因。已回收的原包装进程 PID 再次出现时拒绝向该组发信号，但不声称能识别替代组的 leader 也已退出的全部历史代次。释放仍等待已接收事务完成或回滚，不以在途集合清空为条件；非 SHUD 父类生命周期不改动。
+
+本切片不提供轮询/正常持久终态结算（#307）、kill 分类（#309）、detach/清理策略（#311）、启动对账或完整跨重启恢复，也未接入工具提交入口。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，不能用其结果替代注册表包装进程的运行证据。
 
 安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --no-open --port <p>`（profile 已选择 Web 应用，不再传 `web` 位置参数）。headless 任务改用同一 bundle 的独立 profile，并同样保留 `SHUD_BIN`：
 

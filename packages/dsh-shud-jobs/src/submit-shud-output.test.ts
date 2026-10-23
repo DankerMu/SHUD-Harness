@@ -42,11 +42,8 @@ test("actual parent output controls preserve a character split between stdout wr
         .join(""),
     ).toBe("A\u{10400}\n");
   } finally {
-    execution.finish();
-    try {
-      await h.dispose();
-    } finally {
-      vi.useRealTimers();
-    }
+    vi.useRealTimers();
+    await execution.finish();
+    await h.dispose();
   }
 });
