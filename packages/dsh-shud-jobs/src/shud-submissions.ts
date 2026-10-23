@@ -2,7 +2,7 @@ import type { Stats } from "node:fs";
 import * as io from "node:fs/promises";
 import { join } from "node:path";
 import type { JobHandle, JobId } from "@deepseek-ai/dsh-jobs";
-import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
+import type { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import {
   generateRunIdentifiers,
   RunJobSchema,
@@ -26,6 +26,7 @@ import {
 } from "./shud-input.ts";
 import { registerUnowned } from "./shud-registration.ts";
 import type { ShudExecution, ShudProcessIdentity } from "./detached-shud.ts";
+import type { CompletionReceipt } from "./shud-poll.ts";
 
 export type ShudProducer = (
   prepared: RunJob,
@@ -44,33 +45,25 @@ export class ShudSubmissions {
   private readonly indexes: StateIndexStore;
   private readonly config: Config;
   private readonly waitMs: number;
+  private readonly receipts: Map<RunId, CompletionReceipt>;
   private readonly reservedRuns = new Set<RunId>();
   private readonly reservedJobs = new Set<JobRecordId>();
   private readonly inFlight = new Set<RunId>();
   private readonly pending = new Set<Promise<RunJob>>();
   private accepting = true;
-  private closing: Promise<void> | undefined;
 
-  constructor(registry: LocalJobRegistry, indexes: StateIndexStore, config: Config) {
+  constructor(
+    registry: LocalJobRegistry,
+    indexes: StateIndexStore,
+    config: Config,
+    waitMs: number,
+    receipts: Map<RunId, CompletionReceipt>,
+  ) {
     this.registry = registry;
     this.indexes = indexes;
     this.config = config;
-    if (config.pumpPollMs !== undefined) {
-      this.waitMs = config.pumpPollMs;
-      return;
-    }
-    // Cordis supplies resolved config; direct construction may still omit the parent default.
-    const parent = LocalJobRegistry.Config["~standard"].validate({});
-    const value: unknown = "value" in parent ? parent.value : undefined;
-    if (
-      typeof value !== "object" ||
-      value === null ||
-      !("pumpPollMs" in value) ||
-      typeof value.pumpPollMs !== "number"
-    ) {
-      throw new Error("Parent configuration did not provide a synchronous pumpPollMs");
-    }
-    this.waitMs = value.pumpPollMs;
+    this.waitMs = waitMs;
+    this.receipts = receipts;
   }
 
   isInFlight(id: RunId): boolean {
@@ -237,7 +230,9 @@ export class ShudSubmissions {
         dsh_job_ids: [...record.dsh_job_ids, registered],
       });
       await writeJson(recordPath, record);
-      if (!execution.startup) throw new Error("SHUD producer did not provide startup identity");
+      if (!execution.startup || !execution.value)
+        throw new Error("SHUD producer did not provide startup identity");
+      const lifecycle = execution.value.hooks;
       const startup = await execution.startup;
       if ("error" in startup) throw startup.error;
       record = RunJobSchema.parse({
@@ -248,9 +243,11 @@ export class ShudSubmissions {
         started_at: startup.identity.pid_started_at,
       });
       await writeJson(recordPath, record);
+      this.receipts.set(record.run_id, { lifecycle });
       this.inFlight.delete(record.run_id);
       return record;
     } catch (error) {
+      this.receipts.delete(reservation.run_id);
       try {
         if (execution.value) {
           await execution.value.abort();
@@ -292,14 +289,12 @@ export class ShudSubmissions {
     }
   }
 
-  /** One lifecycle effect drains accepted execution transactions before releasing index ownership. */
-  close(): Promise<void> {
-    if (this.closing) return this.closing;
+  stopAdmission(): void {
     this.accepting = false;
-    this.closing =
-      this.pending.size === 0
-        ? this.indexes.close()
-        : Promise.allSettled(this.pending).then(() => this.indexes.close());
-    return this.closing;
+  }
+
+  /** The common lifecycle owner closes indexes only after both submissions and polling drain. */
+  drain(): Promise<void> {
+    return Promise.allSettled(this.pending).then(() => undefined);
   }
 }

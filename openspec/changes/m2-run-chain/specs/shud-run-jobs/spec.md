@@ -291,6 +291,22 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** 提交已写出 `submitted` 与活动索引条目、包装进程已 spawn 但 `pid` 与 `running` 尚未写入时，轮询循环恰好运行一轮
 - **THEN** 该条目被跳过，不被结算为 `lost`；随后 `run-job.json` 为 `running`，作业正常结束并 collect
 
+#### Scenario: terminal persistence precedes producer completion
+- **WHEN** 在线结算的终态原子写入暂时失败
+- **THEN** producer done 尚未结束、原记录保持不变；下一轮成功写入终态后才结束当前登记，其他条目的结算不受影响
+
+#### Scenario: completion retry preserves durable terminal evidence
+- **WHEN** 终态已持久化但当前 producer 的完成回调失败
+- **THEN** 下一轮重试该完成动作，不改写已有终态的 finished_at 或文件修改时间
+
+#### Scenario: exit publication races liveness inspection
+- **WHEN** 首次读取 exit_code 不存在，而确认包装进程不再执行期间退出码文件原子发布
+- **THEN** 重新读取到的退出码决定结果，不把作业误判为 lost 或 cancelled
+
+#### Scenario: dispose drains an accepted settlement
+- **WHEN** 注册表释放时已有结算步骤处于文件写入中
+- **THEN** 立即停止新步骤与定时器，等待该步骤和已接受提交结束后才释放 stateDir 所有权，新实例不能与旧步骤并发写入
+
 #### Scenario: transient failure outlasting several polls
 - **WHEN** 投递的 flush 连续失败约 1 秒（远多于 3 个 `pumpPollMs`）后恢复
 - **THEN** `notify.attempts` 只增加 1，重试间隔后的下一次尝试成功，`notify.status` 为 `delivered`，不变为 `unreachable`

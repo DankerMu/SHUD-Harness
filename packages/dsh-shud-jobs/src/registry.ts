@@ -6,6 +6,7 @@ import type { RunId, RunJob } from "@shud-harness/dsh-shud-core";
 import type { SubmitShudRequest } from "./shud-input.ts";
 import { ShudSubmissions, type ShudProducer } from "./shud-submissions.ts";
 import { StateIndexStore } from "./state-indexes.ts";
+import { ShudPoll, type CompletionReceipt } from "./shud-poll.ts";
 
 export interface Config extends ParentConfig {
   /** Absolute writable directory for registry state; created when absent. */
@@ -18,6 +19,22 @@ type StandardProps = (typeof LocalJobRegistry.Config)["~standard"];
 
 function isConfigObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function resolvePumpPollMs(config: Config): number {
+  if (config.pumpPollMs !== undefined) return config.pumpPollMs;
+  // Cordis supplies resolved config; direct construction may omit the existing parent default.
+  const parent = LocalJobRegistry.Config["~standard"].validate({});
+  const value: unknown = "value" in parent ? parent.value : undefined;
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("pumpPollMs" in value) ||
+    typeof value.pumpPollMs !== "number"
+  ) {
+    throw new Error("Parent configuration did not provide a synchronous pumpPollMs");
+  }
+  return value.pumpPollMs;
 }
 
 function prepareStateDir(path: string): void {
@@ -51,6 +68,7 @@ export class ShudJobRegistry extends ParentRegistry {
   readonly indexes: StateIndexStore;
   readonly submitShud: (request: SubmitShudRequest, producer: ShudProducer) => Promise<RunJob>;
   readonly isSubmissionInFlight: (id: RunId) => boolean;
+  readonly pollOnce: () => Promise<void>;
 
   static Config: { "~standard": StandardProps } = {
     "~standard": {
@@ -90,18 +108,42 @@ export class ShudJobRegistry extends ParentRegistry {
   constructor(ctx: Context, config: Config) {
     assertExecutableFile(config.shudBin);
     prepareStateDir(config.stateDir);
+    const pumpPollMs = resolvePumpPollMs(config);
     const store = new StateIndexStore(config.stateDir);
+    let poll: ShudPoll | undefined;
     try {
       super(ctx, config);
       this.indexes = store;
       // Capture the actual instance here; scoped Cordis proxies must not choose registration scope.
-      const submissions = new ShudSubmissions(this, store, config);
+      const receipts = new Map<RunId, CompletionReceipt>();
+      const submissions = new ShudSubmissions(this, store, config, pumpPollMs, receipts);
+      const dispatcher = new ShudPoll(
+        store,
+        receipts,
+        (id) => submissions.isInFlight(id),
+        pumpPollMs,
+        (error) => ctx.logger.error(error),
+      );
+      poll = dispatcher;
       this.submitShud = (request, producer) => submissions.submit(request, producer);
       this.isSubmissionInFlight = (id) => submissions.isInFlight(id);
-      // One effect retains ownership through accepted submissions and all their rollback work.
-      ctx.effect(() => () => submissions.close());
+      this.pollOnce = () => dispatcher.pollOnce();
+      let closing: Promise<void> | undefined;
+      // Cordis disposes sibling effects concurrently; all SHUD ownership ordering lives here.
+      ctx.effect(() => () => {
+        dispatcher.stopAdmission();
+        submissions.stopAdmission();
+        return (closing ??= Promise.all([dispatcher.drain(), submissions.drain()]).then(() => {
+          receipts.clear();
+          return store.close();
+        }));
+      });
+      dispatcher.start();
     } catch (error) {
-      void store.close().catch((cleanup: unknown) => ctx.logger.error(cleanup));
+      poll?.stopAdmission();
+      void Promise.resolve(poll?.drain())
+        .then(() => store.close())
+        .catch((cleanup: unknown) => ctx.logger.error(cleanup));
       throw error;
     }
   }

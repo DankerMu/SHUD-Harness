@@ -8,9 +8,8 @@ export function isStartStamp(value: unknown): value is string {
   );
 }
 
-/** Raw OS identity for lock comparisons; the observed lstart resolution is seconds. */
-export function processStart(pid: number): string | null {
-  const result = childProcess.spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+function processOutput(pid: number, columns: string): string | null {
+  const result = childProcess.spawnSync("ps", ["-p", String(pid), "-o", columns], {
     encoding: "utf8",
     env: { ...process.env, LC_ALL: "C", LANG: "C", TZ: "UTC" },
   });
@@ -20,7 +19,7 @@ export function processStart(pid: number): string | null {
     });
   }
   const stamp = result.stdout.trim();
-  if (result.status === 0 && isStartStamp(stamp)) return stamp;
+  if (result.status === 0) return stamp;
   if (result.status === 1 && stamp === "") {
     try {
       process.kill(pid, 0);
@@ -31,6 +30,24 @@ export function processStart(pid: number): string | null {
   throw new Error(
     `Cannot determine process start identity for pid ${pid}: ps status ${result.status}`,
   );
+}
+
+/** Raw OS identity for lock/startup comparisons, including zombies; lstart resolution is seconds. */
+export function processStart(pid: number): string | null {
+  const stamp = processOutput(pid, "lstart=");
+  if (stamp === null || isStartStamp(stamp)) return stamp;
+  throw new Error(`Cannot determine process start identity for pid ${pid}: ps status 0`);
+}
+
+/** One native snapshot couples identity and execution state without hiding zombie start identities. */
+export function processExecutionState(pid: number): { stamp: string; state: string } | null {
+  const output = processOutput(pid, "lstart=,stat=");
+  if (output === null) return null;
+  const match = /^(.*\S)\s+(\S+)$/u.exec(output);
+  if (!match || !isStartStamp(match[1])) {
+    throw new Error(`Cannot determine process execution state for pid ${pid}: malformed ps output`);
+  }
+  return { stamp: match[1], state: match[2] };
 }
 
 /** Cleanup proof only: a zombie cannot execute further file I/O, unlike a live descendant. */

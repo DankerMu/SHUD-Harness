@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeIo from "node:fs/promises";
 import type * as NodeFs from "node:fs";
+import type { JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { RunIdSchema, RunJobSchema } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry } from "./index.ts";
 import { createHarness, producer as ordinaryProducer } from "./test-harness.ts";
@@ -233,6 +234,7 @@ test("late record failure awaits producer resource settlement before removing pa
         ...started,
         hooks: {
           done: release.waiting.then(() => started.hooks.done),
+          settle: (outcome: JobOutcome) => started.hooks.settle(outcome),
           cancel(reason) {
             cancelled.release();
             void release.waiting.then(() => started.hooks.cancel(reason));
@@ -378,6 +380,7 @@ test("producer cancellation failure preserves original failure and retains files
           ...started,
           hooks: {
             done: started.hooks.done,
+            settle: (outcome: JobOutcome) => started.hooks.settle(outcome),
             cancel(reason) {
               if (!refused) {
                 refused = true;

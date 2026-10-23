@@ -2,7 +2,7 @@ import * as childProcess from "node:child_process";
 import { closeSync, constants, openSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { JobHooks } from "@deepseek-ai/dsh-jobs";
+import type { JobHooks, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import type { RunJob } from "@shud-harness/dsh-shud-core";
 import { groupCanPerformIo, processStart } from "./process-identity.ts";
 
@@ -11,8 +11,13 @@ export interface ShudProcessIdentity {
   pid_started_at: string;
 }
 
+/** Caller-owned registration resources; completion is idempotent and releases resources before done. */
+export interface ShudLifecycle extends JobHooks {
+  settle(outcome: JobOutcome): void | Promise<void>;
+}
+
 export interface ShudExecution {
-  hooks: JobHooks;
+  hooks: ShudLifecycle;
   started: Promise<ShudProcessIdentity>;
   /** Rollback only: terminate this owned execution group and prove it can no longer perform I/O. */
   abort(): Promise<void>;
@@ -32,7 +37,7 @@ exit "$code"
 /** Starts only execution. Supplied hooks own registration settlement; exit_code owns model outcome. */
 export function startDetachedShud(
   prepared: RunJob,
-  hooks: JobHooks,
+  hooks: ShudLifecycle,
   pumpPollMs: number,
 ): ShudExecution {
   let resolveStarted!: (identity: ShudProcessIdentity) => void;

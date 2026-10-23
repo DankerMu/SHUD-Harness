@@ -2,9 +2,14 @@ import { closeSync, constants, openSync, readFileSync, writeSync } from "node:fs
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
-import type { JobHandle, JobHooks, JobOutcome } from "@deepseek-ai/dsh-jobs";
+import type { JobHandle, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
-import { ShudJobRegistry, startDetachedShud, type ShudExecution } from "../index.ts";
+import {
+  ShudJobRegistry,
+  startDetachedShud,
+  type ShudExecution,
+  type ShudLifecycle,
+} from "../index.ts";
 import { createHarness } from "../test-harness.ts";
 
 export async function writeInputTree(
@@ -22,9 +27,30 @@ export async function writeInputTree(
   return files;
 }
 
-export async function submissionFixture(parameter?: string) {
+export async function submissionFixture(
+  parameter?: string,
+  execution: "held" | "immediate" = "held",
+) {
   const h = await createHarness();
   try {
+    if (execution === "held") {
+      // Keep running/output assertions independent of the online settlement cadence, without log noise.
+      // The real TCP barrier can exit naturally; existing producer cleanup aborts its owned group.
+      const node = process.execPath.replaceAll("'", "'\\''");
+      await writeFile(
+        h.shudBin,
+        `#!/bin/sh\nexec '${node}' -e '
+        const fs = require("node:fs");
+        const server = require("node:net").createServer(socket => {
+          socket.end("released");
+          server.close(() => process.exit(0));
+        });
+        server.listen(0, "127.0.0.1", () => {
+          fs.writeFileSync("submission-barrier.json", JSON.stringify({ port: server.address().port }));
+        });
+      '\n`,
+      );
+    }
     const inputDir = join(h.root, "input");
     const originals = await writeInputTree(inputDir, parameter);
     const llm = {
@@ -91,7 +117,7 @@ export function registrationResource() {
     persistedAtStart,
     cancellations,
     finish,
-    open: (record: RunJob, handle: JobHandle): JobHooks => {
+    open: (record: RunJob, handle: JobHandle): ShudLifecycle => {
       if (handles.length > 0) throw new Error("test producer was registered more than once");
       prepared.push(RunJobSchema.parse(record));
       persistedAtStart.push(
@@ -106,6 +132,7 @@ export function registrationResource() {
       handles.push(handle);
       return {
         done,
+        settle: finish,
         cancel(reason) {
           cancellations.push(reason);
           finish({ status: "killed", detail: reason });
