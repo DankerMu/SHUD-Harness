@@ -2,6 +2,7 @@ import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeIo from "node:fs/promises";
+import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import { activeGroup, installFakeShud, terminateGroup } from "./detached-shud/test-harness.ts";
 import { barrier } from "./state-indexes/test-harness.ts";
@@ -21,6 +22,7 @@ import {
   seedTerminal,
 } from "./collect-shud/test-harness.ts";
 import { observeSignals, readDurable, readyRun } from "./kill-shud/test-harness.ts";
+import { installScriptFixture } from "./test-harness.ts";
 
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
@@ -188,6 +190,95 @@ test("public kill rejects a visible D7 registration before metadata publication 
   } finally {
     release.release();
     signals?.restore();
+    await h.close();
+  }
+}, 15000);
+
+test("durable natural completion refuses kill while supplied settlement still awaits", async () => {
+  const h = await pollFixture();
+  const releaseSettle = barrier();
+  let restoreSignals: (() => void) | undefined;
+  let restoreParent: (() => void) | undefined;
+  try {
+    const driver = `${h.shudBin}.cjs`;
+    await io.writeFile(
+      driver,
+      `const fs = require("node:fs");
+const cp = require("node:child_process");
+if (process.argv[2] === "--descendant") {
+  process.on("SIGTERM", () => fs.appendFileSync("sigterm-seen", "SIGTERM\\n"));
+  fs.writeFileSync("descendant.pid", String(process.pid));
+  require("node:net").createServer().listen(0, "127.0.0.1", () => process.send("ready"));
+} else {
+  const child = cp.spawn(process.execPath, [__filename, "--descendant"], { stdio: ["ignore", 1, 2, "ipc"] });
+  child.once("message", () => process.exit(0));
+}
+`,
+    );
+    const node = process.execPath.replaceAll("'", "'\\''");
+    const program = driver.replaceAll("'", "'\\''");
+    await installScriptFixture(h.shudBin, `#!/bin/sh\nexec '${node}' '${program}' "$@"\n`);
+    const { producer, pending } = h.start(async () => {
+      await releaseSettle.waiting;
+    });
+    const record = await pending;
+    if (record.pid === null) throw new Error("Real wrapper identity is absent");
+    const pid = record.pid;
+    const id = producer.registration.handles[0].id;
+    await expect.poll(() => producer.durableAtSettle.length, { timeout: 5000 }).toBe(1);
+    const terminal = readDurable(record.run_dir);
+    expect(typeof terminal.finished_at).toBe("string");
+    expect(terminal).toMatchObject({
+      status: "succeeded",
+      exit_code: 0,
+      cancel_requested_at: null,
+    });
+    expect(await io.readFile(join(record.run_dir, "exit_code"), "utf8")).toBe("0\n");
+    await producer.executions[0].waitForExit();
+    const descendant = Number(await io.readFile(join(record.run_dir, "descendant.pid"), "utf8"));
+    expect(activeGroup(pid)).toContain(descendant);
+    expect(activeGroup(pid)).not.toContain(pid);
+    expect(producer.completed).toEqual([]);
+    const path = join(record.run_dir, "run-job.json");
+    const bytes = await io.readFile(path);
+    const mtime = (await io.stat(path, { bigint: true })).mtimeNs;
+    const signals = observeSignals();
+    restoreSignals = signals.restore;
+    const parent = vi.spyOn(LocalJobRegistry.prototype, "kill");
+    restoreParent = () => parent.mockRestore();
+    expect(h.registry.get(id, h.ownerId).status).toBe("running");
+    expect(h.registry.kill(id, h.ownerId, "kill during supplied settlement")).toBe(
+      "already-finished",
+    );
+    expect(parent).not.toHaveBeenCalled();
+    expect(signals.events).toEqual([]);
+    expect(producer.registration.cancellations).toEqual([]);
+    expect(readDurable(record.run_dir)).toEqual(terminal);
+    expect(await io.readFile(path)).toEqual(bytes);
+    expect((await io.stat(path, { bigint: true })).mtimeNs).toBe(mtime);
+    expect(h.registry.get(id, h.ownerId).status).toBe("running");
+    expect(activeGroup(pid)).toContain(descendant);
+    await expectAbsent(join(record.run_dir, "sigterm-seen"));
+    releaseSettle.release();
+    await producer.doneObserved;
+    await expect.poll(() => h.registry.get(id, h.ownerId).status).toBe("completed");
+    expect(producer.completed).toHaveLength(1);
+    expect(producer.completed[0]).toEqual({
+      status: "completed",
+      detail: "SHUD exited with code 0",
+    });
+    expect(producer.durableAtSettle).toEqual([terminal]);
+    expect(producer.durableAtDone).toEqual([terminal]);
+    expect(producer.registration.cancellations).toEqual([]);
+    expect(parent).not.toHaveBeenCalled();
+    expect(signals.events).toEqual([]);
+    expect((await h.registry.collectShud(record.run_id)).exit_class).toBe("ok");
+    expect(readDurable(record.run_dir).cancel_requested_at).toBeNull();
+    expect(activeGroup(pid)).toContain(descendant);
+  } finally {
+    releaseSettle.release();
+    restoreParent?.();
+    restoreSignals?.();
     await h.close();
   }
 }, 15000);

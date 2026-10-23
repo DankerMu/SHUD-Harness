@@ -7,7 +7,7 @@ import type * as NodeIo from "node:fs/promises";
 import type * as NodeChild from "node:child_process";
 import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import { generateRunIdentifiers, RunJobSchema } from "@shud-harness/dsh-shud-core";
-import { activeGroup, terminateGroup } from "./detached-shud/test-harness.ts";
+import { activeGroup, observedStart, terminateGroup } from "./detached-shud/test-harness.ts";
 import { pollFixture, waitForOwnershipRelease } from "./poll-shud/test-harness.ts";
 import { barrier } from "./state-indexes/test-harness.ts";
 import { observeSignals, readDurable, readyRun } from "./kill-shud/test-harness.ts";
@@ -85,7 +85,7 @@ test.each(["rename", "json", "symlink", "job-id", "pid"] as const)(
             ...record,
             ...(kind === "job-id"
               ? { job_id: generateRunIdentifiers().job_id }
-              : { pid: pid + 1000000 }),
+              : { pid: process.pid, pid_started_at: observedStart(process.pid) }),
           }),
         );
       }
@@ -103,6 +103,7 @@ test.each(["rename", "json", "symlink", "job-id", "pid"] as const)(
         });
       }
       signals = observeSignals();
+      expect(h.registry.get(id, h.ownerId).status).toBe("running");
       expect(() => h.registry.kill(id, h.ownerId, "invalid intent request")).toThrow();
       expect(await io.readFile(path)).toEqual(bytes);
       expect((await io.stat(path, { bigint: true })).mtimeNs).toBe(mtime);

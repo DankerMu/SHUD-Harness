@@ -2,7 +2,13 @@ import type { JobHooks, JobId } from "@deepseek-ai/dsh-jobs";
 import { KILL_GRACE_PERIOD_MS, type RunId } from "@shud-harness/dsh-shud-core";
 import type { ShudExecution, ShudProcessIdentity } from "./detached-shud.ts";
 import type { IndexEntry } from "./state-indexes.ts";
-import { CollectFailure, collectFailure, updateRunJob, type RoutedRun } from "./shud-run-file.ts";
+import {
+  CollectFailure,
+  collectFailure,
+  isTerminal,
+  updateRunJob,
+  type RoutedRun,
+} from "./shud-run-file.ts";
 
 interface ManagedRun {
   id: JobId;
@@ -61,7 +67,7 @@ export class ShudCancellation {
     this.requireRegistration(id).identity = identity;
   }
 
-  request<T>(id: JobId, inSubmission: boolean, parentKill: () => T): T {
+  request<T>(id: JobId, inSubmission: boolean, parentKill: () => T): T | "already-finished" {
     if (!this.accepting) throw new Error("SHUD kill admission is closed");
     if (inSubmission) throw new Error("SHUD kill rejected: submission is in flight");
     const managed = this.requireRegistration(id);
@@ -82,6 +88,7 @@ export class ShudCancellation {
         if (current.status === "created" || current.status === "submitted") {
           throw new CollectFailure("kill request", "NOT_RUNNING");
         }
+        if (isTerminal(current.status)) return current;
         try {
           execution.isGroupActive();
         } catch (error) {
@@ -93,6 +100,7 @@ export class ShudCancellation {
       },
       managed.location,
     );
+    if (isTerminal(intent.status)) return "already-finished";
     if (intent.cancel_requested_at === null)
       throw new Error("Cancellation intent was not persisted");
     managed.markedAt = intent.cancel_requested_at;

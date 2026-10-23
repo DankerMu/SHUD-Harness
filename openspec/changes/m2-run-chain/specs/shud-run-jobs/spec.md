@@ -191,6 +191,10 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** 取消前的 RunJob 校验或原子持久化失败
 - **THEN** kill 明确失败，不向进程组发信号、不留下进程内 kill 标记，原有证据保持；未知、无权限、提交仍在进行或已关闭准入的请求同样不得越过各自边界写入或发信号
 
+#### Scenario: kill after durable settlement before parent completion
+- **WHEN** RunJob 已持久化终态，而异步 producer 完成仍在等待、父登记暂时仍显示 running 时 kill 到达
+- **THEN** 同步返回 `already-finished`，不改写 RunJob、不设置取消标记、不发信号、不调用父类 kill；仍为 running 且仅退出文件已存在的请求不受此边界影响
+
 ### Requirement: Host teardown keeps shud running
 宿主 teardown（SIGTERM 等正常退出、注册表重载，即父类调用 producer `cancel` 而该调用不是由 `kill` 覆写发起）时，注册表 SHALL NOT 终止包装进程，SHALL 在 producer `cancel` 内同步以 `failed` 结束该次 dsh 登记（不依赖已随注册表释放而停止的轮询循环，使父类等待结算的 teardown 不会挂起），`run-job.json` 的 `status` SHALL 保持不变，活动索引条目 SHALL 保留。无 `cancel_requested_at` 时 detail SHALL 说明 shud 在后台继续；已有 `cancel_requested_at`（kill 宽限期内 teardown）时 SHALL 先对包装进程组重发 SIGTERM，detail SHALL 说明 kill 进行中，其余终止与 `cancelled` 结算留给下次启动对账（R7/R8）。该结算 SHALL NOT 触发唤醒，也 SHALL NOT 生成 RunRecord。shud 作业无 owner，owner Agent 释放 SHALL NOT 影响它。
 

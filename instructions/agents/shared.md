@@ -123,6 +123,8 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 公开 `kill(id, caller, reason)` 保持同步返回 `requested | already-finished`，仅覆写本实例实际提交并关联的 SHUD 登记，不靠 `kind: shud` 字符串或扫描目录认领作业。先经父类公开 get 做访问与终结状态检查：未知、无权限、已完成或非托管登记保持父类语义；托管活作业在 D7 在途或关闭准入后明确拒绝，不写取消标记、不发信号。首次有效请求以同步原子写持久化 `cancel_requested_at`，再设一次性进程内标记并调用父类 kill；适配后的 producer cancel 消费该标记，对本次 spawn 拥有的负 pgid 发 SIGTERM，不调用原 supplied cancel 冒充完成。重复请求保留首次时间和期限，不重复发 SIGTERM；持久化失败不设标记、不发信号，父类抛错/返回 already-finished 清除未消费的临时标记，但不撤销已持久化意图。Web 固定理由、模型任意理由乃至 `"jobs service disposed"` 都不决定调用来源；未消费标记的 cancel 仍沿用调用方原有资源行为，完整 teardown 放手策略留给 #311。
 
+父类公开视图可在异步 `settle`/`done` 完成前滞后于持久终态；kill 以非让出式转换内新鲜且已通过身份/路径校验的 RunJob 为准。若状态已为 `succeeded`、`failed`、`cancelled` 或 `collected`，同步返回 `already-finished`，不写元数据、不设取消标记、不检查进程组、不发信号，也不调用父类 kill。仍为 `running` 时即使已有数值 `exit_code` 文件也照常接受取消请求，后续结算仍保留自然退出证据的优先级。
+
 既有轮询 cadence 负责取消升级，不新增定时器：按 core `KILL_GRACE_PERIOD_MS = 10000` 从首次请求计时，时钟回退不加速，到期且受控组仍可 I/O 才发 SIGKILL，每次信号前复核所有权。包装进程先退出而抗 SIGTERM 后代仍活着时不能提前结算或结束登记，必须继续跟踪该组至静止。静止后按严格退出文件 first-wins 结算：有效数值文件仍决定自然成功/失败，无文件且有最新取消意图才是 cancelled，非法/不可读文件仍是 failed；持久化终态和本地回收先于 producer 完成。
 
 取消写入、轮询终态及 collect 状态投影共用新鲜 RunJob 的同步校验/转换/原子发布边界：读取、身份/路径校验、字段转换与 `writeJsonSync` 之间不 await，保留本次转换不拥有的最新字段，不以旧快照覆盖取消意图或回退新终态；cancelled 与 lost 的选择也读取该边界内的新标记。提交期元数据仍由 D7 隔离；RunRecord 与重试记录保持原有异步发布、不可变结果及重试提交边界。
