@@ -7,11 +7,13 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { collectRepositoryRevision } from "./repository-revision.ts";
 
@@ -304,10 +306,15 @@ function shimGit(subcommand: string, action: string): void {
   const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
   const shimDir = join(root, "shim");
   mkdirSync(shimDir);
+  const shimPath = join(shimDir, "git");
   writeFileSync(
-    join(shimDir, "git"),
+    `${shimPath}.script`,
     `#!/bin/sh\nif [ "$5" = "${subcommand}" ]; then\n${action}\nfi\nexec "${realGit}" "$@"\n`,
-    { mode: 0o755 },
+  );
+  rmSync(shimPath, { force: true });
+  symlinkSync(
+    fileURLToPath(new URL("../../../../scripts/fixtures/exec-script.sh", import.meta.url)),
+    shimPath,
   );
   vi.stubEnv("PATH", `${shimDir}${delimiter}${process.env.PATH ?? ""}`);
 }

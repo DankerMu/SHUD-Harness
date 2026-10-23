@@ -1,8 +1,10 @@
 import * as io from "node:fs/promises";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import { inspect } from "node:util";
 import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeIo from "node:fs/promises";
+import type * as NodeFs from "node:fs";
 import {
   RunJobSchema,
   RunRecordSchema,
@@ -33,10 +35,16 @@ vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
   return { ...actual, rename: vi.fn(actual.rename), readdir: vi.fn(actual.readdir) };
 });
+vi.mock("node:fs", async (original) => {
+  const actual = await original<typeof NodeFs>();
+  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
+const actualFs = await vi.importActual<typeof NodeFs>("node:fs");
 const actualIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
 beforeEach(() => {
   vi.mocked(io.rename).mockReset().mockImplementation(actualIo.rename);
   vi.mocked(io.readdir).mockReset().mockImplementation(actualIo.readdir);
+  vi.mocked(fs.renameSync).mockReset().mockImplementation(actualFs.renameSync);
 });
 
 async function enteredBeforeCompletion(
@@ -113,11 +121,14 @@ test("RunRecord publication is the commit boundary and a failed collected projec
     vi.mocked(io.rename).mockImplementation(async (source, target) => {
       if (target === recordPath) publications++;
       if (typeof target === "string" && target.endsWith("/collect-error.json")) ledgerWrites++;
+      await actualIo.rename(source, target);
+    });
+    vi.mocked(fs.renameSync).mockImplementation((source, target) => {
       if (target === jobPath) {
-        const candidate = RunJobSchema.parse(JSON.parse(await actualIo.readFile(source, "utf8")));
+        const candidate = RunJobSchema.parse(JSON.parse(actualFs.readFileSync(source, "utf8")));
         if (candidate.status === "collected") {
           expect(
-            RunRecordSchema.parse(JSON.parse(await actualIo.readFile(recordPath, "utf8"))).run_id,
+            RunRecordSchema.parse(JSON.parse(actualFs.readFileSync(recordPath, "utf8"))).run_id,
           ).toBe(candidate.run_id);
           if (blockProjection)
             throw Object.assign(new Error("injected collected projection failure"), {
@@ -125,7 +136,7 @@ test("RunRecord publication is the commit boundary and a failed collected projec
             });
         }
       }
-      await actualIo.rename(source, target);
+      actualFs.renameSync(source, target);
     });
     vi.mocked(io.readdir).mockImplementation(async (...args) => {
       if (forbidScan && args[0] === root)
@@ -181,15 +192,18 @@ test.each(["record-publication", "error-ledger", "failure-status"] as const)(
           ) {
             throw Object.assign(new Error("PRIVATE_WRITE_FAILURE_PAYLOAD_308"), { code: "EIO" });
           }
-          if (phase === "failure-status" && target.endsWith("/run-job.json")) {
-            const record = RunJobSchema.parse(JSON.parse(await actualIo.readFile(source, "utf8")));
-            if (record.status === "failed")
-              throw Object.assign(new Error("PRIVATE_STATUS_FAILURE_PAYLOAD_308"), {
-                code: "EACCES",
-              });
-          }
         }
         await actualIo.rename(source, target);
+      });
+      vi.mocked(fs.renameSync).mockImplementation((source, target) => {
+        if (phase === "failure-status" && targetRun && target === join(targetRun, "run-job.json")) {
+          const record = RunJobSchema.parse(JSON.parse(actualFs.readFileSync(source, "utf8")));
+          if (record.status === "failed")
+            throw Object.assign(new Error("PRIVATE_STATUS_FAILURE_PAYLOAD_308"), {
+              code: "EACCES",
+            });
+        }
+        actualFs.renameSync(source, target);
       });
       const job = await seedTerminal(
         h,
@@ -221,6 +235,7 @@ test.each(["record-publication", "error-ledger", "failure-status"] as const)(
       expect(h.errors.join("\n")).not.toContain("PRIVATE_STATUS_FAILURE_PAYLOAD_308");
     } finally {
       vi.mocked(io.rename).mockImplementation(actualIo.rename);
+      vi.mocked(fs.renameSync).mockImplementation(actualFs.renameSync);
       await h.close();
     }
   },

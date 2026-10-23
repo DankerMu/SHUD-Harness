@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry } from "./index.ts";
 import { producer } from "./test-harness.ts";
+import { activeGroup } from "./detached-shud/test-harness.ts";
 import {
   actualRegistry,
   injectedRegistry,
@@ -154,9 +155,17 @@ describe("SHUD execution transaction through the actual registry", () => {
           .chunks.map((chunk) => chunk.text)
           .join(""),
       ).toBe("actual file output\n");
-      scoped.kill(id, h.ownerId, "test cancellation");
-      expect((await scoped.wait(id, 1000, h.ownerId)).status).toBe("killed");
-      expect(execution.cancellations).toContain("test cancellation");
+      expect(scoped.kill(id, h.ownerId, "test cancellation")).toBe("requested");
+      const cancelled = RunJobSchema.parse(
+        JSON.parse(await readFile(join(record.run_dir, "run-job.json"), "utf8")),
+      );
+      expect(cancelled.cancel_requested_at).toEqual(expect.any(String));
+      const outcome = await scoped.wait(id, 1000, h.ownerId);
+      expect(outcome.status).toBe("killed");
+      expect(outcome.detail).toContain("test cancellation");
+      expect(execution.cancellations).toEqual([]);
+      if (record.pid === null) throw new Error("Submitted execution has no wrapper identity");
+      expect(activeGroup(record.pid)).toEqual([]);
       await controller.dispose();
       expect(() => h.ctx.jobs.start(producer().spec)).toThrow(
         "no job controller serves this agent",

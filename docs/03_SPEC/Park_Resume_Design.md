@@ -254,6 +254,8 @@ workspace/tasks/<task_id>/locks/resume.lock   # resume 是 task 级动作，保�
 
 M2 不使用上面的后续 TaskCard/job 级锁布局：注册表在配置的 `stateDir` 持有 `lock`（pid + 进程启动时间）；同实例索引修改串行化，同条目同时至多一个轮询步骤在途，已有 RunRecord 不重写。存活持有者使第二实例激活失败，陈旧锁才可接管；详见 design D2/D7。
 
+当前实现（#309）：注册表对实际提交关联的 SHUD 登记提供同步公开 kill，先持久化取消意图再向受控进程组 SIGTERM；重复请求保留首次时间，既有轮询按 core 10 秒宽限期升级 SIGKILL，不新增定时器。包装进程先退出但后代仍可 I/O 时继续等待/升级，组静止后按退出文件 first-wins 结算，再完成本地登记。轮询和 collect 状态投影使用新鲜 RunJob 的同步原子发布，不覆盖并发取消标记。非托管登记保持父类行为，未标记 cancel 仍使用调用方原有资源回调；#311 teardown 放手策略、#310 取消意图重启接续、#312 接管、#313 唤醒/索引迁移及工具入口尚未落地。此实现状态不代表 PI Web 验收。
+
 ## 9. 服务重启恢复
 
 M2 注册表 apply 时先取得 `stateDir/lock`，读取 `active.json`，按索引中的绝对运行目录读取 `run-job.json`、`wrapper.pid`、`exit_code` 与结果文件。运行记录不从 `ctx.storage` 读取，也不扫描后续 TaskCard 工作区布局。

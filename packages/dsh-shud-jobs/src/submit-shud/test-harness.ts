@@ -10,7 +10,7 @@ import {
   type ShudExecution,
   type ShudLifecycle,
 } from "../index.ts";
-import { createHarness } from "../test-harness.ts";
+import { createHarness, installScriptFixture } from "../test-harness.ts";
 
 export async function writeInputTree(
   inputDir: string,
@@ -37,7 +37,7 @@ export async function submissionFixture(
       // Keep running/output assertions independent of the online settlement cadence, without log noise.
       // The real TCP barrier can exit naturally; existing producer cleanup aborts its owned group.
       const node = process.execPath.replaceAll("'", "'\\''");
-      await writeFile(
+      await installScriptFixture(
         h.shudBin,
         `#!/bin/sh\nexec '${node}' -e '
         const fs = require("node:fs");

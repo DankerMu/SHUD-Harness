@@ -9,10 +9,10 @@ import {
 } from "@shud-harness/dsh-shud-core";
 import type { ShudLifecycle } from "./detached-shud.ts";
 import { processExecutionState } from "./process-identity.ts";
-import { writeJson } from "./state-files.ts";
 import type { IndexEntry, StateIndexStore } from "./state-indexes.ts";
 import { collectRun } from "./shud-collect.ts";
 import { readExit } from "./shud-exit.ts";
+import type { ShudCancellation } from "./shud-cancellation.ts";
 import {
   CollectFailure,
   collectFailure,
@@ -21,7 +21,7 @@ import {
   readRunFile,
   regularFile,
   validationFailure,
-  verifyRunFile,
+  updateRunJob,
   type RoutedRun,
 } from "./shud-run-file.ts";
 
@@ -59,6 +59,7 @@ export class ShudPoll {
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly indexes: StateIndexStore;
   private readonly receipts: Map<RunId, CompletionReceipt>;
+  private readonly cancellations: ShudCancellation;
   private readonly inSubmission: (id: RunId) => boolean;
   private readonly pumpPollMs: number;
   private readonly report: (error: Error) => void;
@@ -66,12 +67,14 @@ export class ShudPoll {
   constructor(
     indexes: StateIndexStore,
     receipts: Map<RunId, CompletionReceipt>,
+    cancellations: ShudCancellation,
     inSubmission: (id: RunId) => boolean,
     pumpPollMs: number,
     report: (error: Error) => void,
   ) {
     this.indexes = indexes;
     this.receipts = receipts;
+    this.cancellations = cancellations;
     this.inSubmission = inSubmission;
     this.pumpPollMs = pumpPollMs;
     this.report = report;
@@ -171,6 +174,7 @@ export class ShudPoll {
     // Running settlement still requires the complete schema before any mutation.
     const record = RunJobSchema.parse(routed.raw);
     const path = join(entry.run_dir, "run-job.json");
+    if (!this.cancellations.advance(entry.run_id)) return;
 
     let evidence = await readExit(record.run_dir);
     if (!evidence) {
@@ -188,42 +192,46 @@ export class ShudPoll {
       evidence = await readExit(record.run_dir);
     }
 
-    let status: "succeeded" | "failed" | "cancelled";
-    let code: number | null = null;
-    let outcome: JobOutcome;
-    if (evidence && evidence.code !== undefined) {
-      code = evidence.code;
-      status = code === 0 ? "succeeded" : "failed";
-      outcome = {
-        status: code === 0 ? "completed" : "failed",
-        detail: `SHUD exited with code ${code}`,
-      };
-    } else if (evidence?.error) {
-      status = "failed";
-      outcome = { status: "failed", detail: evidence.error.message };
-      this.report(evidence.error);
-    } else if (record.cancel_requested_at !== null) {
-      status = "cancelled";
-      outcome = { status: "killed", detail: "SHUD cancelled without an exit code" };
-    } else {
-      status = "failed";
-      outcome = {
-        status: "failed",
-        detail: "SHUD lost: wrapper no longer executing and exit_code is absent",
-      };
-    }
-    const terminal = RunJobSchema.parse({
-      ...record,
-      status,
-      exit_code: code,
-      finished_at: new Date().toISOString(),
-    });
-    verifyRunFile(entry, routed);
     await regularFile(path, "run metadata");
-    await writeJson(path, terminal);
+    let outcome: JobOutcome | undefined;
+    const terminal = updateRunJob(
+      entry,
+      (current) => {
+        if (current.status !== "running") return current;
+        // A synchronous kill may have arrived during any awaited read above.
+        // Both quiescence and cancelled-versus-lost use the current cancellation state.
+        if (!this.cancellations.advance(entry.run_id)) return current;
+        let status: "succeeded" | "failed" | "cancelled";
+        let code: number | null = null;
+        if (evidence && evidence.code !== undefined) {
+          code = evidence.code;
+          status = code === 0 ? "succeeded" : "failed";
+          outcome = {
+            status: code === 0 ? "completed" : "failed",
+            detail: `SHUD exited with code ${code}`,
+          };
+        } else if (evidence?.error) {
+          status = "failed";
+          outcome = { status: "failed", detail: evidence.error.message };
+        } else if (current.cancel_requested_at !== null) {
+          status = "cancelled";
+          outcome = { status: "killed", detail: "SHUD cancelled without an exit code" };
+        } else {
+          status = "failed";
+          outcome = {
+            status: "failed",
+            detail: "SHUD lost: wrapper no longer executing and exit_code is absent",
+          };
+        }
+        return { ...current, status, exit_code: code, finished_at: new Date().toISOString() };
+      },
+      routed,
+    );
+    if (terminal.status === "running") return;
+    if (outcome && evidence?.error) this.report(evidence.error);
     if (receipt) {
-      receipt.outcome = outcome;
-      await this.complete(record.run_id, receipt, outcome);
+      receipt.outcome = outcome ?? receipt.outcome ?? terminalOutcome(terminal);
+      await this.complete(record.run_id, receipt, receipt.outcome);
     }
   }
 
@@ -232,9 +240,14 @@ export class ShudPoll {
     receipt: CompletionReceipt,
     outcome: JobOutcome,
   ): Promise<void> {
+    if (!this.cancellations.advance(runId)) {
+      throw new Error("SHUD cancellation is waiting for owned group quiescence");
+    }
+    await this.cancellations.waitForExit(runId);
     await receipt.lifecycle.settle(outcome);
     await receipt.lifecycle.done;
     this.receipts.delete(runId);
+    this.cancellations.release(runId);
   }
 
   stopAdmission(): void {

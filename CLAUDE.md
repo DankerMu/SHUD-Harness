@@ -111,15 +111,15 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 `profile:install` 要求 `SHUD_BIN` 是绝对路径、可执行普通文件；缺失或无效时在创建/修改 profile 前失败，不回退默认路径。安装器先以 `web` 模板创建 `shud`，再 `link:` 安装本仓库 bundle：禁用旧 `jobs` 行，并插入 `shud-jobs`（不是按 id 改 name）。安装器仅拥有用户 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 的唯一 `shud-jobs` 项，配置 `shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`；raw 覆写与其它字节保持不变，相同配置重装不改文件。
 
-`shud-jobs` 在 apply 时取得 `stateDir` 的排他所有权，维护 `active.json`/`completed.json`：索引修改在实例内串行执行，以临时文件 + rename 原子替换，先写 completed 再移出 active。内部 `stateDir/.lock-guard` 是永久协调 inode，不可删除或改名；`lock` 保存 `{pid, pid_started_at}`。唯一组合生命周期 effect 开始释放时同步停止轮询定时器、关闭轮询、collect 与提交准入，并行等待已接受的结算/收集步骤（含排队的直接 collect、异步完成回调）与提交/回滚事务结束，再关闭索引修改准入、等待索引写入完成，最后删除锁元数据并释放内核锁；索引保留。停止不等待脱离包装进程自然结束，也不以提交在途集合清空为条件。第二个持有者被拒绝；已发布持有者的诊断包含 stateDir 与 pid。
+`shud-jobs` 在 apply 时取得 `stateDir` 的排他所有权，维护 `active.json`/`completed.json`：索引修改在实例内串行执行，以临时文件 + rename 原子替换，先写 completed 再移出 active。内部 `stateDir/.lock-guard` 是永久协调 inode，不可删除或改名；`lock` 保存 `{pid, pid_started_at}`。唯一组合生命周期 effect 开始释放时同步停止轮询定时器、关闭轮询、collect、托管 SHUD kill 与提交准入，并行等待已接受的结算/收集步骤（含排队的直接 collect、异步完成回调）与提交/回滚事务结束，再关闭索引修改准入、等待索引写入完成，最后删除锁元数据并释放内核锁；索引保留。父类 disposer 并发运行，状态解锁不能提前清除仍可能收到父类 cancel 的托管登记分类；正常完成/成功回滚会释放对应关联，关闭实例的剩余关联随实例回收。停止不等待脱离包装进程自然结束，也不以提交在途集合清空为条件。第二个持有者被拒绝；已发布持有者的诊断包含 stateDir 与 pid。
 
 运行前提：Darwin 的 `/usr/bin/lockf` 或 Linux 的 `/usr/bin/flock`，以及用于进程身份检查的 `ps`（Linux slim 环境需安装 `procps`）。检查固定 locale/时区；不支持的平台、缺失工具或无法确定的进程检查均明确失败，不作不安全回退。锁和包装进程共用规范化的 `ps lstart` 检查：锁保留原始启动戳，RunJob 转为 ISO UTC；实际分辨率仍是秒级。锁持有者 PID 复用但报告戳相同会保守拒绝，不声称能区分所有 PID 代次。
 
-注册表已提供 `submitShud(request, producer)`：请求显式携带会话 cwd、输入路径、project、owner_session 与模型元数据。必需的 `producer(prepared, handle, pumpPollMs)` 返回 `ShudExecution`；可调用已导出的 `startDetachedShud(prepared, hooks, pumpPollMs)`，其中 hooks 是调用方显式提供的 `ShudLifecycle` 登记生命周期依赖，没有默认空实现。`pumpPollMs` 由注册表统一解析父类配置并同时供给提交、执行组件与轮询，不新增默认值。提交按物理路径解析 cwd/输入根（保留符号链接与 `..` 的实际遍历语义）；已存在的 runs 根先以 lstat 拒绝链接/非目录，再以 native realpath 解析实际拼写（包括文件系统大小写别名），用于包含关系检查和运行目录记录；尚不存在的根仍从物理 cwd 派生。完整复制普通文件/目录，只在副本改写可选的 END；拒绝内部链接/特殊文件、符号链接运行目录，以及运行根或 stateDir 位于输入树内的布局。持久化顺序为 created → 活动索引 → submitted（dsh id 为 null）→ 瞬时全局控制器下的无 owner 登记 → 写回 dsh id/历史 → 等待真实启动身份 → 原子写 running、pid、pid_started_at、started_at，随后登记本地完成回执，最后清除进程内在途标记并返回校验过的 `running` RunJob；stdout.log 经父类输出控制提供增量内容，控制器不常驻。
+注册表已提供 `submitShud(request, producer)`：请求显式携带会话 cwd、输入路径、project、owner_session 与模型元数据。必需的 `producer(prepared, handle, pumpPollMs)` 返回 `ShudExecution`；可调用已导出的 `startDetachedShud(prepared, hooks, pumpPollMs)`，其中 hooks 是调用方显式提供的 `ShudLifecycle` 登记生命周期依赖，没有默认空实现。`pumpPollMs` 由注册表统一解析父类配置并同时供给提交、执行组件与轮询，不新增默认值。提交按物理路径解析 cwd/输入根（保留符号链接与 `..` 的实际遍历语义）；已存在的 runs 根先以 lstat 拒绝链接/非目录，再以 native realpath 解析实际拼写（包括文件系统大小写别名），用于包含关系检查和运行目录记录；尚不存在的根仍从物理 cwd 派生。完整复制普通文件/目录，只在副本改写可选的 END；拒绝内部链接/特殊文件、符号链接运行目录，以及运行根或 stateDir 位于输入树内的布局。持久化顺序为 created → 活动索引 → submitted（dsh id 为 null）→ 瞬时全局控制器下的无 owner 登记 → 写回 dsh id/历史 → 等待真实启动身份 → 原子写 running、pid、pid_started_at、started_at，随后登记本地完成回执，最后清除进程内在途标记并返回校验过的 `running` RunJob。真实登记回调在调用 producer 前关联 dsh id 与运行，再附加实际执行能力；启动失败时直到进程、登记与自有文件/索引回滚成功，才同步释放该关联并清除 D7，失败回滚仍拒绝 kill。stdout.log 经父类输出控制提供增量内容，控制器不常驻。
 
 实际执行使用 detached `/bin/sh` 包装进程，以位置参数 `"$@"` 传递命令，stdout/stderr 追加到运行目录日志，宿主关闭自身日志描述符并 unref 子进程。包装进程须先成功原子发布 `wrapper.pid` 才能启动 SHUD；自然结束后原子发布 `exit_code`，包括非零退出码。包装进程可在宿主 SIGKILL 后继续运行；`exit_code` 是求解器退出证据，子进程事件不直接结算 RunJob。
 
-`ShudExecution` 包含 `hooks`、真实身份的 `started` promise 与回滚专用 `abort()`。`ShudLifecycle` 在 `JobHooks` 上增加幂等 `settle(JobOutcome): void | Promise<void>`：调用方负责在 `done` 结束前释放真实登记资源；正常完成不调用 `cancel` 冒充结算。回滚先证明执行组已不能继续 I/O 并完成本地子进程回收，再取消/等待登记资源、移除父类登记与自有索引/目录，并移除本地完成回执；`hooks.done` 本身不是进程终止证据。原生未知非 Z 状态仍按可能 I/O 处理；权限拒绝仅在重新检查明确静止后才可继续，否则保留运行路径与错误原因。已回收的原包装进程 PID 再次出现时拒绝向该组发信号，但不声称能识别替代组的 leader 也已退出的全部历史代次；非 SHUD 父类生命周期不改动。
+`ShudExecution` 包含 `hooks`、真实身份的 `started` promise、受控组能力 `isGroupActive()` / `signalGroup("SIGTERM" | "SIGKILL")` / `waitForExit()` 与回滚专用 `abort()`；显式取消和回滚共用所有权检查。`ShudLifecycle` 在 `JobHooks` 上增加幂等 `settle(JobOutcome): void | Promise<void>`：调用方负责在 `done` 结束前释放真实登记资源；正常完成不调用 `cancel` 冒充结算。回滚先证明执行组已不能继续 I/O 并完成本地子进程回收，再取消/等待登记资源、移除父类登记与自有索引/目录，并移除本地完成回执；`hooks.done` 本身不是进程终止证据。尚未回收的原生子进程仍占有其 pid，即使启动时的身份查询失败也可据此回滚，不重复依赖失败的启动戳查询。原生未知非 Z 状态仍按可能 I/O 处理，无法确定的组检查拒绝继续；权限拒绝仅在重新检查明确静止后才可继续，否则保留运行路径与错误原因。已回收的原包装进程 PID 再次出现时拒绝向该组发信号，但不声称能识别替代组的 leader 也已退出的全部历史代次；非 SHUD 父类生命周期不改动。
 
 注册表按父类 `pumpPollMs` 运行一个轮询调度器，公开 `pollOnce()` 与定时器共享同一入口和逐条目排他状态：手动 tick 等待已在途的该条目步骤，定时器不重复启动它，不同条目可独立推进。关闭准入后的 `pollOnce()` 与 `collectShud()` 明确拒绝，不再读取记录。调度先跳过本进程提交在途 id，再读取并校验 RunJob 与索引的 run_id/job_id/run_dir 一致；已通知终结、collected 及前进程遗留的 created/submitted 条目不在自动路径推进。没有当前 dsh 登记的 running 条目仍可结算。每个 tick 只推进一个阶段：结算或重试本地完成回执后返回，后续 tick 才收集终态条目。
 
@@ -127,13 +127,21 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 结算先原子写 `run-job.json` 的终态、finished_at、exit_code，再调用本地 `settle` 并等待 `done`；succeeded/cancelled/failed 分别映射到父类 completed/killed/failed。持久化失败不完成登记；完成回调失败保留回执，在后续正常 tick 重试，不改写既有终态、finished_at 或文件修改时间。回执完成前不收集；后续 collect 可以将终态投影为 `collected`。结算与 collect 均不迁移活动索引，也不产生唤醒产物。
 
+公开 `kill(id, caller, reason)` 保持同步返回 `requested | already-finished`，仅覆写本实例实际提交并关联的 SHUD 登记，不靠 `kind: shud` 字符串或扫描目录认领作业。先经父类公开 get 做访问与终结状态检查：未知、无权限、已完成或非托管登记保持父类语义；托管活作业在 D7 在途或关闭准入后明确拒绝，不写取消标记、不发信号。首次有效请求以同步原子写持久化 `cancel_requested_at`，再设一次性进程内标记并调用父类 kill；适配后的 producer cancel 消费该标记，对本次 spawn 拥有的负 pgid 发 SIGTERM，不调用原 supplied cancel 冒充完成。重复请求保留首次时间和期限，不重复发 SIGTERM；持久化失败不设标记、不发信号，父类抛错/返回 already-finished 清除未消费的临时标记，但不撤销已持久化意图。Web 固定理由、模型任意理由乃至 `"jobs service disposed"` 都不决定调用来源；未消费标记的 cancel 仍沿用调用方原有资源行为，完整 teardown 放手策略留给 #311。
+
+父类公开视图可在异步 `settle`/`done` 完成前滞后于持久终态；kill 以非让出式转换内新鲜且已通过身份/路径校验的 RunJob 为准。若状态已为 `succeeded`、`failed`、`cancelled` 或 `collected`，同步返回 `already-finished`，不写元数据、不设取消标记、不检查进程组、不发信号，也不调用父类 kill。仍为 `running` 时即使已有数值 `exit_code` 文件也照常接受取消请求，后续结算仍保留自然退出证据的优先级。
+
+既有轮询 cadence 负责取消升级，不新增定时器：按 core `KILL_GRACE_PERIOD_MS = 10000` 从首次请求计时，时钟回退不加速，到期且受控组仍可 I/O 才发 SIGKILL，每次信号前复核所有权。包装进程先退出而抗 SIGTERM 后代仍活着时不能提前结算或结束登记，必须继续跟踪该组至静止。静止后按严格退出文件 first-wins 结算：有效数值文件仍决定自然成功/失败，无文件且有最新取消意图才是 cancelled，非法/不可读文件仍是 failed；持久化终态和本地回收先于 producer 完成。
+
+取消写入、轮询终态及 collect 状态投影共用新鲜 RunJob 的同步校验/转换/原子发布边界：读取、身份/路径校验、字段转换与 `writeJsonSync` 之间不 await，保留本次转换不拥有的最新字段，不以旧快照覆盖取消意图或回退新终态；cancelled 与 lost 的选择也读取该边界内的新标记。提交期元数据仍由 D7 隔离；RunRecord 与重试记录保持原有异步发布、不可变结果及重试提交边界。
+
 注册表公开后端 API `collectShud(id: RunId | JobRecordId): Promise<RunRecord>`，可查活动或完成索引；它与自动 collect 使用同一实现和逐条目队列。直接调用等待该条目已接受的工作及未完成回执；失败调用不阻塞后续请求。未知 id、非终态与本进程提交在途条目拒绝且不创建收集产物。当前没有挂载 `shud_collect` 工具。
 
 收集先验证运行路径与身份，再校验终态完整字段。缓存的数值 exit_code 必须有相同的有效退出文件；缓存为 null 时，有效文件可恢复退出分类，仅文件真正缺失才按取消状态/标记判 cancelled，否则 lost。不可读、非法或不一致的退出证据明确失败，不降级为 lost；退出证据失败将 RunJob 置为 `failed`，包括原 succeeded/cancelled，保留 exit_code、取消标记、身份与时间等其它字段。其它收集失败保留终态；无法合法重写的损坏记录保留原字节。日志只记录路径，输出仅扫描 `output/<project>.out/` 的元数据，生成排序的 POSIX 相对路径及实际字节数，不读取日志/产物内容；初始输出目录真正不存在可为空清单，链接、特殊文件、不可读目录或扫描中消失均失败。RunRecord 保留引用、argv 与模型来源；时间齐全时计算 wall_seconds，否则为 null，负时长拒绝；数值健康四项与 peak_memory_mb 保持 null。
 
 经 core schema 校验后原子发布 `run-record.json`，再原子投影 RunJob 为 `collected`。有效且身份匹配的已有 RunRecord 优先原样返回，字节与 mtime 不变；结果发布是提交边界，后续状态投影失败只重试投影，不重新扫描、改写结果或增加生成失败次数。生成失败写本地 `collect-error.json`（严格的 `attempts`、`last_error`、`at`）；诊断仅含受控阶段、字段路径或 errno，不持久化/记录原始异常载荷。损坏的重试记录保留且不重置，并阻止新的生成尝试。自动路径首次及时尝试，之后沿用 core 常量 `COLLECT_RETRY_INTERVAL_MS = 10000` 与 `MAX_COLLECT_ATTEMPTS = 3`，按持久时间间隔重试，时钟回退不加速；直接 collect 可越过间隔/次数上限，但不能绕过损坏记录重新生成结果。成功重试保留既有错误记录字节与 mtime。
 
-本切片尚未接入用户 kill 覆写/分类（#309）、启动对账（#310）、完整 detach/清理策略（#311）、接管登记（#312）、唤醒投递及完成索引迁移（#313）或工具入口，不声称完整跨重启恢复。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，不能用其结果替代注册表包装进程、在线结算及收集的运行证据。
+本切片尚未接入启动对账（#310，含取消意图的重启接续）、完整 detach/清理策略（#311）、接管登记（#312）、唤醒投递及完成索引迁移（#313）或工具入口，不声称完整跨重启恢复，也不将公开 API 的 Web 理由探针视为 PI Web 验收。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，不能用其结果替代注册表包装进程、在线结算、取消及收集的运行证据。
 
 安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --no-open --port <p>`（profile 已选择 Web 应用，不再传 `web` 位置参数）。headless 任务改用同一 bundle 的独立 profile，并同样保留 `SHUD_BIN`：
 

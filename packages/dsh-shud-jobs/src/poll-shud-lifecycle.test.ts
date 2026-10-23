@@ -1,7 +1,9 @@
 import * as io from "node:fs/promises";
+import * as fs from "node:fs";
 import { join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeIo from "node:fs/promises";
+import type * as NodeFs from "node:fs";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry } from "./index.ts";
 import { createHarness } from "./test-harness.ts";
@@ -19,12 +21,24 @@ import {
 
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
-  return { ...actual, rename: vi.fn(actual.rename), readFile: vi.fn(actual.readFile) };
+  return {
+    ...actual,
+    rename: vi.fn(actual.rename),
+    readFile: vi.fn(actual.readFile),
+    lstat: vi.fn(actual.lstat),
+  };
 });
+vi.mock("node:fs", async (original) => {
+  const actual = await original<typeof NodeFs>();
+  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
+const actualFs = await vi.importActual<typeof NodeFs>("node:fs");
 const actualIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
 beforeEach(() => {
   vi.mocked(io.rename).mockReset().mockImplementation(actualIo.rename);
   vi.mocked(io.readFile).mockReset().mockImplementation(actualIo.readFile);
+  vi.mocked(io.lstat).mockReset().mockImplementation(actualIo.lstat);
+  vi.mocked(fs.renameSync).mockReset().mockImplementation(actualFs.renameSync);
 });
 
 function tick(registry: ShudJobRegistry): Promise<void> {
@@ -103,16 +117,25 @@ test("overlapping manual and timer ticks single-flight one held entry while anot
     const first = h.start();
     const second = h.start();
     const [record, healthy] = await Promise.all([first.pending, second.pending]);
-    vi.mocked(io.rename).mockImplementation(async (source, target) => {
-      if (target === join(record.run_dir, "run-job.json")) {
-        const candidate = RunJobSchema.parse(JSON.parse(await actualIo.readFile(source, "utf8")));
-        if (candidate.status === "succeeded") {
-          terminalWrites++;
-          held.release();
-          await release.waiting;
-        }
+    let heldOnce = false;
+    vi.mocked(io.lstat).mockImplementation(async (...args) => {
+      if (
+        args[0] === join(record.run_dir, "run-job.json") &&
+        !heldOnce &&
+        actualFs.existsSync(join(record.run_dir, "exit_code"))
+      ) {
+        heldOnce = true;
+        held.release();
+        await release.waiting;
       }
-      await actualIo.rename(source, target);
+      return actualIo.lstat(...args);
+    });
+    vi.mocked(fs.renameSync).mockImplementation((source, target) => {
+      if (target === join(record.run_dir, "run-job.json")) {
+        const candidate = RunJobSchema.parse(JSON.parse(actualFs.readFileSync(source, "utf8")));
+        if (candidate.status === "succeeded") terminalWrites++;
+      }
+      actualFs.renameSync(source, target);
     });
     await releaseRun(record);
     ticks.push(tick(h.registry));
@@ -123,7 +146,7 @@ test("overlapping manual and timer ticks single-flight one held entry while anot
     expect(second.producer.durableAtSettle[0].status).toBe("succeeded");
     expect(first.producer.completed).toEqual([]);
     expect((await readRecord(record.run_dir)).status).toBe("running");
-    expect(terminalWrites).toBe(1);
+    expect(terminalWrites).toBe(0);
     release.release();
     await Promise.all(ticks);
     await expect.poll(() => first.producer.completed.length).toBe(1);
@@ -144,19 +167,21 @@ test("failed terminal persistence preserves done and retries successfully withou
     const [record, other] = await Promise.all([first.pending, healthy.pending]);
     const path = join(record.run_dir, "run-job.json");
     const original = await io.readFile(path);
-    vi.mocked(io.rename).mockImplementation(async (source, target) => {
+    vi.mocked(fs.renameSync).mockImplementation((source, target) => {
       if (refuse && target === path) {
-        const candidate = RunJobSchema.parse(JSON.parse(await actualIo.readFile(source, "utf8")));
+        const candidate = RunJobSchema.parse(JSON.parse(actualFs.readFileSync(source, "utf8")));
         if (candidate.status === "succeeded")
-          throw new Error("injected terminal persistence failure");
+          throw Object.assign(new Error("injected terminal persistence failure"), { code: "EIO" });
       }
-      await actualIo.rename(source, target);
+      actualFs.renameSync(source, target);
     });
     await releaseRun(record);
     await releaseRun(other);
     await h.registry.pollOnce();
     await expect
-      .poll(() => h.errors.some((error) => error.includes("injected terminal persistence failure")))
+      .poll(() =>
+        h.errors.some((error) => error.includes("run-job publication") && error.includes("EIO")),
+      )
       .toBe(true);
     expect(await io.readFile(path)).toEqual(original);
     expect(first.producer.completed).toEqual([]);
@@ -221,15 +246,18 @@ test("composite disposal drains an accepted settlement before releasing state ow
   try {
     const { pending } = h.start();
     const record = await pending;
-    vi.mocked(io.rename).mockImplementation(async (source, target) => {
-      if (target === join(record.run_dir, "run-job.json")) {
-        const candidate = RunJobSchema.parse(JSON.parse(await actualIo.readFile(source, "utf8")));
-        if (candidate.status === "succeeded") {
-          held.release();
-          await release.waiting;
-        }
+    let heldOnce = false;
+    vi.mocked(io.lstat).mockImplementation(async (...args) => {
+      if (
+        args[0] === join(record.run_dir, "run-job.json") &&
+        !heldOnce &&
+        actualFs.existsSync(join(record.run_dir, "exit_code"))
+      ) {
+        heldOnce = true;
+        held.release();
+        await release.waiting;
       }
-      await actualIo.rename(source, target);
+      return actualIo.lstat(...args);
     });
     await releaseRun(record);
     polling = tick(h.registry);
@@ -299,8 +327,8 @@ test("disposed timer admits no more steps and reload starts only the replacement
     await vi.advanceTimersByTimeAsync(70);
     expect(reads).toBe(0);
     expect((await readRecord(record.run_dir)).status).toBe("running");
-    vi.mocked(io.rename).mockImplementation(async (source, target) => {
-      await actualIo.rename(source, target);
+    vi.mocked(fs.renameSync).mockImplementation((source, target) => {
+      actualFs.renameSync(source, target);
       if (target === path) published.release();
     });
     await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });

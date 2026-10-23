@@ -19,6 +19,12 @@ export interface ShudLifecycle extends JobHooks {
 export interface ShudExecution {
   hooks: ShudLifecycle;
   started: Promise<ShudProcessIdentity>;
+  /** Inspect only this spawned group, refusing observable identity replacement. */
+  isGroupActive(): boolean;
+  /** Synchronously signal the owned group if it can still perform I/O. */
+  signalGroup(signal: "SIGTERM" | "SIGKILL"): void;
+  /** Await local child reaping, independently of registration completion. */
+  waitForExit(): Promise<void>;
   /** Rollback only: terminate this owned execution group and prove it can no longer perform I/O. */
   abort(): Promise<void>;
 }
@@ -122,51 +128,60 @@ export function startDetachedShud(
   function abort(): Promise<void> {
     return (aborting ??= abortOwnedGroup());
   }
-  async function abortOwnedGroup(): Promise<void> {
+  function isGroupActive(): boolean {
+    const ownedChild = child;
+    const pid = ownedChild?.pid;
+    if (!ownedChild || pid === undefined || !groupCanPerformIo(pid)) return false;
+    // An unreaped native child still owns its pid, even when startup ps inspection failed.
+    // Once reaped, a present leader is observable reuse; indeterminate inspection stays an error.
+    if (
+      (ownedChild.exitCode !== null || ownedChild.signalCode !== null) &&
+      processStart(pid) !== null
+    ) {
+      throw new Error(`Cannot prove ownership of reused process group ${pid}`);
+    }
+    return true;
+  }
+  function signalGroup(signal: "SIGTERM" | "SIGKILL"): void {
+    if (!isGroupActive()) return;
+    const pid = child?.pid;
+    if (pid === undefined) throw new Error("Owned execution has no process identity");
+    // The target comes only from this local spawn, never from persisted metadata.
+    try {
+      process.kill(-pid, signal);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error)) throw error;
+      if (error.code === "EPERM" || error.code === "ESRCH") {
+        let active: boolean;
+        try {
+          active = isGroupActive();
+        } catch (inspection) {
+          throw new AggregateError(
+            [error, inspection],
+            `Cannot prove quiescence after signal failure for group ${pid}`,
+            { cause: inspection },
+          );
+        }
+        if (!active) return;
+      }
+      throw error;
+    }
+  }
+  async function waitForExit(): Promise<void> {
     if (!child) return;
     const ownedChild = child;
-    // Keep local reaping alive even for a standalone caller whose only remaining handle was unref'ed.
     ownedChild.ref();
     try {
-      const pid = ownedChild.pid;
-      if (pid !== undefined && groupCanPerformIo(pid)) {
-        // A reaped child cannot still occupy its pid. Never signal a replacement leader.
-        // This detects observable reuse, not a replacement generation whose leader has also exited.
-        if (
-          (ownedChild.exitCode !== null || ownedChild.signalCode !== null) &&
-          processStart(pid) !== null
-        ) {
-          throw new Error(`Cannot prove ownership of reused process group ${pid}`);
-        }
-        // The target comes only from this local transaction's spawn, never persisted metadata.
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch (error) {
-          if (!(error instanceof Error && "code" in error)) throw error;
-          if (error.code === "EPERM") {
-            let active: boolean;
-            try {
-              active = groupCanPerformIo(pid);
-            } catch (inspection) {
-              throw new AggregateError(
-                [error, inspection],
-                `Cannot prove quiescence after signal denial for group ${pid}`,
-                {
-                  cause: inspection,
-                },
-              );
-            }
-            if (active) throw error;
-          } else if (error.code !== "ESRCH") throw error;
-        }
-      }
       await reaped;
-      if (pid !== undefined) {
-        while (groupCanPerformIo(pid)) await delay(pumpPollMs);
-      }
     } finally {
       ownedChild.unref();
     }
   }
-  return { hooks, started, abort };
+  async function abortOwnedGroup(): Promise<void> {
+    if (!child) return;
+    signalGroup("SIGKILL");
+    await waitForExit();
+    while (isGroupActive()) await delay(pumpPollMs);
+  }
+  return { hooks, started, isGroupActive, signalGroup, waitForExit, abort };
 }

@@ -27,6 +27,7 @@ import {
 import { registerUnowned } from "./shud-registration.ts";
 import type { ShudExecution, ShudProcessIdentity } from "./detached-shud.ts";
 import type { CompletionReceipt } from "./shud-poll.ts";
+import type { ShudCancellation } from "./shud-cancellation.ts";
 
 export type ShudProducer = (
   prepared: RunJob,
@@ -46,6 +47,7 @@ export class ShudSubmissions {
   private readonly config: Config;
   private readonly waitMs: number;
   private readonly receipts: Map<RunId, CompletionReceipt>;
+  private readonly cancellations: ShudCancellation;
   private readonly reservedRuns = new Set<RunId>();
   private readonly reservedJobs = new Set<JobRecordId>();
   private readonly inFlight = new Set<RunId>();
@@ -58,12 +60,14 @@ export class ShudSubmissions {
     config: Config,
     waitMs: number,
     receipts: Map<RunId, CompletionReceipt>,
+    cancellations: ShudCancellation,
   ) {
     this.registry = registry;
     this.indexes = indexes;
     this.config = config;
     this.waitMs = waitMs;
     this.receipts = receipts;
+    this.cancellations = cancellations;
   }
 
   isInFlight(id: RunId): boolean {
@@ -156,6 +160,7 @@ export class ShudSubmissions {
       }
       owned = await io.lstat(reservation.runDir);
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
+      const location = { parent, directory: owned };
       const inputBytes = await copyInput(input, reservation.runDir);
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
       if (input.endDays !== null)
@@ -215,13 +220,23 @@ export class ShudSubmissions {
         label: record.label === null ? record.run_id : `${record.run_id} ${record.label}`,
         output: [stdoutSource(join(record.run_dir, "stdout.log"))],
         run: (handle) => {
+          this.cancellations.register(
+            handle.id,
+            {
+              // Captured creation ownership is checked again before synchronous cancellation writes.
+              run_id: record.run_id,
+              job_id: record.job_id,
+              run_dir: record.run_dir,
+            },
+            location,
+          );
           execution.value = producer(record, handle, this.waitMs);
           // Observe rejection before the identified-record write yields; keep its error for rollback.
           execution.startup = execution.value.started.then(
             (identity) => ({ identity }),
             (error: unknown) => ({ error }),
           );
-          return execution.value.hooks;
+          return this.cancellations.attach(handle.id, execution.value);
         },
       });
       record = RunJobSchema.parse({
@@ -243,6 +258,7 @@ export class ShudSubmissions {
         started_at: startup.identity.pid_started_at,
       });
       await writeJson(recordPath, record);
+      this.cancellations.activate(registered, startup.identity);
       this.receipts.set(record.run_id, { lifecycle });
       this.inFlight.delete(record.run_id);
       return record;
@@ -274,6 +290,7 @@ export class ShudSubmissions {
           verifyRun(input.runsDir, parent, reservation.runDir, owned);
           await io.rm(reservation.runDir, { recursive: true });
         }
+        this.cancellations.release(reservation.run_id);
         this.inFlight.delete(reservation.run_id);
       } catch (cleanup) {
         releaseReservation = false;
