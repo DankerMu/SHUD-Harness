@@ -1,0 +1,121 @@
+import { closeSync, constants, openSync, readFileSync, writeSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { Context } from "@deepseek-ai/cordis";
+import type { JobHandle, JobHooks, JobOutcome } from "@deepseek-ai/dsh-jobs";
+import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
+import { ShudJobRegistry } from "../index.ts";
+import { createHarness } from "../test-harness.ts";
+
+export async function writeInputTree(
+  inputDir: string,
+  parameter = "# synthetic input\r\nSTART\t0\r\nEND\t7\r\nOTHER\t17\r\n",
+  marker = "original forcing bytes\n",
+) {
+  const files = {
+    "tiny.cfg.para": Buffer.from(parameter),
+    "nested/forcing.dat": Buffer.from(marker),
+    "binary.dat": Buffer.from([0, 255, 1, 128, 10]),
+  };
+  await mkdir(join(inputDir, "nested", "empty"), { recursive: true });
+  for (const [name, bytes] of Object.entries(files)) await writeFile(join(inputDir, name), bytes);
+  return files;
+}
+
+export async function submissionFixture(parameter?: string) {
+  const h = await createHarness();
+  try {
+    const inputDir = join(h.root, "input");
+    const originals = await writeInputTree(inputDir, parameter);
+    const llm = {
+      response_model: "explicit-test-model",
+      response_model_source: "configured",
+    } satisfies RunJob["llm"];
+    return {
+      ...h,
+      inputDir,
+      originals,
+      request: {
+        cwd: h.cwd,
+        input_dir: inputDir,
+        project: "tiny",
+        owner_session: h.ownerId,
+        llm,
+      },
+    };
+  } catch (error) {
+    await h.dispose();
+    throw error;
+  }
+}
+
+export function actualRegistry(ctx: Context) {
+  const registry = ctx.jobs;
+  if (!(registry instanceof ShudJobRegistry)) throw new Error("SHUD registry not published");
+  return registry;
+}
+
+export async function injectedRegistry(ctx: Context) {
+  let registry: ShudJobRegistry | undefined;
+  await ctx.plugin({
+    inject: ["jobs"],
+    apply(consumer: Context) {
+      registry = actualRegistry(consumer);
+    },
+  });
+  if (!registry) throw new Error("SHUD consumer did not activate");
+  return registry;
+}
+
+/** Test-only producer: owns a real output descriptor until its done promise settles. */
+export function submissionProducer() {
+  let resolveDone!: (outcome: JobOutcome) => void;
+  const done = new Promise<JobOutcome>((resolve) => {
+    resolveDone = resolve;
+  });
+  let fd: number | undefined;
+  const handles: JobHandle[] = [];
+  const prepared: RunJob[] = [];
+  const persistedAtStart: RunJob[] = [];
+  const cancellations: Array<string | undefined> = [];
+  function finish(outcome: JobOutcome = { status: "killed", detail: "test cleanup" }) {
+    if (fd !== undefined) {
+      closeSync(fd);
+      fd = undefined;
+    }
+    resolveDone(outcome);
+  }
+  return {
+    handles,
+    prepared,
+    persistedAtStart,
+    cancellations,
+    finish,
+    start: (record: RunJob, handle: JobHandle): JobHooks => {
+      if (handles.length > 0) throw new Error("test producer was registered more than once");
+      prepared.push(RunJobSchema.parse(record));
+      persistedAtStart.push(
+        RunJobSchema.parse(JSON.parse(readFileSync(join(record.run_dir, "run-job.json"), "utf8"))),
+      );
+      // Do not create missing logs: those are part of the registry's preparation contract.
+      if (readFileSync(join(record.run_dir, "stdout.log")).length !== 0)
+        throw new Error("stdout was not empty before registration");
+      if (readFileSync(join(record.run_dir, "stderr.log")).length !== 0)
+        throw new Error("stderr was not empty before registration");
+      fd = openSync(join(record.run_dir, "stdout.log"), constants.O_WRONLY | constants.O_APPEND);
+      handles.push(handle);
+      return {
+        done,
+        cancel(reason) {
+          cancellations.push(reason);
+          finish({ status: "killed", detail: reason });
+        },
+      };
+    },
+    append(bytes: string | Buffer) {
+      if (fd === undefined) throw new Error("test producer has no live output descriptor");
+      if (typeof bytes === "string") writeSync(fd, bytes);
+      else writeSync(fd, bytes);
+    },
+  };
+}

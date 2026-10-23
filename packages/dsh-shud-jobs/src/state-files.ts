@@ -47,12 +47,16 @@ export function writeJsonSync(path: string, value: unknown): void {
   }
 }
 
-export async function writeJson(path: string, value: unknown): Promise<void> {
+export function writeJson(path: string, value: unknown): Promise<void> {
+  return writeBytes(path, `${JSON.stringify(value)}\n`);
+}
+
+export async function writeBytes(path: string, bytes: string | Uint8Array): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   const file = await io.open(temporary, "wx", 0o600);
   let open = true;
   try {
-    await file.writeFile(`${JSON.stringify(value)}\n`, "utf8");
+    await file.writeFile(bytes);
     await file.sync();
     await file.close();
     open = false;

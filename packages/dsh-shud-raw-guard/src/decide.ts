@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+import { containsPath } from "@shud-harness/dsh-shud-core";
 
 type RawGuardCall = { name: string; arguments: unknown; cwd?: string };
 type RawGuardDecision = {
@@ -184,11 +185,6 @@ function canonical(target: string, cwd: string): string {
   }
 }
 
-// Component-boundary containment also handles a configured filesystem root.
-function contains(root: string, target: string): boolean {
-  return target === root || target.startsWith(root.endsWith(sep) ? root : root + sep);
-}
-
 // Equivalent spellings: repeated separators collapse and a `/.` path segment
 // (followed by /, end or a command boundary) drops. `./x` and `..` stay as written.
 function normalizeCommandPaths(text: string): string {
@@ -252,7 +248,7 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         : undefined;
   if (
     typeof target === "string" &&
-    options.rawDirs.some((raw) => contains(canonical(raw, cwd), canonical(target, cwd)))
+    options.rawDirs.some((raw) => containsPath(canonical(raw, cwd), canonical(target, cwd)))
   )
     return DENY;
   if ((call.name === "bash" || call.name === "pwsh") && typeof fields.command === "string") {
@@ -277,7 +273,7 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         const pattern = new RegExp(`${escaped}(?![A-Za-z0-9._-])`, flags);
         return texts.some((candidate) => pattern.test(candidate));
       });
-      if (!mentioned && !contains(root, workdir)) continue;
+      if (!mentioned && !containsPath(root, workdir)) continue;
       const writes = [command, unquote(command)].some((text) => {
         const checked = text.replace(DISCARD_REDIRECT, " ");
         return WRITE_VERBS.test(checked) || tarExtracts(checked);
@@ -286,7 +282,7 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
       const roots = archives.size > 0 ? options.rawDirs.map((dir) => canonical(dir, cwd)) : [];
       const writesArchive = [...archives].some((archive) => {
         const target = canonical(archive, workdir);
-        return roots.some((other) => contains(other, target));
+        return roots.some((other) => containsPath(other, target));
       });
       return writes || writesArchive || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
     }

@@ -15,10 +15,8 @@ cleanup() { [ "$KEEP" = "1" ] || rm -rf "$WS"; }
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$WS/input/ccw" "$WS/output"
 cp -R "$INPUT"/. "$WS/input/ccw/"
-# END is in days in .cfg.para (SHUD_IO_Facts.md); keep every other parameter untouched.
-awk -v d="$DAYS" '$1=="END"{print "END " d; next}{print}' "$WS/input/ccw/ccw.cfg.para" > "$WS/input/ccw/ccw.cfg.para.tmp"
-mv "$WS/input/ccw/ccw.cfg.para.tmp" "$WS/input/ccw/ccw.cfg.para"
-grep -q "^END $DAYS$" "$WS/input/ccw/ccw.cfg.para" || { echo "shud:tiny: failed to patch END" >&2; exit 1; }
+# Use the same byte-preserving, solver-compatible END updater as submitted runs.
+node "$ROOT/packages/dsh-shud-jobs/src/shud-end.ts" "$WS/input/ccw/ccw.cfg.para" "$DAYS"
 echo "shud:tiny: running $SHUD_BIN ccw for $DAYS days in $WS"
 start=$(date +%s)
 set +e
