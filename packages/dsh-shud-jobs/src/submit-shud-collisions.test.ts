@@ -62,7 +62,7 @@ test("active, completed and existing-directory collisions redraw more than three
       completed: [completed],
     });
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -95,7 +95,7 @@ test("nonrecursive mkdir EEXIST retries have no three-attempt cap and never auth
       { run_id: record.run_id, job_id: record.job_id, run_dir: record.run_dir },
     ]);
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -106,6 +106,7 @@ test("synchronous reservations prevent two workspaces from claiming one id while
   const second = submissionProducer();
   const entered = barrier();
   const release = barrier();
+  const pending: Promise<unknown>[] = [];
   try {
     const otherCwd = join(h.root, "other-workspace");
     await io.mkdir(otherCwd);
@@ -123,6 +124,7 @@ test("synchronous reservations prevent two workspaces from claiming one id while
     });
     const firstSubmission = registry.submitShud(h.request, first.start);
     const secondSubmission = registry.submitShud({ ...h.request, cwd: otherCwd }, second.start);
+    pending.push(firstSubmission, secondSubmission);
     await entered.waiting;
     const secondRecord = await secondSubmission;
     expect(secondRecord.run_id).toBe("RUN-20261022T031500-bbbb");
@@ -136,8 +138,9 @@ test("synchronous reservations prevent two workspaces from claiming one id while
     expect(registry.indexes.lookup(secondRecord.job_id)?.run_dir).toBe(secondRecord.run_dir);
   } finally {
     release.release();
-    first.finish();
-    second.finish();
+    await Promise.allSettled(pending);
+    await first.finish();
+    await second.finish();
     await h.dispose();
   }
 });

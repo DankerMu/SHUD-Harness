@@ -2,18 +2,11 @@ import * as childProcess from "node:child_process";
 import { closeSync, openSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { readJson, writeJsonSync } from "./state-files.ts";
+import { isStartStamp, processStart } from "./process-identity.ts";
 
 interface Owner {
   pid: number;
   pid_started_at: string;
-}
-
-function isStartStamp(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/u.test(value) &&
-    Number.isFinite(Date.parse(`${value} UTC`))
-  );
 }
 
 function parseOwner(value: unknown, path: string): Owner {
@@ -31,32 +24,6 @@ function parseOwner(value: unknown, path: string): Owner {
     throw new Error(`Invalid owner metadata in ${path}`);
   }
   return { pid: value.pid, pid_started_at: value.pid_started_at };
-}
-
-function processStart(pid: number): string | null {
-  const result = childProcess.spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
-    encoding: "utf8",
-    env: { ...process.env, LC_ALL: "C", LANG: "C", TZ: "UTC" },
-  });
-  if (result.error || result.signal || result.stderr.trim()) {
-    throw new Error(`Cannot inspect process start identity for pid ${pid}: ps failed`, {
-      cause: result.error ?? new Error(result.stderr || String(result.signal)),
-    });
-  }
-  const stamp = result.stdout.trim();
-  if (result.status === 0 && isStartStamp(stamp)) {
-    return stamp;
-  }
-  if (result.status === 1 && stamp === "") {
-    try {
-      process.kill(pid, 0);
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ESRCH") return null;
-    }
-  }
-  throw new Error(
-    `Cannot determine process start identity for pid ${pid}: ps status ${result.status}`,
-  );
 }
 
 /** Owns an open-file-description lock; its coordination inode must never be removed. */

@@ -136,6 +136,34 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** 作业运行中宿主进程收到 SIGKILL
 - **THEN** 包装进程与 SHUD 继续运行，最终写出 `exit_code`
 
+#### Scenario: immediate exit retains genuine startup identity
+- **WHEN** 伪 SHUD 立即退出 0 或 13
+- **THEN** 提交仍记录操作系统报告的包装进程 pid 与启动时间并原子写出 schema 有效的 running；包装进程写出对应 exit_code，不以宿主当前时间伪造进程身份
+
+#### Scenario: running persistence precedes submission admission completion
+- **WHEN** 包装进程已启动但 running 记录的原子写入尚未完成
+- **THEN** run_id 仍在提交在途集合；只有身份与 running 同次写入成功后才移出并返回 running
+
+#### Scenario: rollback drains detached execution before removing files
+- **WHEN** 包装进程启动后身份读取或 running 记录写入失败，且同一进程组的子进程仍持有输出文件
+- **THEN** 先终止并确认本次执行组不再有可执行 I/O 的成员，再释放登记资源与删除本次目录/索引；不能仅凭登记 done 或包装 shell 退出判定安全；无法确认时保留路径并报告原始及清理错误
+
+#### Scenario: wrapper arguments are not shell program text
+- **WHEN** 配置的 SHUD 路径或合法项目名包含空格、引号或 shell 元字符
+- **THEN** 包装进程按原始位置参数调用指定可执行文件，不执行输入字符串中的 shell 语法，输出/输入目录仍受已有路径边界约束
+
+#### Scenario: PID publication fails before command invocation
+- **WHEN** 包装进程无法创建 wrapper.pid.tmp 或无法将其 rename 为 wrapper.pid
+- **THEN** 不调用 SHUD 可执行文件，也不发布 exit_code；不得绕过 PID 发布失败继续运行模型
+
+#### Scenario: native transitional process state during rollback
+- **WHEN** 进程组快照含身份字段有效但状态为操作系统暂态未知值的本组成员
+- **THEN** 保守视为仍可能执行 I/O，直到后续快照证明静止才清理；不得将未知状态当作空组，格式损坏或无法读取仍须保留路径并报错
+
+#### Scenario: already quiescent wrapper group during abort
+- **WHEN** 包装进程已退出但尚未被宿主回收，进程组只剩僵尸或已为空
+- **THEN** 依据静止证据完成回收与回滚，不因无需发送的进程组信号导致错误；仍存活成员的真实权限失败不得被吞掉
+
 ### Requirement: Cancellation
 对 shud 作业的 kill（模型以 `dsh_job_id` 调用 `job_kill`，或 Web 作业卡的 kill）SHALL 先在 `run-job.json` 写 `cancel_requested_at`，再对包装进程组发送 SIGTERM，宽限期（core 常量）后仍存活则 SIGKILL。结算 SHALL 为 first-wins：结算时 `exit_code` 已存在则按退出码结算，否则作业状态置 `cancelled`。被 kill 的作业 SHALL 照常 collect 并按「At-least-once wake」唤醒发起会话。
 

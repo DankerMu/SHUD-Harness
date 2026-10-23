@@ -62,7 +62,13 @@ test("record/index/registration order is durable and the in-flight guard precede
       if (typeof target === "string" && target.endsWith("/run-job.json")) {
         const record = RunJobSchema.parse(JSON.parse(await io.readFile(target, "utf8")));
         expect(registry.isSubmissionInFlight(record.run_id)).toBe(true);
-        observed.push(record.dsh_job_id === null ? record.status : "identified");
+        observed.push(
+          record.status === "running"
+            ? "running"
+            : record.dsh_job_id === null
+              ? record.status
+              : "identified",
+        );
         const active: unknown = JSON.parse(
           await io.readFile(join(h.stateDir, "active.json"), "utf8"),
         );
@@ -73,14 +79,21 @@ test("record/index/registration order is durable and the in-flight guard precede
         );
       } else if (target === join(h.stateDir, "active.json")) observed.push("active");
     });
-    const record = await registry.submitShud(h.request, (prepared, handle) => {
+    const record = await registry.submitShud(h.request, (prepared, handle, pumpPollMs) => {
       observed.push("registered");
-      return execution.start(prepared, handle);
+      return execution.start(prepared, handle, pumpPollMs);
     });
-    expect(observed).toEqual(["created", "active", "submitted", "registered", "identified"]);
-    expect(registry.isSubmissionInFlight(record.run_id)).toBe(true);
+    expect(observed).toEqual([
+      "created",
+      "active",
+      "submitted",
+      "registered",
+      "identified",
+      "running",
+    ]);
+    expect(registry.isSubmissionInFlight(record.run_id)).toBe(false);
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -120,9 +133,9 @@ test.each(["copy", "created", "active", "submitted", "identified", "producer"])(
         await actualIo.rename(source, target);
       });
       await expect(
-        registry.submitShud(h.request, (prepared, handle) => {
+        registry.submitShud(h.request, (prepared, handle, pumpPollMs) => {
           if (phase === "producer") throw new Error("injected producer failure");
-          return execution.start(prepared, handle);
+          return execution.start(prepared, handle, pumpPollMs);
         }),
       ).rejects.toThrow(phase === "copy" ? "nested/forcing.dat" : `injected ${phase}`);
       expect(await io.readdir(join(h.cwd, "runs"))).toEqual([]);
@@ -138,7 +151,7 @@ test.each(["copy", "created", "active", "submitted", "identified", "producer"])(
       for (const [name, bytes] of Object.entries(h.originals))
         expect(await io.readFile(join(h.inputDir, name))).toEqual(bytes);
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   },
@@ -163,7 +176,7 @@ test("a post-mkdir verification error removes only the directory this transactio
     expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
     expect(execution.handles).toEqual([]);
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -195,7 +208,7 @@ test("a foreign replacement after mkdir is preserved, with retained-path cleanup
     expect(await io.readFile(join(replacement, "foreign-sentinel"), "utf8")).toBe("foreign bytes");
     expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -214,13 +227,16 @@ test("late record failure awaits producer resource settlement before removing pa
         throw new Error("late id persistence failed");
       await actualIo.rename(source, target);
     });
-    const submission = registry.submitShud(h.request, (record, handle) => {
-      const hooks = execution.start(record, handle);
+    const submission = registry.submitShud(h.request, (record, handle, pumpPollMs) => {
+      const started = execution.start(record, handle, pumpPollMs);
       return {
-        done: release.waiting.then(() => hooks.done),
-        cancel(reason) {
-          cancelled.release();
-          void release.waiting.then(() => hooks.cancel(reason));
+        ...started,
+        hooks: {
+          done: release.waiting.then(() => started.hooks.done),
+          cancel(reason) {
+            cancelled.release();
+            void release.waiting.then(() => started.hooks.cancel(reason));
+          },
         },
       };
     });
@@ -228,7 +244,13 @@ test("late record failure awaits producer resource settlement before removing pa
       () => null,
       (error: unknown) => error,
     );
-    await cancelled.waiting;
+    const first = await Promise.race([
+      cancelled.waiting.then(() => ({ kind: "cancel" as const })),
+      outcome.then((error) => ({ kind: "outcome" as const, error })),
+    ]);
+    if (first.kind === "outcome") {
+      throw new Error("Submission settled before the cancellation barrier", { cause: first.error });
+    }
     const prepared = execution.prepared[0];
     expect(await io.readFile(join(prepared.run_dir, "stdout.log"), "utf8")).toBe("");
     expect(registry.list().map((job) => job.id)).toContain(execution.handles[0].id);
@@ -240,7 +262,7 @@ test("late record failure awaits producer resource settlement before removing pa
     expect(await io.readdir(join(h.cwd, "runs"))).toEqual([]);
   } finally {
     release.release();
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -269,7 +291,7 @@ test("cleanup failure retains both original cause and undeleted path evidence", 
     expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
   } finally {
     vi.mocked(io.rm).mockImplementation(actualIo.rm);
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });
@@ -328,7 +350,7 @@ test("automatic root disposal drains a held submission rollback before unlocking
   } finally {
     release.release();
     await pending;
-    execution.finish();
+    await execution.finish();
     await disposing;
     await contender.dispose();
     await h.dispose();
@@ -350,16 +372,19 @@ test("producer cancellation failure preserves original failure and retains files
     });
     let refused = false;
     await expect(
-      registry.submitShud(h.request, (record, handle) => {
-        const hooks = execution.start(record, handle);
+      registry.submitShud(h.request, (record, handle, pumpPollMs) => {
+        const started = execution.start(record, handle, pumpPollMs);
         return {
-          done: hooks.done,
-          cancel(reason) {
-            if (!refused) {
-              refused = true;
-              throw new Error("producer could not release its resource");
-            }
-            hooks.cancel(reason);
+          ...started,
+          hooks: {
+            done: started.hooks.done,
+            cancel(reason) {
+              if (!refused) {
+                refused = true;
+                throw new Error("producer could not release its resource");
+              }
+              started.hooks.cancel(reason);
+            },
           },
         };
       }),
@@ -378,7 +403,7 @@ test("producer cancellation failure preserves original failure and retains files
       "resource remains live\n",
     );
   } finally {
-    execution.finish();
+    await execution.finish();
     await h.dispose();
   }
 });

@@ -11,8 +11,8 @@ import {
   submissionProducer,
 } from "./submit-shud/test-harness.ts";
 
-describe("submitted SHUD transaction through the actual registry", () => {
-  test("copies all input, patches only the copy and publishes a validated submitted record", async () => {
+describe("SHUD execution transaction through the actual registry", () => {
+  test("copies all input, patches only the copy and publishes a validated running record", async () => {
     const h = await submissionFixture();
     const execution = submissionProducer();
     try {
@@ -22,9 +22,10 @@ describe("submitted SHUD transaction through the actual registry", () => {
         { ...h.request, end_days: 30, label: "independent experiment" },
         execution.start,
       );
+      const identity = await execution.executions[0].started;
       expect(RunJobSchema.parse(record)).toEqual(record);
       expect(record).toMatchObject({
-        status: "submitted",
+        status: "running",
         backend: "local_job",
         project: "tiny",
         label: "independent experiment",
@@ -37,9 +38,9 @@ describe("submitted SHUD transaction through the actual registry", () => {
         task_id: null,
         stack_id: null,
         data_id: null,
-        pid: null,
-        pid_started_at: null,
-        started_at: null,
+        pid: identity.pid,
+        pid_started_at: identity.pid_started_at,
+        started_at: identity.pid_started_at,
         finished_at: null,
         cancel_requested_at: null,
         exit_code: null,
@@ -68,6 +69,10 @@ describe("submitted SHUD transaction through the actual registry", () => {
       expect(execution.persistedAtStart[0]).toEqual(execution.prepared[0]);
       expect(record).toEqual({
         ...execution.prepared[0],
+        status: "running",
+        pid: identity.pid,
+        pid_started_at: identity.pid_started_at,
+        started_at: identity.pid_started_at,
         dsh_job_id: execution.handles[0].id,
         dsh_job_ids: [execution.handles[0].id],
       });
@@ -80,13 +85,14 @@ describe("submitted SHUD transaction through the actual registry", () => {
         expect(await readFile(join(record.run_dir, "input", "tiny", name))).toEqual(expected);
       }
       expect(await readdir(join(record.run_dir, "input", "tiny", "nested", "empty"))).toEqual([]);
-      expect(await readdir(record.run_dir)).not.toContain("wrapper.pid");
+      await expect.poll(() => readdir(record.run_dir)).toContain("wrapper.pid");
+      expect(Number(await readFile(join(record.run_dir, "wrapper.pid"), "utf8"))).toBe(record.pid);
       expect(registry.get(execution.handles[0].id)).toMatchObject({
         kind: "shud",
         label: `${record.run_id} independent experiment`,
       });
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
@@ -115,7 +121,7 @@ describe("submitted SHUD transaction through the actual registry", () => {
           Object.values(h.originals).reduce((sum, bytes) => sum + bytes.length, 0),
         );
       } finally {
-        execution.finish();
+        await execution.finish();
         await h.dispose();
       }
     },
@@ -159,7 +165,7 @@ describe("submitted SHUD transaction through the actual registry", () => {
         "no job controller serves this agent",
       );
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
@@ -168,13 +174,15 @@ describe("submitted SHUD transaction through the actual registry", () => {
     const h = await submissionFixture();
     const first = submissionProducer();
     const second = submissionProducer();
+    const pending: Promise<RunJob>[] = [];
     try {
       await h.apply(ShudJobRegistry, h.config);
       const registry = actualRegistry(h.ctx);
-      const records: RunJob[] = await Promise.all([
+      pending.push(
         registry.submitShud(h.request, first.start),
         registry.submitShud(h.request, second.start),
-      ]);
+      );
+      const records = await Promise.all(pending);
       expect(records[0].run_id).not.toBe(records[1].run_id);
       expect(records[0].job_id).not.toBe(records[1].job_id);
       expect(records[0].run_dir).not.toBe(records[1].run_dir);
@@ -193,14 +201,15 @@ describe("submitted SHUD transaction through the actual registry", () => {
       expect(registry.indexes.read().active).toHaveLength(2);
       expect(registry.list()).toHaveLength(2);
       for (const record of records) {
-        expect(record.status).toBe("submitted");
+        expect(record.status).toBe("running");
         expect(await readFile(join(record.run_dir, "input", "tiny", "binary.dat"))).toEqual(
           h.originals["binary.dat"],
         );
       }
     } finally {
-      first.finish();
-      second.finish();
+      await Promise.allSettled(pending);
+      await first.finish();
+      await second.finish();
       await h.dispose();
     }
   });
@@ -226,8 +235,8 @@ describe("submitted SHUD transaction through the actual registry", () => {
         "no job controller serves this agent",
       );
     } finally {
-      first.finish();
-      rejected.finish();
+      await first.finish();
+      await rejected.finish();
       await h.dispose();
     }
   });
@@ -273,7 +282,7 @@ describe("submitted SHUD transaction through the actual registry", () => {
       ).toBe("second β\n");
       expect(registry.read(id).chunks).toEqual([]);
     } finally {
-      execution.finish();
+      await execution.finish();
       await h.dispose();
     }
   });
