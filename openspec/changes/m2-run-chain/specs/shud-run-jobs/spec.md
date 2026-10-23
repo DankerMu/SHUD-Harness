@@ -86,6 +86,22 @@
 - **WHEN** `<session cwd>/runs` 是指向任意目录的符号链接时调用 `shud_run`
 - **THEN** 工具返回指出 `runs/` 为符号链接的错误，链接目标内没有新建目录
 
+#### Scenario: input root alias without internal links
+- **WHEN** `input_dir` 本身为指向有效项目目录的符号链接，解析后的目录内部只有普通文件和目录
+- **THEN** 复制解析后的输入内容，原目录和链接目标的字节均不因提交而改变
+
+#### Scenario: unsafe input entry rejected before claiming a run
+- **WHEN** 输入树内部含符号链接、FIFO 或其它非普通文件/目录条目
+- **THEN** 提交指出该条目的相对路径并失败，不创建运行目录，不读取符号链接目标或特殊文件内容
+
+#### Scenario: accepted submission drains before state ownership release
+- **WHEN** 注册表释放时，某个已接收提交正停在复制或记录写入期间
+- **THEN** 拒绝新提交，等待该提交完成或回滚后才释放 stateDir 所有权；不得因 submitted 状态的在途 id 尚未进入 running 而永久等待
+
+#### Scenario: registry state directory overlaps original input
+- **WHEN** 会话工作区与输入目录分离，但注册表 stateDir 位于输入目录内或与其相同
+- **THEN** 提交在创建运行目录或修改索引之前拒绝，指出 stateDir 重叠，原输入及已有索引字节不变
+
 #### Scenario: job output streams log
 - **WHEN** 作业运行中模型以 `shud_run` 返回的 `dsh_job_id` 调用 `job_output`
 - **THEN** 返回 `stdout.log` 中自上次读取后新增的内容

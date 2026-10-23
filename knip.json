@@ -14,7 +14,7 @@
       "project": ["src/**/*.ts"]
     },
     "packages/dsh-shud-jobs": {
-      "entry": ["src/**/*.test.ts"],
+      "entry": ["src/**/*.test.ts", "src/shud-end.ts"],
       "project": ["src/**/*.ts"]
     },
     "packages/dsh-shud-raw-guard": {
@@ -22,5 +22,5 @@
       "project": ["src/**/*.ts"]
     }
   },
-  "ignoreBinaries": ["gitleaks", "semgrep"]
+  "ignoreBinaries": ["gitleaks", "semgrep", "mkfifo"]
 }

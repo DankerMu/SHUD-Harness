@@ -62,7 +62,7 @@ SHUD-Harness/
 
 ## Development Workflow
 
-- 克隆后：`pnpm install`（自动执行 `prepare` → `core.hooksPath=.git-hooks`）。本机需 `gitleaks`（brew）；`semgrep` 仅 CI。
+- 克隆后：`pnpm install`（自动执行 `prepare` → `core.hooksPath=.git-hooks`）。本机需 `gitleaks`（brew）；`semgrep` 仅 CI。作业输入安全测试另需系统 POSIX `mkfifo`（Darwin/Linux），用于构造真实 FIFO 并验证提交在读取前拒绝；它不是 npm 依赖，缺失时测试失败而非跳过。
 - 日常：`pnpm run check` 是唯一默认闸（typecheck → lint → format → coverage → dup → deadcode → naming → schema drift → docs gate）。改 Zod 后 `pnpm run schema:generate`；改 `instructions/agents/*.md` 后 `pnpm run instructions:render`；两者产物都由 CI 比对。
 - 运行时：`pnpm run profile:smoke`（dsh 启动 + 路由断言）、`pnpm run shud:tiny`（ccw 30 天）本机运行；CI 有 npm 版 dsh（`profile-smoke` job），无 SHUD。
 - 环境：`DMXAPI_KEY` 只经环境变量；本机跑 dsh/gh 前 `unset ALL_PROXY`；`DSH_HOME` 指向临时目录避免污染真实会话。
@@ -105,9 +105,13 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 `profile:install` 要求 `SHUD_BIN` 是绝对路径、可执行普通文件；缺失或无效时在创建/修改 profile 前失败，不回退默认路径。安装器先以 `web` 模板创建 `shud`，再 `link:` 安装本仓库 bundle：禁用旧 `jobs` 行，并插入 `shud-jobs`（不是按 id 改 name）。安装器仅拥有用户 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 的唯一 `shud-jobs` 项，配置 `shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`；raw 覆写与其它字节保持不变，相同配置重装不改文件。
 
-`shud-jobs` 在 apply 时取得 `stateDir` 的排他所有权，维护 `active.json`/`completed.json`：索引修改在实例内串行执行，以临时文件 + rename 原子替换，先写 completed 再移出 active。内部 `stateDir/.lock-guard` 是永久协调 inode，不可删除或改名；`lock` 保存 `{pid, pid_started_at}`，释放时先关闭修改准入、等待已接收写入完成，再删除该元数据并释放内核锁，索引保留。第二个持有者被拒绝；已发布持有者的诊断包含 stateDir 与 pid。
+`shud-jobs` 在 apply 时取得 `stateDir` 的排他所有权，维护 `active.json`/`completed.json`：索引修改在实例内串行执行，以临时文件 + rename 原子替换，先写 completed 再移出 active。内部 `stateDir/.lock-guard` 是永久协调 inode，不可删除或改名；`lock` 保存 `{pid, pid_started_at}`。生命周期 effect 开始释放时关闭新提交准入，等待已接收提交完成或回滚，再关闭索引修改准入、等待已接收索引写入完成，最后删除锁元数据并释放内核锁；索引保留。第二个持有者被拒绝；已发布持有者的诊断包含 stateDir 与 pid。
 
-运行前提：Darwin 的 `/usr/bin/lockf` 或 Linux 的 `/usr/bin/flock`，以及用于进程身份检查的 `ps`（Linux slim 环境需安装 `procps`）。检查固定 locale/时区；不支持的平台、缺失工具或无法确定的进程检查均明确失败，不作不安全回退。这里的 `ps lstart` 启动戳只有秒级精度：PID 复用但报告戳相同会保守拒绝，不声称能区分所有 PID 代次；这不是后续 SHUD 包装进程的身份协议，也不代表提交、对账与完整跨重启恢复已实现。
+运行前提：Darwin 的 `/usr/bin/lockf` 或 Linux 的 `/usr/bin/flock`，以及用于进程身份检查的 `ps`（Linux slim 环境需安装 `procps`）。检查固定 locale/时区；不支持的平台、缺失工具或无法确定的进程检查均明确失败，不作不安全回退。这里的 `ps lstart` 启动戳只有秒级精度：PID 复用但报告戳相同会保守拒绝，不声称能区分所有 PID 代次；这不是后续 SHUD 包装进程的身份协议。
+
+注册表已提供 `submitShud(request, producer)`：请求显式携带会话 cwd、输入路径、project、owner_session 与模型元数据，producer 是必需的执行依赖，没有默认空实现。提交按物理路径解析 cwd/输入根（保留符号链接与 `..` 的实际遍历语义），完整复制普通文件/目录，只在副本改写可选的 END；拒绝内部链接/特殊文件、符号链接运行目录，以及运行根或 stateDir 位于输入树内的布局。持久化顺序为 created → 活动索引 → submitted（dsh id 为 null）→ 瞬时全局控制器下的无 owner 登记 → 写回 dsh id/历史；stdout.log 经父类输出控制提供增量内容，控制器不常驻。
+
+当前 API 返回校验过的 `submitted` RunJob，pid/启动时间仍为 null；包装进程执行、running 状态推进、轮询、对账及完整跨重启恢复尚未接入。submitted id 仍保留在进程内在途集合；释放等待的是已接收提交的事务 promise，不等待该集合清空。`pnpm run shud:tiny` 是独立的真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，其成功不代表注册表已实现包装进程。
 
 安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --no-open --port <p>`（profile 已选择 Web 应用，不再传 `web` 位置参数）。headless 任务改用同一 bundle 的独立 profile，并同样保留 `SHUD_BIN`：
 

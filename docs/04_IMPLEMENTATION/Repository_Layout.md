@@ -41,6 +41,8 @@ SHUD-Harness/
 
 默认 `rawDirs: ["data/raw"]` 仅用于开发与探针；部署期真实 `<data_root>/raw` 必须在 workspace root 之外，由用户在 `$DSH_HOME/profiles/shud/cordis.patch.yml` 中以 `- id: shud-raw-guard` + `config: { rawDirs: ["<workspace 外的绝对路径>", ...] }` 覆写。`profile:install` 要求 `SHUD_BIN` 为绝对路径、可执行普通文件，仅新增/更新安装器拥有的唯一 `shud-jobs` 项（`shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`），其余用户 patch 字节不变；已有 raw-only patch 升级后再次安装保持整文件 hash 不变。覆写结果可用 `--profile shud --dump-config` 查看。`shud-jobs` 已实现 stateDir 排他所有权及原子串行索引；永久 `.lock-guard`、可移除 `lock` 与平台工具前提见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
 
+注册表现提供必需 producer 驱动的 `submitShud(request, producer)`，完成输入复制、提交记录/索引持久化与瞬时无 owner 登记，返回 `submitted` RunJob；包装进程、running 推进与轮询仍属后续切片。提交释放顺序和运行边界沿用上述 Runtime Lifecycle，不以独立 `shud:tiny` 的执行成功代替注册表包装进程证据。
+
 ## 2. 运行时资产（不进代码仓）
 
 ```text

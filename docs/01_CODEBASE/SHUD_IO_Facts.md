@@ -10,10 +10,10 @@ canonical_for: [shud-io-facts]
 
 ## 时间单位
 
-- 所有内部时间表示为**分钟** — Source: SHUD/src/IO/read_func.cpp
+- 模拟起止时间 `StartTime`/`EndTime` 以**分钟**保存，由 `DayStart`/`DayEnd` 乘以 1440 得到 — Source: SHUD/src/classes/Model_Control.cpp:86–90
 - forcing.csv 第一列是**天**，读入时 `ts[i][0] *= 1440` 转分钟 — Source: SHUD/src/IO/read_func.cpp
 - LAI/MF .tsd 文件第一列也是**天**，同样 *= 1440 — Source: SHUD/src/IO/read_func.cpp
-- .cfg.para 中时间参数已经是分钟（LSM_STEP=60 = 60分钟 = 1小时） — Source: SHUD/src/IO/read_func.cpp
+- .cfg.para 的 `START`/`END` 是**天**，分别读入 `DayStart`/`DayEnd`，再转换为上述分钟值；不能把该文件的所有时间参数统一当作分钟 — Source: SHUD/src/classes/Model_Control.cpp:146–149、86–90
 - .cfg.ic header 第三个数是分钟（如 5256000.0 = 3652天） — Source: SHUD/input/ccw/ccw.cfg.ic
 - 1440 分钟 = 1 天，是最常见的转换因子 — Verified: 2026-04-26
 
@@ -56,8 +56,10 @@ canonical_for: [shud-io-facts]
 
 ## .cfg.para — 非标准 key-value
 
-- 跳过行首为 `#`、`\n`、`\0`、空格的行 — Source: SHUD/src/IO/read_func.cpp
-- key 大小写不敏感（`strcasecmp`） — Source: SHUD/src/IO/read_func.cpp
+- 按行读取时跳过**首字节**为 `#`、`\n`、`\0`、空格的行 — Source: SHUD/src/classes/Model_Control.cpp:109–113
+- 首字节为 tab 的行不被跳过，随后 `sscanf(str, "%s %lf", ...)` 接受 key 前的空白（包括 tab 后的空格）；这与首字节为空格的整行被忽略不同 — Source: SHUD/src/classes/Model_Control.cpp:110–114
+- key 大小写不敏感（`strcasecmp`）；`START`/`END` 读取到以天计的 `DayStart`/`DayEnd` — Source: SHUD/src/classes/Model_Control.cpp:116–149
+- Harness 提交与 `shud:tiny` 共用 END 更新器：仅替换有效 END 条目的数值，保留 key 大小写、其它字节、注释与行尾；要求覆盖时若没有有效 END 则失败。更新作用于复制后的输入，不改原输入；`input_bytes` 统计 END 改写前实际复制的文件字节 — Source: packages/dsh-shud-jobs/src/shud-end.ts、packages/dsh-shud-jobs/src/shud-input.ts、scripts/runtime/shud-tiny.sh
 
 ## forcing.csv — 非标准 CSV header
 
@@ -106,7 +108,7 @@ reviewer 只标注需要人工确认的位置，不下结论；无法确定单�
 - [ ] 对代码中每个涉及时间值的位置，标注该位置实际使用的单位（天/分钟/秒）
 - [ ] 验证 forcing CSV 读取是否有 `* 1440`（天 → 分钟）转换
 - [ ] 验证 LAI/MF 时序读取是否有同样的 `* 1440` 转换
-- [ ] 验证 .cfg.para 中的时间参数是否直接作为分钟使用（不再转换）
+- [ ] 区分 .cfg.para 的 `START`/`END`（天，转分钟需乘 1440）与其它时间参数，逐字段核对单位，禁止统一假定为分钟
 - [ ] 验证 rSHUD read_output() 的时间是否做了 `* 60`（分钟 → 秒）再加到 POSIXct
 - [ ] 如果代码向报告 / RunRecord 输出时间，标注最终单位是什么
 
@@ -135,7 +137,7 @@ reviewer 只标注需要人工确认的位置，不下结论；无法确定单�
 - [ ] .att: 检查是否处理了 BC 负值（= Dirichlet 边界条件）
 - [ ] .riv 解析: 验证是否处理了双段（河段 + 河型参数）
 - [ ] .riv: 检查是否允许负 slope 值
-- [ ] .cfg.para: 验证 key 比较是否大小写不敏感
+- [ ] .cfg.para: 验证 key 大小写不敏感，首字节空格行被跳过但 tab 开头行可解析；END 覆盖保留无关字节且只修改副本
 - [ ] .cfg.calib: 验证是否区分乘法/加法（+后缀）参数
 - [ ] forcing.csv: 验证 header 解析（第一行 4 个值: NumRows NumCols StartDate EndDate）
 - [ ] TabularData 通用: 验证是否用空格/tab 分隔（不是逗号）

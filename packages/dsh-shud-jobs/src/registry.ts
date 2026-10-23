@@ -2,6 +2,9 @@ import { accessSync, constants, mkdirSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import { LocalJobRegistry, type Config as ParentConfig } from "@deepseek-ai/dsh-jobs-local";
+import type { RunId, RunJob } from "@shud-harness/dsh-shud-core";
+import type { SubmitShudRequest } from "./shud-input.ts";
+import { ShudSubmissions, type ShudProducer } from "./shud-submissions.ts";
 import { StateIndexStore } from "./state-indexes.ts";
 
 export interface Config extends ParentConfig {
@@ -46,6 +49,8 @@ const ParentRegistry: new (
 /** LocalJobRegistry with fail-loud SHUD configuration; non-shud behavior remains inherited. */
 export class ShudJobRegistry extends ParentRegistry {
   readonly indexes: StateIndexStore;
+  readonly submitShud: (request: SubmitShudRequest, producer: ShudProducer) => Promise<RunJob>;
+  readonly isSubmissionInFlight: (id: RunId) => boolean;
 
   static Config: { "~standard": StandardProps } = {
     "~standard": {
@@ -89,8 +94,12 @@ export class ShudJobRegistry extends ParentRegistry {
     try {
       super(ctx, config);
       this.indexes = store;
-      // Cordis disposes sibling effects concurrently. Only the store owns its drain/unlock.
-      ctx.effect(() => () => store.close());
+      // Capture the actual instance here; scoped Cordis proxies must not choose registration scope.
+      const submissions = new ShudSubmissions(this, store, config);
+      this.submitShud = (request, producer) => submissions.submit(request, producer);
+      this.isSubmissionInFlight = (id) => submissions.isInFlight(id);
+      // One effect retains ownership through accepted submissions and all their rollback work.
+      ctx.effect(() => () => submissions.close());
     } catch (error) {
       void store.close().catch((cleanup: unknown) => ctx.logger.error(cleanup));
       throw error;
