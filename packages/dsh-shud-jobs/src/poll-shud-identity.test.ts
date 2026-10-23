@@ -6,7 +6,13 @@ import type * as NodeChild from "node:child_process";
 import type * as NodeIo from "node:fs/promises";
 import { generateRunIdentifiers } from "@shud-harness/dsh-shud-core";
 import { activeGroup } from "./detached-shud/test-harness.ts";
-import { pollFixture, readRecord, releaseRun, replaceRecord } from "./poll-shud/test-harness.ts";
+import {
+  pollFixture,
+  readRecord,
+  releaseRun,
+  replaceRecord,
+  seedRun,
+} from "./poll-shud/test-harness.ts";
 
 const fault = vi.hoisted(() => ({
   mode: "",
@@ -186,6 +192,52 @@ test("unreadable present exit evidence is failed with a diagnostic, not absent o
     await h.close();
   }
 }, 15000);
+
+test.each(["invalid", "unreadable"] as const)(
+  "disk-only %s exit evidence logs explicit diagnostics without consuming the evidence",
+  async (kind) => {
+    const h = await pollFixture();
+    try {
+      const record = await seedRun(h);
+      const exitPath = join(record.run_dir, "exit_code");
+      const bytes =
+        kind === "invalid" ? "diagnostic-coverage-private-payload\n" : "-314159265358979\n";
+      // Publish and arm the read fault in one synchronous turn, before a timer can read valid bytes.
+      writeFileSync(exitPath, bytes);
+      if (kind === "unreadable") fault.unreadable = exitPath;
+      expect(h.registry.list()).toEqual([]);
+      expect(h.producers).toEqual([]);
+
+      await h.registry.pollOnce();
+
+      const diagnostics = h.errors.filter((message) => message.includes(exitPath));
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toContain(exitPath);
+      expect(diagnostics[0]).toContain(
+        kind === "invalid" ? "Invalid exit_code integer" : "Unreadable exit_code",
+      );
+      if (kind === "unreadable") {
+        expect(diagnostics[0]).toContain("EACCES");
+        expect(diagnostics[0]).toContain("injected unreadable exit evidence");
+      }
+      expect(diagnostics[0]).not.toContain(bytes.trim());
+      const terminal = await readRecord(record.run_dir);
+      expect(terminal).toMatchObject({
+        status: "failed",
+        exit_code: null,
+        dsh_job_id: null,
+        dsh_job_ids: [],
+      });
+      expect(terminal.finished_at).not.toBeNull();
+      expect(await actualIo.readFile(exitPath, "utf8")).toBe(bytes);
+      expect(h.registry.list()).toEqual([]);
+      expect(await io.readdir(record.run_dir)).not.toContain("collect-error.json");
+    } finally {
+      fault.unreadable = "";
+      await h.close();
+    }
+  },
+);
 
 test.each(["corrupt", "run-id", "job-id", "run-dir"])(
   "%s record disagreement is preserved and isolated from a healthy entry",
