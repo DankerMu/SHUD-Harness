@@ -66,13 +66,17 @@ export function prepareInput(request: SubmitShudRequest, stateDir: string): Prep
     isAbsolute(request.input_dir) ? request.input_dir : `${cwd}/${request.input_dir}`,
   );
   realDirectory(inputDir);
-  const runsDir = join(cwd, "runs");
+  let runsDir = join(cwd, "runs");
+  if (existingPath(runsDir)) {
+    // Reject links before realpath can hide them, then preserve the existing physical spelling.
+    realDirectory(runsDir);
+    runsDir = realpathSync.native(runsDir);
+  }
   if (containsPath(inputDir, runsDir))
     throw new Error(`Run root is inside input directory: ${inputDir}`);
   if (containsPath(inputDir, realpathSync.native(stateDir))) {
     throw new Error(`stateDir is inside input directory: ${inputDir}`);
   }
-  if (existingPath(runsDir)) realDirectory(runsDir);
   const parameter = join(inputDir, `${project}.cfg.para`);
   const para = existingPath(parameter);
   if (!para?.isFile() || para.isSymbolicLink())

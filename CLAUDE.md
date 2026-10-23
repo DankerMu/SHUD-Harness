@@ -115,7 +115,7 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 运行前提：Darwin 的 `/usr/bin/lockf` 或 Linux 的 `/usr/bin/flock`，以及用于进程身份检查的 `ps`（Linux slim 环境需安装 `procps`）。检查固定 locale/时区；不支持的平台、缺失工具或无法确定的进程检查均明确失败，不作不安全回退。这里的 `ps lstart` 启动戳只有秒级精度：PID 复用但报告戳相同会保守拒绝，不声称能区分所有 PID 代次；这不是后续 SHUD 包装进程的身份协议。
 
-注册表已提供 `submitShud(request, producer)`：请求显式携带会话 cwd、输入路径、project、owner_session 与模型元数据，producer 是必需的执行依赖，没有默认空实现。提交按物理路径解析 cwd/输入根（保留符号链接与 `..` 的实际遍历语义），完整复制普通文件/目录，只在副本改写可选的 END；拒绝内部链接/特殊文件、符号链接运行目录，以及运行根或 stateDir 位于输入树内的布局。持久化顺序为 created → 活动索引 → submitted（dsh id 为 null）→ 瞬时全局控制器下的无 owner 登记 → 写回 dsh id/历史；stdout.log 经父类输出控制提供增量内容，控制器不常驻。
+注册表已提供 `submitShud(request, producer)`：请求显式携带会话 cwd、输入路径、project、owner_session 与模型元数据，producer 是必需的执行依赖，没有默认空实现。提交按物理路径解析 cwd/输入根（保留符号链接与 `..` 的实际遍历语义）；已存在的 runs 根先以 lstat 拒绝链接/非目录，再以 native realpath 解析实际拼写（包括文件系统大小写别名），用于包含关系检查和运行目录记录；尚不存在的根仍从物理 cwd 派生。完整复制普通文件/目录，只在副本改写可选的 END；拒绝内部链接/特殊文件、符号链接运行目录，以及运行根或 stateDir 位于输入树内的布局。持久化顺序为 created → 活动索引 → submitted（dsh id 为 null）→ 瞬时全局控制器下的无 owner 登记 → 写回 dsh id/历史；stdout.log 经父类输出控制提供增量内容，控制器不常驻。
 
 当前 API 返回校验过的 `submitted` RunJob，pid/启动时间仍为 null；包装进程执行、running 状态推进、轮询、对账及完整跨重启恢复尚未接入。submitted id 仍保留在进程内在途集合；释放等待的是已接收提交的事务 promise，不等待该集合清空。`pnpm run shud:tiny` 是独立的真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，其成功不代表注册表已实现包装进程。
 
