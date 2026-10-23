@@ -264,6 +264,7 @@ test("abort refuses an observable replacement leader after its original wrapper 
     expect(child.hasExited).toBe(true);
     expect(activeGroup(record.pid)).toEqual([]);
     await registry.pollOnce();
+    await registry.collectShud(record.run_id);
     const durableBeforeAbort = await io.readFile(join(record.run_dir, "run-job.json"));
     // Replay OS evidence of a replacement only after the real original leader has been reaped.
     observed.reusedPid = record.pid;

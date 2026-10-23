@@ -95,7 +95,7 @@ test.each([0, 13])(
       fault.mode = "publish";
       await h.registry.pollOnce();
       expect(fault.probes).toBeGreaterThan(0);
-      const terminal = await readRecord(record.run_dir);
+      const terminal = producer.durableAtSettle[0];
       expect(terminal.status).toBe(code === 0 ? "succeeded" : "failed");
       expect(terminal.exit_code).toBe(code);
       expect(producer.completed[0].status).toBe(code === 0 ? "completed" : "failed");
@@ -121,7 +121,7 @@ test.each(["zombie", "different"])(
       fault.mode = mode;
       await h.registry.pollOnce();
       expect(fault.probes).toBeGreaterThan(0);
-      expect(await readRecord(record.run_dir)).toMatchObject({ status: "failed", exit_code: null });
+      expect(producer.durableAtSettle[0]).toMatchObject({ status: "failed", exit_code: null });
       expect(producer.completed[0].detail).toMatch(/lost/iu);
       // Only the OS inspection seam is faulted; normal poll must not signal the actual held group.
       expect(activeGroup(record.pid)).toContain(record.pid);
@@ -168,7 +168,7 @@ test("uncertain process inspection preserves the running record and completion w
     expect(await io.readFile(path)).toEqual(bytes);
     expect(first.producer.completed).toEqual([]);
     expect(first.producer.registration.cancellations).toEqual([]);
-    expect((await readRecord(other.run_dir)).status).toBe("succeeded");
+    expect(healthy.producer.durableAtSettle[0].status).toBe("succeeded");
     expect(healthy.producer.completed).toHaveLength(1);
     expect(h.errors.length).toBeGreaterThan(0);
   } finally {
@@ -233,7 +233,8 @@ test.each(["invalid", "unreadable"] as const)(
       expect(terminal.finished_at).not.toBeNull();
       expect(await actualIo.readFile(exitPath, "utf8")).toBe(bytes);
       expect(h.registry.list()).toEqual([]);
-      expect(await io.readdir(record.run_dir)).not.toContain("collect-error.json");
+      await expect(h.registry.collectShud(record.run_id)).rejects.toThrow(/exit evidence/iu);
+      expect(await io.readdir(record.run_dir)).toContain("collect-error.json");
     } finally {
       fault.unreadable = "";
       await h.close();
@@ -269,7 +270,7 @@ test.each(["corrupt", "run-id", "job-id", "run-dir"])(
       expect(bad.producer.completed).toEqual([]);
       expect(bad.producer.registration.cancellations).toEqual([]);
       expect(h.registry.indexes.lookup(record.run_id)?.run_dir).toBe(record.run_dir);
-      expect((await readRecord(healthy.run_dir)).status).toBe("succeeded");
+      expect(good.producer.durableAtSettle[0].status).toBe("succeeded");
       expect(good.producer.completed).toHaveLength(1);
       expect(h.errors.length).toBeGreaterThan(0);
     } finally {

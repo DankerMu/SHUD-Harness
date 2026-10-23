@@ -2,7 +2,7 @@ import { accessSync, constants, mkdirSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import { LocalJobRegistry, type Config as ParentConfig } from "@deepseek-ai/dsh-jobs-local";
-import type { RunId, RunJob } from "@shud-harness/dsh-shud-core";
+import type { JobRecordId, RunId, RunJob, RunRecord } from "@shud-harness/dsh-shud-core";
 import type { SubmitShudRequest } from "./shud-input.ts";
 import { ShudSubmissions, type ShudProducer } from "./shud-submissions.ts";
 import { StateIndexStore } from "./state-indexes.ts";
@@ -69,6 +69,7 @@ export class ShudJobRegistry extends ParentRegistry {
   readonly submitShud: (request: SubmitShudRequest, producer: ShudProducer) => Promise<RunJob>;
   readonly isSubmissionInFlight: (id: RunId) => boolean;
   readonly pollOnce: () => Promise<void>;
+  readonly collectShud: (id: RunId | JobRecordId) => Promise<RunRecord>;
 
   static Config: { "~standard": StandardProps } = {
     "~standard": {
@@ -128,6 +129,7 @@ export class ShudJobRegistry extends ParentRegistry {
       this.submitShud = (request, producer) => submissions.submit(request, producer);
       this.isSubmissionInFlight = (id) => submissions.isInFlight(id);
       this.pollOnce = () => dispatcher.pollOnce();
+      this.collectShud = (id) => dispatcher.collectShud(id);
       let closing: Promise<void> | undefined;
       // Cordis disposes sibling effects concurrently; all SHUD ownership ordering lives here.
       ctx.effect(() => () => {

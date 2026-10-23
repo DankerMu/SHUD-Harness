@@ -105,7 +105,7 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 `profile:install` 要求 `SHUD_BIN` 是绝对路径、可执行普通文件；缺失或无效时在创建/修改 profile 前失败，不回退默认路径。安装器先以 `web` 模板创建 `shud`，再 `link:` 安装本仓库 bundle：禁用旧 `jobs` 行，并插入 `shud-jobs`（不是按 id 改 name）。安装器仅拥有用户 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 的唯一 `shud-jobs` 项，配置 `shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`；raw 覆写与其它字节保持不变，相同配置重装不改文件。
 
-`shud-jobs` 在 apply 时取得 `stateDir` 的排他所有权，维护 `active.json`/`completed.json`：索引修改在实例内串行执行，以临时文件 + rename 原子替换，先写 completed 再移出 active。内部 `stateDir/.lock-guard` 是永久协调 inode，不可删除或改名；`lock` 保存 `{pid, pid_started_at}`。唯一组合生命周期 effect 开始释放时同步停止轮询定时器、关闭轮询与提交准入，并行等待已接受结算步骤（含异步完成回调）与提交/回滚事务结束，再关闭索引修改准入、等待索引写入完成，最后删除锁元数据并释放内核锁；索引保留。停止不等待脱离包装进程自然结束，也不以提交在途集合清空为条件。第二个持有者被拒绝；已发布持有者的诊断包含 stateDir 与 pid。
+`shud-jobs` 在 apply 时取得 `stateDir` 的排他所有权，维护 `active.json`/`completed.json`：索引修改在实例内串行执行，以临时文件 + rename 原子替换，先写 completed 再移出 active。内部 `stateDir/.lock-guard` 是永久协调 inode，不可删除或改名；`lock` 保存 `{pid, pid_started_at}`。唯一组合生命周期 effect 开始释放时同步停止轮询定时器、关闭轮询、collect 与提交准入，并行等待已接受的结算/收集步骤（含排队的直接 collect、异步完成回调）与提交/回滚事务结束，再关闭索引修改准入、等待索引写入完成，最后删除锁元数据并释放内核锁；索引保留。停止不等待脱离包装进程自然结束，也不以提交在途集合清空为条件。第二个持有者被拒绝；已发布持有者的诊断包含 stateDir 与 pid。
 
 运行前提：Darwin 的 `/usr/bin/lockf` 或 Linux 的 `/usr/bin/flock`，以及用于进程身份检查的 `ps`（Linux slim 环境需安装 `procps`）。检查固定 locale/时区；不支持的平台、缺失工具或无法确定的进程检查均明确失败，不作不安全回退。锁和包装进程共用规范化的 `ps lstart` 检查：锁保留原始启动戳，RunJob 转为 ISO UTC；实际分辨率仍是秒级。锁持有者 PID 复用但报告戳相同会保守拒绝，不声称能区分所有 PID 代次。
 
@@ -115,13 +115,19 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 `ShudExecution` 包含 `hooks`、真实身份的 `started` promise 与回滚专用 `abort()`。`ShudLifecycle` 在 `JobHooks` 上增加幂等 `settle(JobOutcome): void | Promise<void>`：调用方负责在 `done` 结束前释放真实登记资源；正常完成不调用 `cancel` 冒充结算。回滚先证明执行组已不能继续 I/O 并完成本地子进程回收，再取消/等待登记资源、移除父类登记与自有索引/目录，并移除本地完成回执；`hooks.done` 本身不是进程终止证据。原生未知非 Z 状态仍按可能 I/O 处理；权限拒绝仅在重新检查明确静止后才可继续，否则保留运行路径与错误原因。已回收的原包装进程 PID 再次出现时拒绝向该组发信号，但不声称能识别替代组的 leader 也已退出的全部历史代次；非 SHUD 父类生命周期不改动。
 
-注册表按父类 `pumpPollMs` 运行一个轮询调度器，公开 `pollOnce()` 与定时器共享同一入口和逐条目排他状态：手动调用等待已在途的该条目步骤，定时器不重复启动它，不同条目可独立推进。关闭轮询准入后的 `pollOnce()` 明确拒绝，不再读取记录。调度先跳过本进程提交在途 id，再读取并校验 RunJob 与索引的 run_id/job_id/run_dir 一致；已通知终结、collected 及前进程遗留的 created/submitted 条目不在本切片推进。没有当前 dsh 登记的 running 条目仍可结算。
+注册表按父类 `pumpPollMs` 运行一个轮询调度器，公开 `pollOnce()` 与定时器共享同一入口和逐条目排他状态：手动 tick 等待已在途的该条目步骤，定时器不重复启动它，不同条目可独立推进。关闭准入后的 `pollOnce()` 与 `collectShud()` 明确拒绝，不再读取记录。调度先跳过本进程提交在途 id，再读取并校验 RunJob 与索引的 run_id/job_id/run_dir 一致；已通知终结、collected 及前进程遗留的 created/submitted 条目不在自动路径推进。没有当前 dsh 登记的 running 条目仍可结算。每个 tick 只推进一个阶段：结算或重试本地完成回执后返回，后续 tick 才收集终态条目。
 
 结算先读 `exit_code`：完整且处于安全整数范围内的十进制整数决定 succeeded（0）或 failed（非零）；已有取消请求也不覆盖退出码。空白、部分数字、小数、不安全整数或不可读文件导致 failed、null exit_code 与明确诊断，原文件保留给后续 collect。仅 ENOENT 表示不存在；此时检查包装进程身份与状态，以时间戳数值比较而非 ISO 字面值比较。观察到消失、身份不同或 Z 状态后必须重读退出码；仍无才按 cancel_requested_at 判 cancelled，否则 failed 并给出 lost 诊断。无法确定的检查或损坏/不一致记录记录错误且不改持久状态、不结束登记，其他条目继续处理。
 
-结算先原子写 `run-job.json` 的终态、finished_at、exit_code，再调用本地 `settle` 并等待 `done`；succeeded/cancelled/failed 分别映射到父类 completed/killed/failed。持久化失败不完成登记；完成回调失败保留回执，在后续正常 tick 重试，不改写既有终态、finished_at 或文件修改时间。无本地回执的既有终态不反复写入。结算不迁移活动索引，也不产生 collect 或唤醒产物。
+结算先原子写 `run-job.json` 的终态、finished_at、exit_code，再调用本地 `settle` 并等待 `done`；succeeded/cancelled/failed 分别映射到父类 completed/killed/failed。持久化失败不完成登记；完成回调失败保留回执，在后续正常 tick 重试，不改写既有终态、finished_at 或文件修改时间。回执完成前不收集；后续 collect 可以将终态投影为 `collected`。结算与 collect 均不迁移活动索引，也不产生唤醒产物。
 
-本切片尚未接入自动 collect/collect-error 重试（#308）、用户 kill 覆写/分类（#309）、启动对账（#310）、完整 detach/清理策略（#311）、接管登记（#312）、唤醒投递（#313）或工具提交入口，不声称完整跨重启恢复。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，不能用其结果替代注册表包装进程及在线结算的运行证据。
+注册表公开后端 API `collectShud(id: RunId | JobRecordId): Promise<RunRecord>`，可查活动或完成索引；它与自动 collect 使用同一实现和逐条目队列。直接调用等待该条目已接受的工作及未完成回执；失败调用不阻塞后续请求。未知 id、非终态与本进程提交在途条目拒绝且不创建收集产物。当前没有挂载 `shud_collect` 工具。
+
+收集先验证运行路径与身份，再校验终态完整字段。缓存的数值 exit_code 必须有相同的有效退出文件；缓存为 null 时，有效文件可恢复退出分类，仅文件真正缺失才按取消状态/标记判 cancelled，否则 lost。不可读、非法或不一致的退出证据明确失败，不降级为 lost；退出证据失败将 RunJob 置为 `failed`，包括原 succeeded/cancelled，保留 exit_code、取消标记、身份与时间等其它字段。其它收集失败保留终态；无法合法重写的损坏记录保留原字节。日志只记录路径，输出仅扫描 `output/<project>.out/` 的元数据，生成排序的 POSIX 相对路径及实际字节数，不读取日志/产物内容；初始输出目录真正不存在可为空清单，链接、特殊文件、不可读目录或扫描中消失均失败。RunRecord 保留引用、argv 与模型来源；时间齐全时计算 wall_seconds，否则为 null，负时长拒绝；数值健康四项与 peak_memory_mb 保持 null。
+
+经 core schema 校验后原子发布 `run-record.json`，再原子投影 RunJob 为 `collected`。有效且身份匹配的已有 RunRecord 优先原样返回，字节与 mtime 不变；结果发布是提交边界，后续状态投影失败只重试投影，不重新扫描、改写结果或增加生成失败次数。生成失败写本地 `collect-error.json`（严格的 `attempts`、`last_error`、`at`）；诊断仅含受控阶段、字段路径或 errno，不持久化/记录原始异常载荷。损坏的重试记录保留且不重置，并阻止新的生成尝试。自动路径首次及时尝试，之后沿用 core 常量 `COLLECT_RETRY_INTERVAL_MS = 10000` 与 `MAX_COLLECT_ATTEMPTS = 3`，按持久时间间隔重试，时钟回退不加速；直接 collect 可越过间隔/次数上限，但不能绕过损坏记录重新生成结果。成功重试保留既有错误记录字节与 mtime。
+
+本切片尚未接入用户 kill 覆写/分类（#309）、启动对账（#310）、完整 detach/清理策略（#311）、接管登记（#312）、唤醒投递及完成索引迁移（#313）或工具入口，不声称完整跨重启恢复。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，不能用其结果替代注册表包装进程、在线结算及收集的运行证据。
 
 安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --no-open --port <p>`（profile 已选择 Web 应用，不再传 `web` 位置参数）。headless 任务改用同一 bundle 的独立 profile，并同样保留 `SHUD_BIN`：
 

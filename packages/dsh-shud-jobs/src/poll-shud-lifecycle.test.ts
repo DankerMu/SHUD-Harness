@@ -84,7 +84,7 @@ test("D7 excludes both submitted and already-renamed running bytes until startup
     const record = await pending;
     await h.registry.pollOnce();
     await expect.poll(() => producer.completed.length).toBe(1);
-    expect((await readRecord(record.run_dir)).status).toBe("succeeded");
+    expect(producer.durableAtSettle[0].status).toBe("succeeded");
     expect(h.registry.isSubmissionInFlight(record.run_id)).toBe(false);
   } finally {
     publish.release();
@@ -120,7 +120,7 @@ test("overlapping manual and timer ticks single-flight one held entry while anot
     await releaseRun(healthy);
     ticks.push(tick(h.registry), tick(h.registry));
     await expect.poll(() => second.producer.completed.length).toBe(1);
-    expect((await readRecord(healthy.run_dir)).status).toBe("succeeded");
+    expect(second.producer.durableAtSettle[0].status).toBe("succeeded");
     expect(first.producer.completed).toEqual([]);
     expect((await readRecord(record.run_dir)).status).toBe("running");
     expect(terminalWrites).toBe(1);
@@ -165,7 +165,7 @@ test("failed terminal persistence preserves done and retries successfully withou
     refuse = false;
     await h.registry.pollOnce();
     await expect.poll(() => first.producer.completed.length).toBe(1);
-    expect((await readRecord(record.run_dir)).status).toBe("succeeded");
+    expect(first.producer.durableAtSettle[0].status).toBe("succeeded");
   } finally {
     refuse = false;
     await h.close();
@@ -192,12 +192,15 @@ test("completion callback retry does not rewrite terminal bytes, mtime or finish
     expect(h.errors.some((error) => error.includes("injected completion callback failure"))).toBe(
       true,
     );
+    await h.registry.pollOnce();
+    expect(await io.readFile(path)).toEqual(bytes);
+    expect((await io.stat(path, { bigint: true })).mtimeNs).toBe(stat.mtimeNs);
     refuse = false;
     await h.registry.pollOnce();
     await expect.poll(() => producer.completed.length).toBe(1);
     await producer.doneObserved;
-    expect(await io.readFile(path)).toEqual(bytes);
-    expect((await io.stat(path, { bigint: true })).mtimeNs).toBe(stat.mtimeNs);
+    expect(producer.durableAtDone[0]).toEqual(terminal);
+    await h.registry.collectShud(record.run_id);
     expect((await readRecord(record.run_dir)).finished_at).toBe(terminal.finished_at);
     const attempts = producer.attempts.length;
     await h.registry.pollOnce();
@@ -255,13 +258,15 @@ test("composite disposal drains an accepted settlement before releasing state ow
     release.release();
     await polling;
     await disposing;
+    await waitForOwnershipRelease(h.stateDir);
     expect(await io.readdir(h.stateDir)).not.toContain("lock");
+    const terminal = await readRecord(record.run_dir);
+    expect(terminal.status).toBe("succeeded");
     await contender.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
     const replacement = actualRegistry(contender.ctx);
-    const terminal = await io.readFile(join(record.run_dir, "run-job.json"));
     await replacement.pollOnce();
-    expect(await io.readFile(join(record.run_dir, "run-job.json"))).toEqual(terminal);
-    expect((await readRecord(record.run_dir)).status).toBe("succeeded");
+    await replacement.collectShud(record.run_id);
+    expect(await readRecord(record.run_dir)).toEqual({ ...terminal, status: "collected" });
   } finally {
     release.release();
     await polling?.catch(() => undefined);
@@ -317,6 +322,7 @@ test("reload settles a new local registration without invoking the retired compl
     await releaseRun(record);
     await h.registry.pollOnce();
     await expect.poll(() => first.producer.completed.length).toBe(1);
+    await h.registry.collectShud(record.run_id);
     const path = join(record.run_dir, "run-job.json");
     const bytes = await io.readFile(path);
     const stat = await io.stat(path, { bigint: true });
@@ -335,7 +341,7 @@ test("reload settles a new local registration without invoking the retired compl
     await releaseRun(next);
     // The replacement timer, not a new manual tick, must complete its own receipt.
     await expect.poll(() => producer.completed.length).toBe(1);
-    expect((await readRecord(next.run_dir)).status).toBe("succeeded");
+    expect(producer.durableAtSettle[0].status).toBe("succeeded");
     expect(first.producer.attempts).toHaveLength(1);
     expect(producer.attempts).toHaveLength(1);
     expect(await io.readFile(path)).toEqual(bytes);

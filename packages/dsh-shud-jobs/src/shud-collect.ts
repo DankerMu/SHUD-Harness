@@ -1,0 +1,294 @@
+import type { Stats } from "node:fs";
+import * as io from "node:fs/promises";
+import { join } from "node:path";
+import {
+  classifyRunExit,
+  COLLECT_RETRY_INTERVAL_MS,
+  MAX_COLLECT_ATTEMPTS,
+  RunJobSchema,
+  RunRecordSchema,
+  type RunJob,
+  type RunRecord,
+} from "@shud-harness/dsh-shud-core";
+import { readExit } from "./shud-exit.ts";
+import { isProjectComponent } from "./shud-input.ts";
+import { writeJson } from "./state-files.ts";
+import type { IndexEntry } from "./state-indexes.ts";
+import {
+  CollectFailure,
+  collectFailure,
+  regularFile,
+  validationFailure,
+  verifyRunFile,
+  type RoutedRun,
+} from "./shud-run-file.ts";
+
+interface CollectLedger {
+  attempts: number;
+  last_error: string;
+  at: string;
+}
+
+async function readLedger(runDir: string): Promise<CollectLedger | undefined> {
+  const path = join(runDir, "collect-error.json");
+  if (!(await regularFile(path, "collect-error ledger", true))) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(await io.readFile(path, "utf8"));
+  } catch (error) {
+    throw collectFailure("collect-error ledger", error);
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 3 ||
+    !("attempts" in value) ||
+    typeof value.attempts !== "number" ||
+    !Number.isSafeInteger(value.attempts) ||
+    value.attempts < 0 ||
+    !("last_error" in value) ||
+    typeof value.last_error !== "string" ||
+    !value.last_error.trim() ||
+    !("at" in value) ||
+    typeof value.at !== "string" ||
+    !RunJobSchema.shape.finished_at.safeParse(value.at).success
+  ) {
+    throw new CollectFailure("collect-error ledger", "INVALID_FIELDS");
+  }
+  return { attempts: value.attempts, last_error: value.last_error, at: value.at };
+}
+
+async function existingRecord(entry: IndexEntry): Promise<RunRecord | undefined> {
+  const path = join(entry.run_dir, "run-record.json");
+  if (!(await regularFile(path, "run-record", true))) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(await io.readFile(path, "utf8"));
+  } catch (error) {
+    throw collectFailure("run-record JSON", error);
+  }
+  const parsed = RunRecordSchema.safeParse(value);
+  if (!parsed.success) throw validationFailure("RunRecord", parsed.error.issues);
+  if (parsed.data.run_id !== entry.run_id || parsed.data.job_id !== entry.job_id) {
+    throw new CollectFailure("run-record identity", "MISMATCH");
+  }
+  return parsed.data;
+}
+
+function fullJob(routed: RoutedRun): RunJob {
+  const parsed = RunJobSchema.safeParse(routed.raw);
+  if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
+  return parsed.data;
+}
+
+async function projectCollected(entry: IndexEntry, routed: RoutedRun): Promise<void> {
+  try {
+    const job = fullJob(routed);
+    if (job.status === "collected") return;
+    verifyRunFile(entry, routed);
+    const path = join(entry.run_dir, "run-job.json");
+    await regularFile(path, "collected status projection");
+    await writeJson(path, RunJobSchema.parse({ ...job, status: "collected" }));
+  } catch (error) {
+    throw collectFailure("collected status projection", error);
+  }
+}
+
+async function exitCode(job: RunJob): Promise<number | null> {
+  try {
+    const present = await regularFile(join(job.run_dir, "exit_code"), "exit evidence", true);
+    const evidence = present ? await readExit(job.run_dir) : undefined;
+    if (evidence?.error) {
+      if (evidence.kind === "invalid")
+        throw new CollectFailure("exit evidence", "INVALID_INTEGER", true);
+      throw collectFailure("exit evidence", evidence.error.cause, true);
+    }
+    const code = evidence?.code ?? null;
+    if (job.exit_code !== null && code !== job.exit_code) {
+      throw new CollectFailure("exit evidence", code === null ? "MISSING" : "MISMATCH", true);
+    }
+    return code;
+  } catch (error) {
+    throw collectFailure("exit evidence", error, true);
+  }
+}
+
+async function initialDirectory(path: string): Promise<boolean> {
+  let stat: Stats;
+  try {
+    stat = await io.lstat(path);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    throw collectFailure("output directory", error);
+  }
+  if (stat.isSymbolicLink()) throw new CollectFailure("output directory", "SYMLINK");
+  if (!stat.isDirectory()) throw new CollectFailure("output directory", "NOT_DIRECTORY");
+  return true;
+}
+
+async function outputFiles(
+  runDir: string,
+  project: string,
+): Promise<RunRecord["artifacts"]["files"]> {
+  const parent = join(runDir, "output");
+  const root = join(parent, `${project}.out`);
+  if (!(await initialDirectory(parent)) || !(await initialDirectory(root))) return [];
+  const files: RunRecord["artifacts"]["files"] = [];
+  async function visit(directory: string, relative: string): Promise<void> {
+    const names = await io.readdir(directory);
+    for (const name of names) {
+      const path = join(directory, name);
+      const child = relative ? `${relative}/${name}` : name;
+      const stat = await io.lstat(path);
+      if (stat.isSymbolicLink()) throw new CollectFailure("output scan", "SYMLINK");
+      if (stat.isDirectory()) await visit(path, child);
+      else if (stat.isFile()) files.push({ path: child, size_bytes: stat.size });
+      else throw new CollectFailure("output scan", "NOT_REGULAR");
+    }
+  }
+  try {
+    await visit(root, "");
+  } catch (error) {
+    throw collectFailure("output scan", error);
+  }
+  files.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return files;
+}
+
+async function failedAttempt(
+  entry: IndexEntry,
+  routed: RoutedRun,
+  ledger: CollectLedger | undefined,
+  job: RunJob | undefined,
+  failure: CollectFailure,
+): Promise<never> {
+  const failures: CollectFailure[] = [failure];
+  try {
+    const attempts = (ledger?.attempts ?? 0) + 1;
+    if (!Number.isSafeInteger(attempts))
+      throw new CollectFailure("collect-error write", "ATTEMPT_OVERFLOW");
+    verifyRunFile(entry, routed);
+    const path = join(entry.run_dir, "collect-error.json");
+    await regularFile(path, "collect-error write", true);
+    await writeJson(path, { attempts, last_error: failure.message, at: new Date().toISOString() });
+  } catch (error) {
+    failures.push(collectFailure("collect-error write", error));
+  }
+  if (failure.exitEvidence && job && job.status !== "failed") {
+    try {
+      verifyRunFile(entry, routed);
+      const path = join(entry.run_dir, "run-job.json");
+      await regularFile(path, "failure status projection");
+      await writeJson(path, RunJobSchema.parse({ ...job, status: "failed" }));
+    } catch (error) {
+      failures.push(collectFailure("failure status projection", error));
+    }
+  }
+  if (failures.length > 1) {
+    throw new AggregateError(failures, "SHUD collect persistence failed", { cause: failure });
+  }
+  throw failure;
+}
+
+export function collectRun(
+  entry: IndexEntry,
+  routed: RoutedRun,
+  automatic: false,
+): Promise<RunRecord>;
+export function collectRun(
+  entry: IndexEntry,
+  routed: RoutedRun,
+  automatic: true,
+): Promise<RunRecord | undefined>;
+/** Caller owns per-entry exclusion. This is the only generation, retry, and existing-result backend. */
+export async function collectRun(
+  entry: IndexEntry,
+  routed: RoutedRun,
+  automatic: boolean,
+): Promise<RunRecord | undefined> {
+  let existingFailure: CollectFailure | undefined;
+  let existing: RunRecord | undefined;
+  try {
+    existing = await existingRecord(entry);
+  } catch (error) {
+    existingFailure = collectFailure("run-record", error);
+  }
+  if (existing) {
+    // A valid immutable file is already committed; projection failure is not another generation attempt.
+    await projectCollected(entry, routed);
+    return existing;
+  }
+  const ledger = await readLedger(entry.run_dir);
+  if (
+    automatic &&
+    ledger &&
+    (ledger.attempts >= MAX_COLLECT_ATTEMPTS ||
+      (ledger.attempts > 0 && Date.now() - Date.parse(ledger.at) < COLLECT_RETRY_INTERVAL_MS))
+  )
+    return undefined;
+
+  let job: RunJob | undefined;
+  let result: RunRecord;
+  try {
+    if (existingFailure) throw existingFailure;
+    job = fullJob(routed);
+    if (!isProjectComponent(job.project)) throw new CollectFailure("project", "INVALID_COMPONENT");
+    const code = await exitCode(job);
+    const missing =
+      job.status === "cancelled" || job.cancel_requested_at !== null ? "cancelled" : "lost";
+    const exitClass = classifyRunExit(code, missing);
+    const files = await outputFiles(job.run_dir, job.project);
+    const candidate = RunRecordSchema.safeParse({
+      run_id: job.run_id,
+      job_id: job.job_id,
+      task_id: job.task_id,
+      stack_id: job.stack_id,
+      data_id: job.data_id,
+      status: exitClass === "ok" ? "succeeded" : "failed",
+      command: job.command,
+      exit_code: code,
+      exit_class: exitClass,
+      artifacts: {
+        stdout: join(job.run_dir, "stdout.log"),
+        stderr: join(job.run_dir, "stderr.log"),
+        shud_output: join(job.run_dir, "output", `${job.project}.out`),
+        files,
+      },
+      numerical_health: {
+        water_balance_residual: null,
+        cvode_failures: null,
+        negative_state_count: null,
+        max_solver_dt: null,
+      },
+      resources: {
+        wall_seconds:
+          job.started_at !== null && job.finished_at !== null
+            ? (Date.parse(job.finished_at) - Date.parse(job.started_at)) / 1000
+            : null,
+        peak_memory_mb: null,
+      },
+      llm: {
+        response_model: job.llm.response_model,
+        response_model_source: job.llm.response_model_source,
+      },
+      collected_at: new Date().toISOString(),
+    });
+    if (!candidate.success) throw validationFailure("RunRecord", candidate.error.issues);
+    result = candidate.data;
+    verifyRunFile(entry, routed);
+    const path = join(entry.run_dir, "run-record.json");
+    if (await regularFile(path, "run-record publication", true))
+      throw new CollectFailure("run-record publication", "ALREADY_EXISTS");
+    try {
+      await writeJson(path, result);
+    } catch (error) {
+      throw collectFailure("run-record publication", error);
+    }
+  } catch (error) {
+    return failedAttempt(entry, routed, ledger, job, collectFailure("generation", error));
+  }
+  // Never roll back or rewrite the committed file if this second atomic write fails.
+  await projectCollected(entry, routed);
+  return result;
+}

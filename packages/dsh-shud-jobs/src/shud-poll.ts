@@ -1,11 +1,29 @@
-import * as io from "node:fs/promises";
 import { join } from "node:path";
 import type { JobOutcome } from "@deepseek-ai/dsh-jobs";
-import { RunJobSchema, type RunId, type RunJob } from "@shud-harness/dsh-shud-core";
+import {
+  RunJobSchema,
+  type JobRecordId,
+  type RunId,
+  type RunJob,
+  type RunRecord,
+} from "@shud-harness/dsh-shud-core";
 import type { ShudLifecycle } from "./detached-shud.ts";
 import { processExecutionState } from "./process-identity.ts";
 import { writeJson } from "./state-files.ts";
 import type { IndexEntry, StateIndexStore } from "./state-indexes.ts";
+import { collectRun } from "./shud-collect.ts";
+import { readExit } from "./shud-exit.ts";
+import {
+  CollectFailure,
+  collectFailure,
+  isTerminal,
+  notificationFinished,
+  readRunFile,
+  regularFile,
+  validationFailure,
+  verifyRunFile,
+  type RoutedRun,
+} from "./shud-run-file.ts";
 
 export interface CompletionReceipt {
   lifecycle: ShudLifecycle;
@@ -13,26 +31,7 @@ export interface CompletionReceipt {
   outcome?: JobOutcome;
 }
 
-type ExitEvidence = { code: number; error?: never } | { error: Error; code?: never };
-
-async function readExit(runDir: string): Promise<ExitEvidence | undefined> {
-  const path = join(runDir, "exit_code");
-  let text: string;
-  try {
-    text = await io.readFile(path, "utf8");
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
-    return { error: new Error(`Unreadable exit_code at ${path}`, { cause: error }) };
-  }
-  const token = text.trim();
-  const code = Number(token);
-  if (!/^[+-]?\d+$/u.test(token) || !Number.isSafeInteger(code)) {
-    return { error: new Error(`Invalid exit_code integer at ${path}`) };
-  }
-  return { code };
-}
-
-function terminalOutcome(record: RunJob): JobOutcome {
+function terminalOutcome(record: Pick<RunJob, "status" | "exit_code">): JobOutcome {
   if (record.status === "succeeded")
     return { status: "completed", detail: `SHUD exited with code ${record.exit_code}` };
   if (record.status === "cancelled")
@@ -44,6 +43,13 @@ function terminalOutcome(record: RunJob): JobOutcome {
         ? "SHUD failed without a recorded exit code"
         : `SHUD exited with code ${record.exit_code}`,
   };
+}
+
+function receiptOutcome(routed: RoutedRun, receipt: CompletionReceipt): JobOutcome {
+  if (receipt.outcome) return receipt.outcome;
+  const code = RunJobSchema.shape.exit_code.safeParse(routed.raw.exit_code);
+  if (!code.success) throw validationFailure("RunJob completion", [{ path: ["exit_code"] }]);
+  return terminalOutcome({ status: routed.status, exit_code: code.data });
 }
 
 /** One cadence and one per-run exclusion map serve timer ticks and public manual ticks alike. */
@@ -84,6 +90,46 @@ export class ShudPoll {
     return Promise.all(operations).then(() => undefined);
   }
 
+  collectShud(id: RunId | JobRecordId): Promise<RunRecord> {
+    try {
+      if (!this.accepting) throw new CollectFailure("admission", "CLOSED");
+      const entry = this.indexes.lookup(id);
+      if (!entry) throw new CollectFailure("request", "UNKNOWN_ID");
+      if (this.inSubmission(entry.run_id))
+        throw new CollectFailure("request", "SUBMISSION_IN_FLIGHT");
+      return this.enqueue(entry.run_id, async () => {
+        const routed = await readRunFile(entry);
+        if (!isTerminal(routed.status)) throw new CollectFailure("request", "NOT_TERMINAL");
+        const receipt = this.receipts.get(entry.run_id);
+        if (receipt) await this.complete(entry.run_id, receipt, receiptOutcome(routed, receipt));
+        return collectRun(entry, routed, false);
+      }).catch((error: unknown) => {
+        const failure = error instanceof Error ? error : collectFailure("request", error);
+        this.report(failure);
+        throw failure;
+      });
+    } catch (error) {
+      const failure = collectFailure("request", error);
+      this.report(failure);
+      return Promise.reject(failure);
+    }
+  }
+
+  /** Non-rejecting tails include queued work; an old completion cannot erase a queued successor. */
+  private enqueue<T>(id: RunId, work: () => Promise<T>): Promise<T> {
+    const previous = this.steps.get(id) ?? Promise.resolve();
+    const operation = previous.then(work);
+    const tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.steps.set(id, tail);
+    void tail.then(() => {
+      if (this.steps.get(id) === tail) this.steps.delete(id);
+    });
+    return operation;
+  }
+
   /** Timers do not accumulate waiters behind slow entries; manual ticks join accepted work. */
   private dispatch(joined?: Promise<void>[]): void {
     if (!this.accepting) return;
@@ -91,8 +137,7 @@ export class ShudPoll {
       if (this.inSubmission(entry.run_id)) continue;
       let operation = this.steps.get(entry.run_id);
       if (!operation) {
-        operation = this.runStep(entry);
-        this.steps.set(entry.run_id, operation);
+        operation = this.enqueue(entry.run_id, () => this.runStep(entry));
       }
       joined?.push(operation);
     }
@@ -105,35 +150,27 @@ export class ShudPoll {
       this.report(
         new Error(`Cannot poll SHUD run ${entry.run_id} at ${entry.run_dir}`, { cause: error }),
       );
-    } finally {
-      this.steps.delete(entry.run_id);
     }
   }
 
   private async step(entry: IndexEntry): Promise<void> {
-    const path = join(entry.run_dir, "run-job.json");
-    const record = RunJobSchema.parse(JSON.parse(await io.readFile(path, "utf8")));
+    const routed = await readRunFile(entry);
     if (
-      record.run_id !== entry.run_id ||
-      record.job_id !== entry.job_id ||
-      record.run_dir !== entry.run_dir
-    ) {
-      throw new Error(
-        `RunJob identity/path does not match its active index entry: ${entry.run_id}`,
-      );
-    }
-    if (
-      record.notify.status !== "pending" ||
-      record.status === "collected" ||
-      record.status === "created" ||
-      record.status === "submitted"
+      notificationFinished(routed.raw) ||
+      routed.status === "collected" ||
+      routed.status === "created" ||
+      routed.status === "submitted"
     )
       return;
-    const receipt = this.receipts.get(record.run_id);
-    if (record.status !== "running") {
-      if (receipt) await this.complete(record, receipt);
+    const receipt = this.receipts.get(entry.run_id);
+    if (routed.status !== "running") {
+      if (receipt) await this.complete(entry.run_id, receipt, receiptOutcome(routed, receipt));
+      else await collectRun(entry, routed, true);
       return;
     }
+    // Running settlement still requires the complete schema before any mutation.
+    const record = RunJobSchema.parse(routed.raw);
+    const path = join(entry.run_dir, "run-job.json");
 
     let evidence = await readExit(record.run_dir);
     if (!evidence) {
@@ -181,17 +218,23 @@ export class ShudPoll {
       exit_code: code,
       finished_at: new Date().toISOString(),
     });
+    verifyRunFile(entry, routed);
+    await regularFile(path, "run metadata");
     await writeJson(path, terminal);
     if (receipt) {
       receipt.outcome = outcome;
-      await this.complete(terminal, receipt);
+      await this.complete(record.run_id, receipt, outcome);
     }
   }
 
-  private async complete(record: RunJob, receipt: CompletionReceipt): Promise<void> {
-    await receipt.lifecycle.settle(receipt.outcome ?? terminalOutcome(record));
+  private async complete(
+    runId: RunId,
+    receipt: CompletionReceipt,
+    outcome: JobOutcome,
+  ): Promise<void> {
+    await receipt.lifecycle.settle(outcome);
     await receipt.lifecycle.done;
-    this.receipts.delete(record.run_id);
+    this.receipts.delete(runId);
   }
 
   stopAdmission(): void {
