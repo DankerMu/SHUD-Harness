@@ -21,11 +21,13 @@ import {
   assertRestartEvidence,
   extendPrefix,
   object,
+  ownChildOutput,
   requireFact,
   submission,
   text,
   type CanonicalEvent,
   type CanonicalPrefix,
+  type ChildOutput,
   type Identity,
   type ProcessSample,
   type RestartEvidence,
@@ -170,6 +172,7 @@ function preflight(): RestartConfig {
 
 class WebHost {
   child: ChildProcess;
+  handles: ChildOutput;
   identity: Identity;
   output = "";
   outputBytes = 0;
@@ -191,6 +194,7 @@ class WebHost {
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
+    this.handles = ownChildOutput(this.child, "Web host", workspace, STOP_MS);
     this.child.once("error", () => {
       this.failure = new Error("Web host spawn failed");
       this.exited = true;
@@ -402,21 +406,23 @@ class WebHost {
     );
   }
   async stop(): Promise<void> {
-    for (const signal of ["SIGTERM", "SIGKILL"] as const) {
-      if (this.exited) return;
-      requireFact(
-        this.identity.pid > 0 && this.identity.stamp.length > 0,
-        "Unsafe to clean up Web host: birth identity was not captured",
-      );
-      requireFact(
-        processStart(this.identity.pid) === this.identity.stamp,
-        "Unsafe to clean up Web host: process identity changed",
-      );
-      this.child.kill(signal);
-      const deadline = Date.now() + STOP_MS;
-      while (!this.exited && Date.now() < deadline) await delay(100);
-    }
-    requireFact(this.exited, "Web host cleanup deadline");
+    await this.handles.cleanup(async () => {
+      for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+        if (this.exited) return;
+        requireFact(
+          this.identity.pid > 0 && this.identity.stamp.length > 0,
+          "Unsafe to clean up Web host: birth identity was not captured",
+        );
+        requireFact(
+          processStart(this.identity.pid) === this.identity.stamp,
+          "Unsafe to clean up Web host: process identity changed",
+        );
+        this.child.kill(signal);
+        const deadline = Date.now() + STOP_MS;
+        while (!this.exited && Date.now() < deadline) await delay(100);
+      }
+      requireFact(this.exited, "Web host cleanup deadline");
+    });
   }
   saveOutput(path: string): void {
     // Captured whole bounded streams avoid chunk-boundary credential leakage.
@@ -543,6 +549,7 @@ async function command(
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const handles = ownChildOutput(child, "build/installer", cwd, STOP_MS);
   let exited = false;
   let failed = false;
   let output = "";
@@ -563,26 +570,31 @@ async function command(
     });
   }
   let group: ShudProcessGroup | undefined;
-  try {
-    requireFact(child.pid, "Build/installer process failed to start");
-    const stamp = processStart(child.pid);
-    requireFact(stamp, "Build/installer birth identity unavailable");
-    group = recoverProcessGroup({
-      pid: child.pid,
-      pid_started_at: new Date(`${stamp} UTC`).toISOString(),
-    });
-    const deadline = Date.now() + 600_000;
-    while (!exited && !failed && Date.now() < deadline)
-      await delay(100, undefined, { signal: abort });
-    screen(output);
-    requireFact(
-      exited && !failed && child.exitCode === 0,
-      "Build or profile installation failed (captured output suppressed)",
-    );
-  } finally {
-    if (group) await stopGroup(group);
-    else requireFact(exited, "Unsafe to clean up build/installer without original birth identity");
-  }
+  await handles.run(
+    async () => {
+      requireFact(child.pid, "Build/installer process failed to start");
+      const stamp = processStart(child.pid);
+      requireFact(stamp, "Build/installer birth identity unavailable");
+      group = recoverProcessGroup({
+        pid: child.pid,
+        pid_started_at: new Date(`${stamp} UTC`).toISOString(),
+      });
+      const deadline = Date.now() + 600_000;
+      while (!exited && !failed && Date.now() < deadline)
+        await delay(100, undefined, { signal: abort });
+      await handles.drain();
+      screen(output);
+      requireFact(
+        exited && !failed && child.exitCode === 0,
+        "Build or profile installation failed (captured output suppressed)",
+      );
+    },
+    async () => {
+      if (group) await stopGroup(group);
+      else
+        requireFact(exited, "Unsafe to clean up build/installer without original birth identity");
+    },
+  );
 }
 
 async function runCase(
@@ -840,7 +852,7 @@ async function runCase(
       try {
         await host.stop();
       } catch {
-        cleanupErrors.push("Unsafe to clean up spawned host: birth identity or exit unproved");
+        cleanupErrors.push(`Unsafe Web host cleanup: PID ${host.identity.pid} may remain live`);
       }
     }
     if (hosts.every((host) => host.exited)) {

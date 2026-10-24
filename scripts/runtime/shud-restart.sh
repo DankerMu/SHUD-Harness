@@ -22,6 +22,7 @@ esac
 }
 unset ALL_PROXY
 . "$ROOT/scripts/runtime/dsh-root.sh"
+DSH_ROOT=$(CDPATH='' cd -- "$DSH_ROOT" && pwd -P)
 DSH_BIN=$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$DSH_BIN")
-export SHUD_BIN DSH_BIN
+export SHUD_BIN DSH_BIN DSH_ROOT
 exec node "$ROOT/scripts/runtime/shud-restart.ts"

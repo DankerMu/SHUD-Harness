@@ -77,7 +77,7 @@ R1–R12 启动对账已接入 `[Service.init]`：先排空启动 pass 再开放
 pnpm run shud:restart
 ```
 
-`SHUD_BIN` 可覆盖默认的仓库 `SHUD/shud`，必须是绝对路径、可执行普通文件；`DSH_ROOT` 沿用安装器的钉版 checkout/npm 宿主解析规则。完整 `SHUD/input/ccw`、原生 `ps` 启动身份与 cwd 检查、Darwin `/usr/sbin/lsof` 和 `/usr/bin/lockf`，或 Linux procfs 与 `/usr/bin/flock`，均在任何宿主启动（包括 profile 创建）前检查。命令构建当前插件，使用既有 `profile:install` 创建两个独立 Web profile，不使用用户现有 `DSH_HOME`，也不提供跳过构建或离线 PASS 模式。
+`SHUD_BIN` 可覆盖默认的仓库 `SHUD/shud`，必须是绝对路径、可执行普通文件；`DSH_ROOT` 沿用安装器的钉版 checkout/npm 宿主解析规则，相对路径按启动命令的 cwd 解析为物理绝对路径后传给 scratch 工作区中的安装器与宿主。完整 `SHUD/input/ccw`、原生 `ps` 启动身份与 cwd 检查、Darwin `/usr/sbin/lsof` 和 `/usr/bin/lockf`，或 Linux procfs 与 `/usr/bin/flock`，均在任何宿主启动（包括 profile 创建）前检查。命令构建当前插件，使用既有 `profile:install` 创建两个独立 Web profile，不使用用户现有 `DSH_HOME`，也不提供跳过构建或离线 PASS 模式。
 
 两个用例依次对已返回规范 `shud_run` 结果、仍运行的宿主发送 SIGTERM 与 SIGKILL，再在同一用例的 home/cwd 中启动新 Web 宿主。每次启动重新认证，认证 URL、token、cookie 只在内存中。只提交一次完整 ccw，不传 `end_days`、不发重启后提示、不用手动 `shud_collect` 补偿；原始与工作区输入文件清单及 SHA-256 前后相同，求解器另持运行目录内的输入副本（允许其正常生成 `.bak` 等文件）。
 
@@ -85,7 +85,7 @@ pnpm run shud:restart
 
 每个用例输出并保留 `$HOME/.shud-restart-SIGTERM-*` 或 `$HOME/.shud-restart-SIGKILL-*`：`home/`（原始 host-owned session log）、`work/runs/<run_id>/`（RunJob、RunRecord、退出码和产物）、`evidence/`（规范 HTTP history 的完整前缀投影、原日志路径、进程与状态样本、输入 hash、清理记录、最终判定）。HTTP export HEAD 仅作 host 读盘/flush 屏障，不替代事件证据；脚本不另实现 zstd 解码器，不改写原始日志。脚本写出的内容先过密钥屏蔽检查。成功与失败均不删除证据，用户确认不再需要后自行移除。
 
-HTTP 请求限时 15 秒，Web 启动 60 秒，首次工具提交 3 分钟，重启后的自动完成 15 分钟；构建/安装限时 10 分钟，单轮关闭等待 15 秒。失败或中断先关闭出生身份验证过的脚本宿主，再仅清理已证明归属的执行组；无法证明归属时明确报告 unsafe cleanup 并保留路径，不按名称或复用 PID 广泛杀进程。仅两个用例的五项断言及清理均成功才输出总 PASS、退出 0；缺前提、超时、证据不完整或无法安全清理均非零。此命令说明不是实际两轮 PASS 记录，也不代替 PI 的 Web 手工验收。
+HTTP 请求限时 15 秒，Web 启动 60 秒，首次工具提交 3 分钟，重启后的自动完成 15 分钟；构建/安装限时 10 分钟，单轮关闭及退出后的输出排空等待各限时 15 秒。失败或中断先关闭出生身份验证过的脚本宿主，再仅清理已证明归属的执行组；无法证明归属或完成清理时明确报告 unsafe cleanup、可能仍存活的 PID 与保留路径，仅释放脚本自己的子进程及管道句柄，使命令有界地非零退出，不把释放句柄记作进程已停止，也不向未验证的 PID 发信号。相关进程可能继续运行，需按保留的身份与证据人工核实处理，不按名称或复用 PID 广泛杀进程；正常退出先排空输出再保存证据。仅两个用例的五项断言及清理均成功才输出总 PASS、退出 0；缺前提、超时、证据不完整或无法安全清理均非零。此命令说明不是实际两轮 PASS 记录，也不代替 PI 的 Web 手工验收。
 
 ## 2. 运行时资产（不进代码仓）
 

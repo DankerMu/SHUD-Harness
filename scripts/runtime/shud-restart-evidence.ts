@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { RunJobSchema, type RunJob } from "../../packages/dsh-shud-core/src/schemas/run-job.ts";
 import {
@@ -417,4 +418,67 @@ export function assertRestartEvidence(evidence: RestartEvidence): RestartAsserti
     deliveredWake: true,
     completedOnly: true,
   };
+}
+
+export interface ChildOutput {
+  drain(): Promise<void>;
+  cleanup(action: () => Promise<void>): Promise<void>;
+  run(action: () => Promise<void>, finalizer: () => Promise<void>): Promise<void>;
+}
+
+/** Track close from spawn: exit alone does not prove that piped output has drained. */
+export function ownChildOutput(
+  child: ChildProcess,
+  label: string,
+  workspace: string,
+  timeout: number,
+): ChildOutput {
+  let closed = false;
+  const closure = new Promise<void>((resolve) => {
+    child.once("close", () => {
+      closed = true;
+      resolve();
+    });
+  });
+  async function drain(): Promise<void> {
+    if (closed) return;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        closure,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Subprocess output drain deadline")), timeout);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  async function cleanup(action: () => Promise<void>, failure?: unknown): Promise<void> {
+    try {
+      await action();
+      await drain();
+    } catch (error) {
+      // Release only our handles, never the unverified process or its exit classification.
+      child.unref();
+      for (const stream of child.stdio) stream?.destroy();
+      throw new AggregateError(
+        failure === undefined ? [error] : [failure, error],
+        `Unsafe to clean up ${label} PID ${child.pid ?? "unavailable"}: birth identity, ownership, exit or output drain unproved; retained workspace: ${workspace}`,
+        { cause: error },
+      );
+    }
+  }
+  async function run(action: () => Promise<void>, finalizer: () => Promise<void>): Promise<void> {
+    let failure: unknown;
+    try {
+      await action();
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      await cleanup(finalizer, failure);
+    }
+  }
+  return { drain, cleanup, run };
 }
