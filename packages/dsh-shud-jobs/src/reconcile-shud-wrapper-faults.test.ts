@@ -2,6 +2,7 @@ import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeIo from "node:fs/promises";
+import type { RunId } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry } from "./index.ts";
 import { expectAbsent, readResult } from "./collect-shud/test-harness.ts";
 import { activeGroup, observedStart } from "./detached-shud/test-harness.ts";
@@ -57,6 +58,7 @@ test.each(cases)(
   async (scenario) => {
     const h = await pollFixture();
     let foreignPid: number | undefined;
+    let foreignRunId: RunId | undefined;
     let foreignChild: number | undefined;
     let foreignPath: string | undefined;
     let applying: Promise<unknown> | undefined;
@@ -66,6 +68,7 @@ test.each(cases)(
       if (scenario.kind === "symlink") {
         const foreign = await readyRun(h);
         foreignPid = foreign.pid;
+        foreignRunId = foreign.record.run_id;
         foreignChild = foreign.invocation.pid;
         foreignPath = join(foreign.record.run_dir, "wrapper.pid");
         expect(await io.readFile(foreignPath, "utf8")).toBe(`${foreignPid}\n`);
@@ -140,7 +143,14 @@ test.each(cases)(
       expect((await readRecord(healthy.run_dir)).status).toBe("collected");
       expect((await readResult(healthy.run_dir)).exit_class).toBe("lost");
       const replacement = actualRegistry(h.ctx);
-      expect(replacement.list()).toEqual([]);
+      if (foreignRunId === undefined) {
+        expect(replacement.list()).toEqual([]);
+      } else {
+        // The genuine foreign R5 entry is adoptable; the faulty submitted entry is not.
+        expect(replacement.list()).toMatchObject([
+          { kind: "shud", label: foreignRunId, status: "running" },
+        ]);
+      }
       expect(replacement.indexes.lookup(record.run_id)).toEqual({
         run_id: record.run_id,
         job_id: record.job_id,

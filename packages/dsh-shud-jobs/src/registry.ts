@@ -130,6 +130,7 @@ export class ShudJobRegistry extends ParentRegistry {
         cancellations,
       );
       const dispatcher = new ShudPoll(
+        this,
         store,
         receipts,
         cancellations,

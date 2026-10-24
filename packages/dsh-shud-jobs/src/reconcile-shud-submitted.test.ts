@@ -5,7 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeChild from "node:child_process";
 import { KILL_GRACE_PERIOD_MS } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry } from "./index.ts";
-import { expectAbsent, readResult, type CollectFixture } from "./collect-shud/test-harness.ts";
+import { expectAbsent, readResult } from "./collect-shud/test-harness.ts";
 import {
   activeGroup,
   installFakeShud,
@@ -22,7 +22,7 @@ import {
   waitForOwnershipRelease,
 } from "./poll-shud/test-harness.ts";
 import { actualRegistry } from "./submit-shud/test-harness.ts";
-import { stopWhileRunning } from "./reconcile-shud/test-harness.ts";
+import { stopAtSubmitted, stopWhileRunning } from "./reconcile-shud/test-harness.ts";
 
 const publication = vi.hoisted(() => ({ pid: 0, path: "", probes: 0 }));
 vi.mock("node:child_process", async (original) => {
@@ -50,27 +50,6 @@ beforeEach(() => {
   publication.path = "";
   publication.probes = 0;
 });
-
-/** Retain the real wrapper while recreating the submitted-before-running crash checkpoint. */
-async function stopAtSubmitted(h: CollectFixture, submittedOffsetMs?: number) {
-  const running = await stopWhileRunning(h);
-  const stamp = running.stamp;
-  const submittedAt = running.record.submitted_at;
-  if (submittedAt === null) throw new Error("Real submission has no timestamp");
-  const submitted = await replaceRecord(running.record, {
-    status: "submitted",
-    pid: null,
-    pid_started_at: null,
-    started_at: null,
-    submitted_at:
-      submittedOffsetMs === undefined
-        ? submittedAt
-        : new Date(
-            Math.floor(Date.parse(submittedAt) / 1000) * 1000 + submittedOffsetMs,
-          ).toISOString(),
-  });
-  return { ...running, submitted, stamp };
-}
 
 test.each([
   [0, "ok"],
@@ -130,17 +109,26 @@ test.each([999, -1000])(
       await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
       const replacement = actualRegistry(h.ctx);
       expect(replacement).not.toBe(h.registry);
+      const registrations = replacement.list();
+      expect(registrations).toHaveLength(1);
+      const adopted = registrations[0];
+      if (!adopted) throw new Error("Promoted R3 run has no takeover registration");
+      expect(adopted.id).not.toBe(submitted.dsh_job_id);
+      expect(adopted.owner).toBeUndefined();
+      expect(adopted).toMatchObject({ kind: "shud", label: record.run_id, status: "running" });
       expect(await readRecord(record.run_dir)).toEqual({
         ...submitted,
         status: "running",
         pid,
         pid_started_at: stamp,
         started_at: stamp,
+        dsh_job_id: adopted.id,
+        dsh_job_ids: [...submitted.dsh_job_ids, adopted.id],
       });
       expect(activeGroup(pid)).toContain(pid);
       expect(activeGroup(pid)).toContain(invocation.pid);
       expect(signals.events).toEqual([]);
-      expect(replacement.list()).toEqual([]);
+      expect(replacement.list().map((job) => job.id)).toEqual([adopted.id]);
       expect(await io.readFile(invocationPath)).toEqual(bytes);
       expect((await io.stat(invocationPath, { bigint: true })).mtimeNs).toBe(mtime);
       await expectAbsent(join(record.run_dir, "exit_code"));
@@ -326,14 +314,12 @@ test("submitted numeric exit still wins when its unused submission timestamp is 
   }
 }, 15000);
 
-test("matching live running identity remains unchanged at replacement readiness", async () => {
+test("matching live running identity survives R5 registration publication at replacement readiness", async () => {
   const h = await pollFixture();
   let restoreSignals: (() => void) | undefined;
   try {
     const { record, pid, invocation } = await stopWhileRunning(h);
     const path = join(record.run_dir, "run-job.json");
-    const bytes = await io.readFile(path);
-    const mtime = (await io.stat(path, { bigint: true })).mtimeNs;
     const invocationPath = join(record.run_dir, "invocation.json");
     const receipt = await io.readFile(invocationPath);
     const receiptMtime = (await io.stat(invocationPath, { bigint: true })).mtimeNs;
@@ -345,15 +331,29 @@ test("matching live running identity remains unchanged at replacement readiness"
     await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
     const replacement = actualRegistry(h.ctx);
     expect(replacement).not.toBe(h.registry);
+    const registrations = replacement.list();
+    expect(registrations).toHaveLength(1);
+    const adopted = registrations[0];
+    if (!adopted) throw new Error("R5 takeover did not publish a registration");
+    expect(adopted.id).not.toBe(record.dsh_job_id);
+    expect(adopted.owner).toBeUndefined();
+    expect(adopted).toMatchObject({ kind: "shud", label: record.run_id, status: "running" });
+    expect(await readRecord(record.run_dir)).toEqual({
+      ...record,
+      dsh_job_id: adopted.id,
+      dsh_job_ids: [...record.dsh_job_ids, adopted.id],
+    });
+    const bytes = await io.readFile(path);
+    const mtime = (await io.stat(path, { bigint: true })).mtimeNs;
+    await replacement.pollOnce();
     expect(await io.readFile(path)).toEqual(bytes);
     expect((await io.stat(path, { bigint: true })).mtimeNs).toBe(mtime);
-    expect(await readRecord(record.run_dir)).toEqual(record);
     expect(await io.readFile(invocationPath)).toEqual(receipt);
     expect((await io.stat(invocationPath, { bigint: true })).mtimeNs).toBe(receiptMtime);
     expect(activeGroup(pid)).toContain(pid);
     expect(activeGroup(pid)).toContain(invocation.pid);
     expect(signals.events).toEqual([]);
-    expect(replacement.list()).toEqual([]);
+    expect(replacement.list().map((job) => job.id)).toEqual([adopted.id]);
     await expectAbsent(join(record.run_dir, "run-record.json"));
     await expectAbsent(join(record.run_dir, "exit_code"));
   } finally {
@@ -578,17 +578,27 @@ test("replacement recovers a live submitted wrapper with the untouched real subm
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 
     await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
+    const replacement = actualRegistry(h.ctx);
+    const registrations = replacement.list();
+    expect(registrations).toHaveLength(1);
+    const adopted = registrations[0];
+    if (!adopted) throw new Error("Promoted R3 run has no takeover registration");
+    expect(adopted.id).not.toBe(submitted.dsh_job_id);
+    expect(adopted.owner).toBeUndefined();
+    expect(adopted).toMatchObject({ kind: "shud", label: record.run_id, status: "running" });
     expect(await readRecord(record.run_dir)).toEqual({
       ...submitted,
       status: "running",
       pid,
       pid_started_at: stamp,
       started_at: stamp,
+      dsh_job_id: adopted.id,
+      dsh_job_ids: [...submitted.dsh_job_ids, adopted.id],
     });
     expect(activeGroup(pid)).toContain(pid);
     expect(activeGroup(pid)).toContain(invocation.pid);
     expect(signals.events).toEqual([]);
-    expect(actualRegistry(h.ctx).list()).toEqual([]);
+    expect(replacement.list().map((job) => job.id)).toEqual([adopted.id]);
     await expectAbsent(join(record.run_dir, "run-record.json"));
   } finally {
     restoreSignals?.();

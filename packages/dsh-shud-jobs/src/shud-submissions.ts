@@ -24,7 +24,11 @@ import {
   type PreparedInput,
   type SubmitShudRequest,
 } from "./shud-input.ts";
-import { registerUnowned } from "./shud-registration.ts";
+import {
+  registerUnowned,
+  registrationLabel,
+  removeSettledRegistration,
+} from "./shud-registration.ts";
 import type { ShudExecution, ShudProcessIdentity } from "./detached-shud.ts";
 import type { CompletionReceipt } from "./shud-poll.ts";
 import type { ShudCancellation } from "./shud-cancellation.ts";
@@ -217,7 +221,7 @@ export class ShudSubmissions {
       await writeJson(recordPath, record);
       registered = registerUnowned(this.registry, {
         kind: "shud",
-        label: record.label === null ? record.run_id : `${record.run_id} ${record.label}`,
+        label: registrationLabel(record),
         output: [stdoutSource(join(record.run_dir, "stdout.log"))],
         run: (handle) => {
           this.cancellations.register(
@@ -236,7 +240,7 @@ export class ShudSubmissions {
             (identity) => ({ identity }),
             (error: unknown) => ({ error }),
           );
-          return this.cancellations.attach(handle.id, execution.value);
+          return this.cancellations.attach(handle.id, execution.value, execution.value);
         },
       });
       record = RunJobSchema.parse({
@@ -270,17 +274,7 @@ export class ShudSubmissions {
           execution.value.hooks.cancel("SHUD submission rolled back");
           await execution.value.hooks.done;
         }
-        if (registered) {
-          // Teardown may already have removed the entry; otherwise wait for the parent's final drain.
-          while (this.registry.list().some((job) => job.id === registered)) {
-            const view = await this.registry.wait(registered, this.waitMs);
-            if (view.status !== "running" && view.status !== "stopping") {
-              if (this.registry.list().some((job) => job.id === registered))
-                this.registry.remove(registered);
-              break;
-            }
-          }
-        }
+        if (registered) await removeSettledRegistration(this.registry, registered, this.waitMs);
         if (indexed) await this.indexes.removeActive(reservation.run_id);
         if (created && existingPath(reservation.runDir)) {
           if (!parent || !owned)
