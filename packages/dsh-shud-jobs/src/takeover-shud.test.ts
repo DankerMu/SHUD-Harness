@@ -22,6 +22,7 @@ import {
 } from "./reconcile-shud/test-harness.ts";
 import { actualRegistry, injectedRegistry } from "./submit-shud/test-harness.ts";
 import { producer as ordinaryProducer } from "./test-harness.ts";
+import { deliveredWake, expectSingleWake } from "./wake-shud/test-harness.ts";
 
 test("R5 takeover without external controllers registers the original labelled execution once and collects its exit", async () => {
   const h = await pollFixture();
@@ -166,6 +167,24 @@ test("R5 takeover without external controllers registers the original labelled e
     expect(h.sessionEvents).toEqual([]);
     expect(h.flushes).toEqual([]);
     expect(h.errors).toEqual([]);
+    const resultPath = join(record.run_dir, "run-record.json");
+    const resultBytes = await io.readFile(resultPath);
+    const resultMtime = (await io.stat(resultPath, { bigint: true })).mtimeNs;
+    expect(result.artifacts.files).toEqual([]);
+    await h.mountSessionController();
+    await deliveredWake(replacement, record.run_dir);
+    expectSingleWake(h, record.run_id, "ok", 0);
+    expect((await readRecord(record.run_dir)).notify).toMatchObject({
+      status: "delivered",
+      attempts: 0,
+    });
+    expect(replacement.indexes.read()).toEqual({
+      active: [],
+      completed: [{ run_id: record.run_id, job_id: record.job_id, run_dir: record.run_dir }],
+    });
+    expect(await io.readFile(resultPath)).toEqual(resultBytes);
+    expect((await io.stat(resultPath, { bigint: true })).mtimeNs).toBe(resultMtime);
+    expect(await io.readFile(invocationPath)).toEqual(invocationBytes);
   } finally {
     restoreSignals?.();
     unsubscribe?.();
@@ -268,6 +287,30 @@ test("R3 promotion with the actual submission timestamp exposes takeover to a la
     expect(h.sessionEvents).toEqual([]);
     expect(h.flushes).toEqual([]);
     expect(h.errors).toEqual([]);
+    await h.mountSessionController();
+    await releaseRun(record);
+    await deliveredWake(replacement, record.run_dir);
+    expect(await replacement.collectShud(record.run_id)).toMatchObject({
+      exit_code: 0,
+      exit_class: "ok",
+      artifacts: { files: [] },
+    });
+    expectSingleWake(h, record.run_id, "ok", 0);
+    expect(await readRecord(record.run_dir)).toMatchObject({
+      status: "collected",
+      pid,
+      pid_started_at: stamp,
+      dsh_job_id: adopted.id,
+      dsh_job_ids: promoted.dsh_job_ids,
+      notify: { status: "delivered", attempts: 0 },
+    });
+    expect(replacement.indexes.read()).toEqual({
+      active: [],
+      completed: [{ run_id: record.run_id, job_id: record.job_id, run_dir: record.run_dir }],
+    });
+    expect(await io.readFile(invocationPath)).toEqual(invocationBytes);
+    expect((await io.stat(invocationPath, { bigint: true })).mtimeNs).toBe(invocationMtime);
+    expect(running.producer.attempts).toEqual([]);
   } finally {
     restoreSignals?.();
     try {

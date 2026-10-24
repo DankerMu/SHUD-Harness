@@ -6,6 +6,7 @@ import type * as NodeChild from "node:child_process";
 import type * as NodeIo from "node:fs/promises";
 import { generateRunIdentifiers } from "@shud-harness/dsh-shud-core";
 import { activeGroup } from "./detached-shud/test-harness.ts";
+import { waitForRecovery } from "./reconcile-shud/test-harness.ts";
 import {
   pollFixture,
   readRecord,
@@ -164,7 +165,13 @@ test("uncertain process inspection preserves the running record and completion w
     fault.pid = record.pid;
     fault.mode = "uncertain";
     await releaseRun(other);
-    await h.registry.pollOnce();
+    await waitForRecovery(async () => {
+      await h.registry.pollOnce();
+      expect(await io.readFile(path)).toEqual(bytes);
+      expect(first.producer.completed).toEqual([]);
+      expect(first.producer.registration.cancellations).toEqual([]);
+      return healthy.producer.completed.length === 1;
+    }, "healthy producer completion while uncertain inspection remains isolated");
     expect(await io.readFile(path)).toEqual(bytes);
     expect(first.producer.completed).toEqual([]);
     expect(first.producer.registration.cancellations).toEqual([]);

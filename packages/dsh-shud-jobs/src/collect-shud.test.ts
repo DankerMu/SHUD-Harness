@@ -8,6 +8,7 @@ import {
 } from "@shud-harness/dsh-shud-core";
 import { terminateGroup } from "./detached-shud/test-harness.ts";
 import { pollFixture, readRecord, releaseRun, replaceRecord } from "./poll-shud/test-harness.ts";
+import { waitForRecovery } from "./reconcile-shud/test-harness.ts";
 import {
   existingResult,
   expectAbsent,
@@ -41,7 +42,10 @@ test.each(Object.entries(numericClasses))(
       await io.writeFile(join(root, "a.bin"), Buffer.from([0, 255, 1, 2]));
       await io.writeFile(join(root, "nested", "b with spaces.dat"), "abc");
       await releaseRun(job);
-      await h.registry.pollOnce();
+      await waitForRecovery(async () => {
+        await h.registry.pollOnce();
+        return producer.completed.length === 1;
+      }, "native producer completion before explicit result collection");
       const result = await h.registry.collectShud(job.run_id);
       expect(RunRecordSchema.parse(result)).toEqual(result);
       expect(result).toMatchObject({

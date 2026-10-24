@@ -179,11 +179,11 @@ SLURM watcher 监控：
 
 Collect 必须是幂等的。重复调用 `collect` 不应破坏已完成结果。
 
-当前实现：`dsh-shud-jobs` 已提供自动收集与后端 `collectShud(RunId | JobRecordId): Promise<RunRecord>`，共用逐条目队列并等待本地完成回执；先发布不可变 RunRecord，再投影 `collected`。状态投影失败只修复投影，不重做生成或消耗生成尝试；成功重试保留历史错误记录。R9/R10 启动对账复用该收集实现：有效且身份匹配的已有 RunRecord 在读取重试记录前优先返回，即使历史预算耗尽、未到重试间隔或记录损坏，也只修复状态；没有有效已提交结果时，损坏的重试记录阻止新的生成尝试，保留且不重置次数。手动 API 可越过正常重试间隔/次数上限。`shud_collect` 工具与耗尽后唤醒尚待接入；pending notify 的活动索引在收集后仍保留，待 #313 投递阶段迁移，已通知条目的启动索引修复见 §9。实现边界与安全规则见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
+当前实现：`dsh-shud-jobs` 已提供自动收集与后端 `collectShud(RunId | JobRecordId): Promise<RunRecord>`，共用逐条目队列并等待本地完成回执；先发布不可变 RunRecord，再投影 `collected`。状态投影失败只修复投影，不重做生成或消耗生成尝试；成功重试保留历史错误记录。R9/R10 启动对账复用该收集实现：有效且身份匹配的已有 RunRecord 在读取重试记录前优先返回，即使历史预算耗尽、未到重试间隔或记录损坏，也只修复状态；没有有效已提交结果时，损坏的重试记录阻止新的生成尝试，保留且不重置次数。手动 API 可越过正常重试间隔/次数上限。`shud_collect` 工具尚待接入；收集本身不投递消息，pending notify 的活动索引在收集后仍保留，由服务初始化后的唯一轮询循环执行 #313 投递，通知终结后迁移索引，见 §9。实现边界与安全规则见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
 
-M2 collect 从 `<session cwd>/runs/<run_id>/` 读取作业与退出信息：按退出码映射 `exit_class`，扫描 `output/<project>.out/` 得到相对路径/字节数清单，计算 `wall_seconds`，复制模型 id 与来源，经 core schema 校验后写 `run-record.json`，再将 RunJob 置为 `collected`；后续 #313 接入唤醒步骤。有效且身份匹配的已有 `run-record.json` 原样返回，内容和修改时间不变；后续 `shud_collect` 工具复用同一逻辑。当前 `wall_seconds` 由 `(Date.parse(finished_at) - Date.parse(started_at)) / 1000` 计算（缺时间为 null），不是精确求解器计时；测量限制见 §9。
+M2 collect 从 `<session cwd>/runs/<run_id>/` 读取作业与退出信息：按退出码映射 `exit_class`，扫描 `output/<project>.out/` 得到相对路径/字节数清单，计算 `wall_seconds`，复制模型 id 与来源，经 core schema 校验后写 `run-record.json`，再将 RunJob 置为 `collected`；后续投递步骤由同一轮询循环负责，不由 collector 发消息。有效且身份匹配的已有 `run-record.json` 原样返回，内容和修改时间不变；后续 `shud_collect` 工具复用同一逻辑。当前 `wall_seconds` 由 `(Date.parse(finished_at) - Date.parse(started_at)) / 1000` 计算（缺时间为 null），不是精确求解器计时；测量限制见 §9。
 
-失败写同目录 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态；退出码不可读/非整数时为 `failed`，不写占位 RunRecord、不置 `collected`。唯一轮询循环在距上次尝试至少 10 秒后重试，上限 3 次；达到上限不再自动 collect，后端 `collectShud()` 仍可手工重试。重启由 R9/R10 接续；耗尽后带失败原因的唤醒与工具入口分别由 #313 及后续工具切片接入。
+失败写同目录 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态；退出码不可读/非整数时为 `failed`，不写占位 RunRecord、不置 `collected`。唯一轮询循环在距上次尝试至少 10 秒后重试，上限 3 次；达到上限不再自动 collect，后端 `collectShud()` 仍可手工重试。重启由 R9/R10 接续；耗尽后的投递保留原终态和错误记录，仅使用经受控阶段/代码校验及归一化的实际失败原因，不直接转发任意 `last_error`。不可信的历史诊断或损坏、错身份、链接形式的已有 RunRecord 阻止失败唤醒，不重置预算、不猜测结果；有效同身份 RunRecord 仍优先。工具入口留待后续切片。
 
 metrics、数值健康计算、ArtifactManifest、TaskCard 更新与报告生成不属于 M2 collect；它们在后续里程碑按相应对象契约接入。
 
@@ -254,11 +254,11 @@ workspace/tasks/<task_id>/locks/resume.lock   # resume 是 task 级动作，保�
 
 M2 不使用上面的后续 TaskCard/job 级锁布局：注册表在配置的 `stateDir` 持有 `lock`（pid + 进程启动时间）；同实例索引修改串行化，同条目同时至多一个轮询步骤在途，已有 RunRecord 不重写。存活持有者使第二实例激活失败，陈旧锁才可接管；详见 design D2/D7。
 
-当前在线取消实现：注册表对本实例实际提交或启动 R3/R5 接管关联的 SHUD 登记提供同步公开 kill，先持久化取消意图并在父类调用前镜像首次期限，再向受控进程组 SIGTERM；重复请求保留首次时间，既有轮询按 core 10 秒宽限期升级 SIGKILL，不新增定时器。父类在消费标记前抛错也不丢失已持久化意图；失败写入不产生意图镜像。包装进程先退出但后代仍可 I/O 时继续等待/升级，组静止后按退出文件 first-wins 结算 durable 结果，再完成本实例登记；本地提交还必须完成真实子进程回收。轮询和 collect 状态投影使用新鲜 RunJob 的同步原子发布，不覆盖并发取消标记。非托管登记保持父类行为；接管顺序及取消意图的文件级重启接续见 §9。#313 唤醒及工具入口尚未落地，此实现状态不代表完整宿主/Web 恢复或 PI 验收。
+当前在线取消实现：注册表对本实例实际提交或启动 R3/R5 接管关联的 SHUD 登记提供同步公开 kill，先持久化取消意图并在父类调用前镜像首次期限，再向受控进程组 SIGTERM；重复请求保留首次时间，既有轮询按 core 10 秒宽限期升级 SIGKILL，不新增定时器。父类在消费标记前抛错也不丢失已持久化意图；失败写入不产生意图镜像。包装进程先退出但后代仍可 I/O 时继续等待/升级，组静止后按退出文件 first-wins 结算 durable 结果，再完成本实例登记；本地提交还必须完成真实子进程回收。轮询和 collect 状态投影使用新鲜 RunJob 的同步原子发布，不覆盖并发取消标记。非托管登记保持父类行为；接管顺序、取消意图的文件级重启接续与 #313 唤醒见 §9。工具入口尚未落地，此实现状态不代表完整宿主/Web 恢复或 PI 验收。
 
 **宿主 teardown 与正常结算分开**：`ShudLifecycle` 要求异步可等待的 `settle(outcome)` 和同步 `detach(detail)`，二者释放同一实际登记资源、完成同一个 producer-owned done，完成幂等且不创建替代 promise。未消费一次性 kill 标记的托管 cancel 在回调内 detach 为 failed，父类公开 settled 事件的 cause 为 teardown；不转发任意 supplied cancel（该回调保留给提交回滚），不靠父类异常兜底强制失败伪造 producer 完成。无取消意图时不发信号，detail 说明宿主退出但 SHUD 继续后台运行；已有意图时先按原组所有权证明重发 SIGTERM，再说明 kill 进行中。权限/检查/可观察替代 leader 错误经受控阶段与错误码报告，仍在 finally 完成登记，不向无法证明归属的组发信号，也不宣称静止。
 
-这是纯登记级放手：teardown 不读写 RunJob/索引，不生成 RunRecord 或 collect ledger，不唤醒、不发 SIGKILL、不等待子进程、不重置取消期限；原始 intent、状态及 pending notify 留给重启对账。组合生命周期仍先关闭准入，再排空已接受的正常工作及启动 R8，之后释放状态锁。发起会话的 Agent 释放不取消无 owner 的 SHUD 登记，后台任务仍可自然结束并正常 collect。
+这是纯登记级放手：登记级 detach 不读写 RunJob/索引，不生成 RunRecord 或 collect ledger，不唤醒、不发 SIGKILL、不等待子进程、不重置取消期限；原始 intent、状态及未完成通知留给后续对账。组合生命周期则先关闭准入，再排空已接受的正常工作及启动 R8，包括已接受的通知 flush、失败记账、标记发布与索引迁移，之后释放状态锁；不能把 detach 的无文件副作用解释为丢弃这些在途工作。发起会话的 Agent 释放不取消无 owner 的 SHUD 登记，后台任务仍可自然结束、正常 collect 并进入投递。
 
 本地提交与接管共用内部最小受控组/完成契约 `ShudControl` / `ShudCompletion`，包含组检查/信号与共享同一实际 done 的 settle/detach；接管使用恢复的组能力和真实父类输出泵完成，不伪造原生 child、started、waitForExit 或 abort。实际本地 `ShudExecution` 仍独自拥有子进程启动、回收与回滚 abort；本地取消先等真正的 native-child waiter，不能因接管不拥有 child 而删去此等待。上述 plain/grace teardown 和无 owner Agent 释放语义同样适用于已接管登记。
 
@@ -268,8 +268,8 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 - **R1–R4（未完成提交）**：created 结算 lost 并 collect；submitted 的退出文件优先，否则只读取已提交的普通、非链接 `wrapper.pid` 并验证真实进程与提交新鲜度，合格才同次写入 running/pid/pid_started_at/started_at。R3 使用该转换返回的新鲜 running 记录进入下述接管，不另造身份通道。确定进程缺失、已死或早于提交时，再读退出文件，仍无才 lost；未知检查错误不等同死亡。没有退出证据且缺有效 `submitted_at` 时保留并报错，不猜测启动边界。
 - **R5–R8（已有运行身份）**：匹配且存活、无取消意图的 R5 进入接管，保留原物理执行并发布新 dsh id/历史；R6 按退出证据结算。R7 在 leader 缺失、不匹配或已死后重读退出文件，仍无才 lost（有取消意图则 cancelled），不向未获所有权的组发信号。R8 保持无 dsh 登记的文件级取消：先以新鲜、匹配且存活的 leader 建立恢复组控制，再沿用在线取消的信号、检查与期限逻辑；组静止后重读退出文件，有效数值始终优先，只有缺失才 cancelled。
-- **R9–R11（收集与待投递）**：R9 复用 §5 的 canonical collector，有效同身份 RunRecord 优先于重试记录，只修复 `collected`，不重写结果；未提交结果的生成仍受原重试间隔/预算约束。R10 保留已耗尽终态，没有结果绝不伪置 collected；R11 保持 collected。两者不制造唤醒，pending notify 的字段与字节语义不变。
-- **R12（已通知索引修复）**：经身份/路径/状态路由和完整 notify 校验确认 `delivered`/`unreachable` 后，优先补写 completed 再移出 active，修复崩溃留下的重叠；不重置通知、不改写 RunJob/RunRecord。重复启动不生成第二份结果或索引条目。
+- **R9–R11（收集与待投递）**：R9 复用 §5 的 canonical collector，有效同身份 RunRecord 优先于重试记录，只修复 `collected`，不重写结果；未提交结果的生成仍受原重试间隔/预算约束。R10 保留已耗尽终态，没有结果绝不伪置 collected；R11 保持 collected。启动文件对账阶段不投递，保持 pending notify；初始化完成后的普通轮询再对符合条件的条目执行下述投递。
+- **R12（已通知索引修复）**：经身份/路径/状态路由和完整 notify 校验确认 `delivered`/`unreachable` 后，优先补写 completed 再移出 active，修复崩溃留下的重叠；不重置通知、不改写 RunJob/RunRecord。普通轮询也执行同一修复，不能仅凭 status 字符串迁移损坏的 notify。重复启动不生成第二份结果或索引条目。
 
 **R3/R5 接管登记**：同步恢复已验证进程身份的组能力，在构造时捕获的原始注册表上复用瞬时全局控制器，建立无 owner 的真实 `kind: shud` 登记；label 仍为 run_id 加可选持久 label，输出继续读取原 `stdout.log`，不依赖 tool-jobs 或外部会话控制器。先经新鲜身份/路径校验把旧 `dsh_job_id` 清空为 null；producer 回调内安装托管分类、组能力和身份，父类 start 返回后在任何 await 之前发布新 current id、追加 `dsh_job_ids` 并保存真实完成回执。每个注册表实例只接管一次；重复 tick 不改 id/历史，后续新实例取得新 id 并追加一次，旧非 null id 不代表本实例已登记。
 
@@ -283,7 +283,13 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 **仍未覆盖的边界**：当前快照与秒级 lstart 不是原子的、通用的 PID/进程组代次能力。重启前 leader 已死而后代可能仍活着时，R7 的 lost/cancelled 不证明历史组静止；不能凭持久化 pid 向裸负 pgid 发信号，该孤儿组策略待 [#343](https://github.com/DankerMu/SHUD-Harness/issues/343) 裁决。原生控制明确区分了测试场景：对真实 shell 包装进程先 SIGSTOP 再组 SIGTERM，Linux 保持匹配的 T-state leader，重启可验证 R8 在原始期限 SIGKILL 后组静止；Darwin leader 会被 SIGTERM 终止，重启实际走 R7 cancelled，抗 TERM 后代仍活着，须由测试的已知所有权显式清理。后者不是 Darwin R8/静止性证据，也不是本切片解决了 #343；平台断言不跳过、不用伪 pid/时间或生产 wrapper trap 替代原生行为。当前 `started_at` 沿用 lstart，`finished_at` 是结算观测时刻；`wall_seconds` 可能包含起点偏差、退出后未观测延迟或取消宽限，并非精确求解器时长。测量语义待 [#344](https://github.com/DankerMu/SHUD-Harness/issues/344) 裁决，本切片没有改计时公式或宣称完成真实时长精度测量。
 
-**后续接入（尚未实现）**：#313 才在服务就绪后执行 `resolveAgent` → `createUserMessage`（`source.kind: shud-jobs`，含 `run_id`）→ `followup` → `sessions.flush` → delivered/unreachable 与正常完成索引迁移；工具入口也尚未挂载。当前 pending notify 保留，不能把 R12 的已有通知索引修复当作已实现投递。后续投递按至少一次语义设计，不宣称 exactly-once，也不以本次接管实现宣称完整宿主/Web 恢复或 PI 验收。
+**初始化后的唤醒投递（#313）**：注册表可选注入 `sessionController` 与 `sessions`；缺服务时保持 pending、不消耗尝试，服务撤销后停止使用旧注入 epoch，晚到的恢复结果不能追加消息或计入失败。即使服务已存在，`Service.init` / 启动对账也绝不等待 `resolveAgent`，避免冷会话恢复等待自身插件激活；注入回调只建立可用性，初始化后的既有 cadence 才投递，不新增定时器或完成事件订阅者。
+
+普通逐条目步骤对已收集结果或经校验的收集耗尽终态执行 `resolveAgent` → `createUserMessage`（`source.kind: shud-jobs`）→ `followup` → `sessions.flush`。成功结果消息包含 durable `run_id`、`exit_class` 与产物数；耗尽消息包含受控实际失败原因。确认 flush 成功后才写 `delivered`，随后先写 completed 再移出 active；无 owner 的 SHUD 登记不经 `job/settled` / tool-jobs 再发一份消息。服务可用且条目符合投递条件后，空 owner 或精确的 `session/not-found` 错误码直接标记 `unreachable`，不把其它恢复错误误判为永久不可达。
+
+暂时性恢复、追加或 flush 失败按原失败时间记账，间隔至少 10 秒、上限 3 次；第三次失败与 `unreachable` 原子发布，不进行第四次传输。失败记账写入失败时先重试该次发布，保留原时间/原因，不让 pump cadence 无控制地重发或凭空增加持久次数；若写入实际已提交，服务缺席产生的规范等待提示不能使该记账失效，在运行/owner 身份及次数、时间、状态仍匹配时识别原失败提示或规范等待提示，不重写、不重复计数，也不接受任意变更的提示。确认的追加及成功 flush 回执按 live Session 和完整运行身份保存在进程内：普通注册表重载可继续 flush 或仅补写 delivered，不重复确认过的步骤；实际进程崩溃丢失这些回执，追加与 durable 标记之间的窗口允许重放。这是至少一次语义，不保证 exactly-once；没有新增持久 outbox 或 schema。
+
+协议与验收边界以 [M2 fixture design](../../openspec/changes/m2-run-chain/design.md)、[tasks](../../openspec/changes/m2-run-chain/tasks.md) 为准；实现入口为 [shud-poll.ts](../../packages/dsh-shud-jobs/src/shud-poll.ts)，历史收集诊断的受控校验归 [shud-run-file.ts](../../packages/dsh-shud-jobs/src/shud-run-file.ts) 所有。当前后端验证包含真实原生执行/宿主崩溃与公开会话服务 doubles，不等同完整 Web 恢复；工具入口 #314–315、完整 Web 验收 #316–318 仍待后续切片，不据此宣称 M2 Epic 完成或 PI 验收。
 
 ## 10. 用户体验
 

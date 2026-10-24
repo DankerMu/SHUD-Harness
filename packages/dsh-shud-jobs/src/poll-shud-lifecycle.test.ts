@@ -239,7 +239,7 @@ test("completion callback retry does not rewrite terminal bytes, mtime or finish
 
 test("composite disposal drains an accepted settlement before releasing state ownership", async () => {
   const h = await pollFixture();
-  const contender = await createHarness();
+  const contender = await createHarness(undefined, "absent");
   const held = barrier();
   const release = barrier();
   let polling: Promise<void> | undefined;
@@ -295,7 +295,19 @@ test("composite disposal drains an accepted settlement before releasing state ow
     const replacement = actualRegistry(contender.ctx);
     await replacement.pollOnce();
     await replacement.collectShud(record.run_id);
-    expect(await readRecord(record.run_dir)).toEqual({ ...terminal, status: "collected" });
+    await expect
+      .poll(async () => (await readRecord(record.run_dir)).notify.detail, { timeout: 5000 })
+      .toMatch(/wait.*session|session.*wait/iu);
+    const collected = await readRecord(record.run_dir);
+    expect(collected.notify.detail).toMatch(/wait.*session|session.*wait/iu);
+    expect(collected).toEqual({
+      ...terminal,
+      status: "collected",
+      notify: {
+        ...terminal.notify,
+        detail: collected.notify.detail,
+      },
+    });
   } finally {
     release.release();
     await polling?.catch(() => undefined);
@@ -363,6 +375,9 @@ test("reload settles a new local registration without invoking the retired compl
     await h.registry.pollOnce();
     await expect.poll(() => first.producer.completed.length).toBe(1);
     await h.registry.collectShud(record.run_id);
+    await expect
+      .poll(async () => (await readRecord(record.run_dir)).notify.detail, { timeout: 5000 })
+      .toMatch(/wait.*session|session.*wait/iu);
     const path = join(record.run_dir, "run-job.json");
     const bytes = await io.readFile(path);
     const stat = await io.stat(path, { bigint: true });

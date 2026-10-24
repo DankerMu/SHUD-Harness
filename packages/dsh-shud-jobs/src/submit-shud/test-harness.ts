@@ -30,8 +30,10 @@ export async function writeInputTree(
 export async function submissionFixture(
   parameter?: string,
   execution: "held" | "immediate" = "held",
+  sessionController: "available" | "absent" = "absent",
 ) {
-  const h = await createHarness();
+  // Submission/lifecycle fixtures retain pending notifications unless delivery is under test.
+  const h = await createHarness(undefined, sessionController);
   try {
     if (execution === "held") {
       // Keep running/output assertions independent of the online settlement cadence, without log noise.

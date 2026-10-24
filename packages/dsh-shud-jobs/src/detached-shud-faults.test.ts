@@ -50,6 +50,8 @@ vi.mock("node:child_process", async (original) => {
         args[0] === "-p" &&
         args[1] !== String(process.pid)
       ) {
+        // Fault startup inspection once; rollback ownership probes must observe actual processes.
+        fault.mode = "";
         return { pid: 0, output: [], stdout: "", stderr: "", status: 0, signal: null };
       }
       if (fault.mode === "group" && command === "ps" && args[0] === "-axo") {

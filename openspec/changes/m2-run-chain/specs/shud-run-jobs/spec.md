@@ -418,6 +418,22 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** 在不挂载 `session-controller` 的 headless profile 中作业结束
 - **THEN** `shud-jobs` 行保持激活，RunRecord 已生成，`notify.status` 保持 `pending` 且 `detail` 指出等待会话控制服务，不变为 `unreachable`
 
+#### Scenario: failed flush does not append twice across ordinary registry reload
+- **WHEN** followup 已向仍存活的同一会话对象追加消息，但 flush 暂时失败，随后同一宿主进程内注册表插件被正常释放并重新装配
+- **THEN** 重试间隔后仅重新确认已接受消息的持久化，不再追加第二条消息；成功后 notify 为 delivered，完成索引迁移。此进程内保证不替代进程崩溃后允许重投的至少一次语义
+
+#### Scenario: notification marker and index publication recover independently
+- **WHEN** flush 已成功，但 delivered 的原子发布或其后的完成索引迁移暂时失败
+- **THEN** 同一进程重试不再次追加已接受的唤醒；delivered 持久化之前不迁移完成索引，持久化之后只修复完成索引与活动索引，不重复投递或改写 RunRecord
+
+#### Scenario: optional session services are revoked during resolution
+- **WHEN** 投递已等待 resolveAgent，而所属可选会话服务 epoch 被撤载后才返回
+- **THEN** 不通过已撤载 epoch 新增 followup，不因服务缺失消耗失败次数或置 unreachable；待服务重新就绪后继续既有投递步骤，已接受工作仍在注册表所有权释放前排空
+
+#### Scenario: cold owner restoration does not block registry activation
+- **WHEN** 可选会话服务先于 jobs 注册表可用，但冷恢复发起会话需要等待 Host 插件完成激活
+- **THEN** jobs 先完成文件对账与自身激活，不在 Service.init 内等待会话恢复；随后既有轮询循环经同一投递步骤恢复会话、唤醒并迁移索引，不新增启动快路径或第二个定时器
+
 ### Requirement: Recoverability invariant
 运行时不变量"shud 作业可恢复（SIGTERM/SIGKILL）"SHALL 以以下可观察断言判定，SHALL NOT 以 `job/settled` 事件判定（dsh 不为无 owner 作业写该事件）：对任一在宿主收到 SIGTERM 或 SIGKILL 前已由 `shud_run` 返回 `job_id` 的作业，重启后（1）`run-job.json` 存在且状态只沿「RunJob record」状态机前进；（2）最终存在 `run-record.json` 或 `collect-error.json`；（3）同一运行目录在任一时刻至多一个 SHUD 进程；（4）在挂载 `session-controller` 的 profile 中，`notify.status` 最终为 `delivered`（发起会话 session log 有一条 `source.kind: shud-jobs` 且含该 `run_id` 的用户消息）或带原因的 `unreachable`；（5）在同一前提下，该作业最终出现在 `completed.json` 且不在 `active.json`。注册表集成测试与 `shud:restart` SHALL 断言这五条。
 

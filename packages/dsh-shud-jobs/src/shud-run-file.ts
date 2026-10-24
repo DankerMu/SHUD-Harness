@@ -42,6 +42,53 @@ const filesystemCodes = new Set([
   "EBUSY",
 ]);
 
+interface CollectDiagnosticRule {
+  filesystem?: true;
+  codes?: readonly string[];
+  validation?: true;
+}
+
+// Historical ledgers carry strings, not trusted CollectFailure instances. Keep the collector's
+// stage/code grammar here beside safeCode; filesystem errno vocabulary has only one owner.
+const collectDiagnosticRules: Record<string, CollectDiagnosticRule> = {
+  "collect-error ledger": { filesystem: true, codes: ["SYMLINK", "NOT_REGULAR", "INVALID_FIELDS"] },
+  "run-record": { filesystem: true, codes: ["SYMLINK", "NOT_REGULAR"] },
+  "run-record JSON": { filesystem: true },
+  "run-record identity": { codes: ["MISMATCH"] },
+  RunJob: { validation: true },
+  RunRecord: { validation: true },
+  "collected status projection": {
+    filesystem: true,
+    codes: ["SYMLINK", "NOT_REGULAR", "NOT_TERMINAL"],
+  },
+  "exit evidence": {
+    filesystem: true,
+    codes: ["SYMLINK", "NOT_REGULAR", "INVALID_INTEGER", "MISSING", "MISMATCH"],
+  },
+  "output directory": { filesystem: true, codes: ["SYMLINK", "NOT_DIRECTORY"] },
+  "output scan": { filesystem: true, codes: ["SYMLINK", "NOT_REGULAR"] },
+  "collect-error write": {
+    filesystem: true,
+    codes: ["SYMLINK", "NOT_REGULAR", "ATTEMPT_OVERFLOW"],
+  },
+  "failure status projection": {
+    filesystem: true,
+    codes: ["SYMLINK", "NOT_REGULAR", "NOT_TERMINAL"],
+  },
+  project: { codes: ["INVALID_COMPONENT"] },
+  "run-record publication": {
+    filesystem: true,
+    codes: ["SYMLINK", "NOT_REGULAR", "ALREADY_EXISTS"],
+  },
+  generation: { filesystem: true },
+  "run path": { filesystem: true },
+  "run metadata": { filesystem: true, codes: ["SYMLINK", "NOT_REGULAR"] },
+  "run metadata JSON": { filesystem: true },
+  "run identity/path": { codes: ["MISMATCH"] },
+  "run status": { codes: ["INVALID_STATUS"] },
+  "run-job publication": { filesystem: true },
+};
+
 function safeCode(error: unknown): string {
   if (error instanceof CollectFailure) return error.code;
   if (error instanceof AggregateError)
@@ -76,6 +123,39 @@ export function validationFailure(
       .filter((part) => typeof part === "string" || typeof part === "number")
       .join(".") || "record";
   return new CollectFailure(stage, `VALIDATION ${path}`);
+}
+
+/** Reconstruct a controlled historical reason; never forward an arbitrary ledger string or path. */
+export function normalizeCollectFailureReason(message: string): string {
+  const prefix = "SHUD collect ";
+  const separator = message.indexOf(": ", prefix.length);
+  const stage = message.slice(prefix.length, separator);
+  if (
+    !message.startsWith(prefix) ||
+    separator < prefix.length ||
+    !Object.hasOwn(collectDiagnosticRules, stage)
+  )
+    throw new CollectFailure("collect-error diagnostic", "UNRECOGNIZED");
+  const rule = collectDiagnosticRules[stage];
+  const code = message.slice(separator + 2);
+  if (rule.validation) {
+    if (!/^VALIDATION(?: [A-Za-z0-9_.]+)?$/u.test(code))
+      throw new CollectFailure("collect-error diagnostic", "UNRECOGNIZED");
+    // Schema paths may evolve; only the known stage and fixed validation label cross this boundary.
+    return `${prefix}${stage}: VALIDATION`;
+  }
+  const codes = code.split("+");
+  for (const part of codes) {
+    if (
+      !rule.codes?.includes(part) &&
+      !(
+        rule.filesystem &&
+        (filesystemCodes.has(part) || part === "INVALID_JSON" || part === "IO_ERROR")
+      )
+    )
+      throw new CollectFailure("collect-error diagnostic", "UNRECOGNIZED");
+  }
+  return `${prefix}${stage}: ${codes.join("+")}`;
 }
 
 export async function regularFile(

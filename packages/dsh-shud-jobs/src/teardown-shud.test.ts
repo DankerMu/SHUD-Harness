@@ -427,10 +427,18 @@ test("owner Agent release leaves unowned SHUD running until normal settlement an
       [{ cause: "producer", job: { status: "completed" } }],
     );
     expect(await readResult(record.run_dir)).toMatchObject({ exit_class: "ok", exit_code: 0 });
-    expect(await readRecord(record.run_dir)).toMatchObject({
+    await expect
+      .poll(async () => (await readRecord(record.run_dir)).notify.detail, { timeout: 5000 })
+      .toMatch(/wait.*session|session.*wait/iu);
+    const collected = await readRecord(record.run_dir);
+    expect(collected.notify.detail).toMatch(/wait.*session|session.*wait/iu);
+    expect(collected).toMatchObject({
       status: "collected",
       owner_session: record.owner_session,
-      notify: record.notify,
+      notify: {
+        ...record.notify,
+        detail: collected.notify.detail,
+      },
     });
     expect(activeGroup(pid)).toEqual([]);
     expect(signals.events).toEqual([]);
