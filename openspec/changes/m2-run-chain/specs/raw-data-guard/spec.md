@@ -8,7 +8,7 @@
 - **THEN** 决策 `kind` 为 `ask`，`reason` 等于 provenance 常量
 
 #### Scenario: session cwd under raw denied
-- **WHEN** 配置 `rawDirs: ["prot"]`，session cwd 为 `prot/sub`，`input_dir` 为工作区外的 `/tmp/ccw`
+- **WHEN** 配置 `rawDirs` 包含工作区 `prot` 的绝对路径，session cwd 为该 `prot/sub`，`input_dir` 为 raw 外的 `/tmp/ccw`（相对 raw 配置仍按当前 session cwd 解析，不锚定另一个工作区）
 - **THEN** 决策 `kind` 为 `deny`，`code` 为 `raw-immutable`
 
 #### Scenario: symlinked runs into raw denied

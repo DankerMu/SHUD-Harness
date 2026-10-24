@@ -425,6 +425,19 @@ collect 失败（`exit_code` 不可读或非整数、产物目录不可读、Run
 - Containment/non-goals: no dependency, core schema, host source, physical equation/default or raw-policy changes; no durable dedup guarantee across process crashes, external notification transport, automatic model conclusions, historical orphan policy (#343), duration redesign (#344) or stdout boundary repair (#348). Keep the shared OpenSpec/Epic/#318 open until PI explicitly accepts. Failed implementation stays on the issue branch; rollback is the reviewed commit, not parallel versions or a compatibility shim.
 
 
+### Execution boundaries: raw-guard shud_run (#301)
+
+- Change surface: decideRawAccess in the existing raw-guard; dedicated decide-shud-run.test.ts because decide.test.ts is near its line limit. Keep the current plugin listener, canonical resolver, core containsPath and provenance/immutable decision constants as single owners.
+- Governing invariant: no shud_run can pass the guard when its prospective runs destination is inside/equal any configured raw root; raw input asks only after every output-deny check has passed. Test two raw-root orders where input touches one and output touches another.
+- Session cwd is authoritative. Ignore arguments.workdir; relative input and relative raw configuration resolve from that same cwd, not process cwd or an invented workspace-root service. Clarify the nested-cwd example using an absolute configured raw root, preserving the original Raw directory configuration contract.
+- Resolve the runs parent without inventing a run id: existing runs follows native realpath including symlinks; missing runs uses the nearest existing ancestor and remaining segments. Native symlink/.. traversal must not be pre-collapsed lexically. Include equality and sibling-prefix controls.
+- Missing/non-string input_dir and malformed/missing arguments still run output protection; only shud_run gains this handling. Existing malformed-argument behavior for other tools is unchanged. Do not add input-existence, project, internal-symlink or unknown-field validation: those belong to #314/registry.
+- Sibling boundaries: index.ts obtains session cwd and performs waterfall/audit; core owns component containment; registry independently rejects symlinked runs with lstat. An unrelated symlinked runs passes this guard even though registry later rejects it. No broadened TOCTOU guarantee.
+- Required evidence: original-main deny/ask RED then incremental GREEN; real filesystem input/run links, absent raw runs, native cwd/input symlink/.., root equality, multiple roots, invalid input, workdir spoof, and Darwin /var aliases with negative controls. Exercise actual plugin waterfall/audit without sensitive arguments; no fake decision-return mocks.
+- Full check/build/strict validation and built plugin-seam smoke are required. Two live raw-guard:probes runs must each report T1–T5 PASS and unchanged two raw MD5s; exit2 means INCONCLUSIVE and rerun, not success. Existing probes cover regression, not the not-yet-mounted shud_run tool.
+- Review focus: CP1 deny precedence and malformed-input bypass; CP2 physical path equivalence and missing ancestors; unchanged legacy policies/audit; no accidental #314 mounting. Three seats: correctness, test-evidence/spec-compliance, security/invariant-state.
+- Non-goals: registry changes, tool mounting/validation, new timers/config/dependencies/schema, shell-policy redesign, raw writes, sandbox/host modifications, scientific conclusions, PI acceptance. Shared change remains unarchived.
+
 ## Not yet specified
 
 - 用户自有 SHUD 输入目录的生命周期（AutoSHUD 产物如何进入、是否需要 DataProvenance 记录来源）——M3 DataProvenance 与 AutoSHUD 编排推到时再界定。

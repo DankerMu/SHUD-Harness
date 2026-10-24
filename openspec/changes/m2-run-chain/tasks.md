@@ -363,10 +363,21 @@
 
 先于 12.1 合入。
 
-- [ ] 13.1 在 `decideRawAccess` 增加 `shud_run` 判定：目标 `<session cwd>/runs/<run_id>` 按最近存在祖先解析后在 raw 内 deny，`input_dir` 在 raw 内 ask，二者都不触及时 next，`input_dir` 缺失或类型不符不抛错；测试放新文件 `decide-shud-run.test.ts`（`decide.test.ts` 已近 1000 行）（raw-data-guard「shud_run is guarded」）。验证：每条 scenario 含符号链接 `runs/`、`rawDirs: ["runs"]` 与 macOS `/var` 别名各有正反例；改动前对 origin/main 的 `decide.ts` 新 deny/ask 行为红；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
+- [x] 13.1 在 `decideRawAccess` 增加 `shud_run` 判定：目标 `<session cwd>/runs/<run_id>` 按最近存在祖先解析后在 raw 内 deny，`input_dir` 在 raw 内 ask，二者都不触及时 next，`input_dir` 缺失或类型不符不抛错；测试放新文件 `decide-shud-run.test.ts`（`decide.test.ts` 已近 1000 行）（raw-data-guard「shud_run is guarded」）。验证：每条 scenario 含符号链接 `runs/`、`rawDirs: ["runs"]` 与 macOS `/var` 别名各有正反例；改动前对 origin/main 的 `decide.ts` 新 deny/ask 行为红；`pnpm run raw-guard:probes` 两次 T1–T5 PASS、md5 不变
 
 - Suggested fixture level: expanded - 策略门决策与 raw 保护，Critical Path #1/#2
 - Minimal mergeable slice: atomic: 单一判定分支与其测试表
+
+### Issue #301 execution fixture
+
+- Selected: Public API / CLI / script entry and Legacy compatibility / examples — decideRawAccess and the real tools/pre-execute waterfall; preserve existing tools, malformed legacy calls, next result/error propagation and provenance text. New-tool policy precedes #314 mounting.
+- Selected: Config / project setup and File IO / path safety / overwrite — existing rawDirs/session-cwd semantics, nearest-existing-ancestor/native symlink resolution, absent runs/equality/sibling prefixes, input/run links and Darwin aliases with positive/negative controls. No filesystem writes in the decision.
+- Selected: Auth / permissions / secrets and Error handling / rollback / partial outputs — deny all output violations before any input ask, including both root orders and invalid/missing arguments; workdir cannot redirect authority; canonical IO errors retain existing fail-loud behavior. Actual listener audit emits only decision/tool/reason-code, no paths/arguments/raw contents.
+- Selected: Documentation / migration notes — clarify the nested-cwd scenario without changing relative raw configuration, record current guarded-tool behavior in an existing living document, and retain future registry/tool responsibilities. No frozen main-spec hand edits.
+- Not selected: Schema / columns / units / field names, Concurrency / shared state / ordering, Resource limits / large input / discovery, Release / packaging / dependency compatibility — no schema/public shape, new mutable state/timer, new discovery/size policy, dependency or packaging change. Existing synchronous decision order is covered by the permissions cases; registry path-swap residual remains unchanged.
+- Evidence floor: test-first deny and ask fail against unchanged origin/main decide.ts; incremental implementation plus all six added spec scenarios and declared boundary controls pass. Parent runs actual built plugin-seam smoke, full pnpm run check/build, strict OpenSpec validation, and two live T1–T5 raw probes with both MD5s unchanged. Preserve each raw output; INCONCLUSIVE never counts as PASS.
+- Execution evidence (2026-10-24): deny then ask tracers each RED before implementation and GREEN after; both fail against the exact original-main source in an isolated copy. All 55 new cases pass, including actual Darwin aliases; full raw suite827passed/1existing skip. Three isolated counterfactuals (first-root-only output check, lexical-only paths, malformed-argument early bypass) fail1/13/6 relevant cases; restored control55PASS.
+- Built real-Cordis waterfall smoke exercises ten cases with exact safe audit/next behavior and unchanged synthetic input SHA256. Two live raw probes each T1–T5 PASS, raw/outside before/after MD5 all406a4b65e6edef2cae087755117da2b9 (qkBnqp/XE5Q9U evidence directories). Full check62files1585passed/1existing skip, coverage86.01/84.24/90.48/87.77%,dup0.56%; build/profile smoke/strict validation pass. Mounted shud_run execution and PI Web acceptance remain later tasks.
 
 ## 14. 重启验收脚本与不变量进矩阵
 
