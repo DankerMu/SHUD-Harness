@@ -93,6 +93,7 @@ export function settlingProducer(
       const hooks = {
         done: resource.done,
         cancel: (reason?: string) => resource.cancel(reason),
+        detach: (detail: string) => resource.detach(detail),
         async settle(outcome: JobOutcome) {
           attempts.push(outcome);
           if (accepted) return;

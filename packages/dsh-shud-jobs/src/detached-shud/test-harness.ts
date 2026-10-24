@@ -263,6 +263,7 @@ export function detachedProducer(onCancel?: () => void) {
       const lifecycle = {
         done: hooks.done,
         settle: (outcome: JobOutcome) => hooks.settle(outcome),
+        detach: (detail: string) => hooks.detach(detail),
         cancel(reason?: string) {
           onCancel?.();
           hooks.cancel(reason);

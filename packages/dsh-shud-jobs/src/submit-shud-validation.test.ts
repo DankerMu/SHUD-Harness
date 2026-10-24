@@ -124,7 +124,6 @@ test("copied input is independent, running clears in-flight membership, and repl
     const replacement = actualRegistry(h.ctx);
     expect(replacement.isSubmissionInFlight(record.run_id)).toBe(false);
     expect(replacement.indexes.lookup(record.run_id)?.run_dir).toBe(record.run_dir);
-    expect(execution.cancellations).toContain("jobs service disposed");
   } finally {
     await execution.finish();
     await h.dispose();

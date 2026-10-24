@@ -119,19 +119,21 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 实际执行使用 detached `/bin/sh` 包装进程，以位置参数 `"$@"` 传递命令，stdout/stderr 追加到运行目录日志，宿主关闭自身日志描述符并 unref 子进程。包装进程须先成功原子发布 `wrapper.pid` 才能启动 SHUD；自然结束后原子发布 `exit_code`，包括非零退出码。包装进程可在宿主 SIGKILL 后继续运行；`exit_code` 是求解器退出证据，子进程事件不直接结算 RunJob。
 
-`ShudExecution` 包含 `hooks`、真实身份的 `started` promise、受控组能力 `isGroupActive()` / `signalGroup("SIGTERM" | "SIGKILL")` / `waitForExit()` 与回滚专用 `abort()`；显式取消和回滚共用所有权检查。`ShudLifecycle` 在 `JobHooks` 上增加幂等 `settle(JobOutcome): void | Promise<void>`：调用方负责在 `done` 结束前释放真实登记资源；正常完成不调用 `cancel` 冒充结算。回滚先证明执行组已不能继续 I/O 并完成本地子进程回收，再取消/等待登记资源、移除父类登记与自有索引/目录，并移除本地完成回执；`hooks.done` 本身不是进程终止证据。尚未回收的原生子进程仍占有其 pid，即使启动时的身份查询失败也可据此回滚，不重复依赖失败的启动戳查询。原生未知非 Z 状态仍按可能 I/O 处理，无法确定的组检查拒绝继续；权限拒绝仅在重新检查明确静止后才可继续，否则保留运行路径与错误原因。已回收的原包装进程 PID 再次出现时拒绝向该组发信号，但不声称能识别替代组的 leader 也已退出的全部历史代次；非 SHUD 父类生命周期不改动。
+`ShudExecution` 包含 `hooks`、真实身份的 `started` promise、受控组能力 `isGroupActive()` / `signalGroup("SIGTERM" | "SIGKILL")` / `waitForExit()` 与回滚专用 `abort()`；显式取消和回滚共用所有权检查。`ShudLifecycle` 在 `JobHooks` 上要求两个幂等完成入口：正常终态的 `settle(JobOutcome): void | Promise<void>` 与登记级退出的同步 `detach(detail): void`。两者释放实际登记资源并完成同一个 producer-owned `done`，不另造完成 promise；detach 以 failed 结束登记，不改 durable 运行结果。原 supplied `cancel` 仅供提交回滚，不代替正常结算或宿主 teardown。回滚先证明执行组已不能继续 I/O 并完成本地子进程回收，再取消/等待登记资源、移除父类登记与自有索引/目录，并移除本地完成回执；`hooks.done` 本身不是进程终止证据。尚未回收的原生子进程仍占有其 pid，即使启动时的身份查询失败也可据此回滚，不重复依赖失败的启动戳查询。原生未知非 Z 状态仍按可能 I/O 处理，无法确定的组检查拒绝继续；权限拒绝仅在重新检查明确静止后才可继续，否则保留运行路径与错误原因。已回收的原包装进程 PID 再次出现时拒绝向该组发信号，但不声称能识别替代组的 leader 也已退出的全部历史代次；非 SHUD 父类生命周期不改动。
 
 注册表在 Cordis `[Service.init]` 等待文件级 R1–R12 启动对账后才启动正常 cadence 并就绪；此前 `submitShud()`、`pollOnce()`、`collectShud()`（含 root/non-strict 访问）明确拒绝。恢复取消可使就绪等待首次取消请求的剩余 10 秒宽限期，不从重启重计。对账与正常轮询共用逐条目排他队列，不同条目独立推进；单条目失败保留证据并由既有 cadence 重试，不阻塞其它条目。按父类 `pumpPollMs` 运行唯一调度器，手动 tick 等待已在途步骤，定时器不重复排队；关闭准入后不再读取记录。正常 tick 跳过本进程提交在途、已通知终结、collected、created/submitted 条目；无 dsh 登记的 running 仍可结算，结算/回执后续 tick 才 collect。启动分支及边界详见 [重启恢复](docs/03_SPEC/Park_Resume_Design.md#9-服务重启恢复)。
 
 结算先读 `exit_code`：完整且处于安全整数范围内的十进制整数决定 succeeded（0）或 failed（非零）；已有取消请求也不覆盖退出码。空白、部分数字、小数、不安全整数或不可读文件导致 failed、null exit_code 与明确诊断，原文件保留给后续 collect。仅 ENOENT 表示不存在；此时检查包装进程身份与状态，以时间戳数值比较而非 ISO 字面值比较。观察到消失、身份不同或 Z 状态后必须重读退出码；仍无才按 cancel_requested_at 判 cancelled，否则 failed 并给出 lost 诊断。无法确定的检查或损坏/不一致记录记录错误且不改持久状态、不结束登记，其他条目继续处理。
 
-结算先原子写 `run-job.json` 的终态、finished_at、exit_code，再调用本地 `settle` 并等待 `done`；succeeded/cancelled/failed 分别映射到父类 completed/killed/failed。持久化失败不完成登记；完成回调失败保留回执，在后续正常 tick 重试，不改写既有终态、finished_at 或文件修改时间。回执完成前不收集；后续 collect 可以将终态投影为 `collected`。结算与 collect 均不迁移活动索引，也不产生唤醒产物。
+正常执行结算先原子写 `run-job.json` 的终态、finished_at、exit_code，再调用本地 `settle` 并等待 `done`；succeeded/cancelled/failed 分别映射到父类 completed/killed/failed。持久化失败不经此路径完成登记；完成回调失败保留回执，在后续正常 tick 重试，不改写既有终态、finished_at 或文件修改时间。回执完成前不收集；后续 collect 可以将终态投影为 `collected`。结算与 collect 均不迁移活动索引，也不产生唤醒产物；宿主 teardown 的登记级 detach 与此 durable 结算路径分开。
 
-公开 `kill(id, caller, reason)` 保持同步返回 `requested | already-finished`，仅覆写本实例实际提交并关联的 SHUD 登记，不靠 `kind: shud` 字符串或扫描目录认领作业。先经父类公开 get 做访问与终结状态检查：未知、无权限、已完成或非托管登记保持父类语义；托管活作业在 D7 在途或关闭准入后明确拒绝，不写取消标记、不发信号。首次有效请求以同步原子写持久化 `cancel_requested_at`，再设一次性进程内标记并调用父类 kill；适配后的 producer cancel 消费该标记，对本次 spawn 拥有的负 pgid 发 SIGTERM，不调用原 supplied cancel 冒充完成。重复请求保留首次时间和期限，不重复发 SIGTERM；持久化失败不设标记、不发信号，父类抛错/返回 already-finished 清除未消费的临时标记，但不撤销已持久化意图。Web 固定理由、模型任意理由乃至 `"jobs service disposed"` 都不决定调用来源；未消费标记的 cancel 仍沿用调用方原有资源行为，完整 teardown 放手策略留给 #311。
+公开 `kill(id, caller, reason)` 保持同步返回 `requested | already-finished`，仅覆写本实例实际提交并关联的 SHUD 登记，不靠 `kind: shud` 字符串或扫描目录认领作业。先经父类公开 get 做访问与终结状态检查：未知、无权限、已完成或非托管登记保持父类语义；托管活作业在 D7 在途或关闭准入后明确拒绝，不写取消标记、不发信号。首次有效请求以同步原子写持久化 `cancel_requested_at`，随后在调用父类前镜像原始期限到本地 `requestedAt` 并设置一次性标记；适配后的 producer cancel 消费该标记，对本次 spawn 拥有的负 pgid 发 SIGTERM。重复请求保留首次时间和期限，不重复发 SIGTERM；持久化失败不设镜像/标记、不发信号，父类抛错/返回 already-finished 清除未消费的临时标记，但保留已持久化意图及本地镜像。Web 固定理由、模型任意理由乃至 `"jobs service disposed"` 都不决定调用来源；无一次性标记的托管 cancel 走宿主 teardown。
 
 父类公开视图可在异步 `settle`/`done` 完成前滞后于持久终态；kill 以非让出式转换内新鲜且已通过身份/路径校验的 RunJob 为准。若状态已为 `succeeded`、`failed`、`cancelled` 或 `collected`，同步返回 `already-finished`，不写元数据、不设取消标记、不检查进程组、不发信号，也不调用父类 kill。仍为 `running` 时即使已有数值 `exit_code` 文件也照常接受取消请求，后续结算仍保留自然退出证据的优先级。
 
-既有轮询 cadence 负责取消升级，不新增定时器：按 core `KILL_GRACE_PERIOD_MS = 10000` 从首次请求计时，时钟回退不加速，到期且受控组仍可 I/O 才发 SIGKILL，每次信号前复核所有权。包装进程先退出而抗 SIGTERM 后代仍活着时不能提前结算或结束登记，必须继续跟踪该组至静止。静止后按严格退出文件 first-wins 结算：有效数值文件仍决定自然成功/失败，无文件且有最新取消意图才是 cancelled，非法/不可读文件仍是 failed；持久化终态和本地回收先于 producer 完成。
+宿主在线的取消结算由既有轮询 cadence 升级，不新增定时器：按 core `KILL_GRACE_PERIOD_MS = 10000` 从首次请求计时，时钟回退不加速，到期且受控组仍可 I/O 才发 SIGKILL，每次信号前复核所有权。包装进程先退出而抗 SIGTERM 后代仍活着时不能提前结算 durable 结果，必须继续跟踪该组至静止。静止后按严格退出文件 first-wins 结算：有效数值文件仍决定自然成功/失败，无文件且有最新取消意图才是 cancelled，非法/不可读文件仍是 failed；正常执行的持久化终态和本地回收先于 producer 完成。
+
+宿主 teardown 在同步 cancel 回调内调用 `detach`：无取消意图时不发信号，以受控 detail 说明 SHUD 继续后台运行；有本地持久意图镜像时先经原所有权证明重发 SIGTERM，再以 kill-in-progress detail 结束登记。信号/检查失败记录受控阶段和错误码，`finally` 仍完成同一个 done 为 failed，不冒充进程已终止。此路径不读写 RunJob/索引、不 collect/唤醒、不 SIGKILL、不等待进程或重置期限；已接受的启动 R8/正常异步工作仍按原 drain 规则排空后放锁。SHUD 登记无 owner，发起 Agent 释放不影响其继续运行和正常收集；Darwin R7/Linux R8 原生验证及 #343 边界见 [重启恢复](docs/03_SPEC/Park_Resume_Design.md#9-服务重启恢复)。
 
 取消写入、轮询终态及 collect 状态投影共用新鲜 RunJob 的同步校验/转换/原子发布边界：读取、身份/路径校验、字段转换与 `writeJsonSync` 之间不 await，保留本次转换不拥有的最新字段，不以旧快照覆盖取消意图或回退新终态；cancelled 与 lost 的选择也读取该边界内的新标记。提交期元数据仍由 D7 隔离；RunRecord 与重试记录保持原有异步发布、不可变结果及重试提交边界。
 
@@ -141,7 +143,7 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 经 core schema 校验后原子发布 `run-record.json`，再原子投影 RunJob 为 `collected`。有效且身份匹配的已有 RunRecord 优先原样返回，字节与 mtime 不变；结果发布是提交边界，后续状态投影失败只重试投影，不重新扫描、改写结果或增加生成失败次数。生成失败写本地 `collect-error.json`（严格的 `attempts`、`last_error`、`at`）；诊断仅含受控阶段、字段路径或 errno，不持久化/记录原始异常载荷。损坏的重试记录保留且不重置，并阻止新的生成尝试。自动路径首次及时尝试，之后沿用 core 常量 `COLLECT_RETRY_INTERVAL_MS = 10000` 与 `MAX_COLLECT_ATTEMPTS = 3`，按持久时间间隔重试，时钟回退不加速；直接 collect 可越过间隔/次数上限，但不能绕过损坏记录重新生成结果。成功重试保留既有错误记录字节与 mtime。
 
-启动对账只恢复文件与已验证的取消控制，不创建 dsh 登记或唤醒；pending notify 保持原样，仅已验证 delivered/unreachable 的 R12 修复完成索引。完整 detach/清理策略（#311）、接管登记（#312）、唤醒投递（#313）及工具入口尚未接入，不声称完整跨重启恢复或 PI Web 验收。R7 孤儿组边界（#343）与 `wall_seconds` 测量语义（#344）仍待裁决，见上述恢复说明。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，其结果不能替代注册表运行证据。
+启动对账只恢复文件与已验证的取消控制，不创建 dsh 登记或唤醒；pending notify 保持原样，仅已验证 delivered/unreachable 的 R12 修复完成索引。接管登记（#312）、唤醒投递（#313）及工具入口尚未接入，不声称完整跨重启恢复或 PI Web 验收。R7 孤儿组边界（#343）与 `wall_seconds` 测量语义（#344）仍待裁决，见上述恢复说明。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，其结果不能替代注册表运行证据。
 
 安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --no-open --port <p>`（profile 已选择 Web 应用，不再传 `web` 位置参数）。headless 任务改用同一 bundle 的独立 profile，并同样保留 `SHUD_BIN`：
 

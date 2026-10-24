@@ -133,6 +133,9 @@ export function registrationResource() {
       return {
         done,
         settle: finish,
+        detach(detail) {
+          finish({ status: "failed", detail });
+        },
         cancel(reason) {
           cancellations.push(reason);
           finish({ status: "killed", detail: reason });
