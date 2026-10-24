@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { JobHooks, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import type { RunJob } from "@shud-harness/dsh-shud-core";
 import { groupCanPerformIo, processStart } from "./process-identity.ts";
+import { signalOwnedProcessGroup, type ShudProcessGroup } from "./process-group.ts";
 
 export interface ShudProcessIdentity {
   pid: number;
@@ -16,13 +17,9 @@ export interface ShudLifecycle extends JobHooks {
   settle(outcome: JobOutcome): void | Promise<void>;
 }
 
-export interface ShudExecution {
+export interface ShudExecution extends ShudProcessGroup {
   hooks: ShudLifecycle;
   started: Promise<ShudProcessIdentity>;
-  /** Inspect only this spawned group, refusing observable identity replacement. */
-  isGroupActive(): boolean;
-  /** Synchronously signal the owned group if it can still perform I/O. */
-  signalGroup(signal: "SIGTERM" | "SIGKILL"): void;
   /** Await local child reaping, independently of registration completion. */
   waitForExit(): Promise<void>;
   /** Rollback only: terminate this owned execution group and prove it can no longer perform I/O. */
@@ -143,29 +140,10 @@ export function startDetachedShud(
     return true;
   }
   function signalGroup(signal: "SIGTERM" | "SIGKILL"): void {
-    if (!isGroupActive()) return;
     const pid = child?.pid;
-    if (pid === undefined) throw new Error("Owned execution has no process identity");
-    // The target comes only from this local spawn, never from persisted metadata.
-    try {
-      process.kill(-pid, signal);
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error)) throw error;
-      if (error.code === "EPERM" || error.code === "ESRCH") {
-        let active: boolean;
-        try {
-          active = isGroupActive();
-        } catch (inspection) {
-          throw new AggregateError(
-            [error, inspection],
-            `Cannot prove quiescence after signal failure for group ${pid}`,
-            { cause: inspection },
-          );
-        }
-        if (!active) return;
-      }
-      throw error;
-    }
+    if (pid === undefined) return;
+    // Local ownership still comes from the native child, including failed-startup rollback.
+    signalOwnedProcessGroup(pid, signal, isGroupActive);
   }
   async function waitForExit(): Promise<void> {
     if (!child) return;

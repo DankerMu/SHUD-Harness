@@ -2,6 +2,7 @@ import type { JobHooks, JobId } from "@deepseek-ai/dsh-jobs";
 import { KILL_GRACE_PERIOD_MS, type RunId } from "@shud-harness/dsh-shud-core";
 import type { ShudExecution, ShudProcessIdentity } from "./detached-shud.ts";
 import type { IndexEntry } from "./state-indexes.ts";
+import { recoverProcessGroup, type ShudProcessGroup } from "./process-group.ts";
 import {
   CollectFailure,
   collectFailure,
@@ -10,22 +11,30 @@ import {
   type RoutedRun,
 } from "./shud-run-file.ts";
 
-interface ManagedRun {
+interface CancellationState {
+  requestedAt?: number;
+  termSent: boolean;
+  killSent: boolean;
+}
+
+interface ManagedRun extends CancellationState {
   id: JobId;
   entry: IndexEntry;
   location: Pick<RoutedRun, "parent" | "directory">;
   execution?: ShudExecution;
   identity?: ShudProcessIdentity;
   markedAt?: string;
-  requestedAt?: number;
-  termSent: boolean;
-  killSent: boolean;
 }
 
-/** Local submitted executions only; persisted ids and kind labels never confer signal ownership. */
+interface RecoveredRun extends CancellationState {
+  group: ShudProcessGroup;
+}
+
+/** Local registrations and separately proven recovered groups share one cancellation deadline path. */
 export class ShudCancellation {
   private readonly registrations = new Map<JobId, ManagedRun>();
   private readonly runs = new Map<RunId, ManagedRun>();
+  private readonly recovered = new Map<RunId, RecoveredRun>();
   private accepting = true;
 
   register(id: JobId, entry: IndexEntry, location: ManagedRun["location"]): void {
@@ -112,22 +121,56 @@ export class ShudCancellation {
     }
   }
 
+  recover(entry: IndexEntry, location: Pick<RoutedRun, "parent" | "directory">): void {
+    if (this.recovered.has(entry.run_id)) return;
+    if (this.runs.has(entry.run_id))
+      throw new Error("Cannot recover a locally registered SHUD execution");
+    updateRunJob(
+      entry,
+      (current) => {
+        if (
+          current.status !== "running" ||
+          current.pid === null ||
+          current.pid_started_at === null ||
+          current.cancel_requested_at === null
+        ) {
+          throw new CollectFailure("recovered cancellation", "NOT_REQUESTED");
+        }
+        const group = recoverProcessGroup({
+          pid: current.pid,
+          pid_started_at: current.pid_started_at,
+        });
+        // Publish ownership before attempting any signal; inspection/TERM failures retain it.
+        this.recovered.set(entry.run_id, {
+          group,
+          requestedAt: Date.parse(current.cancel_requested_at),
+          termSent: false,
+          killSent: false,
+        });
+        return current;
+      },
+      location,
+    );
+  }
+
   /** Called only by the existing dispatcher; no cancellation timer or background task. */
   advance(runId: RunId): boolean {
     const managed = this.runs.get(runId);
-    if (!managed || managed.requestedAt === undefined) return true;
-    const execution = managed.execution;
-    if (!execution) throw new Error("Requested SHUD cancellation has no owned execution");
-    if (!execution.isGroupActive()) return true;
-    if (!managed.termSent) {
-      execution.signalGroup("SIGTERM");
-      managed.termSent = true;
+    const recovered = this.recovered.get(runId);
+    const state = recovered ?? managed;
+    if (!state || state.requestedAt === undefined) return true;
+    const group = recovered ? recovered.group : managed?.execution;
+    if (!group) throw new Error("Requested SHUD cancellation has no owned execution");
+    if (!group.isGroupActive()) return true;
+    if (!state.termSent) {
+      group.signalGroup("SIGTERM");
+      state.termSent = true;
     }
-    if (!managed.killSent && Date.now() - managed.requestedAt >= KILL_GRACE_PERIOD_MS) {
-      execution.signalGroup("SIGKILL");
-      managed.killSent = true;
+    if (!state.killSent && Date.now() - state.requestedAt >= KILL_GRACE_PERIOD_MS) {
+      group.signalGroup("SIGKILL");
+      state.killSent = true;
     }
-    return !execution.isGroupActive();
+    return !group.isGroupActive();
   }
 
   async waitForExit(runId: RunId): Promise<void> {
@@ -139,6 +182,7 @@ export class ShudCancellation {
     const managed = this.runs.get(runId);
     if (managed) this.registrations.delete(managed.id);
     this.runs.delete(runId);
+    this.recovered.delete(runId);
   }
 
   stopAdmission(): void {

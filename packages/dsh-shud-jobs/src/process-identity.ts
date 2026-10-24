@@ -39,8 +39,13 @@ export function processStart(pid: number): string | null {
   throw new Error(`Cannot determine process start identity for pid ${pid}: ps status 0`);
 }
 
+export interface ProcessExecutionObservation {
+  stamp: string;
+  state: string;
+}
+
 /** One native snapshot couples identity and execution state without hiding zombie start identities. */
-export function processExecutionState(pid: number): { stamp: string; state: string } | null {
+export function processExecutionState(pid: number): ProcessExecutionObservation | null {
   const output = processOutput(pid, "lstart=,stat=");
   if (output === null) return null;
   const match = /^(.*\S)\s+(\S+)$/u.exec(output);

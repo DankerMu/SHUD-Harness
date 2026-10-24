@@ -78,6 +78,26 @@ async function existingRecord(entry: IndexEntry): Promise<RunRecord | undefined>
   return parsed.data;
 }
 
+export type CollectCheckpoint =
+  | { kind: "committed"; record: RunRecord }
+  | {
+      kind: "generation";
+      ledger: CollectLedger | undefined;
+      existingFailure: CollectFailure | undefined;
+    };
+
+/** A committed record takes precedence without opening its historical generation ledger. */
+export async function readCollectCheckpoint(entry: IndexEntry): Promise<CollectCheckpoint> {
+  let existingFailure: CollectFailure | undefined;
+  try {
+    const record = await existingRecord(entry);
+    if (record) return { kind: "committed", record };
+  } catch (error) {
+    existingFailure = collectFailure("run-record", error);
+  }
+  return { kind: "generation", ledger: await readLedger(entry.run_dir), existingFailure };
+}
+
 function fullJob(routed: RoutedRun): RunJob {
   const parsed = RunJobSchema.safeParse(routed.raw);
   if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
@@ -212,31 +232,28 @@ export function collectRun(
   entry: IndexEntry,
   routed: RoutedRun,
   automatic: false,
+  checkpoint?: CollectCheckpoint,
 ): Promise<RunRecord>;
 export function collectRun(
   entry: IndexEntry,
   routed: RoutedRun,
   automatic: true,
+  checkpoint?: CollectCheckpoint,
 ): Promise<RunRecord | undefined>;
 /** Caller owns per-entry exclusion. This is the only generation, retry, and existing-result backend. */
 export async function collectRun(
   entry: IndexEntry,
   routed: RoutedRun,
   automatic: boolean,
+  preparedCheckpoint?: CollectCheckpoint,
 ): Promise<RunRecord | undefined> {
-  let existingFailure: CollectFailure | undefined;
-  let existing: RunRecord | undefined;
-  try {
-    existing = await existingRecord(entry);
-  } catch (error) {
-    existingFailure = collectFailure("run-record", error);
-  }
-  if (existing) {
+  const checkpoint = preparedCheckpoint ?? (await readCollectCheckpoint(entry));
+  if (checkpoint.kind === "committed") {
     // A valid immutable file is already committed; projection failure is not another generation attempt.
     await projectCollected(entry, routed);
-    return existing;
+    return checkpoint.record;
   }
-  const ledger = await readLedger(entry.run_dir);
+  const { ledger, existingFailure } = checkpoint;
   if (
     automatic &&
     ledger &&
