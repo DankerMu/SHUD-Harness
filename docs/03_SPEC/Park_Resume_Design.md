@@ -287,7 +287,7 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 普通逐条目步骤对已收集结果或经校验的收集耗尽终态执行 `resolveAgent` → `createUserMessage`（`source.kind: shud-jobs`）→ `followup` → `sessions.flush`。成功结果消息包含 durable `run_id`、`exit_class` 与产物数；耗尽消息包含受控实际失败原因。确认 flush 成功后才写 `delivered`，随后先写 completed 再移出 active；无 owner 的 SHUD 登记不经 `job/settled` / tool-jobs 再发一份消息。服务可用且条目符合投递条件后，空 owner 或精确的 `session/not-found` 错误码直接标记 `unreachable`，不把其它恢复错误误判为永久不可达。
 
-暂时性恢复、追加或 flush 失败按原失败时间记账，间隔至少 10 秒、上限 3 次；第三次失败与 `unreachable` 原子发布，不进行第四次传输。失败记账写入失败时先重试该次发布，保留原时间/原因，不让 pump cadence 无控制地重发或凭空增加持久次数。确认的追加及成功 flush 回执按 live Session 和完整运行身份保存在进程内：普通注册表重载可继续 flush 或仅补写 delivered，不重复确认过的步骤；实际进程崩溃丢失这些回执，追加与 durable 标记之间的窗口允许重放。这是至少一次语义，不保证 exactly-once；没有新增持久 outbox 或 schema。
+暂时性恢复、追加或 flush 失败按原失败时间记账，间隔至少 10 秒、上限 3 次；第三次失败与 `unreachable` 原子发布，不进行第四次传输。失败记账写入失败时先重试该次发布，保留原时间/原因，不让 pump cadence 无控制地重发或凭空增加持久次数；若写入实际已提交，服务缺席产生的规范等待提示不能使该记账失效，在运行/owner 身份及次数、时间、状态仍匹配时识别原失败提示或规范等待提示，不重写、不重复计数，也不接受任意变更的提示。确认的追加及成功 flush 回执按 live Session 和完整运行身份保存在进程内：普通注册表重载可继续 flush 或仅补写 delivered，不重复确认过的步骤；实际进程崩溃丢失这些回执，追加与 durable 标记之间的窗口允许重放。这是至少一次语义，不保证 exactly-once；没有新增持久 outbox 或 schema。
 
 协议与验收边界以 [M2 fixture design](../../openspec/changes/m2-run-chain/design.md)、[tasks](../../openspec/changes/m2-run-chain/tasks.md) 为准；实现入口为 [shud-poll.ts](../../packages/dsh-shud-jobs/src/shud-poll.ts)，历史收集诊断的受控校验归 [shud-run-file.ts](../../packages/dsh-shud-jobs/src/shud-run-file.ts) 所有。当前后端验证包含真实原生执行/宿主崩溃与公开会话服务 doubles，不等同完整 Web 恢复；工具入口 #314–315、完整 Web 验收 #316–318 仍待后续切片，不据此宣称 M2 Epic 完成或 PI 验收。
 

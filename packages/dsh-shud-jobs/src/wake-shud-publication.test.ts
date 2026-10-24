@@ -366,6 +366,240 @@ test("an accounting rename that committed before reporting failure is not counte
   }
 }, 15000);
 
+test("an unknown changed accounting detail blocks transport until the committed detail is restored", async () => {
+  const h = await pollFixture(0, "held", "available");
+  const flush = h.ctx.sessions.flush.bind(h.ctx.sessions);
+  const spy = vi.spyOn(h.ctx.sessions, "flush").mockImplementation(async (session) => {
+    const acknowledged = await flush(session);
+    return h.flushes.length === 1 ? false : acknowledged;
+  });
+  try {
+    const run = await collectedWake(h);
+    const jobPath = join(run.running.run_dir, "run-job.json");
+    let reported = false;
+    vi.mocked(fs.renameSync).mockImplementation((source, target) => {
+      const candidate =
+        target === jobPath
+          ? RunJobSchema.parse(JSON.parse(actualFs.readFileSync(source, "utf8")))
+          : undefined;
+      actualFs.renameSync(source, target);
+      if (!reported && candidate?.notify.attempts === 1) {
+        reported = true;
+        throw Object.assign(new Error("PRIVATE_CHANGED_DETAIL_RENAME_PAYLOAD"), { code: "EIO" });
+      }
+    });
+    await waitForRecovery(async () => {
+      await h.registry.pollOnce();
+      return reported;
+    }, "committed accounting retained after rename EIO");
+    const accounted = await readRecord(run.running.run_dir);
+    expect(accounted.notify).toMatchObject({
+      status: "pending",
+      attempts: 1,
+      at: new Date(run.origin).toISOString(),
+    });
+    expect(accounted.notify.detail).toMatch(/flush|persist|acknowledg/iu);
+    const accepted = [...h.followups];
+    const resolutions = [...h.resolutions];
+    expect(accepted).toHaveLength(1);
+    expect(h.flushes).toEqual([h.ownerId]);
+    await io.writeFile(
+      jobPath,
+      JSON.stringify({
+        ...accounted,
+        notify: { ...accounted.notify, detail: "PRIVATE_UNKNOWN_ACCOUNTING_DETAIL" },
+      }),
+    );
+    const changedBytes = await io.readFile(jobPath);
+    const changedMtime = (await io.stat(jobPath, { bigint: true })).mtimeNs;
+    vi.setSystemTime(run.origin + NOTIFY_RETRY_INTERVAL_MS);
+    // More than one step distinguishes rejecting the checkpoint from accepting it then retrying.
+    await h.registry.pollOnce();
+    await h.registry.pollOnce();
+    await h.registry.pollOnce();
+    expect(await io.readFile(jobPath)).toEqual(changedBytes);
+    expect((await io.stat(jobPath, { bigint: true })).mtimeNs).toBe(changedMtime);
+    expect(h.registry.indexes.read()).toEqual({ active: [run.entry], completed: [] });
+    expect(h.resolutions).toEqual(resolutions);
+    expect(h.followups).toEqual(accepted);
+    expect(h.flushes).toEqual([h.ownerId]);
+    expect(h.errors.join("\n")).not.toMatch(/PRIVATE_(?:UNKNOWN|CHANGED_DETAIL)/u);
+    expect(JSON.stringify(h.followups)).not.toContain("PRIVATE_");
+
+    await io.writeFile(jobPath, JSON.stringify(accounted));
+    await deliveredWake(h.registry, run.running.run_dir);
+    expect((await readRecord(run.running.run_dir)).notify).toMatchObject({
+      status: "delivered",
+      attempts: 1,
+    });
+    expect(h.registry.indexes.read()).toEqual({ active: [], completed: [run.entry] });
+    expect(h.followups).toEqual(accepted);
+    expect(h.flushes).toEqual([h.ownerId, h.ownerId]);
+    await expectWakeEvidence(run);
+  } finally {
+    vi.mocked(fs.renameSync).mockImplementation(actualFs.renameSync);
+    spy.mockRestore();
+    await h.close();
+  }
+}, 15000);
+
+test.each(["flush", "restoration"] as const)(
+  "%s accounting committed before EIO survives service revocation and headless registry reload",
+  async (stage) => {
+    const h = await pollFixture(0, "held", "absent");
+    let restoreResolve: (() => void) | undefined;
+    let restoreFlush: (() => void) | undefined;
+    try {
+      const run = await collectedWake(h);
+      const controller = await h.mountSessionController();
+      const resolve = h.ctx.sessionController.resolveAgent.bind(h.ctx.sessionController);
+      let resolves = 0;
+      const resolveSpy = vi
+        .spyOn(h.ctx.sessionController, "resolveAgent")
+        .mockImplementation(async (id) => {
+          resolves++;
+          if (stage === "restoration" && resolves === 1)
+            throw new Error("PRIVATE_POSTCOMMIT_RESTORATION_PAYLOAD");
+          return resolve(id);
+        });
+      restoreResolve = () => resolveSpy.mockRestore();
+      const flush = h.ctx.sessions.flush.bind(h.ctx.sessions);
+      const flushedSessions: Array<Parameters<typeof flush>[0]> = [];
+      const flushSpy = vi.spyOn(h.ctx.sessions, "flush").mockImplementation(async (session) => {
+        flushedSessions.push(session);
+        const acknowledged = await flush(session);
+        return stage === "flush" && h.flushes.length === 1 ? false : acknowledged;
+      });
+      restoreFlush = () => flushSpy.mockRestore();
+      const jobPath = join(run.running.run_dir, "run-job.json");
+      let reported = false;
+      vi.mocked(fs.renameSync).mockImplementation((source, target) => {
+        const candidate =
+          target === jobPath
+            ? RunJobSchema.parse(JSON.parse(actualFs.readFileSync(source, "utf8")))
+            : undefined;
+        actualFs.renameSync(source, target);
+        if (!reported && candidate?.notify.attempts === 1) {
+          reported = true;
+          throw Object.assign(new Error("PRIVATE_POSTCOMMIT_ACCOUNTING_PAYLOAD"), {
+            code: "EIO",
+          });
+        }
+      });
+      await waitForRecovery(async () => {
+        await h.registry.pollOnce();
+        return reported;
+      }, "failure accounting actually committed before reporting EIO");
+      const accounted = await readRecord(run.running.run_dir);
+      expect(accounted.notify).toMatchObject({
+        status: "pending",
+        attempts: 1,
+        at: new Date(run.origin).toISOString(),
+      });
+      expect(accounted.notify.detail).toMatch(
+        stage === "flush" ? /flush|persist|acknowledg/iu : /resolv|restor/iu,
+      );
+      expect(resolves).toBe(1);
+      expect(h.resolutions).toEqual(stage === "flush" ? [h.ownerId] : []);
+      expect(h.followups).toHaveLength(stage === "flush" ? 1 : 0);
+      expect(h.flushes).toHaveLength(stage === "flush" ? 1 : 0);
+      const accepted = [...h.followups];
+      const flushes = [...h.flushes];
+      const resolutions = [...h.resolutions];
+
+      // No repair poll may run between the committed rename and actual epoch revocation.
+      await controller.dispose();
+      await waitForRecovery(
+        () => h.ctx.get("sessionController") === undefined,
+        "controller service removal before accounting reconciliation",
+      );
+      restoreResolve();
+      restoreResolve = undefined;
+      vi.setSystemTime(run.origin + 1000);
+      await h.registry.pollOnce();
+      const waiting = await readRecord(run.running.run_dir);
+      expect(waiting).toEqual({
+        ...accounted,
+        notify: { ...accounted.notify, detail: waiting.notify.detail },
+      });
+      expect(waiting.notify.detail).toMatch(/wait.*session|session.*wait/iu);
+      const waitingBytes = await io.readFile(jobPath);
+      const waitingMtime = (await io.stat(jobPath, { bigint: true })).mtimeNs;
+      await h.registry.pollOnce();
+      expect(await io.readFile(jobPath)).toEqual(waitingBytes);
+      expect((await io.stat(jobPath, { bigint: true })).mtimeNs).toBe(waitingMtime);
+      expect(resolves).toBe(1);
+      expect(h.resolutions).toEqual(resolutions);
+      expect(h.followups).toEqual(accepted);
+      expect(h.flushes).toEqual(flushes);
+
+      await h.fiber.dispose();
+      await waitForOwnershipRelease(h.stateDir);
+      await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
+      const replacement = actualRegistry(h.ctx);
+      await replacement.pollOnce();
+      expect(await io.readFile(jobPath)).toEqual(waitingBytes);
+      expect((await io.stat(jobPath, { bigint: true })).mtimeNs).toBe(waitingMtime);
+      expect(replacement.indexes.read()).toEqual({ active: [run.entry], completed: [] });
+      expect(resolves).toBe(1);
+      expect(h.resolutions).toEqual(resolutions);
+      expect(h.followups).toEqual(accepted);
+      expect(h.flushes).toEqual(flushes);
+
+      await h.mountSessionController();
+      const remountedResolve = h.ctx.sessionController.resolveAgent.bind(h.ctx.sessionController);
+      const remountedSpy = vi
+        .spyOn(h.ctx.sessionController, "resolveAgent")
+        .mockImplementation(async (id) => {
+          resolves++;
+          return remountedResolve(id);
+        });
+      restoreResolve = () => remountedSpy.mockRestore();
+      vi.setSystemTime(run.origin + NOTIFY_RETRY_INTERVAL_MS - 1);
+      await replacement.pollOnce();
+      await replacement.pollOnce();
+      expect(await io.readFile(jobPath)).toEqual(waitingBytes);
+      expect((await io.stat(jobPath, { bigint: true })).mtimeNs).toBe(waitingMtime);
+      expect(resolves).toBe(1);
+      expect(h.resolutions).toEqual(resolutions);
+      expect(h.followups).toEqual(accepted);
+      expect(h.flushes).toEqual(flushes);
+
+      vi.setSystemTime(run.origin + NOTIFY_RETRY_INTERVAL_MS);
+      await deliveredWake(replacement, run.running.run_dir);
+      expect((await readRecord(run.running.run_dir)).notify).toMatchObject({
+        status: "delivered",
+        attempts: 1,
+      });
+      expect(replacement.indexes.read()).toEqual({ active: [], completed: [run.entry] });
+      await replacement.pollOnce();
+      expect(resolves).toBe(2);
+      expect(h.followups).toHaveLength(1);
+      if (stage === "flush") expect(h.followups).toEqual(accepted);
+      expect(h.flushes).toEqual(stage === "flush" ? [h.ownerId, h.ownerId] : [h.ownerId]);
+      expect(flushedSessions).toHaveLength(stage === "flush" ? 2 : 1);
+      if (stage === "flush") expect(flushedSessions[1]).toBe(flushedSessions[0]);
+      expect(h.flushObservations).toEqual(
+        Array.from({ length: stage === "flush" ? 2 : 1 }, () => ({
+          sessionId: h.ownerId,
+          messages: [h.followups[0].message],
+        })),
+      );
+      expect(h.sessionEvents.filter((event) => event.type === "job/settled")).toEqual([]);
+      expect(h.errors.join("\n")).toMatch(/EIO/u);
+      expect(h.errors.join("\n")).not.toMatch(/accounting checkpoint|PRIVATE_POSTCOMMIT/u);
+      await expectWakeEvidence(run);
+      expect(run.producer.executions).toHaveLength(1);
+    } finally {
+      vi.mocked(fs.renameSync).mockImplementation(actualFs.renameSync);
+      restoreResolve?.();
+      restoreFlush?.();
+      await h.close();
+    }
+  },
+  15000,
+);
+
 test.each(["run identity", "owner identity"] as const)(
   "a changed %s cannot inherit another obligation's unpublished failure budget",
   async (kind) => {

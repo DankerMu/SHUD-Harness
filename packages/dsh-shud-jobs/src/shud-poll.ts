@@ -71,6 +71,7 @@ interface ConfirmedAppend extends IndexEntry {
 const confirmedAppends = new WeakMap<Session, Map<string, ConfirmedAppend>>();
 const NOTIFY_FLUSH_FAILURE_DETAIL = "SHUD notification flush was not acknowledged";
 const NOTIFY_RESTORE_FAILURE_DETAIL = "SHUD notification session restoration failed";
+const NOTIFY_WAITING_DETAIL = "Waiting for session services";
 
 interface PendingNotificationFailure extends IndexEntry {
   owner_session: RunJob["owner_session"];
@@ -623,13 +624,12 @@ export class ShudPoll {
       return current;
     };
     if (!epoch) {
-      const detail = "Waiting for session services";
       updateRunJob(
         entry,
         (current) => {
           verifyOwner(current);
-          if (current.notify.detail === detail) return current;
-          return { ...current, notify: { ...current.notify, detail } };
+          if (current.notify.detail === NOTIFY_WAITING_DETAIL) return current;
+          return { ...current, notify: { ...current.notify, detail: NOTIFY_WAITING_DETAIL } };
         },
         routed,
       );
@@ -659,10 +659,11 @@ export class ShudPoll {
       clearConfirmedAppend = failure.clearConfirmedAppend;
       return publishNotification((notify) => {
         // A rename may have committed before reporting failure. Never count that attempt twice.
+        // Service-readiness presentation can change without changing committed accounting.
         if (
           notify.attempts === failure.notify.attempts &&
           notify.at === failure.notify.at &&
-          notify.detail === failure.notify.detail &&
+          (notify.detail === failure.notify.detail || notify.detail === NOTIFY_WAITING_DETAIL) &&
           notify.status === failure.notify.status
         )
           return notify;
