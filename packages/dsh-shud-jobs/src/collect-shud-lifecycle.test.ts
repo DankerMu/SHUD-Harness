@@ -33,7 +33,12 @@ import {
 
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
-  return { ...actual, rename: vi.fn(actual.rename), readdir: vi.fn(actual.readdir) };
+  return {
+    ...actual,
+    rename: vi.fn(actual.rename),
+    readdir: vi.fn(actual.readdir),
+    readFile: vi.fn(actual.readFile),
+  };
 });
 vi.mock("node:fs", async (original) => {
   const actual = await original<typeof NodeFs>();
@@ -44,6 +49,7 @@ const actualIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
 beforeEach(() => {
   vi.mocked(io.rename).mockReset().mockImplementation(actualIo.rename);
   vi.mocked(io.readdir).mockReset().mockImplementation(actualIo.readdir);
+  vi.mocked(io.readFile).mockReset().mockImplementation(actualIo.readFile);
   vi.mocked(fs.renameSync).mockReset().mockImplementation(actualFs.renameSync);
 });
 
@@ -240,6 +246,45 @@ test.each(["record-publication", "error-ledger", "failure-status"] as const)(
     }
   },
 );
+
+test("direct collection retains the primary controlled reason when error-ledger publication also fails", async () => {
+  const h = await pollFixture();
+  let ledgerPath = "";
+  try {
+    vi.mocked(io.rename).mockImplementation(async (source, target) => {
+      if (target === ledgerPath)
+        throw Object.assign(new Error("PRIVATE_LEDGER_FAILURE_PAYLOAD_315"), { code: "EIO" });
+      await actualIo.rename(source, target);
+    });
+    const job = await seedTerminal(h, { status: "failed", exit_code: null }, async (record) => {
+      ledgerPath = join(record.run_dir, "collect-error.json");
+      await publishExit(record, "abc");
+    });
+    const outcome = await observe(h.registry.collectShud(job.run_id));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("Invalid exit evidence unexpectedly collected");
+    expect(outcome.error).toBeInstanceOf(AggregateError);
+    if (!(outcome.error instanceof AggregateError)) throw new Error("Missing aggregate failure");
+    expect(outcome.error.cause).toMatchObject({
+      message: "SHUD collect exit evidence: INVALID_INTEGER",
+    });
+    expect(outcome.error.errors).toMatchObject([
+      { message: "SHUD collect exit evidence: INVALID_INTEGER" },
+      { message: "SHUD collect collect-error write: EIO" },
+    ]);
+    expect(outcome.error.message).toContain("SHUD collect exit evidence: INVALID_INTEGER");
+    expect(outcome.error.message).toContain("SHUD collect collect-error write: EIO");
+    expect(inspect(outcome.error, { depth: 5 })).not.toContain(
+      "PRIVATE_LEDGER_FAILURE_PAYLOAD_315",
+    );
+    await expectAbsent(ledgerPath);
+    await expectAbsent(join(job.run_dir, "run-record.json"));
+    expect(await readRecord(job.run_dir)).toEqual(job);
+  } finally {
+    vi.mocked(io.rename).mockImplementation(actualIo.rename);
+    await h.close();
+  }
+});
 
 test("automatic and direct collection publish once per run while a held run does not block another", async () => {
   const h = await pollFixture();
@@ -492,7 +537,18 @@ test("direct collection rejects a submission-in-flight without publishing a resu
     const { pending } = h.start();
     await enteredBeforeCompletion(entered.waiting, pending);
     if (!runId) throw new Error("Submission did not reach the D7 barrier");
-    await expect(api.collectShud(runId)).rejects.toThrow();
+    expect(api.isSubmissionInFlight(runId)).toBe(true);
+    const current = await readRecord(runDir);
+    expect(current.status).toBe("running");
+    expect(current.dsh_job_id).not.toBeNull();
+    const outcome = await observe(api.collectShud(runId));
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("D7 submission unexpectedly collected");
+    expect(outcome.error).toMatchObject({ code: "SUBMISSION_IN_FLIGHT" });
+    if (!(outcome.error instanceof Error)) throw new Error("D7 request omitted its error");
+    expect(outcome.error.message).toContain("running");
+    expect(outcome.error.message).toContain("dsh_job_id");
+    expect(outcome.error.message).toContain(current.dsh_job_id);
     await expectAbsent(join(runDir, "run-record.json"));
     await expectAbsent(join(runDir, "collect-error.json"));
     release.release();
@@ -500,6 +556,104 @@ test("direct collection rejects a submission-in-flight without publishing a resu
   } finally {
     release.release();
     await h.close();
+  }
+}, 15000);
+
+test("an admitted D7 diagnostic read retains rejection and state ownership after submission finishes", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const h = await pollFixture();
+  const contender = await createHarness();
+  const published = barrier();
+  const finishSubmission = barrier();
+  const readEntered = barrier();
+  const finishRead = barrier();
+  let runId: RunId | undefined;
+  let runDir = "";
+  let jobPath = "";
+  let collection: Promise<RunRecord> | undefined;
+  let disposing: Promise<void> | undefined;
+  let disposed = false;
+  try {
+    vi.mocked(io.rename).mockImplementation(async (source, target) => {
+      if (typeof target === "string" && target.endsWith("/run-job.json")) {
+        const candidate = RunJobSchema.parse(JSON.parse(await actualIo.readFile(source, "utf8")));
+        if (candidate.status === "running") {
+          runId = candidate.run_id;
+          runDir = candidate.run_dir;
+          await actualIo.rename(source, target);
+          published.release();
+          await finishSubmission.waiting;
+          return;
+        }
+      }
+      await actualIo.rename(source, target);
+    });
+    vi.mocked(io.readFile).mockImplementation(async (...args) => {
+      if (args[0] === jobPath) {
+        readEntered.release();
+        await finishRead.waiting;
+      }
+      return actualIo.readFile(...args);
+    });
+    const { pending } = h.start();
+    await enteredBeforeCompletion(published.waiting, pending);
+    if (!runId) throw new Error("Submission did not publish its D7 running checkpoint");
+    expect(h.registry.isSubmissionInFlight(runId)).toBe(true);
+    jobPath = join(runDir, "run-job.json");
+    collection = h.registry.collectShud(runId);
+    const observed = observe(collection);
+    await enteredBeforeCompletion(readEntered.waiting, observed);
+    finishSubmission.release();
+    const job = await pending;
+    expect(h.registry.isSubmissionInFlight(runId)).toBe(false);
+    disposing = Promise.resolve(h.ctx.fiber.dispose()).then(() => {
+      disposed = true;
+    });
+    await expect
+      .poll(async () => {
+        try {
+          await h.registry.submitShud({ ...h.request, project: "../admission-probe" }, () => {
+            throw new Error("Invalid admission probe reached execution");
+          });
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+        return "unexpected acceptance";
+      })
+      .toContain("admission is closed");
+    expect(disposed).toBe(false);
+    expect(await actualIo.readdir(h.stateDir)).toContain("lock");
+    await expect(contender.apply(ShudJobRegistry, h.config)).rejects.toThrow(h.stateDir);
+    await expectAbsent(join(runDir, "run-record.json"));
+    await expectAbsent(join(runDir, "collect-error.json"));
+
+    finishRead.release();
+    const outcome = await observed;
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("Admitted D7 diagnostic became a collection");
+    expect(outcome.error).toMatchObject({ code: "SUBMISSION_IN_FLIGHT" });
+    if (!(outcome.error instanceof Error)) throw new Error("D7 diagnostic omitted its error");
+    expect(outcome.error.message).toContain("running");
+    expect(outcome.error.message).toContain("dsh_job_id");
+    expect(outcome.error.message).toContain(job.dsh_job_id);
+    await disposing;
+    await waitForOwnershipRelease(h.stateDir);
+    expect(await readRecord(runDir)).toEqual(job);
+    await expectAbsent(join(runDir, "run-record.json"));
+    await expectAbsent(join(runDir, "collect-error.json"));
+  } finally {
+    finishSubmission.release();
+    finishRead.release();
+    try {
+      await collection?.catch(() => undefined);
+      await disposing;
+      vi.mocked(io.readFile).mockImplementation(actualIo.readFile);
+      vi.mocked(io.rename).mockImplementation(actualIo.rename);
+      await contender.dispose();
+      await h.close();
+    } finally {
+      vi.useRealTimers();
+    }
   }
 }, 15000);
 

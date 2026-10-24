@@ -1,6 +1,7 @@
 import { basename } from "node:path";
-import { defineTool, ToolArgsError, type ToolDefinition } from "@deepseek-ai/dsh-tools";
+import { defineTool, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import { produceDetachedShud, type ShudJobRegistry } from "@shud-harness/dsh-shud-jobs";
+import { strictTool } from "./strict-tool.ts";
 
 const parameters = {
   input_dir: {
@@ -96,18 +97,5 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
       };
     },
   });
-  return {
-    ...tool,
-    parameters: { ...tool.parameters, additionalProperties: false },
-    execute(args, exec) {
-      // rc.2 defineTool captures an open-root validator; closing its public projection is not enough.
-      if (typeof args === "object" && args !== null && !Array.isArray(args)) {
-        const unknown = Object.keys(args).filter((key) => !Object.hasOwn(parameters, key));
-        if (unknown.length > 0) {
-          throw new ToolArgsError(unknown.map((key) => `Unknown parameter: ${key}`));
-        }
-      }
-      return tool.execute(args, exec);
-    },
-  };
+  return strictTool(tool, parameters);
 }

@@ -179,11 +179,11 @@ SLURM watcher 监控：
 
 Collect 必须是幂等的。重复调用 `collect` 不应破坏已完成结果。
 
-当前实现：`dsh-shud-jobs` 已提供自动收集与后端 `collectShud(RunId | JobRecordId): Promise<RunRecord>`，共用逐条目队列并等待本地完成回执；先发布不可变 RunRecord，再投影 `collected`。状态投影失败只修复投影，不重做生成或消耗生成尝试；成功重试保留历史错误记录。R9/R10 启动对账复用该收集实现：有效且身份匹配的已有 RunRecord 在读取重试记录前优先返回，即使历史预算耗尽、未到重试间隔或记录损坏，也只修复状态；没有有效已提交结果时，损坏的重试记录阻止新的生成尝试，保留且不重置次数。手动 API 可越过正常重试间隔/次数上限。`shud_collect` 工具尚待接入；收集本身不投递消息，pending notify 的活动索引在收集后仍保留，由服务初始化后的唯一轮询循环执行 #313 投递，通知终结后迁移索引，见 §9。实现边界与安全规则见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
+当前实现：`dsh-shud-jobs` 已提供自动收集与后端 `collectShud(RunId | JobRecordId): Promise<RunRecord>`，共用逐条目队列并等待本地完成回执；先发布不可变 RunRecord，再投影 `collected`。状态投影失败只修复投影，不重做生成或消耗生成尝试；成功重试保留历史错误记录。R9/R10 启动对账复用该收集实现：有效且身份匹配的已有 RunRecord 在读取重试记录前优先返回，即使历史预算耗尽、未到重试间隔或记录损坏，也只修复状态；没有有效已提交结果时，损坏的重试记录阻止新的生成尝试，保留且不重置次数。手动 API 可越过正常重试间隔/次数上限。已挂载 `shud_collect` 工具通过同一 API 接受 `job_id`/`run_id` 二选一，直接返回规范记录；收集本身不投递消息，pending notify 的活动索引在收集后仍保留，由服务初始化后的唯一轮询循环执行 #313 投递，通知终结后迁移索引，见 §9。实现边界与安全规则见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
 
-M2 collect 从 `<session cwd>/runs/<run_id>/` 读取作业与退出信息：按退出码映射 `exit_class`，扫描 `output/<project>.out/` 得到相对路径/字节数清单，计算 `wall_seconds`，复制模型 id 与来源，经 core schema 校验后写 `run-record.json`，再将 RunJob 置为 `collected`；后续投递步骤由同一轮询循环负责，不由 collector 发消息。有效且身份匹配的已有 `run-record.json` 原样返回，内容和修改时间不变；后续 `shud_collect` 工具复用同一逻辑。当前 `wall_seconds` 由 `(Date.parse(finished_at) - Date.parse(started_at)) / 1000` 计算（缺时间为 null），不是精确求解器计时；测量限制见 §9。
+M2 collect 先按持久 id 从活动/完成索引找到原运行目录（提交时为 `<session cwd>/runs/<run_id>/`），不从收集调用者 cwd 扫描或推断路径，再读取作业与退出信息：按退出码映射 `exit_class`，扫描 `output/<project>.out/` 得到相对路径/字节数清单，计算 `wall_seconds`，复制模型 id 与来源，经 core schema 校验后写 `run-record.json`，再将 RunJob 置为 `collected`；后续投递步骤由同一轮询循环负责，不由 collector 发消息。有效且身份匹配的已有 `run-record.json` 原样返回，内容和修改时间不变；`shud_collect` 工具复用同一逻辑，通知完成后另一会话/工作区仍可经完成索引读取。当前 `wall_seconds` 由 `(Date.parse(finished_at) - Date.parse(started_at)) / 1000` 计算（缺时间为 null），不是精确求解器计时；测量限制见 §9。
 
-失败写同目录 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态；退出码不可读/非整数时为 `failed`，不写占位 RunRecord、不置 `collected`。唯一轮询循环在距上次尝试至少 10 秒后重试，上限 3 次；达到上限不再自动 collect，后端 `collectShud()` 仍可手工重试。重启由 R9/R10 接续；耗尽后的投递保留原终态和错误记录，仅使用经受控阶段/代码校验及归一化的实际失败原因，不直接转发任意 `last_error`。不可信的历史诊断或损坏、错身份、链接形式的已有 RunRecord 阻止失败唤醒，不重置预算、不猜测结果；有效同身份 RunRecord 仍优先。工具入口留待后续切片。
+失败写同目录 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态；退出码不可读/非整数时为 `failed`，不写占位 RunRecord、不置 `collected`。唯一轮询循环在距上次尝试至少 10 秒后重试，上限 3 次；达到上限不再自动 collect，后端 `collectShud()` 与 `shud_collect` 仍可手工重试。重启由 R9/R10 接续；耗尽后的投递保留原终态和错误记录，仅使用经受控阶段/代码校验及归一化的实际失败原因，不直接转发任意 `last_error`。不可信的历史诊断或损坏、错身份、链接形式的已有 RunRecord 阻止失败唤醒，不重置预算、不猜测结果；有效同身份 RunRecord 仍优先。工具错误保留本次受控生成原因，包括记账发布同时失败的聚合错误；非终态/提交在途请求只返回当前状态与经校验的 nullable `dsh_job_id`，不生成结果或 ledger。参数、用法及验证边界见 [已挂载的 shud_collect](../04_IMPLEMENTATION/Repository_Layout.md#已挂载的-shud_collect)。
 
 metrics、数值健康计算、ArtifactManifest、TaskCard 更新与报告生成不属于 M2 collect；它们在后续里程碑按相应对象契约接入。
 
@@ -289,7 +289,7 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 暂时性恢复、追加或 flush 失败按原失败时间记账，间隔至少 10 秒、上限 3 次；第三次失败与 `unreachable` 原子发布，不进行第四次传输。失败记账写入失败时先重试该次发布，保留原时间/原因，不让 pump cadence 无控制地重发或凭空增加持久次数；若写入实际已提交，服务缺席产生的规范等待提示不能使该记账失效，在运行/owner 身份及次数、时间、状态仍匹配时识别原失败提示或规范等待提示，不重写、不重复计数，也不接受任意变更的提示。确认的追加及成功 flush 回执按 live Session 和完整运行身份保存在进程内：普通注册表重载可继续 flush 或仅补写 delivered，不重复确认过的步骤；实际进程崩溃丢失这些回执，追加与 durable 标记之间的窗口允许重放。这是至少一次语义，不保证 exactly-once；没有新增持久 outbox 或 schema。
 
-协议与验收边界以 [M2 fixture design](../../openspec/changes/m2-run-chain/design.md)、[tasks](../../openspec/changes/m2-run-chain/tasks.md) 为准；实现入口为 [shud-poll.ts](../../packages/dsh-shud-jobs/src/shud-poll.ts)，历史收集诊断的受控校验归 [shud-run-file.ts](../../packages/dsh-shud-jobs/src/shud-run-file.ts) 所有。当前后端验证包含真实原生执行/宿主崩溃与公开会话服务 doubles，不等同完整 Web 恢复；工具入口 #314–315、完整 Web 验收 #316–318 仍待后续切片，不据此宣称 M2 Epic 完成或 PI 验收。
+协议与验收边界以 [M2 fixture design](../../openspec/changes/m2-run-chain/design.md)、[tasks](../../openspec/changes/m2-run-chain/tasks.md) 为准；实现入口为 [shud-poll.ts](../../packages/dsh-shud-jobs/src/shud-poll.ts)，历史收集诊断的受控校验归 [shud-run-file.ts](../../packages/dsh-shud-jobs/src/shud-run-file.ts) 所有。当前后端验证包含真实原生执行/宿主崩溃与公开会话服务 doubles，工具入口 #314–315 已挂载并经 built/installed 实测；built 完成索引跨工作区读取与 installed headless 活动索引读取的证据分别成立，不等同完整 Web 恢复。完整 Web/PI 验收 #316–318 仍待后续切片，不据此宣称 M2 Epic 完成或 PI 验收。
 
 ## 10. 用户体验
 

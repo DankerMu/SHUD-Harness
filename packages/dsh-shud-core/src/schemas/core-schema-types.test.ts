@@ -22,6 +22,7 @@ describe("core schema type contracts", () => {
         noEmit: true,
         skipLibCheck: true,
         target: ts.ScriptTarget.ES2022,
+        lib: ["lib.es2022.d.ts"],
       },
     });
     expect(

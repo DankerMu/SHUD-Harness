@@ -223,7 +223,11 @@ async function failedAttempt(
     }
   }
   if (failures.length > 1) {
-    throw new AggregateError(failures, "SHUD collect persistence failed", { cause: failure });
+    throw new AggregateError(
+      failures,
+      `SHUD collect persistence failed: ${failures.map((item) => item.message).join("; ")}`,
+      { cause: failure },
+    );
   }
   throw failure;
 }

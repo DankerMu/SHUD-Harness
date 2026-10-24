@@ -133,11 +133,13 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 取消写入、轮询终态、collect 状态投影及通知状态更新共用新鲜 RunJob 的同步校验/转换/原子发布边界：读取、身份/路径校验、字段转换与 `writeJsonSync` 之间不 await，保留本次转换不拥有的最新字段，不以旧快照覆盖取消意图或回退新终态；cancelled 与 lost 的选择也读取该边界内的新标记。提交期元数据仍由 D7 隔离；RunRecord 与收集重试记录保持原有异步发布、不可变结果及重试提交边界。
 
-注册表公开后端 API `collectShud(id: RunId | JobRecordId): Promise<RunRecord>`，可查活动或完成索引；它与自动 collect 使用同一实现和逐条目队列。直接调用等待该条目已接受的工作及未完成回执；失败调用不阻塞后续请求。未知 id、非终态与本进程提交在途条目拒绝且不创建收集产物。当前没有挂载 `shud_collect` 工具。
+注册表公开后端 API `collectShud(id: RunId | JobRecordId): Promise<RunRecord>`，先查活动再查完成索引；已挂载的 `shud_collect` 仅接受两个持久 id 之一，按 core 品牌校验，拒绝未知键/错误根类型，并只委托一次该 API。调用会话 cwd 不参与查找，未索引的磁盘记录仍为未知 id。它与自动 collect 使用同一实现和逐条目队列；失败调用不阻塞后续请求。非终态与提交在途拒绝包含经校验的当前状态/nullable `dsh_job_id`，不创建结果或重试记录。D7 在请求接纳时捕获，仅排队读取身份校验后的错误快照，即使提交期间完成也不转为收集；已接纳读取受既有 drain-before-unlock 约束。普通终态请求等待已接受工作及未完成回执，再进入规范收集。工具用法与实测边界见 [Repository Layout](../../docs/04_IMPLEMENTATION/Repository_Layout.md#已挂载的-shud_collect)。
 
 收集先验证运行路径与身份，再校验终态完整字段。缓存的数值 exit_code 必须有相同的有效退出文件；缓存为 null 时，有效文件可恢复退出分类，仅文件真正缺失才按取消状态/标记判 cancelled，否则 lost。不可读、非法或不一致的退出证据明确失败，不降级为 lost；退出证据失败将 RunJob 置为 `failed`，包括原 succeeded/cancelled，保留 exit_code、取消标记、身份与时间等其它字段。其它收集失败保留终态；无法合法重写的损坏记录保留原字节。日志只记录路径，输出仅扫描 `output/<project>.out/` 的元数据，生成排序的 POSIX 相对路径及实际字节数，不读取日志/产物内容；初始输出目录真正不存在可为空清单，链接、特殊文件、不可读目录或扫描中消失均失败。RunRecord 保留引用、argv 与模型来源；时间齐全时计算 wall_seconds，否则为 null，负时长拒绝；数值健康四项与 peak_memory_mb 保持 null。
 
 经 core schema 校验后原子发布 `run-record.json`，再原子投影 RunJob 为 `collected`。有效且身份匹配的已有 RunRecord 优先原样返回，字节与 mtime 不变；结果发布是提交边界，后续状态投影失败只重试投影，不重新扫描、改写结果或增加生成失败次数。生成失败写本地 `collect-error.json`（严格的 `attempts`、`last_error`、`at`）；诊断仅含受控阶段、字段路径或 errno，不持久化/记录原始异常载荷。损坏的重试记录保留且不重置，并阻止新的生成尝试。自动路径首次及时尝试，之后沿用 core 常量 `COLLECT_RETRY_INTERVAL_MS = 10000` 与 `MAX_COLLECT_ATTEMPTS = 3`，按持久时间间隔重试，时钟回退不加速；直接 collect 可越过间隔/次数上限，但不能绕过损坏记录重新生成结果。成功重试保留既有错误记录字节与 mtime。
+
+工具直接返回规范 RunRecord JSON；普通失败向调用方保留本次 `collect-error.json` 的受控原因。若失败记账/状态发布也失败，聚合错误仍包含原生成原因及受控发布阶段/代码，不转发任意 cause 或历史 ledger 文本。非终态诊断只校验路由状态与当前登记 id；终态完整 schema 校验仍属于收集尝试并按既有规则记账，不提前变成未记账的请求错误。
 
 唤醒由 `packages/dsh-shud-jobs/src/shud-poll.ts` 的同一逐条目队列负责：可选会话服务就绪后才恢复 owner，使用 `createUserMessage` 的 `source.kind: shud-jobs`，经 `followup` 与正向 `sessions.flush` 后发布 delivered，再完成索引迁移。缺服务保持 pending 且不消耗尝试；撤销注入 epoch 后不得用晚到结果追加或记账。暂时性失败间隔至少 10 秒、上限 3 次，最后一次与 unreachable 原子发布；失败记账落盘前先重试原记账，不重发传输。确认的追加/flush 回执与待发布失败记账均为进程内知识，普通注册表重载保留，实际进程崩溃丢失；前者区分 live Session 与完整运行身份，后者另校验 owner，不能继承其它运行的预算。崩溃窗口允许至少一次重放，不保证 exactly-once，不新增持久 outbox。收集耗尽原因须由 `shud-run-file.ts` 校验受控历史阶段/代码并归一化，不能直接转发任意 ledger 文本；有效同身份 RunRecord 优先，不可信证据保持 fail closed。完整顺序与验收边界见上述重启恢复说明和 `openspec/changes/m2-run-chain/design.md`，不要在 collector 或其它订阅者建立第二条投递路径。
 

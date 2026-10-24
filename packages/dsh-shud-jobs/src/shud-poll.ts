@@ -205,11 +205,21 @@ export class ShudPoll {
       if (!this.accepting) throw new CollectFailure("admission", "CLOSED");
       const entry = this.indexes.lookup(id);
       if (!entry) throw new CollectFailure("request", "UNKNOWN_ID");
-      if (this.inSubmission(entry.run_id))
-        throw new CollectFailure("request", "SUBMISSION_IN_FLIGHT");
+      // D7 is an admission decision, even if submission completes while this read is queued.
+      const submissionInFlight = this.inSubmission(entry.run_id);
       return this.enqueue(entry.run_id, async () => {
         const routed = await readRunFile(entry);
-        if (!isTerminal(routed.status)) throw new CollectFailure("request", "NOT_TERMINAL");
+        if (submissionInFlight || !isTerminal(routed.status)) {
+          const currentId = RunJobSchema.shape.dsh_job_id.safeParse(routed.raw.dsh_job_id);
+          if (!currentId.success)
+            throw validationFailure("run metadata", [{ path: ["dsh_job_id"] }]);
+          const failure = new CollectFailure(
+            "request",
+            submissionInFlight ? "SUBMISSION_IN_FLIGHT" : "NOT_TERMINAL",
+          );
+          failure.message += ` (status=${routed.status}, dsh_job_id=${currentId.data ?? "null"})`;
+          throw failure;
+        }
         const receipt = this.receipts.get(entry.run_id);
         if (receipt) await this.complete(entry.run_id, receipt, receiptOutcome(routed, receipt));
         return collectRun(entry, routed, false);

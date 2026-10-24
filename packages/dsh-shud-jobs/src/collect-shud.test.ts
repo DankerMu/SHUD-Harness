@@ -7,7 +7,13 @@ import {
   type RunExitClass,
 } from "@shud-harness/dsh-shud-core";
 import { terminateGroup } from "./detached-shud/test-harness.ts";
-import { pollFixture, readRecord, releaseRun, replaceRecord } from "./poll-shud/test-harness.ts";
+import {
+  pollFixture,
+  readRecord,
+  releaseRun,
+  replaceRecord,
+  seedRun,
+} from "./poll-shud/test-harness.ts";
 import { waitForRecovery } from "./reconcile-shud/test-harness.ts";
 import {
   existingResult,
@@ -279,6 +285,38 @@ test("unknown and still-running direct requests reject without creating collecti
     await h.close();
   }
 }, 15000);
+
+test.each(["created", "submitted", "running"] as const)(
+  "direct collection reports current %s status and nullable current registration without artifacts",
+  async (status) => {
+    const h = await pollFixture();
+    try {
+      for (const currentId of [null, "shud-0123456789abcdef"]) {
+        const job = await seedRun(h, {
+          status,
+          dsh_job_id: currentId,
+          dsh_job_ids: ["shud-fedcba9876543210", ...(currentId === null ? [] : [currentId])],
+          ...(status === "running" ? {} : { pid: null, pid_started_at: null, started_at: null }),
+        });
+        const error: unknown = await h.registry.collectShud(job.run_id).then(
+          () => null,
+          (failure: unknown) => failure,
+        );
+        expect(error).toMatchObject({ code: "NOT_TERMINAL" });
+        if (!(error instanceof Error)) throw new Error("Nonterminal collection did not reject");
+        expect(error.message).toContain(status);
+        expect(error.message).toContain("dsh_job_id");
+        expect(error.message).toContain(currentId ?? "null");
+        expect(error.message).not.toContain("shud-fedcba9876543210");
+        expect(await readRecord(job.run_dir)).toEqual(job);
+        await expectAbsent(join(job.run_dir, "run-record.json"));
+        await expectAbsent(join(job.run_dir, "collect-error.json"));
+      }
+    } finally {
+      await h.close();
+    }
+  },
+);
 
 const conflictingExitFiles: Record<string, string | null> = {
   missing: null,
