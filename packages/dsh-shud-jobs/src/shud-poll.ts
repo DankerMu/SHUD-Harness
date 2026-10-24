@@ -22,6 +22,7 @@ import type { ShudCompletion, ShudControl, ShudProcessIdentity } from "./detache
 import { stdoutSource } from "./file-output.ts";
 import { recoverProcessGroup } from "./process-group.ts";
 import {
+  createShudCompletion,
   registerUnowned,
   registrationLabel,
   removeSettledRegistration,
@@ -377,18 +378,7 @@ export class ShudPoll {
       routed,
     );
     const group = recoverProcessGroup(identity);
-    let finish!: (outcome: JobOutcome) => void;
-    // This producer owns completion of the parent's stdout pump, not an invented native child.
-    const done = new Promise<JobOutcome>((resolve) => {
-      finish = resolve;
-    });
-    const lifecycle: ShudCompletion = {
-      done,
-      settle: finish,
-      detach(detail) {
-        finish({ status: "failed", detail });
-      },
-    };
+    const lifecycle = createShudCompletion();
     const control: ShudControl = { ...group, hooks: lifecycle };
     let registered: JobId | undefined;
     try {

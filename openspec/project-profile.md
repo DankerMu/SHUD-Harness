@@ -3,7 +3,7 @@ Project profile: SHUD-Harness（dsh 内核，ADR-0004）
 Living artifact maintained by `subagent-workflow` Phase 0.0/0.5. Rewritten 2026-10-20 at the Phase 4 reset; the Zero-era profile is in tag `archive/zero-v0.8.3`.
 
 Entry surfaces:
-- `packages/dsh-shud-*/` TypeScript plugin packages (pnpm workspace, `tsc` → `lib/`, vitest). Present: `dsh-shud-core` (8 object Zod schemas, policy-gate-core, role-tool-map), `dsh-shud-raw-guard`, and `dsh-shud-jobs` (durable registry and file-level startup recovery). Planned per `docs/04_IMPLEMENTATION/Repository_Layout.md`: `tools`, `records`, `presets`.
+- `packages/dsh-shud-*/` TypeScript plugin packages (pnpm workspace, `tsc` → `lib/`, vitest). Present: `dsh-shud-core` (8 object Zod schemas, policy-gate-core, role-tool-map), `dsh-shud-raw-guard`, `dsh-shud-jobs` (durable registry and file-level startup recovery), and `dsh-shud-tools` (`shud_run`). Planned per `docs/04_IMPLEMENTATION/Repository_Layout.md`: `shud_collect`, `records`, `presets`.
 - `profile/shud/` dsh bundle (`package.json` + `cordis.patch.yml`): model routing, outbound channel switches, plugin mounts by workspace package specifier. The bundle declares `dependencies["@shud-harness/dsh-shud-raw-guard"] = "workspace:*"`; its patch inserts `name: '@shud-harness/dsh-shud-raw-guard'`. The product is `dsh --profile shud`; there is no app of our own.
 - `scripts/schema/` (Zod → `docs/generated/{schema,json-schema}`), `scripts/docs/` (link checker); `skills/`, `scripts/` (R/bash), `templates/` to come with M3.
 - Contract sources: `docs/adr/implemented/0004-dsh-kernel.md`, `docs/04_IMPLEMENTATION/Phased_Plan.md` (M1–M6, sole truth for gates), `docs/03_SPEC/*`, `docs/00_INDEX/CANONICAL_CONTRACTS.md`, `openspec/changes/*`.
@@ -24,6 +24,7 @@ Contracts:
 
 Risk axes:
 - dsh pre-stable API drift (seam renames, config schema changes) across `chore(dsh-upgrade)` issues; `--patch` ordering (must precede app args).
+- rc.2 tool integration: `defineTool` has an open parameter root; strict tool contracts require both a closed model-visible schema and explicit unknown-key rejection at execution. Runtime `@deepseek-ai/dsh-tools` imports need the full pinned peer closure under `autoInstallPeers: false`; type-only imports do not prove runtime importability.
 - Job durability: in-memory `jobs-local` dies with the process (SIGTERM kills child without `job/settled`, SIGKILL orphans it, restart → `unknown job`); M2's durable backend must survive both.
 - Raw-data byte protection relies on `<data_root>/raw` being outside the workspace root; any plugin that widens the sandbox or resolves symlinks into it breaks the invariant.
 - Schema drift between `Minimal_Schemas.md`, Zod code, generated docs and issue text.

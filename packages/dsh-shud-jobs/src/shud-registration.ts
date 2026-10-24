@@ -1,11 +1,30 @@
-import type { JobId, JobSpec } from "@deepseek-ai/dsh-jobs";
+import type { JobId, JobOutcome, JobSpec } from "@deepseek-ai/dsh-jobs";
 import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import type { RunJob } from "@shud-harness/dsh-shud-core";
+import type { ShudLifecycle } from "./detached-shud.ts";
 
 declare module "@deepseek-ai/dsh-jobs" {
   interface JobKindMap {
     shud: "shud";
   }
+}
+
+/** One registration-only completion; process quiescence remains the execution owner's duty. */
+export function createShudCompletion(): ShudLifecycle {
+  let finish!: (outcome: JobOutcome) => void;
+  const done = new Promise<JobOutcome>((resolve) => {
+    finish = resolve;
+  });
+  return {
+    done,
+    settle: finish,
+    detach(detail) {
+      finish({ status: "failed", detail });
+    },
+    cancel(reason) {
+      finish({ status: "failed", detail: reason ?? "SHUD registration cancelled" });
+    },
+  };
 }
 
 export function registrationLabel(record: Pick<RunJob, "run_id" | "label">): string {

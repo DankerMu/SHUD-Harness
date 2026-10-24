@@ -17,6 +17,10 @@
       "entry": ["src/**/*.test.ts", "src/shud-end.ts"],
       "project": ["src/**/*.ts"]
     },
+    "packages/dsh-shud-tools": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
     "packages/dsh-shud-raw-guard": {
       "entry": ["src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
