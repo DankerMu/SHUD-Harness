@@ -21,7 +21,7 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # 已挂载 shud_run；shud_collect 待 #315
+    dsh-shud-tools/                 # 已挂载 shud_run 与索引式 shud_collect
     dsh-shud-records/               # TaskCard/RunJob/RunRecord/StackLock/EvidenceReport 的 ctx.storage 域
     dsh-shud-presets/               # coordinator / worker / coder / reviewer agent preset 与 system prompt 段
   profile/
@@ -57,7 +57,17 @@ R1–R12 启动对账已接入 `[Service.init]`：先排空启动 pass 再开放
 
 工具要求会话 id/cwd 与已配置模型：先取 `agent.session.requestHeader()?.config.model`，缺失再取 `agent.options.model`；恒记 `response_model_source: configured`，不把 assistant `source.model` 当响应体模型。它通过导出的 `produceDetachedShud` 提交实际执行，沿用 jobs 内与接管共用的登记完成工厂；`submitShud(request, producer)` 的显式 producer 参数仍必需。
 
-提交完成即返回 `status: running`、持久 `job_id`/`run_id`、当前 `dsh_job_id` 与 `run_dir`，不等求解器结束。`job_output`/`job_kill` 只使用当前 `dsh_job_id`；重启接管后用 `job_list` 中含 `run_id` 的 label 找新 id。`shud_collect` 尚未挂载（#315），自动收集的结果在运行目录 `run-record.json`。headless 未提供会话恢复服务时，通知可保持 `pending`、`attempts: 0`、`Waiting for session services`，不妨碍文件级结算/收集；这不等于完整 Web 跨重启或 PI 验收。
+提交完成即返回 `status: running`、持久 `job_id`/`run_id`、当前 `dsh_job_id` 与 `run_dir`，不等求解器结束。`job_output`/`job_kill` 只使用当前 `dsh_job_id`；重启接管后用 `job_list` 中含 `run_id` 的 label 或 `shud_collect` 的非终态错误找新 id。headless 未提供会话恢复服务时，通知可保持 `pending`、`attempts: 0`、`Waiting for session services`，不妨碍文件级结算或经 `shud_collect` 读取记录；这不等于完整 Web 跨重启或 PI 验收。
+
+### 已挂载的 `shud_collect`
+
+同一 `shud-tools` 插件已挂载收集工具；无需新增 profile 行。模型调用只传持久 id 之一，例如 `{"run_id":"RUN-20261024T200036-a20d"}`，或传该运行实际返回的 `job_id`。两者必须且只能提供一个，按 core 品牌 id 校验；未知键、错误类型/品牌和非对象参数均拒绝。`dsh_job_id` 不是收集参数。
+
+工具只委托一次注册表 `collectShud()`：先查活动索引再查完成索引，不扫描工作区，不从调用会话 cwd 推断运行目录。终态尚无记录时执行现有收集；成功直接返回完整规范 RunRecord JSON，不添加科学结论。已提交记录重复读取时字节与 mtime 不变，包括通知完成、移出活动索引后由另一会话/工作区通过任一持久 id 读取。磁盘上有记录但未被索引的 id 仍返回 `UNKNOWN_ID`。
+
+`created`/`submitted`/`running` 返回 `NOT_TERMINAL`，提交仍在途返回 `SUBMISSION_IN_FLIGHT`；受控错误包含当前状态和经校验的当前 `dsh_job_id`（未登记为 `null`，不是历史 id）。此类请求不生成结果或重试记录，提交在途请求也不会在排队期间转为收集。普通收集失败返回写入 `collect-error.json` 的受控原因；记账发布也失败时，错误同时保留原生成原因与受控发布错误，不泄露任意异常或元数据。
+
+2026-10-24 实测边界：built ToolRuntime 的真实 ccw30 运行先拒绝运行中收集，退出 0 后经会话控制服务 seam 完成一次唤醒并移至完成索引，另一会话/cwd 通过两种 id 重复取得不可变记录。已安装 headless profile 的实际模型在两个新会话/不同 cwd 分别用两种 id 调用，canonical request/header/tool/call/tool/result 与落盘记录一致；该路径使用活动索引，通知仍为 pending/0、等待会话服务。两次运行各 45 个源/副本输入 hash 不变；不据此宣称 Web/PI 验收（#316–318）。
 
 ## 2. 运行时资产（不进代码仓）
 

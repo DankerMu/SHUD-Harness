@@ -91,6 +91,15 @@ export async function createToolHarness(options: ToolHarnessOptions = {}) {
           signal: new AbortController().signal,
         });
       },
+      async collect(arguments_: unknown, caller: Agent = agent) {
+        return runtime.execute({
+          callId: "shud-collect-consumer-tracer" as ToolCallId,
+          name: "shud_collect",
+          arguments: arguments_,
+          agent: caller,
+          signal: new AbortController().signal,
+        });
+      },
       async dispose() {
         // Terminate only groups recorded by this isolated registry, including failures after submit.
         // Teardown itself deliberately leaves unmarked SHUD processes alive.
