@@ -139,6 +139,9 @@ export class ShudJobRegistry extends ParentRegistry {
         (error) => ctx.logger.error(error),
       );
       poll = dispatcher;
+      ctx.inject(["sessionController", "sessions"], (services) =>
+        dispatcher.enableDelivery(services.sessionController, services.sessions),
+      );
       let ready = false;
       const requireReady = () => {
         if (!ready) throw new Error("SHUD startup reconciliation is not ready");

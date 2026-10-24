@@ -160,7 +160,7 @@ test.each(["", " \n\t", "13junk", "1.5", "9007199254740992", "NaN"])(
   15000,
 );
 
-test.each(["created", "submitted", "collected", "delivered", "unreachable"] as const)(
+test.each(["created", "submitted", "delivered", "unreachable"] as const)(
   "poll skips %s residue rather than claiming later reconciliation or notification work",
   async (kind) => {
     const h = await pollFixture();
@@ -171,9 +171,9 @@ test.each(["created", "submitted", "collected", "delivered", "unreachable"] as c
           ? { notify: { status: kind, attempts: 0, at: null, detail: null } }
           : {
               status: kind,
-              ...(kind === "created" || kind === "submitted"
-                ? { pid: null, pid_started_at: null, started_at: null }
-                : {}),
+              pid: null,
+              pid_started_at: null,
+              started_at: null,
             },
       );
       const path = join(record.run_dir, "run-job.json");
@@ -208,6 +208,9 @@ test("collected records without local completion receipts are not repeatedly rew
       },
     );
     await h.registry.collectShud(record.run_id);
+    await expect
+      .poll(async () => (await readRecord(record.run_dir)).notify.detail, { timeout: 5000 })
+      .toMatch(/wait.*session|session.*wait/iu);
     const path = join(record.run_dir, "run-job.json");
     const before = await io.readFile(path);
     const stat = await io.stat(path, { bigint: true });

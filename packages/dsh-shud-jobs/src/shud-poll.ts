@@ -3,7 +3,15 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { JobId, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import type { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
+import type { Agent } from "@deepseek-ai/dsh-agent";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import type { ContextFormed } from "@deepseek-ai/dsh-llm";
+import type { SessionController } from "@deepseek-ai/dsh-api-session-controller";
+import type { Session, SessionId, SessionStore } from "@deepseek-ai/dsh-session";
 import {
+  MAX_COLLECT_ATTEMPTS,
+  MAX_NOTIFY_ATTEMPTS,
+  NOTIFY_RETRY_INTERVAL_MS,
   RunJobSchema,
   type JobRecordId,
   type RunId,
@@ -35,12 +43,54 @@ import {
   collectFailure,
   isTerminal,
   notificationFinished,
+  normalizeCollectFailureReason,
   readRunFile,
   regularFile,
   validationFailure,
   updateRunJob,
   type RoutedRun,
 } from "./shud-run-file.ts";
+
+declare module "@deepseek-ai/dsh-llm" {
+  interface MessageSourceMap {
+    "shud-jobs": { kind: "shud-jobs" } & ContextFormed;
+  }
+}
+
+interface DeliveryServices {
+  controller: Pick<SessionController, "resolveAgent">;
+  sessions: Pick<SessionStore, "flush">;
+}
+
+interface ConfirmedAppend extends IndexEntry {
+  flushed: boolean;
+}
+
+// Ordinary registry reload retains live Sessions; a process crash discards these receipts.
+// The directory lookup is qualified by both persisted identifiers before any receipt is reused.
+const confirmedAppends = new WeakMap<Session, Map<string, ConfirmedAppend>>();
+const NOTIFY_FLUSH_FAILURE_DETAIL = "SHUD notification flush was not acknowledged";
+const NOTIFY_RESTORE_FAILURE_DETAIL = "SHUD notification session restoration failed";
+
+interface PendingNotificationFailure extends IndexEntry {
+  owner_session: RunJob["owner_session"];
+  previousAttempts: number;
+  previousAt: string | null;
+  notify: RunJob["notify"];
+  clearConfirmedAppend: (() => void) | undefined;
+}
+
+// Failed publication is not another transport attempt. Keep its original accounting until
+// durable publication, including across registry reloads where no Session was ever resolved.
+const pendingNotificationFailures = new Map<string, PendingNotificationFailure>();
+
+function sameRun(first: IndexEntry, second: IndexEntry): boolean {
+  return (
+    first.run_id === second.run_id &&
+    first.job_id === second.job_id &&
+    first.run_dir === second.run_dir
+  );
+}
 
 export interface CompletionReceipt {
   lifecycle: ShudCompletion;
@@ -95,6 +145,7 @@ export class ShudPoll {
   private readonly inSubmission: (id: RunId) => boolean;
   private readonly pumpPollMs: number;
   private readonly report: (error: Error) => void;
+  private delivery: DeliveryServices | undefined;
 
   constructor(
     registry: LocalJobRegistry,
@@ -112,6 +163,17 @@ export class ShudPoll {
     this.inSubmission = inSubmission;
     this.pumpPollMs = pumpPollMs;
     this.report = report;
+  }
+
+  enableDelivery(
+    controller: DeliveryServices["controller"],
+    sessions: DeliveryServices["sessions"],
+  ): () => void {
+    const epoch = { controller, sessions };
+    this.delivery = epoch;
+    return () => {
+      if (this.delivery === epoch) this.delivery = undefined;
+    };
   }
 
   start(): void {
@@ -410,7 +472,7 @@ export class ShudPoll {
     const decision = reconcileEntry(snapshot);
     switch (decision.action) {
       case "complete-index":
-        await this.indexes.completeActive(entry.run_id);
+        await this.completeNotified(entry, routed.raw.notify);
         return;
       case "collect":
         await collectRun(entry, routed, true, checkpoint);
@@ -457,20 +519,29 @@ export class ShudPoll {
 
   private async step(entry: IndexEntry): Promise<void> {
     const routed = await readRunFile(entry);
-    if (
-      notificationFinished(routed.raw) ||
-      routed.status === "collected" ||
-      routed.status === "created" ||
-      routed.status === "submitted"
-    )
+    if (notificationFinished(routed.raw)) {
+      await this.completeNotified(entry, routed.raw.notify);
       return;
+    }
+    if (routed.status === "collected") {
+      await this.deliverNotification(entry, routed);
+      return;
+    }
+    if (routed.status === "created" || routed.status === "submitted") return;
     const receipt = this.receipts.get(entry.run_id);
     if (routed.status !== "running") {
       if (receipt) await this.complete(entry.run_id, receipt, receiptOutcome(routed, receipt));
       else {
         if (!this.cancellations.advance(entry.run_id)) return;
         this.cancellations.release(entry.run_id);
-        await collectRun(entry, routed, true);
+        const checkpoint = await readCollectCheckpoint(entry);
+        if (
+          checkpoint.kind === "generation" &&
+          checkpoint.ledger &&
+          checkpoint.ledger.attempts >= MAX_COLLECT_ATTEMPTS
+        )
+          await this.deliverNotification(entry, routed, checkpoint);
+        else await collectRun(entry, routed, true, checkpoint);
       }
       return;
     }
@@ -500,6 +571,224 @@ export class ShudPoll {
       evidence,
       "SHUD lost: wrapper no longer executing and exit_code is absent",
     );
+  }
+
+  /** The dispatcher owns exclusion and drains this publication before releasing state ownership. */
+  private async completeNotified(entry: IndexEntry, rawNotify: unknown): Promise<void> {
+    const notify = RunJobSchema.shape.notify.safeParse(rawNotify);
+    if (!notify.success) throw validationFailure("notification completion", notify.error.issues);
+    if (notify.data.status === "pending")
+      throw new CollectFailure("notification completion", "PENDING");
+    const pending = pendingNotificationFailures.get(entry.run_dir);
+    if (pending) {
+      pendingNotificationFailures.delete(entry.run_dir);
+      pending.clearConfirmedAppend?.();
+    }
+    await this.indexes.completeActive(entry.run_id);
+  }
+
+  private async deliverNotification(
+    entry: IndexEntry,
+    routed: RoutedRun,
+    preparedCheckpoint?: CollectCheckpoint,
+  ): Promise<void> {
+    const epoch = this.delivery;
+    const record = RunJobSchema.parse(routed.raw);
+    if (record.notify.status !== "pending") return;
+    const checkpoint = preparedCheckpoint ?? (await readCollectCheckpoint(entry));
+    let outcome: RunRecord | string;
+    if (checkpoint.kind === "committed") {
+      if (record.status !== "collected")
+        throw new CollectFailure("notification checkpoint", "NOT_COLLECTED");
+      outcome = checkpoint.record;
+    } else {
+      if (checkpoint.existingFailure) throw checkpoint.existingFailure;
+      if (record.status === "collected")
+        throw new CollectFailure("notification checkpoint", "MISSING_RESULT");
+      if (
+        !isTerminal(record.status) ||
+        !checkpoint.ledger ||
+        checkpoint.ledger.attempts < MAX_COLLECT_ATTEMPTS
+      )
+        return;
+      outcome = normalizeCollectFailureReason(checkpoint.ledger.last_error);
+    }
+    const verifyOwner = (current: RunJob): RunJob => {
+      if (
+        current.owner_session !== record.owner_session ||
+        current.status !== record.status ||
+        current.notify.status !== "pending"
+      )
+        throw new Error("SHUD notification checkpoint changed during delivery");
+      return current;
+    };
+    if (!epoch) {
+      const detail = "Waiting for session services";
+      updateRunJob(
+        entry,
+        (current) => {
+          verifyOwner(current);
+          if (current.notify.detail === detail) return current;
+          return { ...current, notify: { ...current.notify, detail } };
+        },
+        routed,
+      );
+      return;
+    }
+    let clearConfirmedAppend: (() => void) | undefined;
+    const publishNotification = async (
+      transition: (notify: RunJob["notify"]) => RunJob["notify"],
+      accounting?: PendingNotificationFailure,
+    ): Promise<void> => {
+      const published = updateRunJob(
+        entry,
+        (current) => {
+          verifyOwner(current);
+          const notify = transition(current.notify);
+          return notify === current.notify ? current : { ...current, notify };
+        },
+        routed,
+      );
+      if (accounting && pendingNotificationFailures.get(entry.run_dir) === accounting)
+        pendingNotificationFailures.delete(entry.run_dir);
+      if (published.notify.status === "pending") return;
+      clearConfirmedAppend?.();
+      await this.completeNotified(entry, published.notify);
+    };
+    const publishFailure = (failure: PendingNotificationFailure) => {
+      clearConfirmedAppend = failure.clearConfirmedAppend;
+      return publishNotification((notify) => {
+        // A rename may have committed before reporting failure. Never count that attempt twice.
+        if (
+          notify.attempts === failure.notify.attempts &&
+          notify.at === failure.notify.at &&
+          notify.detail === failure.notify.detail &&
+          notify.status === failure.notify.status
+        )
+          return notify;
+        if (notify.attempts !== failure.previousAttempts || notify.at !== failure.previousAt)
+          throw new Error("SHUD notification accounting checkpoint changed");
+        return failure.notify;
+      }, failure);
+    };
+    const failAttempt = (detail: string) => {
+      const attempts = record.notify.attempts + 1;
+      const failure: PendingNotificationFailure = {
+        ...entry,
+        owner_session: record.owner_session,
+        previousAttempts: record.notify.attempts,
+        previousAt: record.notify.at,
+        notify: {
+          ...record.notify,
+          status: attempts >= MAX_NOTIFY_ATTEMPTS ? "unreachable" : "pending",
+          attempts,
+          at: new Date().toISOString(),
+          detail,
+        },
+        clearConfirmedAppend,
+      };
+      pendingNotificationFailures.set(entry.run_dir, failure);
+      return publishFailure(failure);
+    };
+    if (this.delivery !== epoch || !this.accepting) return;
+    const pending = pendingNotificationFailures.get(entry.run_dir);
+    if (pending) {
+      if (sameRun(pending, entry) && pending.owner_session === record.owner_session)
+        return publishFailure(pending);
+      // A replacement run or owner must not inherit another obligation's unpublished failure.
+      pendingNotificationFailures.delete(entry.run_dir);
+    }
+    if (record.notify.attempts >= MAX_NOTIFY_ATTEMPTS)
+      return publishNotification((notify) => ({
+        ...notify,
+        status: "unreachable",
+        detail: "SHUD notification retry limit reached",
+      }));
+    if (record.notify.attempts > 0) {
+      if (record.notify.at === null)
+        throw new Error("SHUD notification retry timestamp is missing");
+      if (Date.now() - Date.parse(record.notify.at) < NOTIFY_RETRY_INTERVAL_MS) return;
+    }
+    if (record.owner_session === null)
+      return publishNotification((notify) => ({
+        ...notify,
+        status: "unreachable",
+        at: new Date().toISOString(),
+        detail: "SHUD run has no owner session",
+      }));
+    let agent: Agent;
+    try {
+      const resolved = await epoch.controller.resolveAgent(record.owner_session as SessionId);
+      if (this.delivery !== epoch || !this.accepting) return;
+      if ("error" in resolved) {
+        if (resolved.error.code === "session/not-found")
+          return publishNotification((notify) => ({
+            ...notify,
+            status: "unreachable",
+            at: new Date().toISOString(),
+            detail: "SHUD owner session not found",
+          }));
+        return failAttempt(NOTIFY_RESTORE_FAILURE_DETAIL);
+      }
+      agent = resolved.agent;
+    } catch {
+      // Revoked restoration work must neither publish a failure nor expose host exception text.
+      if (this.delivery !== epoch || !this.accepting) return;
+      return failAttempt(NOTIFY_RESTORE_FAILURE_DETAIL);
+    }
+    if (agent.session.id !== record.owner_session)
+      throw new Error("SHUD notification resolved a different owner session");
+    // Revalidate routing, directory ownership and the current owner immediately before append.
+    updateRunJob(entry, verifyOwner, routed);
+    const session = agent.session;
+    const appends = confirmedAppends.get(session) ?? new Map<string, ConfirmedAppend>();
+    let accepted = appends.get(entry.run_dir);
+    if (accepted && !sameRun(accepted, entry)) accepted = undefined;
+    if (!accepted) {
+      const text =
+        typeof outcome === "string"
+          ? `SHUD run ${record.run_id}: collection failed; ${outcome}.`
+          : `SHUD run ${outcome.run_id}: exit_class=${outcome.exit_class}; artifacts=${outcome.artifacts.files.length}.`;
+      const message = createUserMessage({
+        content: [
+          {
+            type: "text",
+            text,
+          },
+        ],
+        source: { kind: "shud-jobs" },
+      });
+      // A throw may occur after host append: only a confirmed return establishes this receipt.
+      try {
+        agent.followup(message);
+      } catch {
+        if (this.delivery !== epoch || !this.accepting) return;
+        return failAttempt("SHUD notification followup failed");
+      }
+      accepted = { ...entry, flushed: false };
+      appends.set(entry.run_dir, accepted);
+      confirmedAppends.set(session, appends);
+    }
+    clearConfirmedAppend = () => {
+      if (appends.get(entry.run_dir) === accepted) appends.delete(entry.run_dir);
+      if (appends.size === 0) confirmedAppends.delete(session);
+    };
+    if (!accepted.flushed) {
+      let flushed = false;
+      try {
+        flushed = await epoch.sessions.flush(session);
+      } catch {
+        // Host exception text is not a durable notification diagnostic.
+      }
+      if (!flushed) return failAttempt(NOTIFY_FLUSH_FAILURE_DETAIL);
+      accepted.flushed = true;
+    }
+    await publishNotification((notify) => ({
+      ...notify,
+      status: "delivered",
+      at: new Date().toISOString(),
+      detail: null,
+    }));
   }
 
   private async settle(

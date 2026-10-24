@@ -7,6 +7,7 @@ import { createScope } from "@deepseek-ai/dsh-scope";
 import type { SessionController } from "@deepseek-ai/dsh-api-session-controller";
 import type { Session, SessionId } from "@deepseek-ai/dsh-session";
 import type { JobEvent, JobHandle, JobId, JobOutcome, JobSpec } from "@deepseek-ai/dsh-jobs";
+import type { UserMessage } from "@deepseek-ai/dsh-llm";
 
 export async function installScriptFixture(path: string, script: string): Promise<void> {
   await writeFile(`${path}.script`, script);
@@ -17,7 +18,10 @@ export async function installScriptFixture(path: string, script: string): Promis
   );
 }
 
-export async function createHarness(parentDir = tmpdir()) {
+export async function createHarness(
+  parentDir = tmpdir(),
+  sessionController: "available" | "absent" = "available",
+) {
   const root = await mkdtemp(join(parentDir, "shud-jobs-test-"));
   const stateDir = join(root, "state");
   const cwd = join(root, "workspace");
@@ -28,6 +32,9 @@ export async function createHarness(parentDir = tmpdir()) {
   const ctx = new Context();
   const sessionEvents: Array<{ type: string; data: unknown }> = [];
   const flushes: SessionId[] = [];
+  const resolutions: SessionId[] = [];
+  const followups: Array<{ sessionId: SessionId; message: UserMessage }> = [];
+  const flushObservations: Array<{ sessionId: SessionId; messages: readonly UserMessage[] }> = [];
   const presetKey = {};
   const preset = createScope(ctx, presetKey);
   const ownerScope = createScope(ctx, {}, { parent: presetKey });
@@ -38,35 +45,68 @@ export async function createHarness(parentDir = tmpdir()) {
   function createSession(id: SessionId) {
     return {
       id,
+      acceptedMessages: [] as UserMessage[],
       header: { cwd },
       append(type: string, data: unknown) {
         sessionEvents.push({ type, data: structuredClone(data) });
       },
     };
   }
+  function createAgent(id: SessionId, agentCtx: Context) {
+    const session = createSession(id);
+    return {
+      id,
+      ctx: agentCtx,
+      session,
+      followup(message: UserMessage) {
+        if (!message.id || message.role !== "user")
+          throw new Error("followup requires an identified user message");
+        session.acceptedMessages.push(message);
+        followups.push({ sessionId: id, message });
+      },
+    };
+  }
   const owners = new Map([
-    [ownerId, { id: ownerId, ctx: ownerScope.ctx, session: createSession(ownerId) }],
-    [otherId, { id: otherId, ctx: otherScope.ctx, session: createSession(otherId) }],
+    [ownerId, createAgent(ownerId, ownerScope.ctx)],
+    [otherId, createAgent(otherId, otherScope.ctx)],
   ]);
+  async function mountSessionController() {
+    const fiber = ctx.plugin((services: Context) => {
+      services.provide("sessionController", {
+        resolveAgent(id: Parameters<SessionController["resolveAgent"]>[0]) {
+          resolutions.push(id);
+          const agent = owners.get(id);
+          return Promise.resolve(
+            agent
+              ? { agent }
+              : {
+                  error: Object.assign(new Error("PRIVATE_SESSION_RESTORE_DETAIL"), {
+                    code: "session/not-found" as const,
+                  }),
+                },
+          );
+        },
+      });
+    });
+    await fiber;
+    return fiber;
+  }
   await ctx.plugin((services: Context) => {
     services.provide("agents", { get: (id: SessionId) => owners.get(id) });
     services.provide("sessions", {
       get: (id: SessionId) => owners.get(id)?.session,
       flush(session: Pick<Session, "id">) {
-        if (owners.get(session.id)?.session !== session) {
+        const live = owners.get(session.id)?.session;
+        if (live !== session) {
           throw new Error(`unknown live session ${session.id}`);
         }
         flushes.push(session.id);
+        flushObservations.push({ sessionId: session.id, messages: [...live.acceptedMessages] });
         return Promise.resolve(true);
       },
     });
-    services.provide("sessionController", {
-      resolveAgent(id: Parameters<SessionController["resolveAgent"]>[0]) {
-        const agent = owners.get(id);
-        return Promise.resolve(agent ? { agent } : { error: new Error(`unknown session ${id}`) });
-      },
-    });
   });
+  if (sessionController === "available") await mountSessionController();
 
   return {
     ctx,
@@ -78,6 +118,10 @@ export async function createHarness(parentDir = tmpdir()) {
     otherId,
     sessionEvents,
     flushes,
+    resolutions,
+    followups,
+    flushObservations,
+    mountSessionController,
     presetCtx: preset.ctx,
     otherCtx: otherScope.ctx,
     config: { stateDir, shudBin },
@@ -96,6 +140,9 @@ export async function createHarness(parentDir = tmpdir()) {
       });
       await fiber;
       return fiber;
+    },
+    replaceOwnerSession() {
+      owners.set(ownerId, createAgent(ownerId, ownerScope.ctx));
     },
     async releaseOwner() {
       await ownerScope.dispose();

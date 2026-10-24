@@ -143,8 +143,12 @@ export function settlingProducer(
   };
 }
 
-export async function pollFixture(code = 0, mode: "held" | "immediate" = "held") {
-  const h = await submissionFixture();
+export async function pollFixture(
+  code = 0,
+  mode: "held" | "immediate" = "held",
+  sessionController: "available" | "absent" = "absent",
+) {
+  const h = await submissionFixture(undefined, "held", sessionController);
   const producers: ReturnType<typeof settlingProducer>[] = [];
   const submissions: Promise<RunJob>[] = [];
   const errors: string[] = [];

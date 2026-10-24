@@ -23,6 +23,7 @@ import {
 } from "./poll-shud/test-harness.ts";
 import { actualRegistry } from "./submit-shud/test-harness.ts";
 import { stopAtSubmitted, stopWhileRunning } from "./reconcile-shud/test-harness.ts";
+import { deliveredWake, expectSingleWake } from "./wake-shud/test-harness.ts";
 
 const publication = vi.hoisted(() => ({ pid: 0, path: "", probes: 0 }));
 vi.mock("node:child_process", async (original) => {
@@ -400,6 +401,25 @@ test.each([
       expect(actualRegistry(h.ctx).list()).toEqual([]);
       expect(await io.readFile(invocationPath)).toEqual(receipt);
       expect((await io.stat(invocationPath, { bigint: true })).mtimeNs).toBe(mtime);
+      const resultPath = join(record.run_dir, "run-record.json");
+      const resultBytes = await io.readFile(resultPath);
+      const resultMtime = (await io.stat(resultPath, { bigint: true })).mtimeNs;
+      expect((await readResult(record.run_dir)).artifacts.files).toEqual([]);
+      await h.mountSessionController();
+      const replacement = actualRegistry(h.ctx);
+      await deliveredWake(replacement, record.run_dir);
+      expectSingleWake(h, record.run_id, exitClass, 0);
+      expect((await readRecord(record.run_dir)).notify).toMatchObject({
+        status: "delivered",
+        attempts: 0,
+      });
+      expect(replacement.indexes.read()).toEqual({
+        active: [],
+        completed: [{ run_id: record.run_id, job_id: record.job_id, run_dir: record.run_dir }],
+      });
+      expect(await io.readFile(resultPath)).toEqual(resultBytes);
+      expect((await io.stat(resultPath, { bigint: true })).mtimeNs).toBe(resultMtime);
+      expect(await io.readFile(invocationPath)).toEqual(receipt);
     } finally {
       try {
         await h.close();
