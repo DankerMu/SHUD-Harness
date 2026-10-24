@@ -113,9 +113,10 @@ test.each([false, true])(
 test("a running indexed record settles without any current dsh registration", async () => {
   const h = await pollFixture();
   try {
-    const record = await seedRun(h);
+    const record = await seedRun(h, {}, (prepared) =>
+      io.writeFile(join(prepared.run_dir, "exit_code"), "13\n"),
+    );
     expect(h.registry.list()).toEqual([]);
-    await io.writeFile(join(record.run_dir, "exit_code"), "13\n");
     await h.registry.pollOnce();
     expect(await h.registry.collectShud(record.run_id)).toMatchObject({ exit_code: 13 });
     const terminal = await readRecord(record.run_dir);

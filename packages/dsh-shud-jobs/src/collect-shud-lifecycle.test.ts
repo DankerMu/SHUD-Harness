@@ -419,6 +419,9 @@ test("failed concurrent direct requests preserve per-run exclusion, durable atte
 }, 15000);
 
 test("direct collection waits for accepted async registration completion before publishing a result", async () => {
+  // Freeze cadence before admission so the manual tick owns the post-release step.
+  // Date, native execution and output-pump timeouts remain real.
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const h = await pollFixture();
   const entered = barrier();
   const release = barrier();
@@ -453,10 +456,14 @@ test("direct collection waits for accepted async registration completion before 
     expect(producer.registration.cancellations).toEqual([]);
     expect((await readRecord(job.run_dir)).status).toBe("collected");
   } finally {
-    release.release();
-    await ticking?.catch(() => undefined);
-    await collection?.catch(() => undefined);
-    await h.close();
+    try {
+      release.release();
+      await ticking?.catch(() => undefined);
+      await collection?.catch(() => undefined);
+      await h.close();
+    } finally {
+      vi.useRealTimers();
+    }
   }
 }, 15000);
 

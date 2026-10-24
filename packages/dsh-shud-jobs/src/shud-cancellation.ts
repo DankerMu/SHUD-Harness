@@ -1,6 +1,6 @@
 import type { JobHooks, JobId } from "@deepseek-ai/dsh-jobs";
 import { KILL_GRACE_PERIOD_MS, type RunId } from "@shud-harness/dsh-shud-core";
-import type { ShudExecution, ShudProcessIdentity } from "./detached-shud.ts";
+import type { ShudControl, ShudExecution, ShudProcessIdentity } from "./detached-shud.ts";
 import type { IndexEntry } from "./state-indexes.ts";
 import { recoverProcessGroup, type ShudProcessGroup } from "./process-group.ts";
 import {
@@ -21,7 +21,8 @@ interface ManagedRun extends CancellationState {
   id: JobId;
   entry: IndexEntry;
   location: Pick<RoutedRun, "parent" | "directory">;
-  execution?: ShudExecution;
+  control?: ShudControl;
+  nativeChild?: Pick<ShudExecution, "waitForExit">;
   identity?: ShudProcessIdentity;
   markedAt?: string;
 }
@@ -52,34 +53,43 @@ export class ShudCancellation {
     return this.registrations.has(id);
   }
 
+  hasRegistration(runId: RunId): boolean {
+    return this.runs.has(runId);
+  }
+
   runId(id: JobId): RunId {
     return this.requireRegistration(id).entry.run_id;
   }
 
-  attach(id: JobId, execution: ShudExecution): JobHooks {
+  attach(
+    id: JobId,
+    control: ShudControl,
+    nativeChild?: Pick<ShudExecution, "waitForExit">,
+  ): JobHooks {
     const managed = this.requireRegistration(id);
-    managed.execution = execution;
+    managed.control = control;
+    managed.nativeChild = nativeChild;
     return {
-      done: execution.hooks.done,
+      done: control.hooks.done,
       cancel: () => {
         const markedAt = managed.markedAt;
         managed.markedAt = undefined;
         if (markedAt === undefined) {
           if (managed.requestedAt === undefined) {
-            execution.hooks.detach("Host exiting; SHUD continues running in the background");
+            control.hooks.detach("Host exiting; SHUD continues running in the background");
             return;
           }
           try {
-            execution.signalGroup("SIGTERM");
+            control.signalGroup("SIGTERM");
           } catch (error) {
             this.report(collectFailure("teardown signal", error));
           } finally {
-            execution.hooks.detach("Host exiting; SHUD kill is in progress");
+            control.hooks.detach("Host exiting; SHUD kill is in progress");
           }
           return;
         }
         if (!managed.termSent) {
-          execution.signalGroup("SIGTERM");
+          control.signalGroup("SIGTERM");
           managed.termSent = true;
         }
       },
@@ -95,8 +105,8 @@ export class ShudCancellation {
     if (inSubmission) throw new Error("SHUD kill rejected: submission is in flight");
     const managed = this.requireRegistration(id);
     const identity = managed.identity;
-    const execution = managed.execution;
-    if (!identity || !execution) throw new Error("SHUD execution is not ready for kill");
+    const control = managed.control;
+    if (!identity || !control) throw new Error("SHUD execution is not ready for kill");
     const intent = updateRunJob(
       managed.entry,
       (current) => {
@@ -113,7 +123,7 @@ export class ShudCancellation {
         }
         if (isTerminal(current.status)) return current;
         try {
-          execution.isGroupActive();
+          control.isGroupActive();
         } catch (error) {
           throw collectFailure("kill ownership", error);
         }
@@ -174,7 +184,7 @@ export class ShudCancellation {
     const recovered = this.recovered.get(runId);
     const state = recovered ?? managed;
     if (!state || state.requestedAt === undefined) return true;
-    const group = recovered ? recovered.group : managed?.execution;
+    const group = recovered ? recovered.group : managed?.control;
     if (!group) throw new Error("Requested SHUD cancellation has no owned execution");
     if (!group.isGroupActive()) return true;
     if (!state.termSent) {
@@ -188,9 +198,9 @@ export class ShudCancellation {
     return !group.isGroupActive();
   }
 
-  async waitForExit(runId: RunId): Promise<void> {
+  async waitForLocalExit(runId: RunId): Promise<void> {
     const managed = this.runs.get(runId);
-    if (managed?.requestedAt !== undefined) await managed.execution?.waitForExit();
+    if (managed?.requestedAt !== undefined) await managed.nativeChild?.waitForExit();
   }
 
   release(runId: RunId): void {

@@ -17,6 +17,27 @@ export async function stopWhileRunning(h: CollectFixture, beforeStop?: () => Pro
   return { ...running, stamp };
 }
 
+/** Retain the real wrapper while recreating the submitted-before-running crash checkpoint. */
+export async function stopAtSubmitted(h: CollectFixture, submittedOffsetMs?: number) {
+  const running = await stopWhileRunning(h);
+  const stamp = running.stamp;
+  const submittedAt = running.record.submitted_at;
+  if (submittedAt === null) throw new Error("Real submission has no timestamp");
+  const submitted = await replaceRecord(running.record, {
+    status: "submitted",
+    pid: null,
+    pid_started_at: null,
+    started_at: null,
+    submitted_at:
+      submittedOffsetMs === undefined
+        ? submittedAt
+        : new Date(
+            Math.floor(Date.parse(submittedAt) / 1000) * 1000 + submittedOffsetMs,
+          ).toISOString(),
+  });
+  return { ...running, submitted, stamp };
+}
+
 export async function stopWithCancellation(h: CollectFixture, beforeStop?: () => Promise<void>) {
   await installFakeShud(h.shudBin, 0, "resistant");
   const running = await stopWhileRunning(h, beforeStop);

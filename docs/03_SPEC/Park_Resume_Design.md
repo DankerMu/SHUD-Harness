@@ -254,28 +254,36 @@ workspace/tasks/<task_id>/locks/resume.lock   # resume 是 task 级动作，保�
 
 M2 不使用上面的后续 TaskCard/job 级锁布局：注册表在配置的 `stateDir` 持有 `lock`（pid + 进程启动时间）；同实例索引修改串行化，同条目同时至多一个轮询步骤在途，已有 RunRecord 不重写。存活持有者使第二实例激活失败，陈旧锁才可接管；详见 design D2/D7。
 
-当前在线取消实现：注册表对实际提交关联的 SHUD 登记提供同步公开 kill，先持久化取消意图并在父类调用前镜像首次期限，再向受控进程组 SIGTERM；重复请求保留首次时间，既有轮询按 core 10 秒宽限期升级 SIGKILL，不新增定时器。父类在消费标记前抛错也不丢失已持久化意图；失败写入不产生意图镜像。包装进程先退出但后代仍可 I/O 时继续等待/升级，组静止后按退出文件 first-wins 结算 durable 结果，再完成本地登记。轮询和 collect 状态投影使用新鲜 RunJob 的同步原子发布，不覆盖并发取消标记。非托管登记保持父类行为；取消意图的文件级重启接续见 §9。#312 接管登记、#313 唤醒及工具入口尚未落地，此实现状态不代表 PI Web 验收。
+当前在线取消实现：注册表对本实例实际提交或启动 R3/R5 接管关联的 SHUD 登记提供同步公开 kill，先持久化取消意图并在父类调用前镜像首次期限，再向受控进程组 SIGTERM；重复请求保留首次时间，既有轮询按 core 10 秒宽限期升级 SIGKILL，不新增定时器。父类在消费标记前抛错也不丢失已持久化意图；失败写入不产生意图镜像。包装进程先退出但后代仍可 I/O 时继续等待/升级，组静止后按退出文件 first-wins 结算 durable 结果，再完成本实例登记；本地提交还必须完成真实子进程回收。轮询和 collect 状态投影使用新鲜 RunJob 的同步原子发布，不覆盖并发取消标记。非托管登记保持父类行为；接管顺序及取消意图的文件级重启接续见 §9。#313 唤醒及工具入口尚未落地，此实现状态不代表完整宿主/Web 恢复或 PI 验收。
 
 **宿主 teardown 与正常结算分开**：`ShudLifecycle` 要求异步可等待的 `settle(outcome)` 和同步 `detach(detail)`，二者释放同一实际登记资源、完成同一个 producer-owned done，完成幂等且不创建替代 promise。未消费一次性 kill 标记的托管 cancel 在回调内 detach 为 failed，父类公开 settled 事件的 cause 为 teardown；不转发任意 supplied cancel（该回调保留给提交回滚），不靠父类异常兜底强制失败伪造 producer 完成。无取消意图时不发信号，detail 说明宿主退出但 SHUD 继续后台运行；已有意图时先按原组所有权证明重发 SIGTERM，再说明 kill 进行中。权限/检查/可观察替代 leader 错误经受控阶段与错误码报告，仍在 finally 完成登记，不向无法证明归属的组发信号，也不宣称静止。
 
 这是纯登记级放手：teardown 不读写 RunJob/索引，不生成 RunRecord 或 collect ledger，不唤醒、不发 SIGKILL、不等待子进程、不重置取消期限；原始 intent、状态及 pending notify 留给重启对账。组合生命周期仍先关闭准入，再排空已接受的正常工作及启动 R8，之后释放状态锁。发起会话的 Agent 释放不取消无 owner 的 SHUD 登记，后台任务仍可自然结束并正常 collect。
 
+本地提交与接管共用内部最小受控组/完成契约 `ShudControl` / `ShudCompletion`，包含组检查/信号与共享同一实际 done 的 settle/detach；接管使用恢复的组能力和真实父类输出泵完成，不伪造原生 child、started、waitForExit 或 abort。实际本地 `ShudExecution` 仍独自拥有子进程启动、回收与回滚 abort；本地取消先等真正的 native-child waiter，不能因接管不拥有 child 而删去此等待。上述 plain/grace teardown 和无 owner Agent 释放语义同样适用于已接管登记。
+
 ## 9. 服务重启恢复
 
-M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` 中读取 `active.json`，按索引中的绝对运行目录执行 [design D11 的 R1–R12](../../openspec/changes/m2-run-chain/design.md) 文件级对账。`await ctx.plugin(...)` 完成才表示注册表就绪；此前即使经 root/non-strict 取得服务，`submitShud()`、`pollOnce()`、`collectShud()` 也明确拒绝。对账不读取 `ctx.storage`，不扫描后续 TaskCard 布局，不重新 spawn、不重新入队，也不创建替代 dsh 登记或伪造完成回执。
+M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` 中读取 `active.json`，按索引中的绝对运行目录执行 [design D11 的 R1–R12](../../openspec/changes/m2-run-chain/design.md) 对账。`await ctx.plugin(...)` 完成才表示注册表就绪；此前即使经 root/non-strict 取得服务，`submitShud()`、`pollOnce()`、`collectShud()` 也明确拒绝。#310 原始切片只实现不带新 dsh 登记的文件级对账；#312 在其已验证的 R3/R5 分支接入真实接管登记。当前对账仍不读取 `ctx.storage`，不扫描后续 TaskCard 布局，不重新 spawn、不重新入队，也不伪造原生执行或完成回执；原有锁、逐条目排他与启动/关闭 drain 边界不变。
 
-- **R1–R4（未完成提交）**：created 结算 lost 并 collect；submitted 的退出文件优先，否则只读取已提交的普通、非链接 `wrapper.pid` 并验证真实进程与提交新鲜度，合格才同次写入 running/pid/pid_started_at/started_at。确定进程缺失、已死或早于提交时，再读退出文件，仍无才 lost；未知检查错误不等同死亡。没有退出证据且缺有效 `submitted_at` 时保留并报错，不猜测启动边界。
-- **R5–R8（已有运行身份）**：匹配且存活的 R5 保持文件监控，不更新 dsh id/历史；R6 按退出证据结算。R7 在 leader 缺失、不匹配或已死后重读退出文件，仍无才 lost（有取消意图则 cancelled），不向未获所有权的组发信号。R8 先以新鲜、匹配且存活的 leader 建立恢复组控制，再沿用在线取消的信号、检查与期限逻辑；组静止后重读退出文件，有效数值始终优先，只有缺失才 cancelled。
+- **R1–R4（未完成提交）**：created 结算 lost 并 collect；submitted 的退出文件优先，否则只读取已提交的普通、非链接 `wrapper.pid` 并验证真实进程与提交新鲜度，合格才同次写入 running/pid/pid_started_at/started_at。R3 使用该转换返回的新鲜 running 记录进入下述接管，不另造身份通道。确定进程缺失、已死或早于提交时，再读退出文件，仍无才 lost；未知检查错误不等同死亡。没有退出证据且缺有效 `submitted_at` 时保留并报错，不猜测启动边界。
+- **R5–R8（已有运行身份）**：匹配且存活、无取消意图的 R5 进入接管，保留原物理执行并发布新 dsh id/历史；R6 按退出证据结算。R7 在 leader 缺失、不匹配或已死后重读退出文件，仍无才 lost（有取消意图则 cancelled），不向未获所有权的组发信号。R8 保持无 dsh 登记的文件级取消：先以新鲜、匹配且存活的 leader 建立恢复组控制，再沿用在线取消的信号、检查与期限逻辑；组静止后重读退出文件，有效数值始终优先，只有缺失才 cancelled。
 - **R9–R11（收集与待投递）**：R9 复用 §5 的 canonical collector，有效同身份 RunRecord 优先于重试记录，只修复 `collected`，不重写结果；未提交结果的生成仍受原重试间隔/预算约束。R10 保留已耗尽终态，没有结果绝不伪置 collected；R11 保持 collected。两者不制造唤醒，pending notify 的字段与字节语义不变。
 - **R12（已通知索引修复）**：经身份/路径/状态路由和完整 notify 校验确认 `delivered`/`unreachable` 后，优先补写 completed 再移出 active，修复崩溃留下的重叠；不重置通知、不改写 RunJob/RunRecord。重复启动不生成第二份结果或索引条目。
 
-恢复取消沿用持久化的首次 `cancel_requested_at + 10000ms`：未到期只等待剩余宽限，到期可立即升级；重启不赠送新宽限，时钟回退不加速。R8 可因此延迟服务/宿主就绪（正常时钟下剩余宽限最多 10 秒，另需实际组静止与 I/O 完成），不是后台 fire-and-forget。已验证的组控制在 leader 先退出、检查/信号/写入失败后仍保留；后代仍能 I/O 时不能提前结束取消。对账与正常步骤共用逐条目队列和既有 cadence，单条目失败隔离并在后续 tick 重试，其它条目可独立推进。释放服务先关闭准入，排空已接受的恢复工作再放锁；释放后不启动新定时器。
+**R3/R5 接管登记**：同步恢复已验证进程身份的组能力，在构造时捕获的原始注册表上复用瞬时全局控制器，建立无 owner 的真实 `kind: shud` 登记；label 仍为 run_id 加可选持久 label，输出继续读取原 `stdout.log`，不依赖 tool-jobs 或外部会话控制器。先经新鲜身份/路径校验把旧 `dsh_job_id` 清空为 null；producer 回调内安装托管分类、组能力和身份，父类 start 返回后在任何 await 之前发布新 current id、追加 `dsh_job_ids` 并保存真实完成回执。每个注册表实例只接管一次；重复 tick 不改 id/历史，后续新实例取得新 id 并追加一次，旧非 null id 不代表本实例已登记。
+
+父类 `registered` 事件发生在新 id 持久化之前；监听器中重入公开 kill 必须以 `kill identity / MISMATCH` 拒绝，不写取消意图、不发信号，不排队补发。发布后 kill 使用同一 current id、pid/start 和受控组证明，走 §8 的取消/teardown 路径。
+
+**接管失败与降级**：旧 id 清空成功后，父类 start 拒绝、producer 回调后抛错或新 id/历史发布失败均记录含 run_id 的受控阶段/错误码，不泄漏原始异常载荷；current id 保持 null、旧历史不变。已生成的父类登记直接 detach 自己的实际完成资源，等待真实父类终态与输出泵排空后移除，最后释放托管关联；不调用适配后的 cancel 或物理 abort，不发信号、不删除运行目录/索引。清理失败保留未完成关联并受控报告，不假称已经释放。此类已容纳失败正常结束启动分支，后续只做文件级监控、结算和 collect，不逐 tick 重试登记，也不安装失败登记的完成回执。清空旧 id 本身失败或身份/路径拒绝仍保留证据并报错，不能把不可写存储伪报为成功写入 null。
+
+恢复取消沿用持久化的首次 `cancel_requested_at + 10000ms`：未到期只等待剩余宽限，到期可立即升级；重启不赠送新宽限，时钟回退不加速。R8 可因此延迟服务/宿主就绪（正常时钟下剩余宽限最多 10 秒，另需实际组静止与 I/O 完成），不是后台 fire-and-forget。已验证的组控制在 leader 先退出、检查/信号/写入失败后仍保留；后代仍能 I/O 时不能提前结束取消。对账与正常步骤共用逐条目队列和既有 cadence，未完成的对账错误隔离并在后续 tick 重试，其它条目可独立推进；上文已容纳的接管登记/发布失败不重试登记。释放服务先关闭准入，排空已接受的恢复与登记清理工作再放锁；释放后不启动新定时器。
 
 **进程时间证据**：锁与 RunJob 的稳定身份仍是固定 locale/时区的秒级 `ps lstart`（RunJob 为 ISO UTC），不改变 `pid_started_at`、`started_at` 或 R5/R7 比较。R3 的“是否早于提交”是独立的新鲜度观测：Darwin 使用已资格化的 lstart；Linux 的整数 btime/截断 ticks 可使 lstart 与 realtime 提交秒不直接可比，因此使用 `/proc/<pid>/stat` 的启动 ticks、`/proc/uptime` 和括号化 realtime 观测，结合经校验并缓存的 `getconf CLK_TCK` 推导保守出生时间界。原生量化与采样跨度显式入界，不加魔法偏移，不用文件 mtime 代替出生证据。缺失工具、不可读/非法证据、身份变化或过大不确定性均 fail closed；尤其采样跨度使判断跨越提交秒边界时保留记录并报错，不凑整为 lost 或擅自提升 running。真正的进程消失仍走退出文件二次读取规则；Linux 部署除 flock/ps 外还须有上述 proc 文件与 getconf。
 
 **仍未覆盖的边界**：当前快照与秒级 lstart 不是原子的、通用的 PID/进程组代次能力。重启前 leader 已死而后代可能仍活着时，R7 的 lost/cancelled 不证明历史组静止；不能凭持久化 pid 向裸负 pgid 发信号，该孤儿组策略待 [#343](https://github.com/DankerMu/SHUD-Harness/issues/343) 裁决。原生控制明确区分了测试场景：对真实 shell 包装进程先 SIGSTOP 再组 SIGTERM，Linux 保持匹配的 T-state leader，重启可验证 R8 在原始期限 SIGKILL 后组静止；Darwin leader 会被 SIGTERM 终止，重启实际走 R7 cancelled，抗 TERM 后代仍活着，须由测试的已知所有权显式清理。后者不是 Darwin R8/静止性证据，也不是本切片解决了 #343；平台断言不跳过、不用伪 pid/时间或生产 wrapper trap 替代原生行为。当前 `started_at` 沿用 lstart，`finished_at` 是结算观测时刻；`wall_seconds` 可能包含起点偏差、退出后未观测延迟或取消宽限，并非精确求解器时长。测量语义待 [#344](https://github.com/DankerMu/SHUD-Harness/issues/344) 裁决，本切片没有改计时公式或宣称完成真实时长精度测量。
 
-**后续接入（尚未实现）**：#312 才为 R3/R5 经瞬时全局控制器无 owner 重新登记并更新 `dsh_job_id`/`dsh_job_ids`；#313 才在服务就绪后执行 `resolveAgent` → `createUserMessage`（`source.kind: shud-jobs`，含 `run_id`）→ `followup` → `sessions.flush` → delivered/unreachable 与正常完成索引迁移。当前 pending notify 保留，不能把 R12 的已有通知索引修复当作已实现投递。后续投递按至少一次语义设计，不宣称 exactly-once。
+**后续接入（尚未实现）**：#313 才在服务就绪后执行 `resolveAgent` → `createUserMessage`（`source.kind: shud-jobs`，含 `run_id`）→ `followup` → `sessions.flush` → delivered/unreachable 与正常完成索引迁移；工具入口也尚未挂载。当前 pending notify 保留，不能把 R12 的已有通知索引修复当作已实现投递。后续投递按至少一次语义设计，不宣称 exactly-once，也不以本次接管实现宣称完整宿主/Web 恢复或 PI 验收。
 
 ## 10. 用户体验
 

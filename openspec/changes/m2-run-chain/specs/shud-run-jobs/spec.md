@@ -309,6 +309,18 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** dsh 重启时作业仍在运行
 - **THEN** `job_list` 列出一个新的 `kind: shud` 登记且其 label 含该 `run_id`，`run-job.json` 的 `dsh_job_id` 为该新 id，其结束后照常 collect 与唤醒
 
+#### Scenario: takeover registration failure keeps file monitoring
+- **WHEN** R3/R5 接管的父类 start 拒绝，或 start 成功后新登记 id/history 的原子发布失败
+- **THEN** 登记失败经受控日志报告；可写的记录保留 null 当前 id 和原历史，已创建的父类登记先完成并移除，不发信号、不删除运行目录或活动索引；原进程继续并由既有轮询结算和 collect，不逐 tick 重试登记
+
+#### Scenario: takeover publication preserves cancellation identity gate
+- **WHEN** registered 事件的同步订阅者在新 dsh_job_id 持久化之前重入 kill，或在 apply 完成后调用该新 id 的 kill
+- **THEN** 发布前调用保留既有身份闸而拒绝，不写取消意图或发信号；登记仍完成发布，发布后 R3 已提升为 running 且与 R5 一样正常接受取消
+
+#### Scenario: takeover registration belongs to one registry epoch
+- **WHEN** 同一实例反复轮询已接管作业，或后续新实例再次启动并接管该仍运行作业
+- **THEN** 同一实例不重复登记或追加历史，后续实例只追加自己的新登记；两者都不重新 spawn，失败和成功后均无残留全局控制器
+
 ### Requirement: Automatic collect
 作业进入 `succeeded`、`failed` 或 `cancelled` 时注册表 SHALL 立即 collect：按 run-records spec 生成 RunRecord（含从 `run-job.json` 复制的 `llm.response_model` 与 `llm.response_model_source`）写入 `run-record.json`，作业状态置 `collected`，之后才唤醒。`run-record.json` 已存在时 collect SHALL 返回已有记录而不改写。collect 失败（`exit_code` 不可读或非整数、产物目录不可读、RunRecord 未通过 schema 校验、写文件失败）时 SHALL 写 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态（`exit_code` 不可读时为 `failed`），SHALL NOT 写 `run-record.json`；`attempts` 未达 core 常量上限时 SHALL 由「Registry poll loop」在重试间隔后重试（重启后由对账 R9 继续），达到上限后 SHALL 停止自动重试并以失败原因唤醒发起会话。
 

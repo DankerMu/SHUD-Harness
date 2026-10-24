@@ -12,8 +12,9 @@ export interface ShudProcessIdentity {
   pid_started_at: string;
 }
 
-/** Caller-owned registration resources; completion is idempotent and releases resources before done. */
-export interface ShudLifecycle extends JobHooks {
+/** Real registration completion shared by locally spawned and adopted executions. */
+export interface ShudCompletion {
+  done: Promise<JobOutcome>;
   /** Normal durable-terminal completion may await registration resource release. */
   settle(outcome: JobOutcome): void | Promise<void>;
   /**
@@ -24,7 +25,15 @@ export interface ShudLifecycle extends JobHooks {
   detach(detail: string): void;
 }
 
-export interface ShudExecution extends ShudProcessGroup {
+/** Local producers additionally own rollback cancellation of their registration resources. */
+export type ShudLifecycle = ShudCompletion & JobHooks;
+
+/** Managed execution capability; adopted groups do not own a native child to start or reap. */
+export interface ShudControl extends ShudProcessGroup {
+  hooks: ShudCompletion;
+}
+
+export interface ShudExecution extends ShudControl {
   hooks: ShudLifecycle;
   started: Promise<ShudProcessIdentity>;
   /** Await local child reaping, independently of registration completion. */

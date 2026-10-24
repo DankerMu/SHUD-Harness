@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { JobOutcome } from "@deepseek-ai/dsh-jobs";
+import type { JobId, JobOutcome } from "@deepseek-ai/dsh-jobs";
+import type { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import {
   RunJobSchema,
   type JobRecordId,
@@ -9,7 +10,14 @@ import {
   type RunJob,
   type RunRecord,
 } from "@shud-harness/dsh-shud-core";
-import type { ShudLifecycle } from "./detached-shud.ts";
+import type { ShudCompletion, ShudControl, ShudProcessIdentity } from "./detached-shud.ts";
+import { stdoutSource } from "./file-output.ts";
+import { recoverProcessGroup } from "./process-group.ts";
+import {
+  registerUnowned,
+  registrationLabel,
+  removeSettledRegistration,
+} from "./shud-registration.ts";
 import { processExecutionState } from "./process-identity.ts";
 import { processBirthObservation, type ProcessBirthObservation } from "./process-birth.ts";
 import type { IndexEntry, StateIndexStore } from "./state-indexes.ts";
@@ -35,7 +43,7 @@ import {
 } from "./shud-run-file.ts";
 
 export interface CompletionReceipt {
-  lifecycle: ShudLifecycle;
+  lifecycle: ShudCompletion;
   /** Retain the precise diagnostic across completion retries, without rewriting durable evidence. */
   outcome?: JobOutcome;
 }
@@ -61,12 +69,26 @@ function receiptOutcome(routed: RoutedRun, receipt: CompletionReceipt): JobOutco
   return terminalOutcome({ status: routed.status, exit_code: code.data });
 }
 
+function verifyTakeoverIdentity(record: RunJob, identity: ShudProcessIdentity): void {
+  if (
+    record.status !== "running" ||
+    record.notify.status !== "pending" ||
+    record.cancel_requested_at !== null ||
+    record.pid !== identity.pid ||
+    record.pid_started_at === null ||
+    Date.parse(record.pid_started_at) !== Date.parse(identity.pid_started_at)
+  ) {
+    throw new CollectFailure("takeover identity", "MISMATCH");
+  }
+}
+
 /** One cadence and one per-run exclusion map serve timer ticks and public manual ticks alike. */
 export class ShudPoll {
   private readonly steps = new Map<RunId, Promise<void>>();
   private readonly startupPending = new Set<RunId>();
   private accepting = true;
   private timer: ReturnType<typeof setInterval> | undefined;
+  private readonly registry: LocalJobRegistry;
   private readonly indexes: StateIndexStore;
   private readonly receipts: Map<RunId, CompletionReceipt>;
   private readonly cancellations: ShudCancellation;
@@ -75,6 +97,7 @@ export class ShudPoll {
   private readonly report: (error: Error) => void;
 
   constructor(
+    registry: LocalJobRegistry,
     indexes: StateIndexStore,
     receipts: Map<RunId, CompletionReceipt>,
     cancellations: ShudCancellation,
@@ -82,6 +105,7 @@ export class ShudPoll {
     pumpPollMs: number,
     report: (error: Error) => void,
   ) {
+    this.registry = registry;
     this.indexes = indexes;
     this.receipts = receipts;
     this.cancellations = cancellations;
@@ -229,10 +253,13 @@ export class ShudPoll {
         decision = reconcileEntry(snapshot);
       }
     }
-    if (decision.action === "monitor") return;
+    if (decision.action === "monitor") {
+      await this.takeoverRunning(entry, record, routed);
+      return;
+    }
     if (decision.action === "promote") {
       const identity = decision.identity;
-      updateRunJob(
+      const promoted = updateRunJob(
         entry,
         (current) => {
           if (current.status !== "submitted") return current;
@@ -247,6 +274,7 @@ export class ShudPoll {
         },
         routed,
       );
+      if (promoted.status === "running") await this.takeoverRunning(entry, promoted, routed);
       return;
     }
     let evidence = decision.action === "settle-exit" ? decision.evidence : undefined;
@@ -266,6 +294,91 @@ export class ShudPoll {
     );
     const terminal = await readRunFile(entry);
     if (isTerminal(terminal.status)) await collectRun(entry, terminal, true);
+  }
+
+  private async takeoverRunning(
+    entry: IndexEntry,
+    observed: RunJob,
+    routed: RoutedRun,
+  ): Promise<void> {
+    if (this.cancellations.hasRegistration(entry.run_id)) return;
+    if (observed.pid === null || observed.pid_started_at === null)
+      throw new CollectFailure("takeover identity", "MISSING");
+    const identity = { pid: observed.pid, pid_started_at: observed.pid_started_at };
+    const record = updateRunJob(
+      entry,
+      (current) => {
+        verifyTakeoverIdentity(current, identity);
+        return current.dsh_job_id === null ? current : { ...current, dsh_job_id: null };
+      },
+      routed,
+    );
+    const group = recoverProcessGroup(identity);
+    let finish!: (outcome: JobOutcome) => void;
+    // This producer owns completion of the parent's stdout pump, not an invented native child.
+    const done = new Promise<JobOutcome>((resolve) => {
+      finish = resolve;
+    });
+    const lifecycle: ShudCompletion = {
+      done,
+      settle: finish,
+      detach(detail) {
+        finish({ status: "failed", detail });
+      },
+    };
+    const control: ShudControl = { ...group, hooks: lifecycle };
+    let registered: JobId | undefined;
+    try {
+      const id = registerUnowned(this.registry, {
+        kind: "shud",
+        label: registrationLabel(record),
+        output: [stdoutSource(join(record.run_dir, "stdout.log"))],
+        run: (handle) => {
+          registered = handle.id;
+          this.cancellations.register(handle.id, entry, routed);
+          const hooks = this.cancellations.attach(handle.id, control);
+          this.cancellations.activate(handle.id, identity);
+          return hooks;
+        },
+      });
+      // Parent start exposed its bound hooks. Do not yield before current-id publication.
+      updateRunJob(
+        entry,
+        (current) => {
+          verifyTakeoverIdentity(current, identity);
+          if (current.dsh_job_id !== null)
+            throw new CollectFailure("takeover registration", "MISMATCH");
+          return {
+            ...current,
+            dsh_job_id: id,
+            dsh_job_ids: [...current.dsh_job_ids, id],
+          };
+        },
+        routed,
+      );
+      this.receipts.set(entry.run_id, { lifecycle });
+    } catch (error) {
+      this.report(
+        new Error(`Cannot register SHUD takeover for run ${entry.run_id}`, {
+          cause: collectFailure("takeover registration", error),
+        }),
+      );
+      if (registered !== undefined) {
+        try {
+          lifecycle.detach("SHUD takeover registration rolled back");
+          await removeSettledRegistration(this.registry, registered, this.pumpPollMs);
+          this.cancellations.release(entry.run_id);
+        } catch (cleanup) {
+          // Keep classification until the parent's entry is actually drained and removed.
+          this.report(
+            new Error(`Cannot clean up SHUD takeover for run ${entry.run_id}`, {
+              cause: collectFailure("takeover registration cleanup", cleanup),
+            }),
+          );
+        }
+      }
+      // Normal startup completion switches to file-only monitoring without registration retries.
+    }
   }
 
   private async reconcileCompletion(
@@ -453,7 +566,7 @@ export class ShudPoll {
     if (!this.cancellations.advance(runId)) {
       throw new Error("SHUD cancellation is waiting for owned group quiescence");
     }
-    await this.cancellations.waitForExit(runId);
+    await this.cancellations.waitForLocalExit(runId);
     await receipt.lifecycle.settle(outcome);
     await receipt.lifecycle.done;
     this.receipts.delete(runId);
