@@ -33,3 +33,5 @@
         rawDirs: ["data/raw"]
     - id: shud-jobs
       name: "@shud-harness/dsh-shud-jobs"
+    - id: shud-tools
+      name: "@shud-harness/dsh-shud-tools"

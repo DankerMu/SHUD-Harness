@@ -193,6 +193,12 @@ function checkJobsSchema(schema, label) {
   check(`${label}: only expected Standard Schema diagnostic`,
     diagnostics.length === 1 && diagnostics[0].message === "Config is not a native Schemastery schema");
 }
+function checkToolsSchema(schema, label) {
+  const tools = (schema["x-cordis"]?.entries ?? []).filter((entry) => entry.id === "shud-tools");
+  check(`${label}: unique shud-tools schema entry`, tools.length === 1);
+  check(`${label}: shud-tools import status ${tools[0]?.status ?? "missing"}`,
+    tools.length === 1 && ["absent", "schema"].includes(tools[0].status));
+}
 async function checkInvalidBoot(bin, profile) {
   const overlay = join(scratch, "missing-shud-bin.patch.yml");
   writeFileSync(overlay, JSON.stringify([
@@ -417,10 +423,12 @@ try {
   const shudJobs = row("shud-jobs");
   check("parent jobs disabled", /^  disabled: true$/m.test(jobs));
   check("shud-jobs package specifier", /^  name: ['"]?@shud-harness\/dsh-shud-jobs['"]?$/m.test(shudJobs));
+  check("shud-tools package specifier", /^  name: ['"]?@shud-harness\/dsh-shud-tools['"]?$/m.test(row("shud-tools")));
   const composedJobs = patchRows(dump, "composed profile").filter((entry) => entry?.id === "shud-jobs");
   check("composed shud-jobs binary", composedJobs[0]?.config?.shudBin === shudBin);
   check("composed shud-jobs state directory", composedJobs[0]?.config?.stateDir === join(web.directory, "shud-jobs"));
   checkJobsSchema(schema, "Web import");
+  checkToolsSchema(schema, "Web import");
 
   const rawOnly = "# existing deployment bytes\r\n- id: 'shud-raw-guard'\r\n  config: { rawDirs: ['/srv/data_root/raw'] }\r\n# preserve missing final newline";
   writeFileSync(web.patch, rawOnly, { mode: 0o640 });
@@ -570,6 +578,7 @@ try {
   const headlessSchema = JSON.parse((await run("headless schema", process.execPath,
     [bin, "--profile", "shud-probe", "--dump-config-schema"], true)).stdout);
   checkJobsSchema(headlessSchema, "headless import");
+  checkToolsSchema(headlessSchema, "headless import");
   const headlessGuards = (headlessSchema["x-cordis"]?.entries ?? []).filter((entry) => entry.id === "shud-raw-guard");
   check("headless raw-guard imports", headlessGuards.length === 1 && ["absent", "schema"].includes(headlessGuards[0].status));
   await checkInvalidBoot(bin, web);
@@ -579,4 +588,4 @@ try {
   process.exitCode = 1;
 }
 NODE
-printf 'profile:smoke: OK (dsh %s, model deepseek-flash-guan via DMXAPI, raw-guard mounted, shud-jobs mounted, session-log-deepseek disabled)\n' "$DSH_VERSION_LABEL"
+printf 'profile:smoke: OK (dsh %s, model deepseek-flash-guan via DMXAPI, raw-guard mounted, shud-jobs mounted, shud-tools mounted, session-log-deepseek disabled)\n' "$DSH_VERSION_LABEL"

@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "@shud-harness/dsh-shud-jobs": "workspace:*",
-    "@shud-harness/dsh-shud-raw-guard": "workspace:*"
+    "@shud-harness/dsh-shud-raw-guard": "workspace:*",
+    "@shud-harness/dsh-shud-tools": "workspace:*"
   },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" }

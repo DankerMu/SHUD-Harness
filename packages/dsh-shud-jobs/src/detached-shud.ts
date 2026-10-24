@@ -6,6 +6,8 @@ import type { JobHooks, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import type { RunJob } from "@shud-harness/dsh-shud-core";
 import { groupCanPerformIo, processStart } from "./process-identity.ts";
 import { signalOwnedProcessGroup, type ShudProcessGroup } from "./process-group.ts";
+import { createShudCompletion } from "./shud-registration.ts";
+import type { ShudProducer } from "./shud-submissions.ts";
 
 export interface ShudProcessIdentity {
   pid: number;
@@ -52,6 +54,10 @@ printf '%s\n' "$code" > exit_code.tmp || exit 1
 /bin/mv -f exit_code.tmp exit_code || exit 1
 exit "$code"
 `;
+
+/** Production producer: cancellation policy is attached by the owning registry. */
+export const produceDetachedShud: ShudProducer = (prepared, _handle, pumpPollMs) =>
+  startDetachedShud(prepared, createShudCompletion(), pumpPollMs);
 
 /** Starts only execution. Supplied hooks own registration settlement; exit_code owns model outcome. */
 export function startDetachedShud(

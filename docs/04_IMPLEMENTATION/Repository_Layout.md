@@ -21,7 +21,7 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # shud_run / shud_collect 等模型可见工具
+    dsh-shud-tools/                 # 已挂载 shud_run；shud_collect 待 #315
     dsh-shud-records/               # TaskCard/RunJob/RunRecord/StackLock/EvidenceReport 的 ctx.storage 域
     dsh-shud-presets/               # coordinator / worker / coder / reviewer agent preset 与 system prompt 段
   profile/
@@ -37,13 +37,27 @@ SHUD-Harness/
   SHUD/ rSHUD/ AutoSHUD/            # 只读参考 submodule（保留）
 ```
 
-每个 `dsh-shud-*` 包：`src/` TS strict，`tsc` 到 `lib/`，`vitest` 测试，`package.json` 声明 `peerDependencies["@deepseek-ai/dsh"] = "0.2.1-rc.2"`。Host 侧插件入口 `export const name` + `export function apply(ctx, config)`。不发 npm；profile 以 workspace 包说明符 `insert` 挂载（bundle 声明 `workspace:*` 依赖）：`profile/shud/package.json` 的 `dependencies["@shud-harness/dsh-shud-raw-guard"] = "workspace:*"`，patch 行的 `name: '@shud-harness/dsh-shud-raw-guard'`。
+每个 `dsh-shud-*` 包：`src/` TS strict，`tsc` 到 `lib/`，`vitest` 测试。jobs/tools 按实际宿主 seam 声明 `peerDependencies`，tools 补齐其运行时 peer 闭包；以相同钉版 `devDependencies` 支持本仓构建/测试（dsh seam `0.2.1-rc.2`、Cordis `4.0.5`）。profile bundle 的宿主 peer 为 `@deepseek-ai/dsh@0.2.1-rc.2`，不为插件另装宿主。Host 侧插件入口 `export const name` + `export function apply(ctx, config)`。不发 npm；profile bundle 声明 jobs/raw-guard/tools 的 `workspace:*` 依赖，以 `insert` 插入各自包说明符；`shud-tools` 注入现有 `tools` 与 SHUD `jobs` 服务，不兼容普通 `jobs-local` 替代。
 
 默认 `rawDirs: ["data/raw"]` 仅用于开发与探针；部署期真实 `<data_root>/raw` 必须在 workspace root 之外，由用户在 `$DSH_HOME/profiles/shud/cordis.patch.yml` 中以 `- id: shud-raw-guard` + `config: { rawDirs: ["<workspace 外的绝对路径>", ...] }` 覆写。`profile:install` 要求 `SHUD_BIN` 为绝对路径、可执行普通文件，仅新增/更新安装器拥有的唯一 `shud-jobs` 项（`shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`），其余用户 patch 字节不变；已有 raw-only patch 升级后再次安装保持整文件 hash 不变。覆写结果可用 `--profile shud --dump-config` 查看。`shud-jobs` 已实现 stateDir 排他所有权及原子串行索引；永久 `.lock-guard`、可移除 `lock` 与平台工具前提见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
 
 注册表现提供 `submitShud(request, producer)`，完成输入复制、提交记录/索引持久化、瞬时无 owner 登记与真实包装进程启动，原子写入 pid/启动时间后返回 `running` RunJob。必需的 `producer(prepared, handle, pumpPollMs)` 返回 `ShudExecution`；已导出的 `startDetachedShud(prepared, hooks, pumpPollMs)` 要求显式 `ShudLifecycle`（JobHooks、正常终态的同步/异步 `settle` 与必需同步 `detach(detail)`，共用实际 producer done），并沿用注册表统一解析的父类轮询间隔。本地提交与接管共用最小受控组/完成能力，但原生 child 启动、回收及回滚 abort 仍只属于实际本地执行，不为接管伪造。detached 包装进程原子发布 `wrapper.pid`/`exit_code`；唯一调度器与公开 `pollOnce()` 共享逐条目排他状态，正常结算先原子持久化终态再完成登记，完成回调失败可重试而不改写终态。同步公开 kill 作用于本实例实际关联的提交或 R3/R5 接管登记，先持久化取消意图并在父类调用前保留本地期限镜像，再向受控进程组 SIGTERM；既有 cadence 在 core 10 秒期限到达后按需 SIGKILL，组静止后按退出证据 first-wins 结算，不因 leader 单独退出提前完成 durable 结果，本地执行还须完成真实子进程回收。取消、结算及 collect 状态投影共用新鲜 RunJob 的非让出式原子发布，避免旧快照覆盖取消标记。后续 tick 自动收集，后端 `collectShud(RunId | JobRecordId)` 共用同一条目队列与收集实现：原子发布不可变 RunRecord 后投影 `collected`，生成失败持久化重试记录，自动间隔 10 秒、最多 3 次，直接调用可重试。组合生命周期先停止轮询/收集/kill/提交准入，等待已接受及排队工作（含启动对账与接管登记清理）结束再释放索引锁；父类并发释放期间仍保留必要的托管登记分类。本地提交回滚先证明执行组静止并回收本地子进程，再清理登记与自有文件。未标记的托管 cancel 则同步 detach 为 failed：无意图不发信号，有意图先重发受控 TERM，检查/信号错误经受控日志报告而仍完成登记；不读写 durable 状态、不等待进程或发 KILL。接管登记沿用此 teardown 语义，无 owner 的登记也不因发起 Agent 释放而取消。唤醒及工具入口尚未接入；详细顺序、资源契约及 Darwin R7/Linux R8 验证边界见 Runtime Lifecycle 与下文 Park/Resume 链接，不以独立 `shud:tiny` 的执行成功代替注册表运行证据，也不宣称完整宿主/Web 恢复或 PI 验收。
 
 R1–R12 启动对账已接入 `[Service.init]`：先排空启动 pass 再开放 SHUD submit/poll/collect 并启动正常 cadence，恢复取消可能等待原始宽限的剩余时间，原有启动锁与 drain 边界不变。#310 原始切片只做文件级对账；#312 现为 R3/R5 建立真实无 owner 接管登记，复用原 label/stdout、不重新 spawn，先清空旧 current id，再不让出地发布新 id/追加历史和完成回执，每个实例只登记一次。发布前 registered 事件中的重入 kill 拒绝，不写意图或发信号；发布后沿用托管 kill。登记/新 id 发布失败保留已清空的 null id 与旧历史，受控报告并排空/移除父类登记后释放关联，不 abort 物理执行、不删除运行文件/索引，后续文件级 poll/collect 不重试登记；存储不能清空旧 id 时仍明确失败。R8 保持无接管登记的恢复取消。R9 优先修复已提交 RunRecord 的状态，pending notify 不变，R12 仅修复已验证通知终态的完成索引；#313 唤醒/正常完成索引迁移仍未接入。Linux R3 以原生 proc/getconf 证据判新鲜度，lstart 身份不变，不确定证据 fail closed。完整恢复、接管失败清理及 #343/#344 已知限制集中在 [Park/Resume §9](../03_SPEC/Park_Resume_Design.md#9-服务重启恢复)。
+
+### 已挂载的 `shud_run`
+
+构建后沿用同一导出的 `DSH_HOME` 与有效 `SHUD_BIN` 执行 `pnpm run profile:install`；`pnpm run profile:smoke` 检查 Web/headless profile 中的 `shud-tools` 组合与可导入性。运行前在 scratch 工作区复制输入，不改只读 SHUD submodule。模型工具调用示例（不是 shell 命令）：
+
+```json
+{"input_dir":"input/ccw","end_days":30,"label":"ccw END=30"}
+```
+
+仅接受 `input_dir`、可选 `project`、`end_days`、`label`；未知参数（包括 `workdir`/`threads`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
+
+工具要求会话 id/cwd 与已配置模型：先取 `agent.session.requestHeader()?.config.model`，缺失再取 `agent.options.model`；恒记 `response_model_source: configured`，不把 assistant `source.model` 当响应体模型。它通过导出的 `produceDetachedShud` 提交实际执行，沿用 jobs 内与接管共用的登记完成工厂；`submitShud(request, producer)` 的显式 producer 参数仍必需。
+
+提交完成即返回 `status: running`、持久 `job_id`/`run_id`、当前 `dsh_job_id` 与 `run_dir`，不等求解器结束。`job_output`/`job_kill` 只使用当前 `dsh_job_id`；重启接管后用 `job_list` 中含 `run_id` 的 label 找新 id。`shud_collect` 尚未挂载（#315），自动收集的结果在运行目录 `run-record.json`。headless 未提供会话恢复服务时，通知可保持 `pending`、`attempts: 0`、`Waiting for session services`，不妨碍文件级结算/收集；这不等于完整 Web 跨重启或 PI 验收。
 
 ## 2. 运行时资产（不进代码仓）
 
