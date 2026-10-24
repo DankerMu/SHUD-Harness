@@ -327,15 +327,26 @@ test("disposed timer admits no more steps and reload starts only the replacement
     await vi.advanceTimersByTimeAsync(70);
     expect(reads).toBe(0);
     expect((await readRecord(record.run_dir)).status).toBe("running");
+    await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
+    expect((await readRecord(record.run_dir)).status).toBe("collected");
+    const replacement = actualRegistry(h.ctx);
+    expect(replacement).not.toBe(h.registry);
+    reads = 0;
+    await h.registry.pollOnce().catch(() => undefined);
+    expect(reads).toBe(0);
+    // A post-apply entry cannot be settled by startup: only the replacement cadence can advance it.
+    const fresh = await seedRun({ ...h, registry: replacement });
+    const freshPath = join(fresh.run_dir, "run-job.json");
     vi.mocked(fs.renameSync).mockImplementation((source, target) => {
       actualFs.renameSync(source, target);
-      if (target === path) published.release();
+      if (target === freshPath) published.release();
     });
-    await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
+    await io.writeFile(join(fresh.run_dir, "exit_code"), "0\n");
     await vi.advanceTimersByTimeAsync(7);
     await published.waiting;
-    expect((await readRecord(record.run_dir)).status).toBe("succeeded");
+    expect((await readRecord(fresh.run_dir)).status).toBe("succeeded");
     expect(h.registry.list()).toEqual([]);
+    expect(replacement.list()).toEqual([]);
   } finally {
     vi.useRealTimers();
     await h?.close();

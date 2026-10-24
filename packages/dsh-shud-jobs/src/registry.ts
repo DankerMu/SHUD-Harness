@@ -1,6 +1,6 @@
 import { accessSync, constants, mkdirSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import type { Context } from "@deepseek-ai/cordis";
+import { Service, type Context } from "@deepseek-ai/cordis";
 import { LocalJobRegistry, type Config as ParentConfig } from "@deepseek-ai/dsh-jobs-local";
 import type { JobRecordId, RunId, RunJob, RunRecord } from "@shud-harness/dsh-shud-core";
 import type { SubmitShudRequest } from "./shud-input.ts";
@@ -72,6 +72,7 @@ export class ShudJobRegistry extends ParentRegistry {
   readonly pollOnce: () => Promise<void>;
   readonly collectShud: (id: RunId | JobRecordId) => Promise<RunRecord>;
   override readonly kill: LocalJobRegistry["kill"];
+  private readonly initialize: () => Promise<void>;
 
   static Config: { "~standard": StandardProps } = {
     "~standard": {
@@ -137,10 +138,23 @@ export class ShudJobRegistry extends ParentRegistry {
         (error) => ctx.logger.error(error),
       );
       poll = dispatcher;
-      this.submitShud = (request, producer) => submissions.submit(request, producer);
+      let ready = false;
+      const requireReady = () => {
+        if (!ready) throw new Error("SHUD startup reconciliation is not ready");
+      };
+      this.submitShud = async (request, producer) => {
+        requireReady();
+        return submissions.submit(request, producer);
+      };
       this.isSubmissionInFlight = (id) => submissions.isInFlight(id);
-      this.pollOnce = () => dispatcher.pollOnce();
-      this.collectShud = (id) => dispatcher.collectShud(id);
+      this.pollOnce = async () => {
+        requireReady();
+        return dispatcher.pollOnce();
+      };
+      this.collectShud = async (id) => {
+        requireReady();
+        return dispatcher.collectShud(id);
+      };
       this.kill = (id, caller, reason) => {
         if (!cancellations.owns(id)) return super.kill(id, caller, reason);
         // Public parent preflight preserves access and already-finished behavior before any write.
@@ -165,7 +179,12 @@ export class ShudJobRegistry extends ParentRegistry {
           return store.close();
         }));
       });
-      dispatcher.start();
+      this.initialize = async () => {
+        await dispatcher.reconcileAtStartup();
+        if (closing) return;
+        dispatcher.start();
+        ready = true;
+      };
     } catch (error) {
       poll?.stopAdmission();
       void Promise.resolve(poll?.drain())
@@ -173,6 +192,10 @@ export class ShudJobRegistry extends ParentRegistry {
         .catch((cleanup: unknown) => ctx.logger.error(cleanup));
       throw error;
     }
+  }
+
+  [Service.init](): Promise<void> {
+    return this.initialize();
   }
 }
 

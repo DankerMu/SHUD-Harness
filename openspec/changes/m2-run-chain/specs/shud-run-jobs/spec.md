@@ -214,14 +214,14 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 插件 apply 取得锁后 SHALL 读取活动索引，按（`run-job.json` 的 `status`、`pid`、`pid_started_at`、运行目录中的 `exit_code`）逐条对账。"存活"指 pid 对应进程存在且其启动时间与记录一致；任何判定"不存活"之后 SHALL 再读一次 `exit_code`，仍不存在才判 `lost`。对账表：
 - R1 `created` → 结算为 `lost`（从未启动），collect，唤醒；
 - R2 `submitted` 且有 `exit_code` → 按退出码结算，collect，唤醒；
-- R3 `submitted`、无 `exit_code`、`wrapper.pid` 进程存活且启动时间不早于 `submitted_at` → 补记 `pid`/`pid_started_at`，置 `running` 并按 R5 接管；
+- R3 `submitted`、无 `exit_code`、`wrapper.pid` 进程存活且启动时间按 OS 秒级精度不早于 `submitted_at` → 补记 `pid`/`pid_started_at`，置 `running` 并按 R5 接管；
 - R4 `submitted` 的其余情形 → 再读 `exit_code`，仍无则 `lost`，collect，唤醒；
 - R5 `running`、无 `cancel_requested_at`、无 `exit_code`、存活 → 接管（见「Takeover registration」）；
 - R6 `running` 且有 `exit_code` → 按退出码结算，collect，唤醒；
 - R7 `running`、无 `exit_code`、不存活 → 再读后仍无则结算为 `lost`（有 `cancel_requested_at` 时为 `cancelled`），collect，唤醒；
-- R8 `running`、有 `cancel_requested_at`、无 `exit_code`、存活 → 重发 SIGTERM，宽限后 SIGKILL，结算为 `cancelled`，collect，唤醒；
-- R9 `succeeded`/`failed`/`cancelled`，且无 `collect-error.json` 或其 `attempts` 未达上限（无论 `run-record.json` 是否已存在）→ collect（`run-record.json` 已存在时原样返回该记录），成功则置 `collected`，唤醒；
-- R10 `succeeded`/`failed`/`cancelled`，`collect-error.json` 的 `attempts` 已达上限，`notify.status: pending` → 不再 collect，状态保持不变（无 `run-record.json` 时 SHALL NOT 置 `collected`），只补投递含失败原因的唤醒；
+- R8 `running`、有 `cancel_requested_at`、无 `exit_code`、存活 → 重发 SIGTERM，按原取消时间的宽限期限升级 SIGKILL，组静止后再读 `exit_code`：数值优先，无则结算为 `cancelled`，collect，唤醒；
+- R9 `succeeded`/`failed`/`cancelled`，且已有有效同身份 `run-record.json`，或无 `collect-error.json`，或其 `attempts` 未达上限 → collect；有效已提交记录优先原样返回并修复 `collected` 投影，不受 capped/recent/corrupt 历史 ledger 阻挡、不重新生成或消耗预算；否则沿用生成重试间隔，成功置 `collected`，唤醒；
+- R10 `succeeded`/`failed`/`cancelled`，无有效已提交 RunRecord，`collect-error.json` 的 `attempts` 已达上限，`notify.status: pending` → 不再 collect，状态保持不变（无 `run-record.json` 时 SHALL NOT 置 `collected`），只补投递含失败原因的唤醒；
 - R11 `collected` 且 `notify.status: pending` → 只补投递唤醒；
 - R12 `notify.status` 为 `delivered` 或 `unreachable` → 写入完成索引并移出活动索引。
 对账 SHALL NOT 重新 spawn 任何作业，SHALL NOT 含重新入队的情形。对账 SHALL 在每个条目上幂等，重复执行不产生第二份 RunRecord。结算、collect、`notify` 状态与接管登记 SHALL 在 apply 时执行，不依赖 `tool-jobs` 或 `sessionController`；唤醒按「At-least-once wake」的就绪规则投递，此前 `notify.status` 保持 `pending`。
@@ -231,7 +231,7 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **THEN** 生成 `exit_class: lost` 的 RunRecord，运行目录中从未出现 SHUD 进程
 
 #### Scenario: submitted with live wrapper
-- **WHEN** `run-job.json` 为 `submitted`、`pid` 为 `null`，`wrapper.pid` 指向仍在运行且启动时间晚于 `submitted_at` 的包装进程
+- **WHEN** `run-job.json` 为 `submitted`、`pid` 为 `null`，`wrapper.pid` 指向仍在运行且启动时间按 OS 秒级精度不早于 `submitted_at` 的包装进程
 - **THEN** 对账后 `run-job.json` 为 `running` 且记录该 pid，未启动第二个 SHUD
 
 #### Scenario: submitted without wrapper
@@ -273,6 +273,26 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 #### Scenario: delivered but still indexed
 - **WHEN** `notify.status` 为 `delivered` 而条目仍在 `active.json`
 - **THEN** 条目出现在 `completed.json` 并从 `active.json` 移除，不再投递
+
+#### Scenario: same-second wrapper start during submitted recovery
+- **WHEN** submitted_at 带毫秒，而在可比较时钟域中的真实包装进程出生观测与其属于同一秒
+- **THEN** 允许按 R3 恢复该活跃包装进程；能够确定早于提交所在秒的进程不得被接管或接收信号，不确定的原生观测须明确失败
+
+#### Scenario: Linux process identity epoch is not the submission clock
+- **WHEN** 真实新包装进程的 Linux lstart 因原生 epoch/时钟刻度量化而早于 realtime submitted_at 所在秒
+- **THEN** 保留 lstart 作为 PID 身份令牌，但以可比较的原生进程出生证据作 R3 新鲜度判定，不得误记 lost、硬加时间容差或改用 wrapper.pid 文件时间冒充进程出生
+
+#### Scenario: committed record repair precedes startup generation budget
+- **WHEN** 同身份有效 run-record.json 已提交但 RunJob 尚未置 collected，历史 collect-error.json 已达上限、尚在间隔内或损坏
+- **THEN** 启动优先原样返回该记录、修复 collected，记录 bytes/mtime 与历史 ledger 不变，不重读退出码或输出生成第二份记录
+
+#### Scenario: recovered cancellation retains original deadline and group ownership
+- **WHEN** R8 恢复时确认包装进程身份匹配，其收到 SIGTERM 后先退出而同组后代仍运行并忽略 SIGTERM
+- **THEN** 保留已验证组的升级责任，按首次 cancel_requested_at 的原期限发送 SIGKILL并确认组静止；不因 leader 消失提前结算，不因重启延长期限，最终有效退出码仍优先
+
+#### Scenario: startup reconciliation owns readiness and disposal
+- **WHEN** 启动对账仍在进行，非严格上下文已能读取服务，或该实例开始释放
+- **THEN** 正常轮询与 SHUD 提交/手工轮询/collect 不得抢跑；释放先关闭准入、等待已接受的对账工作再释放 stateDir 锁，之后不得启动新轮询
 
 ### Requirement: Takeover registration
 对账中接管的作业（R3、R5）SHALL 立即由「Registry poll loop」继续监视，并在 apply 时以「Shud job submission」相同的瞬时全局控制器、无 owner、相同 label 经父类 `start` 重新登记，把新 `dsh_job_id` 写入 `run-job.json` 并追加到 `dsh_job_ids`；SHALL NOT 等待 `tool-jobs` 挂载。登记失败 SHALL NOT 影响轮询循环、collect 与唤醒：`dsh_job_id` 保持 `null`，失败原因经宿主 logger 记录。
