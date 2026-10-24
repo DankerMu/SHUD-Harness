@@ -235,6 +235,7 @@ test("late record failure awaits producer resource settlement before removing pa
         hooks: {
           done: release.waiting.then(() => started.hooks.done),
           settle: (outcome: JobOutcome) => started.hooks.settle(outcome),
+          detach: (detail: string) => started.hooks.detach(detail),
           cancel(reason) {
             cancelled.release();
             void release.waiting.then(() => started.hooks.cancel(reason));
@@ -381,6 +382,7 @@ test("producer cancellation failure preserves original failure and retains files
           hooks: {
             done: started.hooks.done,
             settle: (outcome: JobOutcome) => started.hooks.settle(outcome),
+            detach: (detail: string) => started.hooks.detach(detail),
             cancel(reason) {
               if (!refused) {
                 refused = true;

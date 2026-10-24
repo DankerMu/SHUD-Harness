@@ -5,12 +5,20 @@ import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeFs from "node:fs";
 import type * as NodeIo from "node:fs/promises";
 import type * as NodeChild from "node:child_process";
+import type { JobEvent } from "@deepseek-ai/dsh-jobs";
 import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import { generateRunIdentifiers, RunJobSchema } from "@shud-harness/dsh-shud-core";
-import { activeGroup, observedStart, terminateGroup } from "./detached-shud/test-harness.ts";
+import {
+  activeGroup,
+  installFakeShud,
+  observedStart,
+  terminateGroup,
+} from "./detached-shud/test-harness.ts";
 import { pollFixture, waitForOwnershipRelease } from "./poll-shud/test-harness.ts";
 import { barrier } from "./state-indexes/test-harness.ts";
 import { observeSignals, readDurable, readyRun } from "./kill-shud/test-harness.ts";
+import { completedWithinWindow, waitForTerm } from "./reconcile-shud/test-harness.ts";
+import { expectAbsent } from "./collect-shud/test-harness.ts";
 
 const inspection = vi.hoisted(() => ({ mode: "", pid: 0 }));
 vi.mock("node:child_process", async (original) => {
@@ -24,7 +32,7 @@ vi.mock("node:child_process", async (original) => {
           ...result,
           stdout:
             inspection.mode === "malformed"
-              ? "malformed group inspection\n"
+              ? "PRIVATE_TEARDOWN_INSPECTION_PAYLOAD\n"
               : `${String(result.stdout).trimEnd()}\n${inspection.pid} ${inspection.pid} S\n`,
         };
       }
@@ -118,9 +126,9 @@ test.each(["rename", "json", "symlink", "job-id", "pid"] as const)(
       // A failed persistence must not misclassify the parent's subsequent unmarked disposal call.
       await h.fiber.dispose();
       await waitForOwnershipRelease(h.stateDir);
-      await expect
-        .poll(() => producer.registration.cancellations)
-        .toEqual(["jobs service disposed"]);
+      await completedWithinWindow(producer.executions[0].hooks.done);
+      expect(await producer.executions[0].hooks.done).toMatchObject({ status: "failed" });
+      expect(producer.registration.cancellations).toEqual([]);
       expect(signals.events).toEqual([]);
       expect(activeGroup(pid)).toContain(pid);
       expect(await io.readFile(path)).toEqual(bytes);
@@ -134,13 +142,25 @@ test.each(["rename", "json", "symlink", "job-id", "pid"] as const)(
 );
 
 test.each(["throw", "already-finished"] as const)(
-  "parent kill %s clears its unconsumed mark but retains durable intent",
+  "parent kill %s revokes its mark but teardown still honors the persisted cancellation",
   async (mode) => {
-    const h = await pollFixture();
+    // Isolate teardown from normal cancellation advancement; native work and Date stay real.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const h = await pollFixture().catch((error: unknown) => {
+      vi.useRealTimers();
+      throw error;
+    });
     let signals: ReturnType<typeof observeSignals> | undefined;
     let restoreParent: (() => void) | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let disposing: Promise<void> | undefined;
     try {
-      const { record, id, pid, producer } = await readyRun(h);
+      await installFakeShud(h.shudBin, 0, "resistant");
+      const { record, id, pid, producer, invocation } = await readyRun(h);
+      const events: JobEvent[] = [];
+      unsubscribe = h.ctx.jobs.events.subscribe({ owners: "all" }, (event) => {
+        events.push(structuredClone(event));
+      });
       signals = observeSignals();
       const parent = vi.spyOn(LocalJobRegistry.prototype, "kill").mockImplementationOnce(() => {
         if (mode === "throw") throw new Error("parent kill refused before cancel");
@@ -160,18 +180,57 @@ test.each(["throw", "already-finished"] as const)(
       expect(intent).toEqual({ ...record, cancel_requested_at: intent.cancel_requested_at });
       expect(signals.events).toEqual([]);
       expect(producer.registration.cancellations).toEqual([]);
-      await h.fiber.dispose();
-      await waitForOwnershipRelease(h.stateDir);
-      await expect
-        .poll(() => producer.registration.cancellations)
-        .toEqual(["jobs service disposed"]);
-      expect(signals.events).toEqual([]);
+      expect(h.registry.get(id, h.ownerId).status).toBe("running");
       expect(activeGroup(pid)).toContain(pid);
+      expect(activeGroup(pid)).toContain(invocation.pid);
+      await expectAbsent(join(record.run_dir, "sigterm-seen"));
+      const snapshots = await Promise.all(
+        [join(record.run_dir, "run-job.json"), join(h.stateDir, "active.json")].map(
+          async (path) => ({
+            path,
+            bytes: await io.readFile(path),
+            mtime: (await io.stat(path, { bigint: true })).mtimeNs,
+          }),
+        ),
+      );
+      const ownDone = producer.executions[0].hooks.done;
+      disposing = Promise.resolve(h.fiber.dispose());
+      void disposing.catch(() => undefined);
+      // A stale one-shot mark would send TERM but leave done pending instead of detaching.
+      await completedWithinWindow(Promise.all([ownDone, disposing]));
+      await waitForOwnershipRelease(h.stateDir);
+      const outcome = await ownDone;
+      expect(outcome.status).toBe("failed");
+      // Fail promptly on a missing intent mirror, before waiting for the native receipt.
+      expect(signals.events).toEqual([{ pid: -pid, signal: "SIGTERM" }]);
+      expect(outcome.detail).toMatch(/host.*exit/iu);
+      expect(outcome.detail).toMatch(/kill.*(?:progress|pending)/iu);
+      expect(outcome.detail).not.toMatch(/parent boundary fault|cancel threw|orphan/iu);
+      expect(producer.registration.cancellations).toEqual([]);
+      expect(
+        events.filter((event) => event.type === "settled" && event.job.id === id),
+      ).toMatchObject([{ cause: "teardown", job: { status: "failed", detail: outcome.detail } }]);
+      await waitForTerm(record.run_dir);
+      expect(activeGroup(pid)).toContain(invocation.pid);
       expect(readDurable(record.run_dir)).toEqual(intent);
+      for (const snapshot of snapshots) {
+        expect(await io.readFile(snapshot.path)).toEqual(snapshot.bytes);
+        expect((await io.stat(snapshot.path, { bigint: true })).mtimeNs).toBe(snapshot.mtime);
+      }
+      await expectAbsent(join(record.run_dir, "run-record.json"));
+      await expectAbsent(join(record.run_dir, "collect-error.json"));
+      expect(h.sessionEvents).toEqual([]);
+      expect(h.flushes).toEqual([]);
     } finally {
-      restoreParent?.();
-      signals?.restore();
-      await h.close();
+      try {
+        restoreParent?.();
+        signals?.restore();
+        unsubscribe?.();
+        await h.close();
+        await disposing?.catch(() => undefined);
+      } finally {
+        vi.useRealTimers();
+      }
     }
   },
   15000,
@@ -180,17 +239,39 @@ test.each(["throw", "already-finished"] as const)(
 test.each([false, true])(
   "live signal denial retains intent and preserves an additional inspection failure=%s",
   async (failInspection) => {
-    const h = await pollFixture();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const h = await pollFixture().catch((error: unknown) => {
+      vi.useRealTimers();
+      throw error;
+    });
     let restoreKill: (() => void) | undefined;
+    let unsubscribe: (() => void) | undefined;
+    let disposing: Promise<void> | undefined;
     try {
       const { record, id, pid, producer } = await readyRun(h);
+      const events: JobEvent[] = [];
+      unsubscribe = h.ctx.jobs.events.subscribe({ owners: "all" }, (event) => {
+        events.push(structuredClone(event));
+      });
+      const lifecycle = producer.executions[0].hooks;
+      const detach = lifecycle.detach.bind(lifecycle);
+      const completionStatuses: string[] = [];
+      lifecycle.detach = (detail) => {
+        detach(detail);
+        completionStatuses.push(h.registry.get(id).status);
+      };
       const native = process.kill.bind(process);
       const denied: string[] = [];
+      const attempted: Array<{ pid: number; signal: string }> = [];
       const kill = vi.spyOn(process, "kill").mockImplementation((target, signal) => {
+        if (signal !== 0) {
+          attempted.push({ pid: target, signal: String(signal) });
+          if (target !== -pid) throw new Error("Refusing a foreign test-group signal");
+        }
         if (target === -pid && signal !== 0) {
           denied.push(String(signal));
           if (failInspection) inspection.mode = "malformed";
-          throw Object.assign(new Error("permission denied for live owned group"), {
+          throw Object.assign(new Error("PRIVATE_TEARDOWN_SIGNAL_PAYLOAD"), {
             code: "EPERM",
           });
         }
@@ -218,23 +299,154 @@ test.each([false, true])(
       expect(intent).toEqual({ ...record, cancel_requested_at: intent.cancel_requested_at });
       expect(h.registry.get(id, h.ownerId).status).toBe("running");
       expect(producer.completed).toEqual([]);
-      await h.fiber.dispose();
+      const snapshots = await Promise.all(
+        [join(record.run_dir, "run-job.json"), join(h.stateDir, "active.json")].map(
+          async (path) => ({
+            path,
+            bytes: await io.readFile(path),
+            mtime: (await io.stat(path, { bigint: true })).mtimeNs,
+          }),
+        ),
+      );
+      const errorsBefore = h.errors.length;
+      disposing = Promise.resolve(h.fiber.dispose());
+      void disposing.catch(() => undefined);
+      await completedWithinWindow(Promise.all([lifecycle.done, disposing]));
       await waitForOwnershipRelease(h.stateDir);
-      await expect
-        .poll(() => producer.registration.cancellations)
-        .toEqual(["jobs service disposed"]);
+      const outcome = await lifecycle.done;
+      expect(outcome.status).toBe("failed");
+      expect(outcome.detail).toMatch(/host.*exit/iu);
+      expect(outcome.detail).toMatch(/kill.*(?:progress|pending)/iu);
+      expect(outcome.detail).not.toMatch(/PRIVATE_|cancel threw|orphan/iu);
+      expect(completionStatuses).toEqual(["running"]);
+      expect(producer.registration.cancellations).toEqual([]);
+      expect(
+        events.filter((event) => event.type === "settled" && event.job.id === id),
+      ).toMatchObject([{ cause: "teardown", job: { status: "failed", detail: outcome.detail } }]);
+      const diagnostics = h.errors.slice(errorsBefore).join("\n");
+      expect(diagnostics).toContain(
+        `SHUD collect teardown signal: ${failInspection ? "IO_ERROR" : "EPERM"}`,
+      );
+      expect(diagnostics).not.toContain("PRIVATE_");
+      expect(denied).toEqual(failInspection ? ["SIGTERM"] : ["SIGTERM", "SIGTERM"]);
+      expect(attempted.every((attempt) => attempt.pid === -pid)).toBe(true);
+      for (const snapshot of snapshots) {
+        expect(await io.readFile(snapshot.path)).toEqual(snapshot.bytes);
+        expect((await io.stat(snapshot.path, { bigint: true })).mtimeNs).toBe(snapshot.mtime);
+      }
+      await expectAbsent(join(record.run_dir, "run-record.json"));
+      await expectAbsent(join(record.run_dir, "collect-error.json"));
+      expect(h.sessionEvents).toEqual([]);
+      expect(h.flushes).toEqual([]);
       inspection.mode = "";
       expect(activeGroup(pid)).toContain(pid);
       expect(readDurable(record.run_dir)).toEqual(intent);
       expect(denied).not.toContain("SIGKILL");
     } finally {
-      inspection.mode = "";
-      restoreKill?.();
-      await h.close();
+      try {
+        inspection.mode = "";
+        restoreKill?.();
+        unsubscribe?.();
+        await h.close();
+        await disposing?.catch(() => undefined);
+      } finally {
+        vi.useRealTimers();
+      }
     }
   },
   15000,
 );
+
+test("teardown refuses an observable replacement leader but completes its own registration", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const h = await pollFixture().catch((error: unknown) => {
+    vi.useRealTimers();
+    throw error;
+  });
+  let restoreSignals: (() => void) | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let disposing: Promise<void> | undefined;
+  try {
+    await installFakeShud(h.shudBin, 0, "resistant");
+    const { record, id, pid, invocation, producer } = await readyRun(h);
+    const lifecycle = producer.executions[0].hooks;
+    const detach = lifecycle.detach.bind(lifecycle);
+    let completions = 0;
+    lifecycle.detach = (detail) => {
+      detach(detail);
+      completions++;
+    };
+    const events: JobEvent[] = [];
+    const completionAtStopping: number[] = [];
+    unsubscribe = h.ctx.jobs.events.subscribe({ owners: "all" }, (event) => {
+      events.push(structuredClone(event));
+      if (event.type === "stopping") completionAtStopping.push(completions);
+    });
+    const signals = observeSignals();
+    restoreSignals = signals.restore;
+    expect(h.registry.kill(id, h.ownerId, "cancel before replacement observation")).toBe(
+      "requested",
+    );
+    await waitForTerm(record.run_dir);
+    await completedWithinWindow(producer.executions[0].waitForExit());
+    expect(activeGroup(pid)).not.toContain(pid);
+    expect(activeGroup(pid)).toContain(invocation.pid);
+    const intent = readDurable(record.run_dir);
+    expect(intent.cancel_requested_at).toEqual(expect.any(String));
+    const snapshots = await Promise.all(
+      [join(record.run_dir, "run-job.json"), join(h.stateDir, "active.json")].map(async (path) => ({
+        path,
+        bytes: await io.readFile(path),
+        mtime: (await io.stat(path, { bigint: true })).mtimeNs,
+      })),
+    );
+    // Real leader exit/reaping comes first. Only the OS replacement observation is injected;
+    // the original resistant descendant remains real and must receive no teardown signal.
+    inspection.pid = pid;
+    inspection.mode = "replacement";
+    const errorsBefore = h.errors.length;
+    disposing = Promise.resolve(h.fiber.dispose());
+    void disposing.catch(() => undefined);
+    await completedWithinWindow(Promise.all([lifecycle.done, disposing]));
+    await waitForOwnershipRelease(h.stateDir);
+    const outcome = await lifecycle.done;
+    expect(outcome.status).toBe("failed");
+    expect(outcome.detail).toMatch(/host.*exit/iu);
+    expect(outcome.detail).toMatch(/kill.*(?:progress|pending)/iu);
+    expect(outcome.detail).not.toMatch(/PRIVATE_|cancel threw|orphan/iu);
+    expect(completionAtStopping).toEqual([0, 1]);
+    expect(completions).toBe(1);
+    expect(producer.registration.cancellations).toEqual([]);
+    expect(events.filter((event) => event.type === "settled" && event.job.id === id)).toMatchObject(
+      [{ cause: "teardown", job: { status: "failed", detail: outcome.detail } }],
+    );
+    const diagnostics = h.errors.slice(errorsBefore).join("\n");
+    expect(diagnostics).toContain("SHUD collect teardown signal: IO_ERROR");
+    expect(diagnostics).not.toContain("PRIVATE_");
+    expect(signals.events).toEqual([{ pid: -pid, signal: "SIGTERM" }]);
+    for (const snapshot of snapshots) {
+      expect(await io.readFile(snapshot.path)).toEqual(snapshot.bytes);
+      expect((await io.stat(snapshot.path, { bigint: true })).mtimeNs).toBe(snapshot.mtime);
+    }
+    expect(readDurable(record.run_dir)).toEqual(intent);
+    await expectAbsent(join(record.run_dir, "run-record.json"));
+    await expectAbsent(join(record.run_dir, "collect-error.json"));
+    expect(h.sessionEvents).toEqual([]);
+    expect(h.flushes).toEqual([]);
+    inspection.mode = "";
+    expect(activeGroup(pid)).toContain(invocation.pid);
+  } finally {
+    try {
+      inspection.mode = "";
+      restoreSignals?.();
+      unsubscribe?.();
+      await h.close();
+      await disposing?.catch(() => undefined);
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+}, 15000);
 
 test.each(["malformed", "replacement"] as const)(
   "kill fails closed on %s ownership inspection without touching metadata or signaling",

@@ -120,7 +120,7 @@ export class ShudJobRegistry extends ParentRegistry {
       this.indexes = store;
       // Capture the actual instance here; scoped Cordis proxies must not choose registration scope.
       const receipts = new Map<RunId, CompletionReceipt>();
-      const cancellations = new ShudCancellation();
+      const cancellations = new ShudCancellation((error) => ctx.logger.error(error));
       const submissions = new ShudSubmissions(
         this,
         store,

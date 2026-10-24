@@ -36,6 +36,11 @@ export class ShudCancellation {
   private readonly runs = new Map<RunId, ManagedRun>();
   private readonly recovered = new Map<RunId, RecoveredRun>();
   private accepting = true;
+  private readonly report: (error: Error) => void;
+
+  constructor(report: (error: Error) => void) {
+    this.report = report;
+  }
 
   register(id: JobId, entry: IndexEntry, location: ManagedRun["location"]): void {
     const managed: ManagedRun = { id, entry, location, termSent: false, killSent: false };
@@ -56,14 +61,23 @@ export class ShudCancellation {
     managed.execution = execution;
     return {
       done: execution.hooks.done,
-      cancel: (reason) => {
+      cancel: () => {
         const markedAt = managed.markedAt;
         managed.markedAt = undefined;
         if (markedAt === undefined) {
-          execution.hooks.cancel(reason);
+          if (managed.requestedAt === undefined) {
+            execution.hooks.detach("Host exiting; SHUD continues running in the background");
+            return;
+          }
+          try {
+            execution.signalGroup("SIGTERM");
+          } catch (error) {
+            this.report(collectFailure("teardown signal", error));
+          } finally {
+            execution.hooks.detach("Host exiting; SHUD kill is in progress");
+          }
           return;
         }
-        managed.requestedAt ??= Date.parse(markedAt);
         if (!managed.termSent) {
           execution.signalGroup("SIGTERM");
           managed.termSent = true;
@@ -112,6 +126,7 @@ export class ShudCancellation {
     if (isTerminal(intent.status)) return "already-finished";
     if (intent.cancel_requested_at === null)
       throw new Error("Cancellation intent was not persisted");
+    managed.requestedAt ??= Date.parse(intent.cancel_requested_at);
     managed.markedAt = intent.cancel_requested_at;
     try {
       return parentKill();

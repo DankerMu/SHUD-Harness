@@ -206,6 +206,14 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** 对 `running` 作业 kill 后、宽限期结束前注册表被释放，且 SHUD 尚未退出
 - **THEN** 注册表释放在宽限期内完成而不挂起，该次 dsh 登记以 `failed`（detail 含 kill 进行中）结算，`run-job.json` 仍为 `running` 且保留 `cancel_requested_at`，活动索引条目保留，下次启动按 R8 结算为 `cancelled`
 
+#### Scenario: durable kill intent survives parent admission failure
+- **WHEN** kill 已成功持久化取消时间，但父类在调用 producer cancel 前抛错，随后该注册表 teardown
+- **THEN** 一次性 kill 标记已撤销，但 teardown 仍识别已持久化的取消意图，按原期限中的 kill 处理并重发受控进程组 SIGTERM；该次登记同步结束为 failed，取消时间及 RunJob/索引不被改写
+
+#### Scenario: teardown signal failure does not wait for the solver
+- **WHEN** 已有取消意图的 teardown 在重发 SIGTERM 时遇到权限或进程身份检查错误
+- **THEN** 错误经受控诊断保持可见，不对无法证明归属的进程组发信号；producer done 仍在 cancel 内结束为 failed，不假装进程已终止，不生成 RunRecord 或覆盖原有取消证据
+
 #### Scenario: owner session disposed
 - **WHEN** 作业运行中发起会话的 Agent 被释放（会话归档或关闭），宿主保持运行
 - **THEN** SHUD 继续运行，结束后轮询循环照常 collect 并经冷恢复唤醒该会话

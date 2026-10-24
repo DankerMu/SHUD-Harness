@@ -18,6 +18,7 @@ import {
   waitForEvidence,
   waitForOwnershipRelease,
 } from "./poll-shud/test-harness.ts";
+import { completedWithinWindow } from "./reconcile-shud/test-harness.ts";
 
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
@@ -410,6 +411,10 @@ test("async completion remains single-flight and retains state ownership until i
     expect((await readRecord(record.run_dir)).status).toBe("succeeded");
     expect(producer.completed).toEqual([]);
     expect(producer.attempts).toHaveLength(1);
+    const path = join(record.run_dir, "run-job.json");
+    const terminalBytes = await io.readFile(path);
+    const terminalMtime = (await io.stat(path, { bigint: true })).mtimeNs;
+    const ownDone = producer.executions[0].hooks.done;
     disposing = Promise.resolve(h.ctx.fiber.dispose());
     await expect
       .poll(async () => {
@@ -431,12 +436,25 @@ test("async completion remains single-flight and retains state ownership until i
     expect(refused).toBeInstanceOf(Error);
     expect(refused instanceof Error ? refused.message : null).toContain(h.stateDir);
     expect(await io.readdir(h.stateDir)).toContain("lock");
+    await completedWithinWindow(ownDone);
+    const detachedOutcome = await ownDone;
+    expect(detachedOutcome.status).toBe("failed");
+    expect(detachedOutcome.detail).toMatch(/host.*exit/iu);
+    expect(producer.completed).toEqual([]);
+    expect(() => producer.registration.append("must not reopen a detached resource")).toThrow(
+      "no live output descriptor",
+    );
     release.release();
     await Promise.all(ticks);
     await disposing;
     await waitForOwnershipRelease(h.stateDir);
     expect(producer.completed).toHaveLength(1);
     expect(producer.attempts).toHaveLength(1);
+    // The accepted normal callback still finishes, but cannot replace teardown's first outcome.
+    expect(producer.completed[0].status).toBe("completed");
+    expect(await ownDone).toBe(detachedOutcome);
+    expect(await io.readFile(path)).toEqual(terminalBytes);
+    expect((await io.stat(path, { bigint: true })).mtimeNs).toBe(terminalMtime);
   } finally {
     release.release();
     await Promise.allSettled(ticks);

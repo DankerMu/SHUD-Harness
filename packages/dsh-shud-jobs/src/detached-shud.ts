@@ -14,7 +14,14 @@ export interface ShudProcessIdentity {
 
 /** Caller-owned registration resources; completion is idempotent and releases resources before done. */
 export interface ShudLifecycle extends JobHooks {
+  /** Normal durable-terminal completion may await registration resource release. */
   settle(outcome: JobOutcome): void | Promise<void>;
+  /**
+   * Synchronously release registration resources and fulfill the same done as failed.
+   * Registration-only teardown: no process termination or durable-state access.
+   * Idempotent with normal settlement and rollback cancellation.
+   */
+  detach(detail: string): void;
 }
 
 export interface ShudExecution extends ShudProcessGroup {
