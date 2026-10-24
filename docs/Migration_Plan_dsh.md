@@ -230,3 +230,7 @@ node ../dsh-spike/runs/m2/api.mjs call 47820 session/prompt '{"request":{"reques
 SIGKILL 变体（`END 730`）：13:30:50 `kill -KILL 49351`，wrapper 51886 / 1、shud 51890 存活；重启 dsh 51998 接管为 `shud-93bbde2b93d84bea`；13:32:24 exit 0，S1 seq 163 唤醒 → turn 12。结束时 `pgrep` 无残留 dsh、wrapper 或 shud 进程。
 
 **附带发现（触发停止条件，已裁决）**：按 id 的 patch 不能改行的 `name`（`vendor/include/src/index.ts:115-118` 告警 `patch: name mismatch … skipping`，实测 `runs/m2/dump-config-byid-rename.stderr`），D1「按 id 替换 `jobs` 行」不可行；spike 改用 `- id: jobs` + `disabled: true` 再插入新行（对插入行按 id 补 `config` 可行，`vendor/include/src/index.ts:94-99`）。编排方裁决：D1 挂载方式修订为 disable + insert（行 id `shud-jobs`），决策实质不变，受影响文字已在 design、proposal、specs 与 tasks 中修订（清单见 design「Open Questions」末条）。O4 使 `response` 分支在 rc.2 恒不可达；编排方裁决保留 `response|configured` 枚举，spec「Response model capture」、D10 与 task 12.1 改为 rc.2 恒记 `configured`（先 `requestHeader()?.config.model` 后 `options.model`，`source.model` 不得记为 `response`）。修订后的 requirement 经一轮 Stage 3 式三路并行复审（6 条 P1：O6 Config 投影为 `unsupported`、按 id patch 整体替换 `config`、O4 未落到 spec/任务、#303/#314 过时），全部修复并经独立验证通过。
+
+### M2 raw-guard：`shud_run` 路径保护（2026-10-24，#301）
+
+策略门现按 session cwd 与原有 native realpath／最近存在祖先规则解析路径：`runs` 位于或等于任一 raw 根时优先 deny；否则 raw 内 `input_dir` 以原 provenance 文案 ask；忽略参数中的 `workdir`，缺失或非法输入参数仍检查输出。实际 built Cordis seam 10 场景通过，两次 live `raw-guard:probes` 均 T1–T5 PASS，raw／根外样本 MD5 前后不变。此处只记录策略门及既有工具回归证据；`shud_run` 工具尚未挂载（#314），不代表完整运行链或 PI 验收。
