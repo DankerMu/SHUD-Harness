@@ -130,8 +130,6 @@ review_only: # project invariants without mechanical enforcement yet; each has a
     trigger: "PR template checkbox + reviewer; user chose review-only"
   - rule: "dsh upgrades only via chore(dsh-upgrade) issue"
     trigger: "process; no-bypass hook blocks direct writes to ../deepseek-harness"
-  - rule: "runtime invariant companions beyond tests (reviewer checklist)"
-    trigger: "M2 ctx.jobs plugin → invariant tests enter the matrix"
   - rule: "scientific wording rules in prose"
     trigger: "M3 EvidenceReport language guard → tested constants"
 
@@ -174,11 +172,13 @@ verification:
     evidence: "session log: raw read allowed-once then successful result; raw write immutable without new approval; raw md5 unchanged"
   - surface: "SHUD ccw tiny run (local only)"
     command: "pnpm run shud:tiny"
+  - surface: "SHUD ccw restart recovery (local block; requires SHUD and DMXAPI_KEY)"
+    command: "pnpm run shud:restart"
   - surface: "guardrail self-test"
     command: "pnpm run test-guardrails"
 
 readiness_gaps:
-  - "CI cannot run SHUD: shud:tiny remains a local-only block gate"
+  - "CI cannot run SHUD: shud:tiny and shud:restart remain local-only block gates; shud:restart requires local SHUD and DMXAPI_KEY"
   - "CI cannot run real LLM probes: raw-guard:probes requires local DMXAPI_KEY; Web approval remains manual"
   - "eng-init rendered-harness checker lives in gitignored .claude/skills; repo-side equivalents are instructions:check + docs:paths"
   - "semgrep not installed locally; CI job sast runs it"

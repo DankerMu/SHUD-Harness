@@ -452,6 +452,10 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - **WHEN** 配置的 SHUD 二进制不存在时执行 `pnpm run shud:restart`
 - **THEN** 命令在启动 dsh 前以非 0 退出并指明缺失项
 
+#### Scenario: local blocking gate registration
+- **WHEN** 真实重启命令与作业伴生集成测试已经交付，更新控制面登记
+- **THEN** 指令源及生成投影的 Verification Matrix、Enforcement Index 将 `shud:restart` 登记为本机 block；constraints verification 镜像该命令且移除对应 runtime invariant companions review_only 项；CONTEXT 的 Jobs 五条不变量引用该命令及第6–11组既有集成测试，保留一般通知的 delivered 或 unreachable 语义与独立 PI 手工验收边界
+
 ### Requirement: Epic-close manual acceptance
 M2 Epic 收口时 PI SHALL 在 `dsh --profile shud` 的 Web 界面亲自完成一次：一句话让 agent 用 `shud_run` 跑 ccw，运行中重启 dsh，完成后会话被唤醒并给出 RunRecord；证据（session log 路径、事件序列摘录、运行目录）记入 `docs/Migration_Plan_dsh.md`。合并子 PR 与关闭实现 issue SHALL NOT 视为该验收通过（`docs/adr/implemented/0007-m2-epic-acceptance.md`）。
 

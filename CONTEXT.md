@@ -12,7 +12,7 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 |---|---|---|---|
 | Governance（策略门） | `tools/pre-execute` 瀑布决策 allow/deny/cancel/ask；角色—工具映射；保留规则 id | `packages/dsh-shud-core/src/governance/` | 决策表为测试常量；`ask` 走 `ctx.approval` |
 | Core objects（8 对象） | TaskCard · StackLock · DataProvenance · RunJob · RunRecord · AnalysisPlan · EvidenceReport · ChangeRequest 的 Zod 权威源与生成投影 | `packages/dsh-shud-core/src/schemas/`，`docs/generated/`，`docs/03_SPEC/Minimal_Schemas.md` | 字段真相 = Zod；Markdown/JSON Schema 只生成不手编 |
-| Jobs / Park-Resume（M2） | 长作业经 `ctx.jobs` 提交、agent 空闲、完成唤醒；durable JobRegistry 跨重启对账 | 规划中的 `dsh-shud-jobs` 包，`docs/03_SPEC/Park_Resume_Design.md` | shud 无 owner 登记，以运行目录、索引与 `shud-jobs` 消息满足下列五条可恢复性断言；非 shud 作业保持宿主行为 |
+| Jobs / Park-Resume（M2） | 长作业经 `ctx.jobs` 提交、agent 空闲、完成唤醒；durable JobRegistry 跨重启对账 | `packages/dsh-shud-jobs/`，`docs/03_SPEC/Park_Resume_Design.md` | shud 无 owner 登记，以运行目录、索引与 `shud-jobs` 消息满足下列五条可恢复性断言；非 shud 作业保持宿主行为 |
 | Host profile（dsh seam） | 模型路由、出站通道、插件挂载；dsh 只读宿主 | `profile/shud/`，`../deepseek-harness`（钉 `dsh-v0.2.1-rc.2`） | 只用文档化 seam；`--dump-config` 可枚举 |
 | Scientific runtime | SHUD 编译/运行、rSHUD 读输出与水量平衡、ccw fixture | `scripts/runtime/`，`SHUD/ rSHUD/ AutoSHUD/`，`docs/01_CODEBASE/SHUD_IO_Facts.md` | submodule 只读；运行在 scratch workspace |
 | Docs / Spec / Decisions | 规范、里程碑、决策四区、生成指令 | `docs/04_IMPLEMENTATION/Phased_Plan.md`，`docs/adr/`，`instructions/agents/` | 一事一家；生成物由 CI 比对 |
@@ -38,7 +38,18 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
     2. 最终存在 `run-record.json` 或 `collect-error.json`。
     3. 同一运行目录在任一时刻至多一个 SHUD 进程；不同运行目录可并行。
     4. 挂载 `session-controller` 时，`notify.status` 最终为 `delivered`（发起会话 session log 有 `source.kind: shud-jobs` 且含该 `run_id` 的消息）或带原因的 `unreachable`。
-    5. 同一前提下，作业最终在 `completed.json` 且不在 `active.json`。无 owner 作业不以 `job/settled` 判定；伴生集成测试与本机重启命令的矩阵登记由 M2 task 14.2 落地。
+    5. 同一前提下，作业最终在 `completed.json` 且不在 `active.json`。无 owner 作业不以 `job/settled` 判定。
+
+    伴生验证已登记进 Verification Matrix / Enforcement Index：既有集成测试由 `pnpm run test:coverage`（默认 `pnpm run check` 的组成部分，本机 + CI）执行；真实 ccw 的 `pnpm run shud:restart` 是需本机 SHUD 与 `DMXAPI_KEY` 的独立阻断闸，不在默认 `check` 或 CI 中运行。该受控脚本的 SIGTERM / SIGKILL 两用例要求五条断言成立，且第 4 条必须为 `delivered`（`unreachable` 判 FAIL），RunRecord 含退出码与非空产物清单；不收窄一般恢复允许 delivered 或带原因 unreachable 的契约。以下是 M2 第 6–11 组的代表性集成测试，不是完整文件清单：
+
+    - 第 6 组，提交 / 脱离执行 / 轮询：`packages/dsh-shud-jobs/src/submit-shud.test.ts`、`packages/dsh-shud-jobs/src/detached-shud.test.ts`、`packages/dsh-shud-jobs/src/poll-shud.test.ts`。
+    - 第 7 组，收集与失败重试记账（`collect-error.json`）：`packages/dsh-shud-jobs/src/collect-shud.test.ts`、`packages/dsh-shud-jobs/src/collect-shud-retry.test.ts`。
+    - 第 8 组，状态锁 / 持久索引：`packages/dsh-shud-jobs/src/state-lock.test.ts`、`packages/dsh-shud-jobs/src/state-indexes.test.ts`。
+    - 第 9 组，取消 / 宿主释放与执行存活：`packages/dsh-shud-jobs/src/kill-shud.test.ts`、`packages/dsh-shud-jobs/src/teardown-shud.test.ts`。
+    - 第 10 组，启动对账 / 原执行接管：`packages/dsh-shud-jobs/src/reconcile-shud.test.ts`、`packages/dsh-shud-jobs/src/takeover-shud.test.ts`。
+    - 第 11 组，唤醒 / 确认 flush / 重试耗尽 unreachable：`packages/dsh-shud-jobs/src/wake-shud.test.ts`、`packages/dsh-shud-jobs/src/wake-shud-retry.test.ts`。
+
+    上述工程验证不等于 PI 功能验收；#318 仍待 PI 在 Epic 收口时亲自完成 Web 重启与唤醒验收（[ADR-0007](docs/adr/implemented/0007-m2-epic-acceptance.md)），合并子 PR 不代表验收通过。
 
 ## Forbidden Logic
 
