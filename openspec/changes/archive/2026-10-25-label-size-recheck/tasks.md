@@ -9,7 +9,7 @@
 ## 2. Hosted proof and delivery
 
 - [x] 2.1 Never-merged draft PR #365 proved fixed head b167888b113f001175f33f75953a4774a69b40a9 (617>400): opened run40203123060 size/aggregate FAIL; labeled run40203307095 all checks PASS with bypass; unlabeled run40203565500 size/aggregate FAIL, other six green. Effective PR state changed CLEAN to BLOCKED without commits/reopen. Draft closed unmerged; proof comment and local logs retained.
-- [ ] 2.2 Full pnpm run check, test-guardrails, strict fixture validation, independent expanded review and exact-head CI pass; merge/close #324 and archive only this fixture, not M2 acceptance.
+- [x] 2.2 Full check, 151 guardrails and strict validation passed; three-seat round1 review clean, zero fixes, exact-head CI8/8 at 9ad399bda76d67e11712e57ff0eb659e839203b8. PR #366 merged as 5397180fbca8147c47d7d9e576a326d92e9a8943 and #324 closed. Archive only this fixture; ADR-0008 stays proposed and M2/#293/#318 await PI acceptance.
 
 ## Risk packs
 
