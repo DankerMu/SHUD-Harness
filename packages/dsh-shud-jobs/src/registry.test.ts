@@ -264,6 +264,40 @@ describe("registry apply configuration", () => {
     },
   );
 
+  test.each<[string, { pumpPollMs?: number }]>([
+    ["omitted", {}],
+    ["zero", { pumpPollMs: 0 }],
+    ["fractional", { pumpPollMs: 1.5 }],
+  ])(
+    "rejects direct construction with %s pumpPollMs before jobs or state ownership",
+    async (_label, cadence) => {
+      const h = await createHarness();
+      let unexpected: ShudJobRegistry | undefined;
+      try {
+        const message = caughtError(() => {
+          unexpected = new ShudJobRegistry(h.ctx, { ...h.config, ...cadence });
+        });
+        expect(message).toContain("pumpPollMs");
+        expect(message).toMatch(/ShudJobRegistry\.Config|Cordis/);
+        expect(message).toMatch(/parsed|resolved/i);
+        expect(h.ctx.get("jobs")).toBeUndefined();
+        expect(await readdir(h.stateDir)).toEqual([]);
+      } finally {
+        try {
+          // Direct construction owns root effects rather than a plugin fiber.
+          await h.ctx.fiber.dispose();
+        } finally {
+          try {
+            // Also release any unexpected RED instance before removing its state directory.
+            await unexpected?.indexes.close();
+          } finally {
+            await h.dispose();
+          }
+        }
+      }
+    },
+  );
+
   test("preserves parent Config identity and resolved defaults", async () => {
     const original = LocalJobRegistry.Config;
     const parent = original["~standard"].validate({});
