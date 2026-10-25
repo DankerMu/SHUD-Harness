@@ -22,22 +22,6 @@ function isConfigObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function resolvePumpPollMs(config: Config): number {
-  if (config.pumpPollMs !== undefined) return config.pumpPollMs;
-  // Cordis supplies resolved config; direct construction may omit the existing parent default.
-  const parent = LocalJobRegistry.Config["~standard"].validate({});
-  const value: unknown = "value" in parent ? parent.value : undefined;
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !("pumpPollMs" in value) ||
-    typeof value.pumpPollMs !== "number"
-  ) {
-    throw new Error("Parent configuration did not provide a synchronous pumpPollMs");
-  }
-  return value.pumpPollMs;
-}
-
 function prepareStateDir(path: string): void {
   try {
     mkdirSync(path, { recursive: true });
@@ -112,7 +96,13 @@ export class ShudJobRegistry extends ParentRegistry {
   constructor(ctx: Context, config: Config) {
     assertExecutableFile(config.shudBin);
     prepareStateDir(config.stateDir);
-    const pumpPollMs = resolvePumpPollMs(config);
+    // Cordis resolves parent defaults before construction; direct construction is unsupported.
+    const pumpPollMs = config.pumpPollMs;
+    if (typeof pumpPollMs !== "number" || !Number.isSafeInteger(pumpPollMs) || pumpPollMs < 1) {
+      throw new Error(
+        "Invalid pumpPollMs: expected a positive safe integer from parsed ShudJobRegistry.Config (Cordis-resolved configuration)",
+      );
+    }
     const store = new StateIndexStore(config.stateDir);
     let poll: ShudPoll | undefined;
     try {
