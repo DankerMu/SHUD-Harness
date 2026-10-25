@@ -9,7 +9,7 @@
 ## 2. Integration and delivery
 
 - [x] 2.1 Three changed files pass 38/38 native tests; full pnpm run check passes 74 files, 1738 tests/1 existing skip, and strict OpenSpec validates. Diff audit shows only four sites plus two imports changed; all production/protected code remains unchanged. Outputs retained under issue-352; unobserved historical windows are not claimed reproduced.
-- [ ] 2.2 Complete expanded review, exact-head CI and merge/close #352; archive only this fixture, preserving pending M2 PI acceptance.
+- [x] 2.2 Three expanded review seats clean on f656a77ce762071457ab7b9cd8c5396ad4793842, zero fix passes; exact-head CI 40219318429 all eight jobs pass. PR #371 merged as 8263762dadb07029830f3431087398fca4157ee9 and #352 closed. Archive only this fixture, preserving pending M2 PI acceptance.
 
 ## Risk packs
 
