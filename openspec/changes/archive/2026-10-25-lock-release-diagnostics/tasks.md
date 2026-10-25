@@ -10,7 +10,7 @@
 ## 2. Runtime qualification and delivery
 
 - [x] 2.1 Focused 44/44 and full check 74 files/1743 tests with 1 existing skip pass. Built Darwin chmod0500 smoke proves EACCES diagnostics, real child guard acquisition, live-self refusal, same rejection and guarded recovery with unchanged nonempty indexes/inode; final source rerun also passes. Profile smoke passes with existing #233 projection limitations. All earlier lint/format/path failures and repairs retained; no gate changes. Owned temporary script/directory removed, source evidence retained as inert text.
-- [ ] 2.2 Three-seat critical-path review and exact-head CI pass; merge/close #335, archive only this independent fixture, preserve #293/#318 pending PI acceptance.
+- [x] 2.2 Three critical-path review seats clean on cd736e64034e311d0ffc8328a90505489e6b8e7a, zero fix passes; exact-head Linux CI 40227800141 all eight jobs pass. PR #374 merged as d9742bb3e540f5c03974eef22cfe34667f101bdf and #335 closed. Archive only this independent fixture; #293/#318 and M2 remain pending PI acceptance.
 
 ## Risk packs
 
