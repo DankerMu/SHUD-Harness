@@ -272,7 +272,13 @@ test.each(["corrupt", "run-id", "job-id", "run-dir"])(
       await h.registry.pollOnce();
       await io.writeFile(join(record.run_dir, "exit_code"), "0\n");
       await releaseRun(healthy);
-      await h.registry.pollOnce();
+      await waitForRecovery(async () => {
+        await h.registry.pollOnce();
+        expect(await io.readFile(path, "utf8")).toBe(bytes);
+        expect(bad.producer.completed).toEqual([]);
+        expect(bad.producer.registration.cancellations).toEqual([]);
+        return good.producer.completed.length === 1;
+      }, "healthy producer completion while record disagreement remains isolated");
       expect(await io.readFile(path, "utf8")).toBe(bytes);
       expect(bad.producer.completed).toEqual([]);
       expect(bad.producer.registration.cancellations).toEqual([]);
