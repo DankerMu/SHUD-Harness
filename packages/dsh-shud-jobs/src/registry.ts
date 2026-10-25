@@ -8,6 +8,7 @@ import { ShudSubmissions, type ShudProducer } from "./shud-submissions.ts";
 import { StateIndexStore } from "./state-indexes.ts";
 import { ShudPoll, type CompletionReceipt } from "./shud-poll.ts";
 import { ShudCancellation } from "./shud-cancellation.ts";
+import { createRecoveryReporter } from "./shud-recovery-log.ts";
 
 export interface Config extends ParentConfig {
   /** Absolute writable directory for registry state; created when absent. */
@@ -127,6 +128,7 @@ export class ShudJobRegistry extends ParentRegistry {
         (id) => submissions.isInFlight(id),
         pumpPollMs,
         (error) => ctx.logger.error(error),
+        createRecoveryReporter(ctx),
       );
       poll = dispatcher;
       ctx.inject(["sessionController", "sessions"], (services) =>

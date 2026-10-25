@@ -147,6 +147,7 @@ export class ShudPoll {
   private readonly inSubmission: (id: RunId) => boolean;
   private readonly pumpPollMs: number;
   private readonly report: (error: Error) => void;
+  private readonly warn: (message: string) => void;
   private delivery: DeliveryServices | undefined;
 
   constructor(
@@ -157,6 +158,7 @@ export class ShudPoll {
     inSubmission: (id: RunId) => boolean,
     pumpPollMs: number,
     report: (error: Error) => void,
+    warn: (message: string) => void,
   ) {
     this.registry = registry;
     this.indexes = indexes;
@@ -165,6 +167,7 @@ export class ShudPoll {
     this.inSubmission = inSubmission;
     this.pumpPollMs = pumpPollMs;
     this.report = report;
+    this.warn = warn;
   }
 
   enableDelivery(
@@ -358,6 +361,8 @@ export class ShudPoll {
       // The leader may have published its exit while the retained group was becoming quiet.
       evidence = await readExit(record.run_dir);
     }
+    // Settlement releases retained R8 control; a later R7 classification cannot erase it.
+    const hadRecoveredControl = this.cancellations.hasRecoveredControl(entry.run_id);
     await this.settle(
       entry,
       routed,
@@ -367,7 +372,17 @@ export class ShudPoll {
         : "SHUD lost: wrapper no longer executing and exit_code is absent",
     );
     const terminal = await readRunFile(entry);
-    if (isTerminal(terminal.status)) await collectRun(entry, terminal, true);
+    if (isTerminal(terminal.status)) {
+      if (decision.row === "R7" && !hadRecoveredControl) {
+        this.warn(
+          `R7 run_id=${record.run_id} recorded_pid=${record.pid} recorded_pid_started_at=${record.pid_started_at}: ` +
+            "recorded wrapper identity is no longer live/matching; historical group quiescence is unverified; " +
+            "no signal is sent to an unowned historical group; descendants may remain; " +
+            "cancelled/lost is not proof that the historical group stopped.",
+        );
+      }
+      await collectRun(entry, terminal, true);
+    }
   }
 
   private async takeoverRunning(

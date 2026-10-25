@@ -471,3 +471,9 @@
 
 - Suggested fixture level: none - 人工验收与证据记录
 - Minimal mergeable slice: atomic: 单次验收记录
+
+## Follow-up #343：历史组边界诊断（2026-10-25）
+
+- PI 评论 6397949594/6399764892 选择安全所有权与日志诊断，接受 RunRecord 不永久区分历史组静止证明；既有已勾选任务与当时的原生证据保持原样。
+- 独立 expanded fixture `orphan-recovery-diagnostic` 管理实现与验证：最终无保留控制的 R7 在成功终态后输出隔离的 stderr 诊断，不改分类/信号/通知/持久格式；保留 R8 控制跨 leader 退出不得误报。成功宿主原先没有可读 runtime logger sink，须验证实际 stderr 而不是测试 exporter 接收。
+- 工程验证：stderr 回归先 6 fail / 26 pass，补实现后 focused 33/33；完整 check 为 75 文件、1748 pass / 1 existing skip，profile smoke 通过。原生 Darwin 同宿主替换观察到后代继续 I/O、恢复信号为空、cancelled 记录和一条 R7 诊断；独立真实 Web SIGTERM/SIGKILL 重启闸均通过，五条持久 verdict 全 true。审查/CI/合并由独立 fixture 管理；这些证据不等于 PI 验收，Epic #293、#318 与本 change 保持开放。

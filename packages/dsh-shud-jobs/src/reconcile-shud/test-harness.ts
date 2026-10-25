@@ -2,10 +2,54 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
+import { expect, vi } from "vitest";
+import type { RunJob } from "@shud-harness/dsh-shud-core";
 import type { CollectFixture } from "../collect-shud/test-harness.ts";
 import { installFakeShud, observedStart, terminateGroup } from "../detached-shud/test-harness.ts";
 import { readyRun } from "../kill-shud/test-harness.ts";
 import { replaceRecord, waitForOwnershipRelease } from "../poll-shud/test-harness.ts";
+
+export interface RecoveryStderr {
+  text(): string;
+  lines(runId: string): string[];
+  restore(): void;
+}
+
+/** Capture only this test's operator-output window, never a test-only logger exporter. */
+export function captureRecoveryStderr(): RecoveryStderr {
+  let output = "";
+  const write = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    output += String(chunk);
+    if (output.length > 65536) throw new Error("Recovery stderr capture exceeded 64 KiB");
+    return true;
+  });
+  return {
+    text: () => output,
+    lines: (runId: string) =>
+      output.split(/\r?\n/u).filter((line) => line.includes(runId) && /\bR7\b/u.test(line)),
+    restore: () => write.mockRestore(),
+  };
+}
+
+export function expectUnownedRecoveryWarning(stderr: RecoveryStderr, record: RunJob) {
+  const lines = stderr.lines(record.run_id);
+  expect(lines).toHaveLength(1);
+  const line = lines[0];
+  if (line === undefined) throw new Error("Missing R7 stderr diagnostic");
+  expect(record.pid).not.toBeNull();
+  expect(record.pid_started_at).not.toBeNull();
+  expect(line).toContain(String(record.pid));
+  expect(line).toContain(record.pid_started_at);
+  expect(line).toMatch(/\bWARN\b/iu);
+  expect(line).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/u);
+  expect(line).toMatch(
+    /(?:unverified|unproven|unknown).*quiescen|quiescen.*(?:unverified|unproven|unknown)/iu,
+  );
+  expect(line).toMatch(/no signals?|not signal/iu);
+  expect(line).toMatch(/unowned|not owned/iu);
+  expect(line).toMatch(/descendants?.*(?:may|might|could)/iu);
+  expect(line).not.toContain(record.run_dir);
+}
 
 /** Retire the registration owner without terminating its genuinely running wrapper. */
 export async function stopWhileRunning(h: CollectFixture, beforeStop?: () => Promise<void>) {

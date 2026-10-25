@@ -287,7 +287,15 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 **进程时间证据**：锁与 RunJob 的稳定身份仍是固定 locale/时区的秒级 `ps lstart`（RunJob 为 ISO UTC），不改变 `pid_started_at`、`started_at` 或 R5/R7 比较。R3 的“是否早于提交”是独立的新鲜度观测：Darwin 使用已资格化的 lstart；Linux 的整数 btime/截断 ticks 可使 lstart 与 realtime 提交秒不直接可比，因此使用 `/proc/<pid>/stat` 的启动 ticks、`/proc/uptime` 和括号化 realtime 观测，结合经校验并缓存的 `getconf CLK_TCK` 推导保守出生时间界。原生量化与采样跨度显式入界，不加魔法偏移，不用文件 mtime 代替出生证据。缺失工具、不可读/非法证据、身份变化或过大不确定性均 fail closed；尤其采样跨度使判断跨越提交秒边界时保留记录并报错，不凑整为 lost 或擅自提升 running。真正的进程消失仍走退出文件二次读取规则；Linux 部署除 flock/ps 外还须有上述 proc 文件与 getconf。
 
-**仍未覆盖的边界**：当前快照与秒级 lstart 不是原子的、通用的 PID/进程组代次能力。重启前 leader 已死而后代可能仍活着时，R7 的 lost/cancelled 不证明历史组静止；不能凭持久化 pid 向裸负 pgid 发信号，该孤儿组策略待 [#343](https://github.com/DankerMu/SHUD-Harness/issues/343) 裁决。原生控制明确区分了测试场景：对真实 shell 包装进程先 SIGSTOP 再组 SIGTERM，Linux 保持匹配的 T-state leader，重启可验证 R8 在原始期限 SIGKILL 后组静止；Darwin leader 会被 SIGTERM 终止，重启实际走 R7 cancelled，抗 TERM 后代仍活着，须由测试的已知所有权显式清理。后者不是 Darwin R8/静止性证据，也不是本切片解决了 #343；平台断言不跳过、不用伪 pid/时间或生产 wrapper trap 替代原生行为。当前 `started_at` 沿用 lstart，`finished_at` 是结算观测时刻；`wall_seconds` 可能包含起点偏差、退出后未观测延迟或取消宽限，并非精确求解器时长。测量语义待 [#344](https://github.com/DankerMu/SHUD-Harness/issues/344) 裁决，本切片没有改计时公式或宣称完成真实时长精度测量。
+**孤儿组残余与 #343 的 PI 决策**：当前快照与秒级 lstart 不是原子的、通用的 PID/进程组代次能力。PI 在 [#343](https://github.com/DankerMu/SHUD-Harness/issues/343) 的 comments 6397949594 / 6399764892 选择安全所有权加明确诊断，并接受仅日志区分：重启前 recorded wrapper 身份已不再存活或匹配时，最终 R7 的 lost/cancelled 不证明历史组静止；不能凭持久化 pid 向裸负 pgid 发信号。退出文件二次读取仍优先，变为 R6 时不告警；本实例若已在 R8 建立并保留组控制，后续 leader 消失也仍受既有组静止与信号规则约束，不误报为未验证、未发信号的孤儿组。
+
+无保留恢复组控制的最终 R7 仅在终态成功发布后、collect 前输出一次带时间戳的 WARN，包含 run_id、记录的 pid/start 身份，并说明历史组静止性未验证、不向未拥有的历史组发信号、后代可能仍活着、cancelled/lost 不是组停止证明；不声称必然存在孤儿或数值 pid 已不存在。操作者从**宿主进程 stderr** 接收该诊断，不是 Web 日志面板或会话唤醒消息。专用 `shud-recovery` Cordis facade 的 exporter 仅转发该实例该 facade 的消息，按显式名称和公开 metadata 的同一个 WeakRef 过滤，随插件释放；不转发其它 facade、插件或既有错误回调的载荷，不加入运行路径、原始异常或文件内容。失败/延迟终态发布不告警，collect 失败、后续 tick 或终态重载不重复。
+
+这是诊断修复，不是孤儿清理能力：RunJob/RunRecord、通知与退出分类不变，不新增持久字段或证据文件。终态发布后、告警前崩溃，stderr 不可用或日志丢失，都可能使区分永久丢失；后续仅凭 RunRecord 不能重建历史组是否静止的证明。人工调查必须重新核实当前进程身份、组成员及控制所有权，不能依据历史 pid/pgid 直接发信号。
+
+原生控制明确区分测试场景：对真实 shell 包装进程先 SIGSTOP 再组 SIGTERM，Linux 保持匹配的 T-state leader，注册表替换可验证 R8 在原始期限 SIGKILL 后组静止且无孤儿告警；Darwin leader 会被 SIGTERM 终止，替换实际走 R7 cancelled，抗 TERM 后代仍活着并产生上述诊断，须由测试的已知所有权显式清理。后者不是 Darwin R8/静止性证据，平台断言不跳过、不用伪 pid/时间或生产 wrapper trap 替代原生行为。同一宿主内的注册表替换证明不等同完整宿主/Web 重启闸；工程验证与本项 PI 语义决策也不等同 Epic #293 / #318 的最终 PI 验收，集中验收仍待完成。
+
+**已裁决、待实现的计时语义**：当前 `started_at` 沿用 lstart，`finished_at` 是结算观测时刻；`wall_seconds` 可能包含起点偏差、退出后未观测延迟或取消宽限，并非精确求解器时长。PI 已在 [#344](https://github.com/DankerMu/SHUD-Harness/issues/344) comment 6397950076 裁决：缺少可信时长证据时记录 null，`finished_at` 保留结算观测语义，在线取消时长包含取消窗口；该决策待 #344 实现。本 #343 切片没有改计时公式或宣称完成真实时长精度测量。
 
 **初始化后的唤醒投递（#313）**：注册表可选注入 `sessionController` 与 `sessions`；缺服务时保持 pending、不消耗尝试，服务撤销后停止使用旧注入 epoch，晚到的恢复结果不能追加消息或计入失败。即使服务已存在，`Service.init` / 启动对账也绝不等待 `resolveAgent`，避免冷会话恢复等待自身插件激活；注入回调只建立可用性，初始化后的既有 cadence 才投递，不新增定时器或完成事件订阅者。
 

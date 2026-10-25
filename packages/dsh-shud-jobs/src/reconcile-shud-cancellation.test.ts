@@ -4,15 +4,18 @@ import { join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeChild from "node:child_process";
 import type * as NodeFs from "node:fs";
+import type * as NodeIo from "node:fs/promises";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry } from "./index.ts";
-import { expectAbsent, publishExit, readResult } from "./collect-shud/test-harness.ts";
-import { activeGroup } from "./detached-shud/test-harness.ts";
+import { expectAbsent, publishExit, readLedger, readResult } from "./collect-shud/test-harness.ts";
+import { activeGroup, terminateGroup } from "./detached-shud/test-harness.ts";
 import { readDurable } from "./kill-shud/test-harness.ts";
 import { pollFixture, readRecord, waitForOwnershipRelease } from "./poll-shud/test-harness.ts";
 import {
+  captureRecoveryStderr,
   closeRecovery,
   completedWithinWindow,
+  expectUnownedRecoveryWarning,
   stopWithCancellation,
   waitForRecovery,
   waitForTerm,
@@ -27,6 +30,7 @@ interface RecoveryFault {
   absentReads: number;
   replacementStamp: string;
   denyWrite: boolean;
+  collectPath: string;
   terminals: Array<{ status: RunJob["status"]; exit_code: number | null }>;
 }
 
@@ -38,6 +42,7 @@ const fault = vi.hoisted((): RecoveryFault => ({
   absentReads: 0,
   replacementStamp: "Thu Jan  1 00:00:01 1970",
   denyWrite: false,
+  collectPath: "",
   terminals: [],
 }));
 vi.mock("node:child_process", async (original) => {
@@ -79,6 +84,11 @@ vi.mock("node:fs", async (original) => {
   const actual = await original<typeof NodeFs>();
   return { ...actual, renameSync: vi.fn(actual.renameSync) };
 });
+vi.mock("node:fs/promises", async (original) => {
+  const actual = await original<typeof NodeIo>();
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
+const actualIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
 const actualFs = await vi.importActual<typeof NodeFs>("node:fs");
 const actualChild = await vi.importActual<typeof NodeChild>("node:child_process");
 const nativeKill = process.kill.bind(process);
@@ -90,6 +100,14 @@ beforeEach(() => {
   fault.absentReads = 0;
   fault.replacementStamp = "Thu Jan  1 00:00:01 1970";
   fault.denyWrite = false;
+  fault.collectPath = "";
+  vi.mocked(io.rename)
+    .mockReset()
+    .mockImplementation(async (source, target) => {
+      if (target === fault.collectPath)
+        throw Object.assign(new Error("PRIVATE_COLLECTION_FAILURE_343"), { code: "EIO" });
+      await actualIo.rename(source, target);
+    });
   fault.terminals = [];
   vi.mocked(fs.renameSync)
     .mockReset()
@@ -137,6 +155,7 @@ test.each([
   "recovered leader-first cancellation retains its original deadline with exit=$code",
   async ({ code, status, exitClass }) => {
     const h = await pollFixture();
+    const stderr = captureRecoveryStderr();
     let pid: number | undefined;
     let applying: Promise<unknown> | undefined;
     let restoreSignals: (() => void) | undefined;
@@ -175,6 +194,7 @@ test.each([
         expect(readDurable(run.record.run_dir)).toEqual(run.record);
         expect(fault.terminals).toEqual([]);
         expect(ready).toBe(false);
+        expect(stderr.lines(run.record.run_id)).toEqual([]);
       }
       vi.setSystemTime(run.requestedAt + 10000);
       await completedWithinWindow(applying);
@@ -195,7 +215,9 @@ test.each([
         exit_class: exitClass,
       });
       expect(actualRegistry(h.ctx).list()).toEqual([]);
+      expect(stderr.lines(run.record.run_id)).toEqual([]);
     } finally {
+      stderr.restore();
       fault.mode = "";
       fault.denyWrite = false;
       restoreSignals?.();
@@ -210,6 +232,7 @@ test.each(["unowned-inspection", "owned-inspection", "TERM", "KILL", "write"] as
   "recovered %s failure retains the responsibility needed for later settlement",
   async (kind) => {
     const h = await pollFixture();
+    const stderr = captureRecoveryStderr();
     let pid: number | undefined;
     let applying: Promise<unknown> | undefined;
     let restoreSignals: (() => void) | undefined;
@@ -236,6 +259,7 @@ test.each(["unowned-inspection", "owned-inspection", "TERM", "KILL", "write"] as
       expect((await io.stat(fault.path, { bigint: true })).mtimeNs).toBe(mtime);
       await expectAbsent(join(run.record.run_dir, "run-record.json"));
       expect(fault.terminals).toEqual([]);
+      expect(stderr.lines(run.record.run_id)).toEqual([]);
       fault.mode = "";
       fault.denyWrite = false;
       signals.deny();
@@ -260,6 +284,7 @@ test.each(["unowned-inspection", "owned-inspection", "TERM", "KILL", "write"] as
         expect(await io.readFile(fault.path)).toEqual(bytes);
         expect(signals.events).toEqual(priorSignals);
         expect(fault.terminals).toEqual([]);
+        expect(stderr.lines(run.record.run_id)).toEqual([]);
         fault.mode = "";
       }
       await waitForRecovery(async () => {
@@ -275,7 +300,9 @@ test.each(["unowned-inspection", "owned-inspection", "TERM", "KILL", "write"] as
       expect((await readResult(run.record.run_dir)).exit_class).toBe("cancelled");
       expect(registry.list()).toEqual([]);
       if (kind === "write") expect(signals.events).toHaveLength(2);
+      expect(stderr.lines(run.record.run_id)).toEqual([]);
     } finally {
+      stderr.restore();
       fault.mode = "";
       fault.denyWrite = false;
       restoreSignals?.();
@@ -382,5 +409,66 @@ test("recovered ownership refuses a reappearing leader even when its coarse star
     restoreSignals?.();
     vi.useRealTimers();
     await closeRecovery(h, pid, applying);
+  }
+}, 15000);
+
+test("unowned R7 warns only after terminal publication and never repeats after collection failure or reload", async () => {
+  const h = await pollFixture();
+  const stderr = captureRecoveryStderr();
+  let pid: number | undefined;
+  let restoreSignals: (() => void) | undefined;
+  try {
+    const run = await stopWithCancellation(h);
+    pid = run.pid;
+    await terminateGroup(pid);
+    await run.producer.executions[0].waitForExit();
+    await expectAbsent(join(run.record.run_dir, "exit_code"));
+    fault.pid = pid;
+    fault.path = join(run.record.run_dir, "run-job.json");
+    fault.denyWrite = true;
+    const signals = groupSignals(pid);
+    restoreSignals = signals.restore;
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+
+    const fiber = await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
+    const registry = actualRegistry(h.ctx);
+    expect(h.errors.length).toBeGreaterThan(0);
+    expect(await readRecord(run.record.run_dir)).toEqual(run.record);
+    expect(fault.terminals).toEqual([]);
+    expect(stderr.lines(run.record.run_id)).toEqual([]);
+    expect(stderr.text()).not.toContain("terminal publication denied");
+    await expectAbsent(join(run.record.run_dir, "run-record.json"));
+
+    fault.denyWrite = false;
+    fault.collectPath = join(run.record.run_dir, "run-record.json");
+    await registry.pollOnce();
+    expect(fault.terminals).toContainEqual({ status: "cancelled", exit_code: null });
+    await expectAbsent(fault.collectPath);
+    expectUnownedRecoveryWarning(stderr, run.record);
+    expect(stderr.text()).not.toContain("PRIVATE_COLLECTION_FAILURE_343");
+    const ledger = await readLedger(run.record.run_dir);
+    expect(ledger.attempts).toBe(1);
+    await registry.pollOnce();
+    expectUnownedRecoveryWarning(stderr, run.record);
+
+    fault.collectPath = "";
+    await registry.collectShud(run.record.run_id);
+    await registry.pollOnce();
+    expect((await readResult(run.record.run_dir)).exit_class).toBe("cancelled");
+    expectUnownedRecoveryWarning(stderr, run.record);
+    await fiber.dispose();
+    await waitForOwnershipRelease(h.stateDir);
+    await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
+    await actualRegistry(h.ctx).pollOnce();
+    expectUnownedRecoveryWarning(stderr, run.record);
+    expect(signals.events).toEqual([]);
+    expect(activeGroup(pid)).toEqual([]);
+  } finally {
+    stderr.restore();
+    fault.denyWrite = false;
+    fault.collectPath = "";
+    restoreSignals?.();
+    vi.useRealTimers();
+    await closeRecovery(h, pid);
   }
 }, 15000);

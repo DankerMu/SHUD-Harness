@@ -22,7 +22,12 @@ import {
   waitForOwnershipRelease,
 } from "./poll-shud/test-harness.ts";
 import { actualRegistry } from "./submit-shud/test-harness.ts";
-import { stopAtSubmitted, stopWhileRunning } from "./reconcile-shud/test-harness.ts";
+import {
+  captureRecoveryStderr,
+  expectUnownedRecoveryWarning,
+  stopAtSubmitted,
+  stopWhileRunning,
+} from "./reconcile-shud/test-harness.ts";
 import { deliveredWake, expectSingleWake } from "./wake-shud/test-harness.ts";
 
 const publication = vi.hoisted(() => ({ pid: 0, path: "", probes: 0 }));
@@ -317,6 +322,7 @@ test("submitted numeric exit still wins when its unused submission timestamp is 
 
 test("matching live running identity survives R5 registration publication at replacement readiness", async () => {
   const h = await pollFixture();
+  const stderr = captureRecoveryStderr();
   let restoreSignals: (() => void) | undefined;
   try {
     const { record, pid, invocation } = await stopWhileRunning(h);
@@ -357,7 +363,9 @@ test("matching live running identity survives R5 registration publication at rep
     expect(replacement.list().map((job) => job.id)).toEqual([adopted.id]);
     await expectAbsent(join(record.run_dir, "run-record.json"));
     await expectAbsent(join(record.run_dir, "exit_code"));
+    expect(stderr.lines(record.run_id)).toEqual([]);
   } finally {
+    stderr.restore();
     restoreSignals?.();
     try {
       await h.close();
@@ -374,6 +382,7 @@ test.each([
   "running exit %s during downtime is collected as %s before replacement readiness",
   async (code, exitClass) => {
     const h = await pollFixture(code);
+    const stderr = captureRecoveryStderr();
     try {
       const { record, producer } = await stopWhileRunning(h);
       await releaseRun(record);
@@ -420,7 +429,9 @@ test.each([
       expect(await io.readFile(resultPath)).toEqual(resultBytes);
       expect((await io.stat(resultPath, { bigint: true })).mtimeNs).toBe(resultMtime);
       expect(await io.readFile(invocationPath)).toEqual(receipt);
+      expect(stderr.lines(record.run_id)).toEqual([]);
     } finally {
+      stderr.restore();
       try {
         await h.close();
       } finally {
@@ -440,6 +451,7 @@ test.each([
   "running $identity identity with cancellation=$cancelled is collected as $exitClass without signals",
   async ({ identity, cancelled, exitClass }) => {
     const h = await pollFixture();
+    const stderr = captureRecoveryStderr();
     let restoreSignals: (() => void) | undefined;
     try {
       const { record, pid, invocation, producer } = await stopWhileRunning(h);
@@ -458,7 +470,7 @@ test.each([
       restoreSignals = signals.restore;
       vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 
-      await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
+      const fiber = await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
       expect(await readResult(record.run_dir)).toMatchObject({
         run_id: record.run_id,
         job_id: record.job_id,
@@ -477,7 +489,28 @@ test.each([
         expect(activeGroup(pid)).toContain(pid);
         expect(activeGroup(pid)).toContain(invocation.pid);
       } else expect(activeGroup(pid)).toEqual([]);
+      expectUnownedRecoveryWarning(stderr, checkpoint);
+      const replacement = actualRegistry(h.ctx);
+      const otherFacade = fiber.ctx.logger("shud-recovery");
+      otherFacade.level = 2;
+      otherFacade.warn("PRIVATE_SAME_NAME_OTHER_FACADE_343");
+      const unrelated = h.ctx.logger("unrelated-recovery-test");
+      unrelated.level = 2;
+      unrelated.warn("PRIVATE_UNRELATED_WARNING_343");
+      unrelated.error(new Error("PRIVATE_UNRELATED_ERROR_343"));
+      expect(stderr.text()).not.toContain("PRIVATE_");
+      await replacement.pollOnce();
+      await replacement.collectShud(record.run_id);
+      expectUnownedRecoveryWarning(stderr, checkpoint);
+      await fiber.dispose();
+      await waitForOwnershipRelease(h.stateDir);
+      otherFacade.warn("PRIVATE_DISPOSED_FACADE_343");
+      expect(stderr.text()).not.toContain("PRIVATE_");
+      await h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
+      await actualRegistry(h.ctx).pollOnce();
+      expectUnownedRecoveryWarning(stderr, checkpoint);
     } finally {
+      stderr.restore();
       restoreSignals?.();
       try {
         await h.close();
@@ -491,6 +524,7 @@ test.each([
 
 test("running exit 19 published during the non-live probe beats cancellation at readiness", async () => {
   const h = await pollFixture();
+  const stderr = captureRecoveryStderr();
   let restoreSignals: (() => void) | undefined;
   try {
     const { record, pid, producer } = await stopWhileRunning(h);
@@ -522,7 +556,9 @@ test("running exit 19 published during the non-live probe beats cancellation at 
     expect(collected.notify).toEqual(checkpoint.notify);
     expect(actualRegistry(h.ctx).list()).toEqual([]);
     expect(signals.events).toEqual([]);
+    expect(stderr.lines(record.run_id)).toEqual([]);
   } finally {
+    stderr.restore();
     publication.path = "";
     restoreSignals?.();
     try {
@@ -535,6 +571,7 @@ test("running exit 19 published during the non-live probe beats cancellation at 
 
 test("expired recovered cancellation kills the resistant group before replacement readiness without new grace", async () => {
   const h = await pollFixture();
+  const stderr = captureRecoveryStderr();
   let restoreSignals: (() => void) | undefined;
   try {
     await installFakeShud(h.shudBin, 0, "resistant");
@@ -577,7 +614,9 @@ test("expired recovered cancellation kills the resistant group before replacemen
     expect(actualRegistry(h.ctx).list()).toEqual([]);
     expect(await io.readFile(invocationPath)).toEqual(receipt);
     expect((await io.stat(invocationPath, { bigint: true })).mtimeNs).toBe(receiptMtime);
+    expect(stderr.lines(record.run_id)).toEqual([]);
   } finally {
+    stderr.restore();
     restoreSignals?.();
     try {
       await h.close();
@@ -589,6 +628,7 @@ test("expired recovered cancellation kills the resistant group before replacemen
 
 test("replacement recovers a live submitted wrapper with the untouched real submission timestamp", async () => {
   const h = await pollFixture();
+  const stderr = captureRecoveryStderr();
   let restoreSignals: (() => void) | undefined;
   try {
     const { record, submitted, pid, invocation, stamp } = await stopAtSubmitted(h);
@@ -620,7 +660,9 @@ test("replacement recovers a live submitted wrapper with the untouched real subm
     expect(signals.events).toEqual([]);
     expect(replacement.list().map((job) => job.id)).toEqual([adopted.id]);
     await expectAbsent(join(record.run_dir, "run-record.json"));
+    expect(stderr.lines(record.run_id)).toEqual([]);
   } finally {
+    stderr.restore();
     restoreSignals?.();
     try {
       await h.close();

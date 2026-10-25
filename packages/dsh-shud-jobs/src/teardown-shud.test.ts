@@ -22,7 +22,9 @@ import {
   waitForOwnershipRelease,
 } from "./poll-shud/test-harness.ts";
 import {
+  captureRecoveryStderr,
   completedWithinWindow,
+  expectUnownedRecoveryWarning,
   waitForRecovery,
   waitForTerm,
 } from "./reconcile-shud/test-harness.ts";
@@ -154,6 +156,7 @@ test("plain registry disposal synchronously fails its own SHUD registration with
 
 test("kill-grace disposal resends TERM before startup cancellation: Linux R8 and Darwin R7", async () => {
   const h = await submissionFixture();
+  const stderr = captureRecoveryStderr();
   const resource = registrationResource();
   let execution: ShudExecution | undefined;
   let disposing: Promise<void> | undefined;
@@ -321,6 +324,7 @@ test("kill-grace disposal resends TERM before startup cancellation: Linux R8 and
         { pid: -pid, signal: "SIGKILL" },
       ]);
       expect(activeGroup(pid)).toEqual([]);
+      expect(stderr.lines(record.run_id)).toEqual([]);
     } else {
       expect(process.platform).toBe("darwin");
       recovering = h.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
@@ -334,6 +338,7 @@ test("kill-grace disposal resends TERM before startup cancellation: Linux R8 and
         { pid: -pid, signal: "SIGTERM" },
         { pid: -pid, signal: "SIGTERM" },
       ]);
+      expectUnownedRecoveryWarning(stderr, intent);
     }
     expect(await readRecord(record.run_dir)).toMatchObject({
       status: "collected",
@@ -349,6 +354,7 @@ test("kill-grace disposal resends TERM before startup cancellation: Linux R8 and
     expect(h.sessionEvents).toEqual([]);
     expect(h.flushes).toEqual([]);
   } finally {
+    stderr.restore();
     restoreSignals?.();
     unsubscribe?.();
     try {
