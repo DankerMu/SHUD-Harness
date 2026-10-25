@@ -82,7 +82,7 @@ vi.mock("node:child_process", async (original) => {
 });
 vi.mock("node:fs", async (original) => {
   const actual = await original<typeof NodeFs>();
-  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+  return { ...actual, renameSync: vi.fn(actual.renameSync), write: vi.fn(actual.write) };
 });
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();

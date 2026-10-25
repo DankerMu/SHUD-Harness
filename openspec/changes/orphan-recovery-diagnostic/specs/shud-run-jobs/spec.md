@@ -26,6 +26,12 @@ After R7 terminal settlement without retained recovered group control, the runti
 - **THEN** the instance's diagnostic sink does not forward those messages
 - **AND** a replacement plugin emits its own eligible R7 diagnostic exactly once to stderr
 
+#### Scenario: Operator diagnostic output is unavailable
+
+- **WHEN** stderr has a closed pipe reader or closed descriptor when an eligible diagnostic is emitted
+- **THEN** that diagnostic may be lost, but its write failure SHALL NOT terminate the host or interrupt settlement and collection
+- **AND** failure handling SHALL own only that write, without a shared-stream error listener, retry or fallback output channel
+
 #### Scenario: Durable record is read after the diagnostic window
 
 - **WHEN** logs were lost or a crash occurred between terminal publication and warning

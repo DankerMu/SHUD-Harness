@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
+import type * as NodeFs from "node:fs";
 import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import type { JobEvent, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { KILL_GRACE_PERIOD_MS } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry, startDetachedShud, type ShudExecution } from "./index.ts";
@@ -33,6 +34,11 @@ import {
   registrationResource,
   submissionFixture,
 } from "./submit-shud/test-harness.ts";
+
+vi.mock("node:fs", async (original) => {
+  const actual = await original<typeof NodeFs>();
+  return { ...actual, write: vi.fn(actual.write) };
+});
 
 test("plain registry disposal synchronously fails its own SHUD registration without stopping execution", async () => {
   const h = await submissionFixture();

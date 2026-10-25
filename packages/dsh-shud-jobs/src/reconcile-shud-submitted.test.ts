@@ -3,6 +3,7 @@ import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeChild from "node:child_process";
+import type * as NodeFs from "node:fs";
 import { KILL_GRACE_PERIOD_MS } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry } from "./index.ts";
 import { expectAbsent, readResult } from "./collect-shud/test-harness.ts";
@@ -29,6 +30,11 @@ import {
   stopWhileRunning,
 } from "./reconcile-shud/test-harness.ts";
 import { deliveredWake, expectSingleWake } from "./wake-shud/test-harness.ts";
+
+vi.mock("node:fs", async (original) => {
+  const actual = await original<typeof NodeFs>();
+  return { ...actual, write: vi.fn(actual.write) };
+});
 
 const publication = vi.hoisted(() => ({ pid: 0, path: "", probes: 0 }));
 vi.mock("node:child_process", async (original) => {

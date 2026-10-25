@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -9,6 +10,8 @@ import { installFakeShud, observedStart, terminateGroup } from "../detached-shud
 import { readyRun } from "../kill-shud/test-harness.ts";
 import { replaceRecord, waitForOwnershipRelease } from "../poll-shud/test-harness.ts";
 
+const actualFs = await vi.importActual<typeof fs>("node:fs");
+
 export interface RecoveryStderr {
   text(): string;
   lines(runId: string): string[];
@@ -18,16 +21,21 @@ export interface RecoveryStderr {
 /** Capture only this test's operator-output window, never a test-only logger exporter. */
 export function captureRecoveryStderr(): RecoveryStderr {
   let output = "";
-  const write = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
-    output += String(chunk);
+  const write = vi.mocked(fs.write).mockImplementation((...args) => {
+    const [fd, chunk, callback] = args;
+    if (fd !== process.stderr.fd || typeof chunk !== "string" || typeof callback !== "function")
+      return actualFs.write(...args);
+    output += chunk;
     if (output.length > 65536) throw new Error("Recovery stderr capture exceeded 64 KiB");
-    return true;
+    queueMicrotask(() => callback(null, Buffer.byteLength(chunk), chunk));
   });
   return {
     text: () => output,
     lines: (runId: string) =>
       output.split(/\r?\n/u).filter((line) => line.includes(runId) && /\bR7\b/u.test(line)),
-    restore: () => write.mockRestore(),
+    restore: () => {
+      write.mockReset().mockImplementation(actualFs.write);
+    },
   };
 }
 
