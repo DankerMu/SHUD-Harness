@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { inspect } from "node:util";
 
-const diagnostics = new WeakSet<Error>();
+const diagnostics = new WeakMap<Error, ReadonlySet<number>>();
 const TEXT_LIMIT = 32768;
 
 function bounded(text: string): string {
@@ -56,12 +56,8 @@ function describeFailures(failures: readonly unknown[]): string {
   return bounded(lines.join("\n"));
 }
 
-function processSnapshot(pids: Iterable<number>): string {
-  const known = new Set(pids);
-  const identity = known.size
-    ? [...known].map((pid) => `pid=${pid} pgid=${pid}`).join("; ")
-    : "identity unknown";
-  const heading = `Native cleanup context: ${identity}\nps pid pgid stat`;
+function processSnapshot(known: ReadonlySet<number>, context: string): string {
+  const heading = `${context}\nps pid pgid stat`;
   try {
     const result = spawnSync("ps", ["-axo", "pid=,pgid=,stat="], {
       encoding: "utf8",
@@ -89,12 +85,30 @@ function processSnapshot(pids: Iterable<number>): string {
 
 /** Capture at the catch boundary, before a collecting surface attempts its next release. */
 export function captureCleanupFailure(error: unknown, pids: Iterable<number> = []): Error {
-  if (error instanceof Error && diagnostics.has(error)) return error;
-  const captured = new Error(`${describeFailures([error])}\n${processSnapshot(pids)}`, {
-    // Keep cyclic original causes behind an aggregate member, not the reporter's cause chain.
-    cause: new AggregateError([error], "Captured cleanup failure"),
-  });
-  diagnostics.add(captured);
+  const previous = error instanceof Error ? diagnostics.get(error) : undefined;
+  const known = new Set(previous);
+  for (const pid of pids) known.add(pid);
+  if (error instanceof Error && previous && previous.size === known.size) return error;
+  const identity = known.size
+    ? [...known].map((pid) => `pid=${pid} pgid=${pid}`).join("; ")
+    : "identity unknown";
+  if (error instanceof Error && previous) {
+    // Enclosing attribution is new evidence, not a new observation of process state.
+    const enriched = new Error(
+      `Enclosing cleanup attribution: ${identity}\nOriginal capture-layer diagnostic (snapshot unchanged):\n${error.message}`,
+      { cause: new AggregateError([error], "Earlier cleanup diagnostic") },
+    );
+    diagnostics.set(enriched, known);
+    return enriched;
+  }
+  const captured = new Error(
+    `${describeFailures([error])}\n${processSnapshot(known, `Native cleanup capture-layer context: ${identity}`)}`,
+    {
+      // Keep cyclic original causes behind an aggregate member, not the reporter's cause chain.
+      cause: new AggregateError([error], "Captured cleanup failure"),
+    },
+  );
+  diagnostics.set(captured, known);
   return captured;
 }
 
@@ -103,7 +117,13 @@ export function cleanupDiagnostic(message: string, failures: readonly unknown[])
   const error = new Error(`${message}\n${describeFailures(failures)}`, {
     cause: new AggregateError(failures, message),
   });
-  diagnostics.add(error);
+  const known = new Set<number>();
+  for (const failure of failures) {
+    if (failure instanceof Error) {
+      for (const pid of diagnostics.get(failure) ?? []) known.add(pid);
+    }
+  }
+  diagnostics.set(error, known);
   return error;
 }
 

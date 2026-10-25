@@ -3,13 +3,13 @@
 ## 1. Failure evidence boundary
 
 - [x] 1.1 Parent observed semantic RED (missing inner message) alongside 8 existing native fault tests passing, plus actual default-reporter nested abort probe omitting the inner sentinel. Source/receipts/output retained locally; no missing-module failure.
-- [x] 1.2 Shared test-only diagnostics now cover detached/submission/poll wrappers; focused 29/29 pass for nested/multiple/cause/non-Error/cycle evidence, unavailable snapshot preservation, no success snapshot and each existing stop/continue boundary.
+- [x] 1.2 Shared diagnostics retain nested/non-Error/cycle/stop-boundary proof. Review C1 fixed: enclosing identities enrich an already-captured diagnostic without resampling or changing its snapshot/references; actual cleanupResources composition regression and direct-node counterexample pass. Focused 31/31 pass; real cyclic default-reporter probe terminates with original evidence.
 - [x] 1.3 Immediate pending/body observation now spans both early fault-test stops; native tests prove combined evidence, same-object body-only error, unchanged order and no later release after existing early stop failures.
 - [x] 1.4 Actual default-reporter injection now exposes all five sentinels, real stack and receipt-matching pid/pgid/ps. Final candidate source digests and output retained, temporary probes removed; Testing_Strategy records use and historical non-claims. Finite deep-cause probe confirms original cause remains visible despite bounded summaries.
 
 ## 2. Regression and delivery
 
-- [ ] 2.1 Parent runs focused diagnostic/lifecycle regressions, full pnpm run check (including coverage/dup), strict fixture validation and exact-head CI; production proof files and shared defaults unchanged.
+- [ ] 2.1 Focused regressions and full pnpm run check pass after interval-only isolation of cleanup completion (74 files, 1738 passed/1 existing skip); native execution and pump timeouts remain real. Prior failure logs retained; unrelated #352 site 1 reproduced and recorded without modifying its tests. Strict fixture validation and exact-head CI remain delivery gates; production proof files/shared defaults unchanged.
 - [ ] 2.2 Expanded independent review passes, merge/close #349 on delivered diagnostic criteria and archive only this fixture; do not claim historical trace-free failures solved or M2 PI accepted.
 
 ## Risk packs

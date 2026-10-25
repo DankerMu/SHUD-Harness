@@ -29,7 +29,6 @@ vi.mock("node:child_process", async (original) => {
 test.each(["detached", "submission", "settlement"])(
   "%s cleanup exposes nested abort evidence and finishes registration after abort",
   async (surface) => {
-    const h = await pollFixture();
     const producer =
       surface === "detached"
         ? detachedProducer()
@@ -40,6 +39,12 @@ test.each(["detached", "submission", "settlement"])(
     let native: ShudExecution | undefined;
     let originalAbort: ShudExecution["abort"] | undefined;
     let pid: number | undefined;
+    // Isolate cleanup completion from normal settlement; native work and Date stay real.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const h = await pollFixture().catch((error: unknown) => {
+      vi.useRealTimers();
+      throw error;
+    });
     try {
       const record = await h.registry.submitShud(h.request, (...args) => {
         native = producer.start(...args);
@@ -74,22 +79,31 @@ test.each(["detached", "submission", "settlement"])(
       expect(failure.message).toContain("ps pid pgid stat");
       expect(activeGroup(pid)).toEqual([]);
     } finally {
-      if (native && originalAbort) native.abort = originalAbort;
-      if (pid !== undefined) await terminateGroup(pid);
-      await cleanupResources([finish, () => h.close()]);
+      try {
+        if (native && originalAbort) native.abort = originalAbort;
+        if (pid !== undefined) await terminateGroup(pid);
+        await cleanupResources([finish, () => h.close()]);
+      } finally {
+        vi.useRealTimers();
+      }
     }
   },
   15000,
 );
 
 test("poll close retains a failed group check, continues abort/done, then disposes ownership", async () => {
-  const h = await pollFixture();
-  const { producer, pending } = h.start();
   let originalAbort: ShudExecution["abort"] | undefined;
   let native: ShudExecution | undefined;
   let pid: number | undefined;
   let closed = false;
+  // The completion assertion belongs to close(), not the normal settlement interval.
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const h = await pollFixture().catch((error: unknown) => {
+    vi.useRealTimers();
+    throw error;
+  });
   try {
+    const { producer, pending } = h.start();
     const record = await pending;
     if (record.pid === null) throw new Error("No polling fixture identity");
     pid = record.pid;
@@ -118,9 +132,13 @@ test("poll close retains a failed group check, continues abort/done, then dispos
     await expect(access(h.root)).rejects.toMatchObject({ code: "ENOENT" });
     closed = true;
   } finally {
-    fault.groupInspection = false;
-    if (native && originalAbort) native.abort = originalAbort;
-    if (pid !== undefined) await terminateGroup(pid);
-    if (!closed) await h.close();
+    try {
+      fault.groupInspection = false;
+      if (native && originalAbort) native.abort = originalAbort;
+      if (pid !== undefined) await terminateGroup(pid);
+      if (!closed) await h.close();
+    } finally {
+      vi.useRealTimers();
+    }
   }
 }, 15000);

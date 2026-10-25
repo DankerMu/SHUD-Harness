@@ -102,12 +102,8 @@ test("failure capture reports real snapshot fields and retains cyclic and non-Er
   expect(failure.message).toContain("undefined");
   expect(failure.message).toContain("pid=4242 pgid=4242");
   expect(failure.message).toContain("4242 4242 S");
-  expect(childProcess.spawnSync).toHaveBeenCalledExactlyOnceWith(
-    "ps",
-    ["-axo", "pid=,pgid=,stat="],
-    expect.objectContaining({ timeout: 1000, maxBuffer: 1024 * 1024, encoding: "utf8" }),
-  );
   expect(captureCleanupFailure(failure)).toBe(failure);
+  expect(captureCleanupFailure(failure, [4242])).toBe(failure);
   expect(childProcess.spawnSync).toHaveBeenCalledTimes(1);
 });
 
@@ -157,6 +153,93 @@ test("snapshot is captured before the next cleanup action changes process state"
   expect(errorEvidence(failure)).toContain("4242 4242 S");
   expect(errorEvidence(failure)).not.toContain("5151 5151 Z");
   expect(retainedFailures(failure).has(original)).toBe(true);
+});
+
+test("enclosing known identities survive a disposal failure without recapturing process state", async () => {
+  const disposal = new Error("dispose failed: identity unknown in original error text");
+  const order: string[] = [];
+  let firstCapture: Error | undefined;
+  let firstMessage: string | undefined;
+  let firstStack: string | undefined;
+  const failure: unknown = await preserveCleanupErrors(
+    () => Promise.resolve(),
+    async () => {
+      try {
+        await cleanupResources([
+          () => {
+            order.push("execution");
+            return Promise.resolve();
+          },
+          () => {
+            order.push("dispose");
+            return Promise.reject(disposal);
+          },
+          () => {
+            order.push("later release");
+            vi.mocked(childProcess.spawnSync).mockReturnValue({
+              pid: 0,
+              output: [],
+              stdout: "5151 5151 Z\n",
+              stderr: "",
+              status: 0,
+              signal: null,
+            });
+            return Promise.resolve();
+          },
+        ]);
+      } catch (error) {
+        if (!(error instanceof Error)) throw error;
+        firstCapture = error;
+        firstMessage = error.message;
+        firstStack = error.stack;
+        throw error;
+      }
+    },
+    () => [4242],
+  ).catch((error: unknown) => error);
+  expect(order).toEqual(["execution", "dispose", "later release"]);
+  if (!(failure instanceof Error) || !firstCapture) throw new Error("Missing disposal diagnostic");
+  expect(failure.message).toContain("Enclosing cleanup attribution: pid=4242 pgid=4242");
+  expect(failure.message).toContain("Original capture-layer diagnostic (snapshot unchanged)");
+  expect(failure.message).toContain("ps pid pgid stat\n4242 4242 S");
+  expect(failure.message).not.toContain("5151 5151 Z");
+  expect(failure.message).toContain(disposal.message);
+  expect(failure.message).toContain(firstMessage);
+  expect(firstCapture.message).toBe(firstMessage);
+  expect(firstCapture.stack).toBe(firstStack);
+  expect(firstCapture.message).toContain("capture-layer context: identity unknown");
+  const retained = retainedFailures(failure);
+  expect(retained.has(disposal)).toBe(true);
+  expect(retained.has(firstCapture)).toBe(true);
+  expect(captureCleanupFailure(failure)).toBe(failure);
+  expect(captureCleanupFailure(failure, [4242])).toBe(failure);
+  expect(childProcess.spawnSync).toHaveBeenCalledTimes(1);
+});
+
+test("unknown and known-first captures retain attribution across composition and recapture", () => {
+  const original = new Error("original capture");
+  const unknown = captureCleanupFailure(original);
+  expect(unknown.message).toContain("capture-layer context: identity unknown");
+  expect(captureCleanupFailure(unknown)).toBe(unknown);
+  const attributed = captureCleanupFailure(unknown, [4242]);
+  expect(attributed.message).toContain(unknown.message);
+  expect(attributed.message).toContain("Enclosing cleanup attribution: pid=4242 pgid=4242");
+  const composed = cleanupDiagnostic("composed cleanup", [attributed]);
+  expect(captureCleanupFailure(composed, [4242, 4242])).toBe(composed);
+  const extended = captureCleanupFailure(composed, [5151]);
+  expect(extended.message).toContain("pid=4242 pgid=4242; pid=5151 pgid=5151");
+  expect(extended.message).toContain(composed.message);
+  expect(captureCleanupFailure(extended, [4242, 5151])).toBe(extended);
+  expect(retainedFailures(extended).has(original)).toBe(true);
+  expect(childProcess.spawnSync).toHaveBeenCalledTimes(1);
+
+  const knownFirst = captureCleanupFailure(original, [4242]);
+  const knownComposed = cleanupDiagnostic("known-first cleanup", [knownFirst]);
+  expect(knownComposed.message).toContain("pid=4242 pgid=4242");
+  expect(knownComposed.message).not.toContain("identity unknown");
+  expect(captureCleanupFailure(knownComposed)).toBe(knownComposed);
+  expect(captureCleanupFailure(knownComposed, [4242])).toBe(knownComposed);
+  expect(childProcess.spawnSync).toHaveBeenCalledTimes(2);
 });
 
 test("bounded diagnostics retain original oversized and deeply nested failures", () => {
