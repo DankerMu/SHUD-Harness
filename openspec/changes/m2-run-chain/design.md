@@ -143,6 +143,12 @@ collect 失败（`exit_code` 不可读或非整数、产物目录不可读、Run
 | R11 | `collected` | `notify.status: pending` | 只补投递唤醒（followup → flush 后才置 `delivered`） |
 | R12 | 任一 | `notify.status` 为 `delivered`/`unreachable` | 补写 `completed.json` 并移出 `active.json` |
 
+R7 的 `cancelled` / `lost` 不证明历史进程组已静止。按 #343 的 PI 裁决，最终仍为 R7、且本实例没有已保留的恢复组控制时，在成功终态发布后、collect 前，经本实例专用 Cordis logger 的隔离 exporter 向宿主 stderr 输出诊断：run_id、记录的 pid/start、记录身份已不存活或不匹配、历史组静止未证实、未向无所有权的历史组发信号，后代可能仍存活。退出文件重读转 R6、结算失败或延期均不输出；已有 R8 控制因故障跨越 leader 退出后仍按原静止/信号规则推进，不误报为无控制。后续 collect/终态恢复不重复输出。新出口不转发其它 facade/插件/既有错误载荷，随插件 effect 释放。
+
+该区别仅在日志中，不新增持久字段或证据文件、不改通知；终态发布至日志输出之间崩溃、stderr 不可用或日志丢失后，RunRecord 不能永久区分历史组未证实与已静止取消。PI 已接受这一限制；运维须结合原始进程身份调查，不能依据历史 pid/pgid 裸发信号。stderr 不是 Web 日志面板，工程验证不等于 #318 的集中 PI 验收。
+
+诊断通过单次异步 stderr fd 写入输出；该次写入的 callback 独立接收失败，不安装共享 stream 错误监听器、不重试或切换输出渠道。stderr 管道/描述符关闭可丢失本条日志，但不能因此终止宿主或中断结算、collect；其它诊断仍按自身边界处理。
+
 `running` 总与 `pid`/`pid_started_at` 同次写入（schema 强制），故不存在 pid 为 `null` 的 `running`；pid 未知的窗口由 `submitted` 加 `wrapper.pid` 覆盖。对账不含任何重新入队行：没有排队状态，`created`/`submitted` 从不重新 spawn（防止同一运行目录出现第二个 SHUD）。对账在每个条目上幂等，重复执行不产生第二份 RunRecord。结算、collect、`notify` 状态与接管登记都在 apply 时执行；投递按 D7 的就绪规则在 `sessionController` 与 `sessions` 可用后开始，此前 `notify.status` 保持 `pending`。
 
 接管的 dsh 重新登记：R3/R5 作业在 apply 时即以 D1 的瞬时全局控制器、无 owner、相同 label 经父类 `start` 登记，新 `dsh_job_id` 写入 `run-job.json` 并追加到 `dsh_job_ids`；不等待 `tool-jobs`。登记失败不影响轮询循环、collect 与唤醒。

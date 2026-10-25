@@ -234,6 +234,10 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 - R12 `notify.status` 为 `delivered` 或 `unreachable` → 写入完成索引并移出活动索引。
 对账 SHALL NOT 重新 spawn 任何作业，SHALL NOT 含重新入队的情形。对账 SHALL 在每个条目上幂等，重复执行不产生第二份 RunRecord。结算、collect、`notify` 状态与接管登记 SHALL 在 apply 时执行，不依赖 `tool-jobs` 或 `sessionController`；唤醒按「At-least-once wake」的就绪规则投递，此前 `notify.status` 保持 `pending`。
 
+最终 R7 且本实例无已保留恢复组控制时，成功终态发布后、collect 前 SHALL 向宿主 stderr 输出本实例专用恢复诊断，包含 run_id、记录的 pid/start、历史组静止未证实且不向无所有权历史组发信号；`cancelled` / `lost` SHALL NOT 被解释为所有后代停止。出口 SHALL 隔离其它 facade/插件与任意错误载荷，并随插件 effect 释放。R6 重读胜出、结算失败/延期或仍有已证明 R8 控制时 SHALL NOT 误报；后续 collect/终态恢复 SHALL NOT 重复该诊断。此区别为日志限定，SHALL NOT 新增持久字段/文件或改变通知；文档 SHALL 说明终态至日志间崩溃、stderr/日志丢失后 RunRecord 无法永久保留该区分。
+
+stderr 管道或描述符关闭时，诊断写入失败 SHALL 仅造成该条日志丢失，SHALL NOT 终止宿主或中断结算、collect；错误处理 SHALL 仅拥有该次写入，不安装共享 stream 错误监听器，不增加重试或替代输出渠道。
+
 #### Scenario: created never started
 - **WHEN** `run-job.json` 为 `created`（宿主在登记前退出），随后 dsh 启动
 - **THEN** 生成 `exit_class: lost` 的 RunRecord，运行目录中从未出现 SHUD 进程

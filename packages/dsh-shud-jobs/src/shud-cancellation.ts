@@ -57,6 +57,10 @@ export class ShudCancellation {
     return this.runs.has(runId);
   }
 
+  hasRecoveredControl(runId: RunId): boolean {
+    return this.recovered.has(runId);
+  }
+
   runId(id: JobId): RunId {
     return this.requireRegistration(id).entry.run_id;
   }
