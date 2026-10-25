@@ -6,6 +6,7 @@ import { inspect } from "node:util";
 import type { JobHandle, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { generateRunIdentifiers, RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry, startDetachedShud, type ShudExecution } from "../index.ts";
+import { captureCleanupFailure, cleanupDiagnostic } from "../cleanup-diagnostics.ts";
 import {
   actualRegistry,
   registrationResource,
@@ -121,24 +122,30 @@ export function settlingProducer(
     },
     async cleanup() {
       const failures: unknown[] = [];
+      const identities = new Set<number>();
       for (const execution of executions) {
         const identity = await execution.started.catch(() => undefined);
         if (identity) {
+          identities.add(identity.pid);
           try {
             await terminateGroup(identity.pid);
           } catch (error) {
-            failures.push(error);
+            failures.push(captureCleanupFailure(error, [identity.pid]));
           }
         }
         try {
           await execution.abort();
         } catch (error) {
-          failures.push(error);
+          failures.push(captureCleanupFailure(error, identity ? [identity.pid] : []));
         }
       }
-      registration.finish();
-      await doneObserved;
-      if (failures.length) throw new AggregateError(failures, "Settlement fixture cleanup failed");
+      try {
+        registration.finish();
+        await doneObserved;
+      } catch (error) {
+        failures.push(captureCleanupFailure(error, identities));
+      }
+      if (failures.length) throw cleanupDiagnostic("Settlement fixture cleanup failed", failures);
     },
   };
 }
@@ -179,12 +186,15 @@ export async function pollFixture(
       async close() {
         const failures: unknown[] = [];
         // Callers release their held filesystem barriers before this cleanup.
-        await Promise.allSettled(submissions);
+        const settled = await Promise.allSettled(submissions);
+        const identities = settled.flatMap((result) =>
+          result.status === "fulfilled" && result.value.pid !== null ? [result.value.pid] : [],
+        );
         for (const producer of producers) {
           try {
             await producer.cleanup();
           } catch (error) {
-            failures.push(error);
+            failures.push(captureCleanupFailure(error, identities));
           }
         }
         try {
@@ -192,9 +202,9 @@ export async function pollFixture(
           await waitForOwnershipRelease(h.stateDir);
           await h.dispose();
         } catch (error) {
-          failures.push(error);
+          failures.push(captureCleanupFailure(error, identities));
         }
-        if (failures.length) throw new AggregateError(failures, "Polling fixture cleanup failed");
+        if (failures.length) throw cleanupDiagnostic("Polling fixture cleanup failed", failures);
       },
     };
   } catch (error) {

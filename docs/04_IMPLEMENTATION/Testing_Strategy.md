@@ -71,6 +71,10 @@ MVP 推荐两个 fixture：
 | dummy runner | 快速测试 job/collect/report，不依赖 SHUD |
 | ccw tiny | 测试真实 SHUD/rSHUD 闭环 |
 
+M2 原生进程 fixture 的清理失败由共享测试诊断入口保留嵌套 `AggregateError.errors`、`Error.cause`、message/stack 与原错误引用，并在失败边界采集已知 pid/pgid 和 `ps` 的 pid/pgid/stat；不采集命令行、环境变量或 raw 内容。摘要有界且截断明确，原始错误仍经 cause 保留；快照不可得不会覆盖原错误，成功路径不新增诊断快照。默认 Vitest reporter 即可看到原因，无需自定义 reporter。
+
+诊断不得重排清理或改变各面的 stop/continue 语义：detached 与 fault 用例已有的早期静止失败仍停止后续释放，原本收集错误后继续的 polling/cleanupResources 保持原样。body 或已观察的 pending 拒绝与 finally 清理失败同时可见；仅 body 失败时保留同一错误对象。#349 已捕获复现的成因是测试启动身份注入范围过宽，PR #351 已将其改为一次性；更早无 trace 的失败及其与 #313 的因果关系仍未知，不将后续通过称为消除所有间歇失败。此诊断修复不改生产 abort/所有权证明或共享 fixture 默认值。
+
 ccw tiny 验收：
 
 - SHUD 编译成功；

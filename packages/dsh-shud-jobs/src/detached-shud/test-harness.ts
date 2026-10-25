@@ -10,6 +10,7 @@ import * as jobs from "../index.ts";
 import type { SubmitShudRequest } from "../index.ts";
 import { createHarness, installScriptFixture } from "../test-harness.ts";
 import { actualRegistry, registrationResource } from "../submit-shud/test-harness.ts";
+import { captureCleanupFailure, cleanupDiagnostic } from "../cleanup-diagnostics.ts";
 
 const HOST_ARGUMENT = "--detached-shud-host";
 const WAIT_MS = 5000;
@@ -289,18 +290,30 @@ export function detachedProducer(onCancel?: () => void) {
     async cleanup() {
       // Independently kill known owned groups even if the implementation's abort is defective.
       await Promise.allSettled(starts);
-      for (const pid of groups) await terminateGroup(pid);
+      for (const pid of groups) {
+        try {
+          await terminateGroup(pid);
+        } catch (error) {
+          throw cleanupDiagnostic("Detached test group cleanup failed", [
+            captureCleanupFailure(error, groups),
+          ]);
+        }
+      }
       const failures: unknown[] = [];
       for (const execution of owned) {
         try {
           await execution.abort();
         } catch (error) {
-          failures.push(error);
+          failures.push(captureCleanupFailure(error, groups));
         }
       }
-      registration.finish();
+      try {
+        registration.finish();
+      } catch (error) {
+        failures.push(captureCleanupFailure(error, groups));
+      }
       if (failures.length)
-        throw new AggregateError(failures, "Detached test execution cleanup failed");
+        throw cleanupDiagnostic("Detached test execution cleanup failed", failures);
     },
   };
 }
@@ -314,10 +327,10 @@ export async function cleanupResources(
     try {
       await action();
     } catch (error) {
-      failures.push(error);
+      failures.push(captureCleanupFailure(error));
     }
   }
-  if (failures.length > 0) throw new AggregateError(failures, "Detached fixture cleanup failed");
+  if (failures.length > 0) throw cleanupDiagnostic("Detached fixture cleanup failed", failures);
 }
 
 export interface WrapperHost {
