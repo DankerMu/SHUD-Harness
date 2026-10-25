@@ -7,6 +7,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -155,14 +156,10 @@ jobs:
     needs: [lint, test, docs-gate, secrets, sast, pr-size, profile-smoke]
     if: always()
     steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
       - name: Fail if any required job did not succeed (failure, cancelled or skipped)
         env:
           RESULTS: ${{ toJSON(needs) }}
-        run: |
-          echo "$RESULTS"
-          bad=$(echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"')
-          if [ -n "$bad" ]; then
-            echo "required jobs not successful (result must be success, never skipped): $bad" >&2
-            exit 1
-          fi
-          echo "all required checks passed"
+        run: sh scripts/guardrails/aggregate-checks.sh

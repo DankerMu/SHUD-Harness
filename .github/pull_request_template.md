@@ -19,3 +19,5 @@
 ## 体积
 
 - [ ] ≤ 400 行；若加 `size-exempt` label，在此写明原因：
+
+标签授予/撤销会自动触发完整 CI 重评，无需空提交或 close/reopen；其它标签增删同样运行完整 CI，并可能取消该 PR 仍在途的旧 run。唯一必需检查 `all-checks-passed` 仍要求所有依赖 job success，不以 skipped 代替通过。
