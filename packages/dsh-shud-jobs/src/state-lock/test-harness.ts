@@ -1,4 +1,4 @@
-import { fork, spawn, type ChildProcess } from "node:child_process";
+import { fork, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -11,7 +11,16 @@ import { createHarness } from "../test-harness.ts";
 const CHILD_ARGUMENT = "--state-lock-registry-child";
 const RESPONSE_TIMEOUT_MS = 5000;
 
-type Reply = { event: string; pid: number; jobs?: unknown; error?: string; childPid?: number };
+type Reply = {
+  event: string;
+  pid: number;
+  jobs?: unknown;
+  error?: string;
+  childPid?: number;
+  acquired?: boolean;
+  metadata?: string;
+  guard?: { dev: number; ino: number };
+};
 
 export interface RegistryChild {
   pid: number;
@@ -20,6 +29,9 @@ export interface RegistryChild {
   release(): Promise<Reply>;
   spawnUnrelated(): Promise<Reply>;
   interruptCompletion(): Promise<Reply>;
+  acquireGuard(): Promise<Reply>;
+  recoverMetadata(expected: string): Promise<Reply>;
+  releaseGuard(): Promise<Reply>;
   kill(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -42,7 +54,7 @@ export async function createRegistryChild(
   // Node 24 can omit "close" after manual IPC disconnection even after a clean exit.
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
 
-  function reply(event: string, command?: string): Promise<Reply> {
+  function reply(event: string, command?: string | { recoverMetadata: string }): Promise<Reply> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         finish(new Error(`Registry child timed out waiting for ${event}: ${stderr}`));
@@ -114,6 +126,9 @@ export async function createRegistryChild(
       release: () => reply("released", "release"),
       spawnUnrelated: () => reply("spawned", "spawn"),
       interruptCompletion: () => reply("completion-persisted", "interrupt-completion"),
+      acquireGuard: () => reply("guard-acquired", "acquire-guard"),
+      recoverMetadata: (expected) => reply("metadata-recovered", { recoverMetadata: expected }),
+      releaseGuard: () => reply("guard-released", "release-guard"),
       async kill() {
         child.kill("SIGKILL");
         await stop();
@@ -140,6 +155,7 @@ async function runRegistryChild() {
   const h = await createHarness(dirname(stateDir));
   const unrelated: ChildProcess[] = [];
   let operations = Promise.resolve();
+  let guardFd: number | undefined;
   process.on("message", (command: unknown) => {
     operations = operations.then(async () => {
       if (command === "apply") {
@@ -154,6 +170,44 @@ async function runRegistryChild() {
       } else if (command === "release") {
         await h.ctx.fiber.dispose();
         process.send?.({ event: "released", pid: process.pid });
+      } else if (command === "acquire-guard") {
+        if (guardFd !== undefined) throw new Error("operator guard already held");
+        const fd = fs.openSync(join(stateDir, ".lock-guard"), "a", 0o600);
+        try {
+          const result = spawnSync(
+            process.platform === "darwin" ? "/usr/bin/lockf" : "/usr/bin/flock",
+            process.platform === "darwin" ? ["-s", "-t", "0", "3"] : ["-n", "3"],
+            { stdio: ["ignore", "ignore", "pipe", fd], encoding: "utf8" },
+          );
+          const busy = process.platform === "darwin" ? 75 : 1;
+          if (result.error || result.signal || (result.status !== 0 && result.status !== busy)) {
+            throw new Error("operator guard acquisition failed", { cause: result.error });
+          }
+          if (result.status === 0) guardFd = fd;
+          const { dev, ino } = fs.fstatSync(fd);
+          process.send?.({
+            event: "guard-acquired",
+            pid: process.pid,
+            acquired: guardFd !== undefined,
+            guard: { dev, ino },
+          });
+        } finally {
+          if (guardFd !== fd) fs.closeSync(fd);
+        }
+      } else if (typeof command === "object" && command !== null && "recoverMetadata" in command) {
+        if (guardFd === undefined) throw new Error("operator recovery requires held guard");
+        // The caller has stopped registry admission. Recheck its exact recorded owner while
+        // retaining kernel exclusion; never split a free-guard probe from metadata removal.
+        const metadata = fs.readFileSync(join(stateDir, "lock"), "utf8");
+        if (metadata !== command.recoverMetadata) throw new Error("operator owner recheck failed");
+        fs.unlinkSync(join(stateDir, "lock"));
+        process.send?.({ event: "metadata-recovered", pid: process.pid, metadata });
+      } else if (command === "release-guard") {
+        if (guardFd === undefined) throw new Error("operator guard is not held");
+        const fd = guardFd;
+        guardFd = undefined;
+        fs.closeSync(fd);
+        process.send?.({ event: "guard-released", pid: process.pid });
       } else if (command === "interrupt-completion") {
         const registry = h.ctx.jobs;
         if (!(registry instanceof ShudJobRegistry)) throw new Error("SHUD registry not published");
@@ -196,6 +250,10 @@ async function runRegistryChild() {
     for (const child of unrelated) child.kill("SIGKILL");
     void operations
       .then(() => h.dispose())
+      .finally(() => {
+        if (guardFd !== undefined) fs.closeSync(guardFd);
+        guardFd = undefined;
+      })
       .catch((error: unknown) => {
         console.error(error);
         process.exitCode = 1;
