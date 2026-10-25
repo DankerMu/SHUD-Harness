@@ -9,8 +9,8 @@
 
 ## 2. Regression and delivery
 
-- [ ] 2.1 Focused regressions and full pnpm run check pass after interval-only isolation of cleanup completion (74 files, 1738 passed/1 existing skip); native execution and pump timeouts remain real. Prior failure logs retained; unrelated #352 site 1 reproduced and recorded without modifying its tests. Strict fixture validation and exact-head CI remain delivery gates; production proof files/shared defaults unchanged.
-- [ ] 2.2 Expanded independent review passes, merge/close #349 on delivered diagnostic criteria and archive only this fixture; do not claim historical trace-free failures solved or M2 PI accepted.
+- [x] 2.1 Focused regressions and full pnpm run check pass after interval-only isolation of cleanup completion (74 files, 1738 passed/1 existing skip); native execution and pump timeouts remain real. Prior failure logs retained; unrelated #352 site 1 reproduced and recorded without modifying its tests. Strict fixture validation passes; exact-head CI 40216530399 all eight jobs pass. Production proof files/shared defaults unchanged.
+- [x] 2.2 Expanded independent review and fresh fix re-review pass on 3b3ffdbe86b07d93efb53532d0bf3f2a6990dffa; one fix pass used. PR #369 merged as 863f2868f55ec81ef7b21097cd9b2e5fb43814f9 and #349 closed on delivered diagnostic criteria. Archive only this fixture; historical trace-free failures remain unknown and M2 PI acceptance remains pending.
 
 ## Risk packs
 
