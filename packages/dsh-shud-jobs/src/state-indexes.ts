@@ -102,7 +102,25 @@ export class StateIndexStore {
       if (active === undefined) writeJsonSync(this.activePath, this.active);
       if (completed === undefined) writeJsonSync(this.completedPath, this.completed);
     } catch (error) {
-      this.lock.release();
+      let releaseFailed = false;
+      let releaseError: unknown;
+      try {
+        this.lock.release();
+      } catch (cleanupError) {
+        releaseFailed = true;
+        releaseError = cleanupError;
+      }
+      if (releaseFailed) {
+        const initialization =
+          error instanceof Error ? error.message : "index initialization failed";
+        const release =
+          releaseError instanceof Error ? releaseError.message : "unknown lock release failure";
+        throw new AggregateError(
+          [error, releaseError],
+          `Cannot initialize indexes in stateDir ${stateDir}: ${initialization}; cleanup failed: ${release}`,
+          { cause: error },
+        );
+      }
       throw error;
     }
   }

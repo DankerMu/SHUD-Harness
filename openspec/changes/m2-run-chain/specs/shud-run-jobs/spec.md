@@ -37,7 +37,7 @@
 - **THEN** stderr 含 `did not activate`、`shud-jobs` 与 `shudBin`，`tool-jobs` 行未激活
 
 ### Requirement: State directory lock and indexes
-注册表 SHALL 在 apply 时于 `stateDir` 取得排他锁文件 `lock`（记录持有者 pid 与进程启动时间）：锁被另一个存活的 dsh 进程持有（pid 存活且启动时间一致）时 apply SHALL 失败并指明 `stateDir` 与持有者 pid；持有者已不存在或 pid 被复用时 SHALL 视为陈旧锁并接管；注册表释放时 SHALL 删除锁。`stateDir` SHALL 含活动索引 `active.json`（尚未完成唤醒的作业的 `run_id`、`job_id`、运行目录绝对路径）与完成索引 `completed.json`（已离开活动索引的作业的 `run_id`、`job_id` 到运行目录绝对路径的映射），二者 SHALL 以临时文件加 rename 原子写；同一注册表实例内对索引的所有修改 SHALL 串行执行。作业离开活动索引时 SHALL 先写入完成索引再从活动索引移除。
+注册表 SHALL 在 apply 时于 `stateDir` 取得排他锁文件 `lock`（记录持有者 pid 与进程启动时间）：锁被另一个存活的 dsh 进程持有（pid 存活且启动时间一致）时 apply SHALL 失败并指明 `stateDir` 与持有者 pid；持有者已不存在或 pid 被复用时 SHALL 视为陈旧锁并接管；正常释放时 SHALL 删除锁元数据。删除失败时 SHALL 仍尝试关闭内核锁描述符，报告路径、错误码及已释放或不确定的实际关闭结果，保留原始失败；初始化与清理同时失败时 SHALL 保留两者。释放 SHALL 仅自动尝试一次，不自动重试或接管 live-self 残留；同一实例后续 close SHALL 返回同一结果。恢复 SHALL 先证明无活跃持有者，并在持续持有永久内核协调锁、重新验证元数据身份后才人工删除确认的 `lock` 残留，或退出原宿主后走正常陈旧锁接管；SHALL NOT 删除或改名 `.lock-guard` 或人工改写索引。`stateDir` SHALL 含活动索引 `active.json`（尚未完成唤醒的作业的 `run_id`、`job_id`、运行目录绝对路径）与完成索引 `completed.json`（已离开活动索引的作业的 `run_id`、`job_id` 到运行目录绝对路径的映射），二者 SHALL 以临时文件加 rename 原子写；同一注册表实例内对索引的所有修改 SHALL 串行执行。作业离开活动索引时 SHALL 先写入完成索引再从活动索引移除。
 
 #### Scenario: two concurrent submissions
 - **WHEN** 两个会话几乎同时各提交一个 shud 作业
@@ -69,7 +69,7 @@
 
 #### Scenario: disposal drains admitted mutations
 - **WHEN** 注册表释放时仍有已接收的索引修改未完成
-- **THEN** 拒绝新修改，等待已接收索引修改完成后才删除 `lock` 并释放索引排他所有权；非 shud 作业的父类 teardown 仍由整体注册表释放等待，行为不变
+- **THEN** 拒绝新修改，等待已接收索引修改完成后才尝试删除 `lock` 并关闭内核锁描述符；删除失败仍尝试关闭，保留原错误并明确区分 guard 已释放与关闭结果不确定，不重复清理、不改索引或永久协调 inode；非 shud 作业的父类 teardown 仍由整体注册表释放等待，行为不变
 
 ### Requirement: Shud job submission
 `shud_run` 调用期间注册表 SHALL 同步完成提交，顺序为：分配 `job_id`/`run_id`；创建 `<session cwd>/runs/<run_id>/`，创建前后各以 `lstat` 确认 `runs/` 与 `runs/<run_id>` 均为真实目录（不是符号链接）且 `runs/<run_id>` 由本次非递归 `mkdir` 新建；把输入目录完整复制到 `input/<project>/`（M2 恒为完整复制）；有 `end_days` 时只在副本的 `<project>.cfg.para` 中改写 `END`；原子写 `run-job.json`（`status: created`）并加入活动索引；写 `status: submitted`；经父类 `start` 以无 owner、`kind: shud`、label `<run_id>`（有 `label` 时为 `<run_id> <label>`）登记，并把 `stdout.log` 作为输出源——登记前注册表 SHALL 以自身构造时的无作用域上下文经父类 `attachController` 挂载一个全局层控制器，父类 `start` 返回或抛错后立即释放（无 owner 作业只能由全局控制器放行；该控制器 SHALL NOT 常驻），因此登记不依赖 `tool-jobs` 是否挂载或挂在哪一层；包装进程 spawn 后写 `pid`、`pid_started_at` 与 `status: running`。运行目录复核失败、复制失败或父类 `start` 抛错时，注册表 SHALL 删除本次运行目录（含部分副本）与已加入的索引条目，并以说明原因的错误失败，使 `shud_run` 返回工具错误；此时 SHALL NOT 留下 RunJob、RunRecord 或索引条目。SHALL NOT 修改原输入目录。注册表 SHALL 把 `owner_session` 记为调用所属会话 id，`dsh_job_id` 记为本次登记 id 并追加到 `dsh_job_ids`。

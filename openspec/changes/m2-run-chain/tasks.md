@@ -207,6 +207,8 @@
 
 - [x] 8.1 实现 `stateDir/lock`（pid + 进程启动时间；存活持有者使 apply 失败并指明 `stateDir` 与 pid；陈旧锁接管；释放时删除），`active.json` 与 `completed.json` 的原子写，以及同一实例内索引修改的串行化（先写完成索引再移出活动索引）（shud-run-jobs「State directory lock and indexes」）。验证：两个并发提交都进入 `active.json`；第二个注册表实例以同一 `stateDir` apply 失败且诊断含持有者 pid；持有者 pid 已退出时接管成功；移出活动索引前崩溃（模拟）后条目仍可经完成或活动索引找到
 
+- #335 follow-up（2026-10-25，独立 change `lock-release-diagnostics`）：8.1 的原勾选记录与历史证据保持不变。补充失败验收为 disposal/初始化双路径 unlink 故障、原错误保留、close 失败不伪报解锁、索引字节与 guard inode 不变、真实子进程取得 guard 但 live 元数据仍拒绝第二注册表、持锁复核身份后的人工恢复。PI 选定一次自动尝试/零重试；工程验证与交付证据记录在该独立 change，M2 仍待集中 PI 验收。
+
 - Suggested fixture level: expanded - 跨进程互斥与索引一致性，Critical Path #4
 - Minimal mergeable slice: atomic: 锁与索引写共用同一互斥假设，拆开会出现无锁的索引写窗口
 

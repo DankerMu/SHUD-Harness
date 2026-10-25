@@ -26,12 +26,23 @@ function parseOwner(value: unknown, path: string): Owner {
   return { pid: value.pid, pid_started_at: value.pid_started_at };
 }
 
+function filesystemCode(error: unknown): string {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : "unknown";
+}
+
 /** Owns an open-file-description lock; its coordination inode must never be removed. */
 export class StateLock {
   private fd: number | undefined;
+  private readonly stateDir: string;
   private readonly metadata: string;
 
   constructor(stateDir: string) {
+    this.stateDir = stateDir;
     this.metadata = join(stateDir, "lock");
     const platform = process.platform;
     if (platform !== "darwin" && platform !== "linux") {
@@ -62,6 +73,11 @@ export class StateLock {
       if (previous !== undefined) {
         const owner = parseOwner(previous, this.metadata);
         if (processStart(owner.pid) === owner.pid_started_at) {
+          if (owner.pid === process.pid) {
+            throw new Error(
+              `Cannot acquire stateDir ${stateDir}: live-self metadata for pid ${owner.pid}; suspected release residue, operator verification required`,
+            );
+          }
           throw new Error(`Cannot acquire stateDir ${stateDir}: held by pid ${owner.pid}`);
         }
       }
@@ -80,10 +96,37 @@ export class StateLock {
     const fd = this.fd;
     if (fd === undefined) return;
     this.fd = undefined;
+    let unlinkFailed = false;
+    let unlinkError: unknown;
     try {
       unlinkSync(this.metadata);
-    } finally {
-      closeSync(fd);
+    } catch (error) {
+      unlinkFailed = true;
+      unlinkError = error;
     }
+    let closeFailed = false;
+    let closeError: unknown;
+    try {
+      closeSync(fd);
+    } catch (error) {
+      closeFailed = true;
+      closeError = error;
+    }
+    if (!unlinkFailed && !closeFailed) return;
+
+    const unlinkCode = unlinkFailed ? filesystemCode(unlinkError) : undefined;
+    const metadataState = !unlinkFailed
+      ? "metadata removed"
+      : unlinkCode === "ENOENT"
+        ? "metadata absent (unlink ENOENT)"
+        : `metadata removal failed (unlink ${unlinkCode}); residue may remain`;
+    const guardState = closeFailed
+      ? `kernel guard state unknown (close ${filesystemCode(closeError)})`
+      : "kernel guard released";
+    const message = `Cannot release stateDir ${this.stateDir}: ${this.metadata}: ${metadataState}; ${guardState}`;
+    if (unlinkFailed && closeFailed) {
+      throw new AggregateError([unlinkError, closeError], message, { cause: unlinkError });
+    }
+    throw new Error(message, { cause: unlinkFailed ? unlinkError : closeError });
   }
 }
