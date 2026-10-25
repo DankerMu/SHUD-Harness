@@ -25,9 +25,14 @@ export function stdoutSource(path: string): JobOutputSource {
     read(fromByte) {
       if (!Number.isSafeInteger(fromByte) || fromByte < 0)
         throw new Error("Invalid stdout byte offset");
-      const fd = fs.openSync(path, "r");
+      const fd = fs.openSync(
+        path,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+      );
       try {
-        const size = fs.fstatSync(fd).size;
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile()) throw new Error("Stdout source is not a regular file");
+        const size = stat.size;
         const lossy = fromByte > size;
         const start = lossy ? 0 : fromByte;
         if (size === start) return { text: "", nextOffset: start, lossy, spillPath: path };

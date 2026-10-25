@@ -273,6 +273,8 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 **R3/R5 接管登记**：同步恢复已验证进程身份的组能力，在构造时捕获的原始注册表上复用瞬时全局控制器，建立无 owner 的真实 `kind: shud` 登记；label 仍为 run_id 加可选持久 label，输出继续读取原 `stdout.log`，不依赖 tool-jobs 或外部会话控制器。先经新鲜身份/路径校验把旧 `dsh_job_id` 清空为 null；producer 回调内安装托管分类、组能力和身份，父类 start 返回后在任何 await 之前发布新 current id、追加 `dsh_job_ids` 并保存真实完成回执。每个注册表实例只接管一次；重复 tick 不改 id/历史，后续新实例取得新 id 并追加一次，旧非 null id 不代表本实例已登记。
 
+本地提交与接管共用同一 stdout 读取入口：每次打开拒绝最终分量符号链接，以非阻塞方式打开后校验实际描述符为普通文件；目录/FIFO 不被当作空日志，也不会等待 FIFO 写者。失败由父类记 warning 并停止该流，保留已有输出、不追加链接目标字节；正常增量 UTF-8、短读、截断与 spillPath 语义不变。此边界不证明原 inode 身份，不排除同用户硬链接/普通文件替换或祖先目录并发替换；这些残余与 #348 的写入侧非目标见 [design 风险记录](../../openspec/changes/m2-run-chain/design.md#risks--trade-offs)。
+
 父类 `registered` 事件发生在新 id 持久化之前；监听器中重入公开 kill 必须以 `kill identity / MISMATCH` 拒绝，不写取消意图、不发信号，不排队补发。发布后 kill 使用同一 current id、pid/start 和受控组证明，走 §8 的取消/teardown 路径。
 
 **接管失败与降级**：旧 id 清空成功后，父类 start 拒绝、producer 回调后抛错或新 id/历史发布失败均记录含 run_id 的受控阶段/错误码，不泄漏原始异常载荷；current id 保持 null、旧历史不变。已生成的父类登记直接 detach 自己的实际完成资源，等待真实父类终态与输出泵排空后移除，最后释放托管关联；不调用适配后的 cancel 或物理 abort，不发信号、不删除运行目录/索引。清理失败保留未完成关联并受控报告，不假称已经释放。此类已容纳失败正常结束启动分支，后续只做文件级监控、结算和 collect，不逐 tick 重试登记，也不安装失败登记的完成回执。清空旧 id 本身失败或身份/路径拒绝仍保留证据并报错，不能把不可写存储伪报为成功写入 null。
