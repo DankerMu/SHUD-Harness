@@ -9,7 +9,7 @@
 ## 2. Integration and delivery
 
 - [x] 2.1 Full check passes 74 files/1746 tests with 1 existing skip. Built-module smoke rejects missing/zero/fractional cadence with no jobs or ownership files; real profile smoke passes with existing #233 projection warnings. Strict fixture validation passes; source/output evidence retained as inert text and temporary probe removed.
-- [ ] 2.2 Expanded review and exact-head CI pass; merge/close #340 and archive only this fixture, not M2 or PI acceptance issues.
+- [x] 2.2 Three expanded review seats clean on c83f071a82c6508f9bbf6a6a1b5aa0c5fabd7374, zero fix passes; exact-head CI 40232172671 all eight jobs pass. PR #376 merged as 025726f1b266c06c531dfd69610d8d267b41f409 and #340 closed. Archive only this fixture; M2 and PI acceptance issues remain pending.
 
 ## Risk packs
 
