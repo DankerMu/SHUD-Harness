@@ -14,6 +14,7 @@ SHUD-Harness/
   package.json                      # pnpm workspace 根；scripts: typecheck / test / build / profile:smoke
   pnpm-workspace.yaml               # packages/*
   tsconfig.base.json
+  tsconfig.scripts.json             # 根 scripts/**/*.ts 的独立 noEmit 类型程序（排除测试/夹具）
   packages/
     dsh-shud-core/                  # 领域层（运行时无关）
       src/schemas/                  # 8 对象 Zod schema（移植）
@@ -30,7 +31,7 @@ SHUD-Harness/
       cordis.patch.yml              # 模型路由、session-log-deepseek 关闭、以 workspace 包说明符挂载插件（bundle 声明 workspace:* 依赖）
       overlays/                     # 可选 --patch 覆盖（本机 / CI）
   skills/                           # SHUD 专用 SKILL.md（run-shud-tiny-case 等，经 dsh skill-filesystem 加载）
-  scripts/                          # 确定性脚本（R/bash），非 LLM
+  scripts/                          # 确定性脚本（TypeScript/R/bash），非 LLM
   templates/                        # evidence_report.md 模板
   docs/                             # ADR + 计划 + 精简 spec（处置表执行后）
   openspec/                         # glossary + changes
@@ -38,6 +39,8 @@ SHUD-Harness/
 ```
 
 每个 `dsh-shud-*` 包：`src/` TS strict，`tsc` 到 `lib/`，`vitest` 测试。jobs/tools 按实际宿主 seam 声明 `peerDependencies`，tools 补齐其运行时 peer 闭包；以相同钉版 `devDependencies` 支持本仓构建/测试（dsh seam `0.2.1-rc.2`、Cordis `4.0.5`）。profile bundle 的宿主 peer 为 `@deepseek-ai/dsh@0.2.1-rc.2`，不为插件另装宿主。Host 侧插件入口 `export const name` + `export function apply(ctx, config)`。不发 npm；profile bundle 声明 jobs/raw-guard/tools 的 `workspace:*` 依赖，以 `insert` 插入各自包说明符；`shud-tools` 注入现有 `tools` 与 SHUD `jobs` 服务，不兼容普通 `jobs-local` 替代。
+
+默认 `pnpm run typecheck` 先构建并检查各包，再显式执行根 `typecheck:scripts`（`tsc -p tsconfig.scripts.json`）；`pnpm run check` 与 CI 复用同一命令。脚本程序继承不变的 strict 基线、使用根直接声明且与包同版的 `@types/node`，只检查生产 `scripts/**/*.ts`，不产出 JS/声明文件；测试、test-harness 与 fixture 入口排除。包内测试、根 `vitest.config.ts` 和 `.mjs` 配置不因此新增到编译器门禁，type-aware lint 也不替代该门禁。
 
 默认 `rawDirs: ["data/raw"]` 仅用于开发与探针；部署期真实 `<data_root>/raw` 必须在 workspace root 之外，由用户在 `$DSH_HOME/profiles/shud/cordis.patch.yml` 中以 `- id: shud-raw-guard` + `config: { rawDirs: ["<workspace 外的绝对路径>", ...] }` 覆写。`profile:install` 要求 `SHUD_BIN` 为绝对路径、可执行普通文件，仅新增/更新安装器拥有的唯一 `shud-jobs` 项（`shudBin` 与 `stateDir: $DSH_HOME/profiles/<name>/shud-jobs`），其余用户 patch 字节不变；已有 raw-only patch 升级后再次安装保持整文件 hash 不变。覆写结果可用 `--profile shud --dump-config` 查看。`shud-jobs` 已实现 stateDir 排他所有权及原子串行索引；永久 `.lock-guard`、可移除 `lock` 与平台工具前提见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
 

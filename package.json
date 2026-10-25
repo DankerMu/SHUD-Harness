@@ -9,7 +9,8 @@
   },
   "scripts": {
     "prepare": "git config core.hooksPath .git-hooks",
-    "typecheck": "pnpm run build && pnpm -r run typecheck",
+    "typecheck": "pnpm run build && pnpm -r run typecheck && pnpm run typecheck:scripts",
+    "typecheck:scripts": "tsc -p tsconfig.scripts.json",
     "build": "pnpm -r run build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -46,6 +47,7 @@
     "@commitlint/cli": "21.2.4",
     "@commitlint/config-conventional": "21.2.4",
     "@eslint/js": "10.0.1",
+    "@types/node": "24.19.2",
     "@vitest/coverage-v8": "4.1.12",
     "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",

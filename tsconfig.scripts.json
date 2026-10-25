@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["scripts/**/*.ts"],
+  "exclude": [
+    "scripts/**/*.test.ts",
+    "scripts/**/*.spec.ts",
+    "scripts/**/test-harness.ts",
+    "scripts/**/test-harness/**",
+    "scripts/**/test/**",
+    "scripts/**/tests/**",
+    "scripts/**/__tests__/**",
+    "scripts/**/fixture/**",
+    "scripts/**/fixtures/**",
+    "scripts/**/__fixtures__/**"
+  ]
+}
