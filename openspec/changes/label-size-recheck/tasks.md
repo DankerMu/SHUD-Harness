@@ -8,7 +8,7 @@
 
 ## 2. Hosted proof and delivery
 
-- [ ] 2.1 Parent opens a never-merged oversized draft proof PR and records same-head opened failure -> labeled green+bypass -> unlabeled red for size AND aggregate, without commits/reopen between label events; close draft and preserve logs.
+- [x] 2.1 Never-merged draft PR #365 proved fixed head b167888b113f001175f33f75953a4774a69b40a9 (617>400): opened run40203123060 size/aggregate FAIL; labeled run40203307095 all checks PASS with bypass; unlabeled run40203565500 size/aggregate FAIL, other six green. Effective PR state changed CLEAN to BLOCKED without commits/reopen. Draft closed unmerged; proof comment and local logs retained.
 - [ ] 2.2 Full pnpm run check, test-guardrails, strict fixture validation, independent expanded review and exact-head CI pass; merge/close #324 and archive only this fixture, not M2 acceptance.
 
 ## Risk packs
