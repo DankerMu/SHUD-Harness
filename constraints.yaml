@@ -64,7 +64,7 @@ thresholds:
   max_file_lines: 1000 # eslint max-lines (block); .large-file-guard.json uses the same number
   duplication_percent_max: 3 # .jscpd.json threshold (block); measured 0.57% at init
   coverage_percent_min: 80 # vitest.config.ts thresholds (block); measured 90.9% lines at init
-  pr_diff_lines_max: 400 # scripts/guardrails/pr-size.sh (CI block, label size-exempt logged)
+  pr_diff_lines_max: 400 # CI block; size-exempt logged; label grant/revoke triggers full-CI reevaluation
   agents_md_max_lines: 320 # rendered AGENTS.md budget (eng-init checker)
 
 naming:

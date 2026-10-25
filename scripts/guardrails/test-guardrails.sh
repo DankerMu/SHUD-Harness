@@ -179,6 +179,12 @@ expect_fail "pr-size" sh scripts/guardrails/pr-size.sh --count 450
 expect_pass "pr-size" sh scripts/guardrails/pr-size.sh --count 10
 expect_pass "pr-size exempt label" env PR_LABELS=size-exempt sh scripts/guardrails/pr-size.sh --count 450
 
+# 6b required aggregate: exercise the same command CI runs, with literal job-result fixtures.
+expect_pass "aggregate all success" env RESULTS='{"lint":{"result":"success"},"test":{"result":"success"},"docs-gate":{"result":"success"},"secrets":{"result":"success"},"sast":{"result":"success"},"pr-size":{"result":"success"},"profile-smoke":{"result":"success"}}' sh scripts/guardrails/aggregate-checks.sh
+for result in failure cancelled skipped; do
+  expect_fail "aggregate required job $result" env RESULTS="{\"lint\":{\"result\":\"success\"},\"test\":{\"result\":\"success\"},\"docs-gate\":{\"result\":\"success\"},\"secrets\":{\"result\":\"success\"},\"sast\":{\"result\":\"success\"},\"pr-size\":{\"result\":\"$result\"},\"profile-smoke\":{\"result\":\"success\"}}" sh scripts/guardrails/aggregate-checks.sh
+done
+
 # 7 adr verify (copy, then plant: stray root record; edited archived record)
 mkdir -p "$TMP/adr/docs"; cp -R docs/adr "$TMP/adr/docs/adr"
 expect_pass "adr:check" sh scripts/adr/verify.sh --root "$TMP/adr"

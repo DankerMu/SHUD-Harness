@@ -68,11 +68,12 @@ SHUD-Harness/
 
 ## Development Workflow
 
-- 克隆后：`pnpm install`（自动执行 `prepare` → `core.hooksPath=.git-hooks`）。本机需 `gitleaks`（brew）；`semgrep` 仅 CI。作业输入安全测试另需系统 POSIX `mkfifo`（Darwin/Linux），用于构造真实 FIFO 并验证提交在读取前拒绝；它不是 npm 依赖，缺失时测试失败而非跳过。
+- 克隆后：`pnpm install`（自动执行 `prepare` → `core.hooksPath=.git-hooks`）。本机需 `gitleaks` 与 `jq`（brew；jq 用于 CI 聚合器的本机自证）；`semgrep` 仅 CI。作业输入安全测试另需系统 POSIX `mkfifo`（Darwin/Linux），用于构造真实 FIFO 并验证提交在读取前拒绝；它不是 npm 依赖，缺失时测试失败而非跳过。
 - 日常：`pnpm run check` 是唯一默认闸（typecheck → lint → format → coverage → dup → deadcode → naming → schema drift → docs gate）。改 Zod 后 `pnpm run schema:generate`；改 `instructions/agents/*.md` 后 `pnpm run instructions:render`；两者产物都由 CI 比对。
 - 运行时：`pnpm run profile:smoke`（dsh 启动 + 路由断言）、`pnpm run shud:tiny`（ccw 30 天）本机运行；CI 有 npm 版 dsh（`profile-smoke` job），无 SHUD。
 - 环境：`DMXAPI_KEY` 只经环境变量；本机跑 dsh/gh 前 `unset ALL_PROXY`；`DSH_HOME` 指向临时目录避免污染真实会话。
 - 流程：一个 issue 一个分支/worktree，走 `subagent-workflow`；PR ≤400 行（CI 阻断，`size-exempt` label 记录例外）；提交信息 conventional（commit-msg 钩子）；通常 merge 需 CI `all-checks-passed` + PI 功能验收。**Epic #210 例外**：子 PR 完成规定工程验证与审查后可 merge、关闭实现 issue；PI 在整个 Epic 结束时统一功能验收，Epic 关闭与 OpenSpec 归档仍等 PI 明确通过（[ADR-0005](docs/adr/implemented/0005-epic-210-acceptance.md)）。
+- PR 标签增删（包括非 `size-exempt` 标签）触发完整 CI，接受其 runner 成本；同一 PR 的新事件会取消仍在途的旧 run。`size-exempt` 授予/撤销无需空提交或 close/reopen，豁免仍须在 PR 写明理由；`all-checks-passed` 仍要求所有依赖 job success，failed/cancelled/skipped 均失败，不改分支保护。
 
 ## Verification Matrix
 
@@ -91,7 +92,7 @@ SHUD-Harness/
 | 文档闸 | `pnpm run docs:check` | 链接、路径声明、生成指令、决策记录全绿 | block |
 | 密钥 | `pnpm run security:secrets` | gitleaks 0 泄漏 | block |
 | SAST（CI） | `pnpm run security:sast` | semgrep 0 finding | block（CI） |
-| PR 体积 | `pnpm run pr:size` | ≤400 行或已标 `size-exempt` | block（CI） |
+| PR 体积 | `pnpm run pr:size` | ≤400 行或已标 `size-exempt`；标签授予/撤销触发完整 CI 重评 | block（CI） |
 | dsh profile 启动（本机 + CI） | `pnpm run profile:smoke` | 路由 deepseek-flash-guan、DMXAPI、session-log-deepseek disabled、raw-guard mounted | block（本机 + CI） |
 | raw-guard 五探针（本机，需 `DMXAPI_KEY`） | `pnpm run raw-guard:probes` | T1–T5 PASS、两份 raw md5 不变、总绿汇总（exit 0）；exit 2 = INCONCLUSIVE（模型偏离、guard 证据干净）须重跑，不计回归；exit 1 = 回归 | block（本机） |
 | Web 审批卡往返 | 手工：读 raw → Allow once；写 raw → deny | session log 读审批 allowed-once 后成功；写 immutable 且无新审批；raw md5 不变 | manual |
@@ -241,10 +242,10 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | 文档链接 + 路径声明 + 生成指令 + 决策记录 | `scripts/docs/`，`scripts/instructions/render.sh`，`scripts/adr/verify.sh` | CI `pnpm run docs:check` | block |
 | 密钥 | gitleaks | pre-commit；CI `pnpm run security:secrets` | block |
 | SAST | semgrep | CI `pnpm run security:sast` | block |
-| PR ≤400 行（label `size-exempt` 记录） | `scripts/guardrails/pr-size.sh` | CI `pnpm run pr:size` | block |
+| PR ≤400 行（label `size-exempt` 记录；标签增删完整 CI 重评） | `scripts/guardrails/pr-size.sh` | CI `pnpm run pr:size` | block |
 | Conventional commits | `commitlint.config.mjs` | commit-msg | block |
 | 锁文件干净、不拉 dsh | `pnpm-workspace.yaml` | CI lint/test jobs install with frozen lockfile | block |
-| 单一必需检查 | `.github/workflows/ci.yml` all-checks-passed | GitHub rulesets（branch protection） | block |
+| 单一必需检查（依赖 job 非 success 均失败） | `.github/workflows/ci.yml` all-checks-passed / `scripts/guardrails/aggregate-checks.sh` | GitHub rulesets；`pnpm run test-guardrails` 正反例 | block |
 | 越界动作（no-verify、force-push、dsh/raw 写、生成物手编） | `scripts/guardrails/no-bypass.sh`（`.claude/settings.json` 与 `.codex/hooks.json` 共用） | pre-commit 等价：agent PreToolUse hook | block |
 | 本次触碰 >1000 行文件 | `.claude/hooks/large-file-guard/large-file-guard.sh` | pre-commit 等价：agent hook on git commit | block |
 | 闸自证 | `scripts/guardrails/test-guardrails.sh` | 本机 `pnpm run test-guardrails` | block |
