@@ -90,6 +90,7 @@ SHUD-Harness/
 | raw-guard 五探针（本机，需 `DMXAPI_KEY`） | `pnpm run raw-guard:probes` | T1–T5 PASS、两份 raw md5 不变、总绿汇总（exit 0）；exit 2 = INCONCLUSIVE（模型偏离、guard 证据干净）须重跑，不计回归；exit 1 = 回归 | block（本机） |
 | Web 审批卡往返 | 手工：读 raw → Allow once；写 raw → deny | session log 读审批 allowed-once 后成功；写 immutable 且无新审批；raw md5 不变 | manual |
 | SHUD ccw tiny（本机） | `pnpm run shud:tiny` | exit 0 + `.dat` 产出，<2 min | block（本机） |
+| SHUD ccw 重启恢复（本机，需 SHUD 与 `DMXAPI_KEY`） | `pnpm run shud:restart` | SIGTERM / SIGKILL 两用例 PASS；SHUD 连续存活、五条恢复断言成立，通知必须 `delivered`（`unreachable` 判 FAIL）；RunRecord 含退出码与非空产物清单，证据取 session log / 运行目录 / 索引 | block（本机） |
 | 闸自证 | `pnpm run test-guardrails` | 每闸拒违规、收干净输入 | block |
 
 ## Runtime Lifecycle
@@ -143,7 +144,7 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 
 唤醒由 `packages/dsh-shud-jobs/src/shud-poll.ts` 的同一逐条目队列负责：可选会话服务就绪后才恢复 owner，使用 `createUserMessage` 的 `source.kind: shud-jobs`，经 `followup` 与正向 `sessions.flush` 后发布 delivered，再完成索引迁移。缺服务保持 pending 且不消耗尝试；撤销注入 epoch 后不得用晚到结果追加或记账。暂时性失败间隔至少 10 秒、上限 3 次，最后一次与 unreachable 原子发布；失败记账落盘前先重试原记账，不重发传输。确认的追加/flush 回执与待发布失败记账均为进程内知识，普通注册表重载保留，实际进程崩溃丢失；前者区分 live Session 与完整运行身份，后者另校验 owner，不能继承其它运行的预算。崩溃窗口允许至少一次重放，不保证 exactly-once，不新增持久 outbox。收集耗尽原因须由 `shud-run-file.ts` 校验受控历史阶段/代码并归一化，不能直接转发任意 ledger 文本；有效同身份 RunRecord 优先，不可信证据保持 fail closed。完整顺序与验收边界见上述重启恢复说明和 `openspec/changes/m2-run-chain/design.md`，不要在 collector 或其它订阅者建立第二条投递路径。
 
-启动 R3 完成原有身份提升后与 R5 共用接管路径：经瞬时全局控制器创建无 owner 的真实 `kind: shud` 登记，沿用 run_id 加可选 label 与原 stdout；先清空旧 current id，再不让出地发布新 `dsh_job_id`、追加 `dsh_job_ids` 并安装完成回执，不重新 spawn。对每个运行，每个实例只接管一次，后续新实例再追加一次。登记/新 id 发布失败时保留已清空的 current id 和旧历史，受控报告；已产生登记则 detach、等待父类输出泵/终态、移除登记，最后释放托管关联，不 abort 物理执行或删除运行文件/索引，随后继续文件级 poll/collect 而不重试登记。清空旧 id 的存储失败仍是错误，不伪报 null；登记清理失败保留未完成关联并受控报告。R8 保持文件级恢复取消，不创建接管登记；启动阶段保留 pending notify，R12 修复已验证 delivered/unreachable 的完成索引，初始化后的普通轮询接续 #313 投递。后端与公开会话服务 doubles 的验证不等同完整宿主/Web 跨重启恢复或 PI 验收；工具入口 #314–315、完整 Web 验收 #316–318 尚待接入。R7 孤儿组边界（#343）与 `wall_seconds` 测量语义（#344）仍待裁决，见上述恢复说明。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，其结果不能替代注册表运行证据。
+启动 R3 完成原有身份提升后与 R5 共用接管路径：经瞬时全局控制器创建无 owner 的真实 `kind: shud` 登记，沿用 run_id 加可选 label 与原 stdout；先清空旧 current id，再不让出地发布新 `dsh_job_id`、追加 `dsh_job_ids` 并安装完成回执，不重新 spawn。对每个运行，每个实例只接管一次，后续新实例再追加一次。登记/新 id 发布失败时保留已清空的 current id 和旧历史，受控报告；已产生登记则 detach、等待父类输出泵/终态、移除登记，最后释放托管关联，不 abort 物理执行或删除运行文件/索引，随后继续文件级 poll/collect 而不重试登记。清空旧 id 的存储失败仍是错误，不伪报 null；登记清理失败保留未完成关联并受控报告。R8 保持文件级恢复取消，不创建接管登记；启动阶段保留 pending notify，R12 修复已验证 delivered/unreachable 的完成索引，初始化后的普通轮询接续 #313 投递。后端与公开会话服务 doubles 的验证不等同完整宿主/Web 跨重启恢复或 PI 验收；工具入口 #314–315 与真实 Web 重启脚本 #316 已交付，`pnpm run shud:restart` 已登记为本机阻断闸，PI 手工验收 #318 仍待完成，工程验证不替代该验收。R7 孤儿组边界（#343）与 `wall_seconds` 测量语义（#344）仍待裁决，见上述恢复说明。`pnpm run shud:tiny` 仍是独立真实求解器 smoke，与提交共用 `packages/dsh-shud-jobs/src/shud-end.ts` 的 END 更新器；`SHUD_TINY_DAYS` 默认仍为 30 天，其结果不能替代注册表运行证据。
 
 安装与启动必须沿用同一导出的 `DSH_HOME`。需要审批卡/作业卡时，在同一环境执行 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --no-open --port <p>`（profile 已选择 Web 应用，不再传 `web` 位置参数）。headless 任务改用同一 bundle 的独立 profile，并同样保留 `SHUD_BIN`：
 
@@ -184,7 +185,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 - **Model-visible ⟺ logged**：模型看到的每个工具结果/审批/作业事件都进 session log；未记录的东西不是证据。
 - **Capability seams + registrations as effects**：插件注册是显式副作用，启动时可枚举（`--dump-config`）。
 - **显式默认、无硬编码可调项**：阈值/路径/模型 id 来自 `constraints.yaml`、`profile/shud/cordis.patch.yml`、schema 常量；配置缺失即 fail-loud，不静默回退。
-- **Runtime invariant companions**：每条 `CONTEXT.md` 不变量在代码里有对应断言或测试；M2 起作业持久化不变量进入矩阵。
+- **Runtime invariant companions**：每条 `CONTEXT.md` 不变量在代码里有对应断言或测试；M2 作业持久化不变量由既有集成测试（`pnpm run test:coverage`，纳入默认 `check`）与本机独立 `pnpm run shud:restart` 阻断闸共同覆盖。
 - **Branded ids**：TaskCard/RunJob/RunRecord 等 id 用品牌类型，不用裸 string。
 - **Waterfall delegation**：`tools/pre-execute` 决策按 allow→deny→cancel→ask 瀑布，第一条命中即终止，fail-closed。
 - **Closure 判据代码化**：TaskCard 不能仅因 LLM 认为完成而关闭（`docs/02_ARCHITECTURE/Agent_Architecture.md` §7）。
@@ -244,12 +245,13 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | dsh profile 路由 / 出站关闭 | `scripts/runtime/profile-smoke.sh` | 本机 + CI `pnpm run profile:smoke` | block |
 | raw-guard 五探针 / raw 字节不变 | `scripts/runtime/raw-guard-probes.sh` | 本机 `pnpm run raw-guard:probes`（需 `DMXAPI_KEY`；exit 2 = 模型偏离须重跑） | block |
 | ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
+| ccw 重启恢复 / 五条作业不变量 | `scripts/runtime/shud-restart.sh` | 本机 `pnpm run shud:restart`（需 SHUD 与 `DMXAPI_KEY`；SIGTERM / SIGKILL 两用例，通知必须 delivered） | block（本机） |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
 | PI 功能验收（Epic #210 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 验收记录；工程门禁不变 | gate |
 | 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
 | docs 随代码改 | PR 模板 | review-only | review-only |
 | 科学措辞规则（M3 转测试常量） | 报告生成 | review-only until M3 | review-only |
-| 运行时不变量伴生（M2 起入矩阵） | reviewer 清单 | review-only until M2 | review-only |
+| 运行时不变量伴生（M2 作业持久化） | `CONTEXT.md` 第 13 条及其 `packages/dsh-shud-jobs/src/` 集成测试路径 | 本机 + CI `pnpm run test:coverage`（纳入 `pnpm run check`）；本机独立 `pnpm run shud:restart` | block |
 | dsh 升级只走 issue | 流程 | review-only | review-only |
 
 ## Agent Roles
