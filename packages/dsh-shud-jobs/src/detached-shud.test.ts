@@ -6,6 +6,7 @@ import type * as NodeChild from "node:child_process";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry } from "./index.ts";
 import { actualRegistry, submissionFixture } from "./submit-shud/test-harness.ts";
+import { waitForRecovery } from "./reconcile-shud/test-harness.ts";
 import {
   activeGroup,
   cleanupResources,
@@ -103,7 +104,18 @@ test.each([0, 13])(
       await expect
         .poll(() => textIfPresent(join(record.run_dir, "exit_code")), { timeout: 5000 })
         .toBe(`${code}\n`);
-      await registry.pollOnce();
+      await waitForRecovery(async () => {
+        await registry.pollOnce();
+        const settled = RunJobSchema.parse(
+          JSON.parse(await readFile(join(record.run_dir, "run-job.json"), "utf8")),
+        );
+        return (
+          settled.status === "succeeded" ||
+          settled.status === "failed" ||
+          settled.status === "cancelled" ||
+          settled.status === "collected"
+        );
+      }, "immediate native exit durable terminal publication before collection");
       expect(await registry.collectShud(record.run_id)).toMatchObject({ exit_code: code });
       const terminal = RunJobSchema.parse(
         JSON.parse(await readFile(join(record.run_dir, "run-job.json"), "utf8")),

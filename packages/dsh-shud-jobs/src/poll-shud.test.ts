@@ -2,6 +2,7 @@ import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 import { terminateGroup } from "./detached-shud/test-harness.ts";
+import { waitForRecovery } from "./reconcile-shud/test-harness.ts";
 import {
   pollFixture,
   readRecord,
@@ -65,7 +66,10 @@ test.each([0, 13])(
       // Existing snapshots must finish while the held wrapper still has no exit evidence.
       await h.registry.pollOnce();
       await releaseRun(record);
-      await h.registry.pollOnce();
+      await waitForRecovery(async () => {
+        await h.registry.pollOnce();
+        return producer.completed.length === 1;
+      }, "published exit completion despite an existing cancellation request");
       const terminal = producer.durableAtSettle[0];
       expect(terminal.status).toBe(code === 0 ? "succeeded" : "failed");
       expect(terminal.exit_code).toBe(code);
@@ -143,7 +147,10 @@ test.each(["", " \n\t", "13junk", "1.5", "9007199254740992", "NaN"])(
       const record = await pending;
       const evidence = join(record.run_dir, "exit_code");
       await io.writeFile(evidence, bytes);
-      await h.registry.pollOnce();
+      await waitForRecovery(async () => {
+        await h.registry.pollOnce();
+        return producer.completed.length === 1;
+      }, "invalid exit evidence producer completion");
       const terminal = await readRecord(record.run_dir);
       expect(terminal.status).toBe("failed");
       expect(terminal.exit_code).toBeNull();
