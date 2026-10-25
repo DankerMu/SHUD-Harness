@@ -4,7 +4,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeChild from "node:child_process";
 import type * as NodeIo from "node:fs/promises";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
-import { ShudJobRegistry } from "./index.ts";
+import { ShudJobRegistry, type ShudExecution } from "./index.ts";
 import { createHarness } from "./test-harness.ts";
 import { barrier } from "./state-indexes/test-harness.ts";
 import { actualRegistry, submissionFixture } from "./submit-shud/test-harness.ts";
@@ -16,6 +16,7 @@ import {
   readInvocation,
   terminateGroup,
 } from "./detached-shud/test-harness.ts";
+import { preserveCleanupErrors } from "./cleanup-diagnostics.ts";
 
 const fault = vi.hoisted(() => ({
   mode: "",
@@ -23,6 +24,7 @@ const fault = vi.hoisted(() => ({
   replayPid: 0,
   replayRemaining: 0,
   groupReads: 0,
+  cleanupGroupFailureAt: 0,
   children: [] as Array<{ pid: number; exited: Promise<void> }>,
 }));
 vi.mock("node:child_process", async (original) => {
@@ -44,6 +46,12 @@ vi.mock("node:child_process", async (original) => {
       return child;
     },
     spawnSync(command: string, args: readonly string[], options: NodeChild.SpawnSyncOptions) {
+      if (fault.cleanupGroupFailureAt > 0 && command === "ps" && args[0] === "-axo") {
+        if (++fault.groupReads === fault.cleanupGroupFailureAt) {
+          fault.cleanupGroupFailureAt = 0;
+          return { pid: 0, output: [], stdout: "", stderr: "", status: 0, signal: null };
+        }
+      }
       if (
         fault.mode === "identity" &&
         command === "ps" &&
@@ -95,6 +103,7 @@ beforeEach(() => {
   fault.replayPid = 0;
   fault.replayRemaining = 0;
   fault.groupReads = 0;
+  fault.cleanupGroupFailureAt = 0;
   vi.mocked(io.rename).mockReset().mockImplementation(actualIo.rename);
   vi.mocked(io.rm).mockReset().mockImplementation(actualIo.rm);
 });
@@ -102,6 +111,18 @@ beforeEach(() => {
 async function stopObservedChildren(): Promise<void> {
   for (const child of fault.children) await terminateGroup(child.pid);
   await Promise.all(fault.children.map((child) => child.exited));
+}
+
+async function cleanupFaultSubmission(
+  pending: Promise<unknown> | undefined,
+  releaseExecution: () => Promise<void>,
+  dispose: () => Promise<void>,
+): Promise<void> {
+  fault.mode = "";
+  await stopObservedChildren();
+  await pending?.catch(() => undefined);
+  await stopObservedChildren();
+  await cleanupResources([releaseExecution, dispose]);
 }
 
 test("D7 membership survives the held running rename and clears only after atomic identity publication", async () => {
@@ -166,36 +187,140 @@ test.each(["spawn", "identity"])(
     const h = await submissionFixture();
     const execution = detachedProducer();
     let pending: Promise<RunJob> | undefined;
+    await preserveCleanupErrors(
+      async (observe) => {
+        await installFakeShud(h.shudBin, 0, "held");
+        await h.apply(ShudJobRegistry, h.config);
+        fault.mode = mode;
+        fault.missingExecutable = join(h.root, "missing-wrapper-executable");
+        const registry = actualRegistry(h.ctx);
+        vi.mocked(io.rm).mockImplementation(async (path, options) => {
+          if (typeof path === "string" && path.includes("/runs/RUN-") && options?.recursive) {
+            for (const child of fault.children) expect(activeGroup(child.pid)).toEqual([]);
+          }
+          await actualIo.rm(path, options);
+        });
+        pending = observe(registry.submitShud(h.request, execution.start));
+        await expect(pending).rejects.toThrow(
+          mode === "spawn" ? /spawn|ENOENT/u : /identity|inspect/u,
+        );
+        expect(await io.readdir(join(h.cwd, "runs"))).toEqual([]);
+        expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
+        expect(registry.list()).toEqual([]);
+        for (const child of fault.children) expect(activeGroup(child.pid)).toEqual([]);
+      },
+      () =>
+        cleanupFaultSubmission(
+          pending,
+          () => execution.cleanup(),
+          () => h.dispose(),
+        ),
+      () => fault.children.map((child) => child.pid),
+    );
+  },
+  15000,
+);
+
+test.each([1, 2])(
+  "cleanup stop %s retains body and pending failures without releasing later resources",
+  async (stop) => {
+    const h = await submissionFixture();
+    const execution = detachedProducer();
+    let native: ShudExecution | undefined;
     try {
       await installFakeShud(h.shudBin, 0, "held");
       await h.apply(ShudJobRegistry, h.config);
-      fault.mode = mode;
-      fault.missingExecutable = join(h.root, "missing-wrapper-executable");
-      const registry = actualRegistry(h.ctx);
-      vi.mocked(io.rm).mockImplementation(async (path, options) => {
-        if (typeof path === "string" && path.includes("/runs/RUN-") && options?.recursive) {
-          for (const child of fault.children) expect(activeGroup(child.pid)).toEqual([]);
-        }
-        await actualIo.rm(path, options);
+      const record = await actualRegistry(h.ctx).submitShud(h.request, (...args) => {
+        native = execution.start(...args);
+        return native;
       });
-      pending = registry.submitShud(h.request, execution.start);
-      await expect(pending).rejects.toThrow(
-        mode === "spawn" ? /spawn|ENOENT/u : /identity|inspect/u,
-      );
-      expect(await io.readdir(join(h.cwd, "runs"))).toEqual([]);
-      expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
-      expect(registry.list()).toEqual([]);
-      for (const child of fault.children) expect(activeGroup(child.pid)).toEqual([]);
+      if (!native || record.pid === null) throw new Error("No native execution for cleanup stop");
+      await native.abort();
+      expect(fault.children).toHaveLength(1);
+      const body = new Error("body before early cleanup stop");
+      const pendingError = new Error("pending before early cleanup stop");
+      let pending: Promise<unknown> | undefined;
+      const later: string[] = [];
+      // A quiescent group has two real ps checks per stopObservedChildren invocation.
+      fault.groupReads = 0;
+      fault.cleanupGroupFailureAt = stop === 1 ? 1 : 3;
+      const failure: unknown = await preserveCleanupErrors(
+        async (observe) => {
+          pending = observe(Promise.reject(pendingError));
+          await expect(pending).rejects.toBe(pendingError);
+          throw body;
+        },
+        () =>
+          cleanupFaultSubmission(
+            pending,
+            async () => {
+              later.push("execution");
+              await execution.cleanup();
+            },
+            async () => {
+              later.push("dispose");
+              await h.dispose();
+            },
+          ),
+        () => fault.children.map((child) => child.pid),
+      ).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      if (!(failure instanceof Error)) throw new Error("Missing cleanup stop diagnostics");
+      expect(failure.message).toContain(body.message);
+      expect(failure.message).toContain(pendingError.message);
+      expect(failure.message).toContain("Cannot independently inspect owned test process group");
+      expect(failure.message).toContain(`pid=${record.pid} pgid=${record.pid}`);
+      expect(fault.groupReads).toBe(stop === 1 ? 1 : 3);
+      expect(later).toEqual([]);
+      expect(activeGroup(record.pid)).toEqual([]);
     } finally {
-      fault.mode = "";
-      await stopObservedChildren();
-      await pending?.catch(() => undefined);
+      fault.cleanupGroupFailureAt = 0;
       await stopObservedChildren();
       await cleanupResources([() => execution.cleanup(), () => h.dispose()]);
     }
   },
   15000,
 );
+
+test("detached group cleanup rejection stops before abort and registration release", async () => {
+  const h = await submissionFixture();
+  const execution = detachedProducer();
+  let native: ShudExecution | undefined;
+  let originalAbort: ShudExecution["abort"] | undefined;
+  try {
+    await h.apply(ShudJobRegistry, h.config);
+    const record = await actualRegistry(h.ctx).submitShud(h.request, (...args) => {
+      native = execution.start(...args);
+      return native;
+    });
+    if (!native || record.pid === null) throw new Error("No native execution for group stop");
+    const abort = native.abort.bind(native);
+    originalAbort = abort;
+    let aborts = 0;
+    native.abort = async () => {
+      aborts++;
+      await abort();
+    };
+    let done = false;
+    void native.hooks.done.then(() => {
+      done = true;
+    });
+    fault.cleanupGroupFailureAt = 1;
+    const failure: unknown = await execution.cleanup().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error("Missing group stop diagnostic");
+    expect(failure.message).toContain("Cannot independently inspect owned test process group");
+    expect(failure.message).toContain(`pid=${record.pid} pgid=${record.pid}`);
+    expect(aborts).toBe(0);
+    expect(done).toBe(false);
+    expect(activeGroup(record.pid)).toContain(record.pid);
+  } finally {
+    fault.cleanupGroupFailureAt = 0;
+    if (native && originalAbort) native.abort = originalAbort;
+    await stopObservedChildren();
+    await cleanupResources([() => execution.cleanup(), () => h.dispose()]);
+  }
+}, 15000);
 
 test("running-write rollback terminates an output-holding descendant even after the wrapper shell exits", async () => {
   const h = await submissionFixture();

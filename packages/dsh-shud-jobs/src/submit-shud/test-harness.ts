@@ -11,6 +11,7 @@ import {
   type ShudLifecycle,
 } from "../index.ts";
 import { createHarness, installScriptFixture } from "../test-harness.ts";
+import { captureCleanupFailure, cleanupDiagnostic } from "../cleanup-diagnostics.ts";
 
 export async function writeInputTree(
   inputDir: string,
@@ -156,6 +157,7 @@ export function registrationResource() {
 export function submissionProducer() {
   const registration = registrationResource();
   const executions: ShudExecution[] = [];
+  const identities = new Set<number>();
   return {
     handles: registration.handles,
     prepared: registration.prepared,
@@ -166,6 +168,10 @@ export function submissionProducer() {
     start: (record: RunJob, handle: JobHandle, pumpPollMs: number): ShudExecution => {
       const execution = startDetachedShud(record, registration.open(record, handle), pumpPollMs);
       executions.push(execution);
+      void execution.started.then(
+        (identity) => identities.add(identity.pid),
+        () => undefined,
+      );
       return execution;
     },
     async finish() {
@@ -174,12 +180,16 @@ export function submissionProducer() {
         try {
           await execution.abort();
         } catch (error) {
-          failures.push(error);
+          failures.push(captureCleanupFailure(error, identities));
         }
       }
-      registration.finish();
+      try {
+        registration.finish();
+      } catch (error) {
+        failures.push(captureCleanupFailure(error, identities));
+      }
       if (failures.length)
-        throw new AggregateError(failures, "Submission fixture execution cleanup failed");
+        throw cleanupDiagnostic("Submission fixture execution cleanup failed", failures);
     },
   };
 }
