@@ -9,7 +9,7 @@
 ## 2. Integration verification
 
 - [x] 2.1 Parent ran a standalone built-module real-file smoke including FIFO with a bounded subprocess, profile:smoke, full pnpm run check (72 files, 1715 passed / 1 existing skip), and strict OpenSpec validation; outputs are in local .workplans/issue-348 evidence.
-- [ ] 2.2 Independent expanded risk review and exact-head CI pass; close only #348 after merge, archive this fix separately, keep M2 Epic/acceptance open.
+- [x] 2.2 Independent expanded three-seat review and exact-head CI passed at f4dc1c22c3ef46b9f9c078f433094f52b3c1d941 (round 1 clean, zero fixes); PR #359 merged as 3f7593cca3baca78c3a07508060d1835bb1c9d2b and #348 closed. This archive records only the independent fix; #293/#318 and m2-run-chain remain pending PI acceptance.
 
 ## Risk packs
 
