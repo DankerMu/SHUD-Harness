@@ -9,7 +9,7 @@
 ## 2. Integration gates
 
 - [x] 2.1 Full pnpm run check passed; test-guardrails passed 147/147; strict fixture validation passed. Broad lint-program diagnostic has no TS2688 but still exits 2 with out-of-scope package test diagnostics; no claim of a clean broad lint program.
-- [ ] 2.2 Independent expanded review and exact-head CI pass; merge, close #356 and archive this independent fixture without closing M2 PI acceptance.
+- [x] 2.2 Expanded three-seat review round 1 clean and exact-head CI passed at 264d18376ff2c88a389fd1372544342ac948619c; PR #362 merged as 00db9b82170d800a47dcbebf1e66e6cccc312c57, #356 closed. This archive is independent; M2/#293/#318 remain pending PI acceptance.
 
 ## Risk packs
 
