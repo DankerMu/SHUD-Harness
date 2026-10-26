@@ -35,13 +35,15 @@ bash scripts/fixtures/dummy-job.sh --duration-ms 500 --exit-code 0 --lines 10
 ### 预期输出
 
 ```text
-<workspace>/runs/<run_id>/job.yaml          # 作业记录（id/cmd/cwd/pid/started/log 路径）
+<workspace>/runs/<run_id>/run-job.json      # RunJob 当前状态
 <workspace>/runs/<run_id>/stdout.log
 <workspace>/runs/<run_id>/stderr.log
-<workspace>/runs/<run_id>/run_record.yaml
+<workspace>/runs/<run_id>/run-record.json
 <workspace>/runs/<run_id>/metrics.yaml
-# RunJob/RunRecord 记录另经 ctx.storage 域持久化（$DSH_HOME/storages/，Repository_Layout §2）
+# RunJob/RunRecord 位于上述运行目录；active.json、completed.json 与 lock 位于插件 stateDir
 ```
+
+M2 的 RunJob/RunRecord 不经 `ctx.storage` 域保存；记录落点与索引/锁分工以 [Phased_Plan M2](Phased_Plan.md#2-m2-运行主链) 和 [design D2](../../openspec/changes/m2-run-chain/design.md) 为准。
 
 ### 用例
 
