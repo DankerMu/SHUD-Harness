@@ -68,6 +68,7 @@ SHUD-Harness/
 - 环境：`DMXAPI_KEY` 只经环境变量；本机跑 dsh/gh 前 `unset ALL_PROXY`；`DSH_HOME` 指向临时目录避免污染真实会话。
 - 流程：一个 issue 一个分支/worktree，走 `subagent-workflow`；PR ≤400 行（CI 阻断，`size-exempt` label 记录例外）；提交信息 conventional（commit-msg 钩子）；通常 merge 需 CI `all-checks-passed` + PI 功能验收。**Epic #210 例外**：子 PR 完成规定工程验证与审查后可 merge、关闭实现 issue；PI 在整个 Epic 结束时统一功能验收，Epic 关闭与 OpenSpec 归档仍等 PI 明确通过（[ADR-0005](docs/adr/implemented/0005-epic-210-acceptance.md)）。
 - PR 标签增删（包括非 `size-exempt` 标签）触发完整 CI，接受其 runner 成本；同一 PR 的新事件会取消仍在途的旧 run。`size-exempt` 授予/撤销无需空提交或 close/reopen，豁免仍须在 PR 写明理由；`all-checks-passed` 仍要求所有依赖 job success，failed/cancelled/skipped 均失败，不改分支保护。
+- 本地证据：所有写入者（含 issue、PR 审查、design/stage-pipeline）先读当前 [project profile](openspec/project-profile.md) 的本地证据契约；`.workplans/` 不交付、不强制入库，禁止为格式闸重写已消费的 oracle/证据字节。
 
 ## Verification Matrix
 
@@ -76,7 +77,7 @@ SHUD-Harness/
 | 全部（默认闸） | `pnpm run check` | 以下全部绿 | block |
 | 类型 | `pnpm run typecheck` | tsc 0 错 | block |
 | Lint（type-aware、max-lines 1000、import 禁令） | `pnpm run lint` | 0 错 0 警 | block |
-| 格式 | `pnpm run format:check` | prettier 无差异 | block |
+| 格式（交付文件；本地 `.workplans/` 由 `.gitignore` 统一排除） | `pnpm run format:check` | prettier 无差异；不改写已消费证据 | block |
 | 单测 | `pnpm run test` | 全绿 | block |
 | 单测 + 覆盖率 | `pnpm run test:coverage` | lines/stmts/funcs/branches ≥80% | block |
 | 重复 | `pnpm run dup` | ≤3% | block |
@@ -233,7 +234,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | 禁止并行版本后缀 | `.git-hooks/check-naming.sh`，`constraints.yaml` naming | pre-commit；CI `pnpm run naming:check` | block |
 | 文件 ≤1000 行（3 文件冻结基线，M2/M3 棘轮） | `eslint.config.mjs`，`constraints.yaml` baseline | pre-commit lint-staged；CI `pnpm run lint` | block |
 | type-aware lint，禁 import dsh 内部路径 | `eslint.config.mjs`，`tsconfig.eslint.json` | pre-commit；CI `pnpm run lint` | block |
-| 格式 | `.prettierrc.json`，`.editorconfig` | pre-commit；CI `pnpm run format:check` | block |
+| 交付文件格式；本地 `.workplans/` 不在发现范围 | `.prettierrc.json`，`.editorconfig`；`.gitignore` 的 `/.workplans/` 由 Git/Prettier 共用 | pre-commit；CI `pnpm run format:check` | block |
 | 类型 | `tsconfig.base.json` | CI `pnpm run typecheck` | block |
 | 测试 + 覆盖率 ≥80% | `vitest.config.ts` | CI `pnpm run test:coverage` | block |
 | 重复 ≤3% | `.jscpd.json` | CI `pnpm run dup` | block |
