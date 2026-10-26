@@ -28,14 +28,14 @@ vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
   return {
     ...actual,
-    readFile: vi.fn(actual.readFile),
+    open: vi.fn(actual.open),
     readdir: vi.fn(actual.readdir),
     rename: vi.fn(actual.rename),
   };
 });
 const actualIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
 beforeEach(() => {
-  vi.mocked(io.readFile).mockReset().mockImplementation(actualIo.readFile);
+  vi.mocked(io.open).mockReset().mockImplementation(actualIo.open);
   vi.mocked(io.readdir).mockReset().mockImplementation(actualIo.readdir);
   vi.mocked(io.rename).mockReset().mockImplementation(actualIo.rename);
 });
@@ -49,13 +49,13 @@ test("kill after an accepted poll snapshot preserves fresh intent and classifies
   try {
     const { record, id, pid, producer } = await readyRun(h);
     let held = false;
-    vi.mocked(io.readFile).mockImplementation(async (...args) => {
+    vi.mocked(io.open).mockImplementation(async (...args) => {
       if (!held && args[0] === join(record.run_dir, "exit_code")) {
         held = true;
         entered.release();
         await release.waiting;
       }
-      return actualIo.readFile(...args);
+      return actualIo.open(...args);
     });
     polling = h.registry.pollOnce();
     await entered.waiting;
@@ -403,14 +403,14 @@ test("late cancellation rechecks descendant quiescence before publishing a termi
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(origin);
     let held = false;
-    vi.mocked(io.readFile).mockImplementation(async (...args) => {
+    vi.mocked(io.open).mockImplementation(async (...args) => {
       if (!held && args[0] === join(record.run_dir, "exit_code")) {
         // This read follows the step's initial cancellation check and its running snapshot.
         held = true;
         entered.release();
         await release.waiting;
       }
-      return actualIo.readFile(...args);
+      return actualIo.open(...args);
     });
     polling = h.registry.pollOnce();
     await entered.waiting;

@@ -61,7 +61,7 @@ vi.mock("node:child_process", async (original) => {
 });
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
-  return { ...actual, readFile: vi.fn(actual.readFile) };
+  return { ...actual, open: vi.fn(actual.open) };
 });
 const actualIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
 beforeEach(() => {
@@ -70,12 +70,12 @@ beforeEach(() => {
   fault.exitPath = "";
   fault.probes = 0;
   fault.unreadable = "";
-  vi.mocked(io.readFile)
+  vi.mocked(io.open)
     .mockReset()
-    .mockImplementation(async (path, options) => {
-      if (path === fault.unreadable)
+    .mockImplementation(async (...args) => {
+      if (args[0] === fault.unreadable)
         throw Object.assign(new Error("injected unreadable exit evidence"), { code: "EACCES" });
-      return actualIo.readFile(path, options);
+      return actualIo.open(...args);
     });
 });
 
