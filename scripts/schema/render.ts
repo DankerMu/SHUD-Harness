@@ -7,6 +7,7 @@ export type JsonSchema = {
   $schema?: string;
   $id?: string;
   title?: string;
+  description?: string;
   type?: string | string[];
   enum?: unknown[];
   properties?: Record<string, JsonSchema>;
@@ -31,6 +32,7 @@ type FieldRow = {
   nullable: string;
   type: string;
   constraints: string;
+  description?: string;
 };
 
 export function buildJsonSchema(definition: SchemaDefinition): JsonSchema {
@@ -71,6 +73,19 @@ export function buildMarkdown(definition: SchemaDefinition, jsonSchema: JsonSche
         )} | ${cell(field.constraints)} |`,
     ),
   ];
+
+  const annotatedFields = fields.filter((field) => field.description !== undefined);
+  if (annotatedFields.length > 0) {
+    lines.push(
+      "",
+      "## Field semantics",
+      "",
+      ...annotatedFields.map(
+        (field) =>
+          `- ${cell(field.field)}: ${cell((field.description ?? "").replace(/[\r\n]+/gu, " "))}`,
+      ),
+    );
+  }
 
   if (enumFields.length > 0) {
     lines.push(
@@ -123,6 +138,7 @@ export function flattenFields(schema: JsonSchema, parentPath = ""): FieldRow[] {
       nullable: isNullable(propertySchema) ? "yes" : "no",
       type: typeLabel(propertySchema),
       constraints: constraintLabel(propertySchema),
+      description: propertySchema.description ?? propertyWithoutNull.description,
     });
 
     const nestedObject = nestedObjectSchema(propertyWithoutNull, fieldPath);

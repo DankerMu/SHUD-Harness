@@ -6,6 +6,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeIo from "node:fs/promises";
 import type * as NodeFs from "node:fs";
 import {
+  COLLECT_RETRY_INTERVAL_MS,
+  MAX_COLLECT_ATTEMPTS,
   RunJobSchema,
   RunRecordSchema,
   type RunId,
@@ -681,5 +683,160 @@ test("one automatic step settles a running entry and only a later cadence collec
   } finally {
     vi.useRealTimers();
     await h?.close();
+  }
+}, 15000);
+
+test.each([false, true])(
+  "an externally installed terminal cannot acquire an observation after failed publication=%s",
+  async (failPublication) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const h = await pollFixture();
+    try {
+      const { producer, pending } = h.start();
+      const job = await pending;
+      let refused = 0;
+      vi.mocked(fs.renameSync).mockImplementation((source, target) => {
+        if (failPublication && target === join(job.run_dir, "run-job.json")) {
+          const candidate = RunJobSchema.parse(JSON.parse(actualFs.readFileSync(source, "utf8")));
+          if (candidate.status === "succeeded") {
+            refused++;
+            throw Object.assign(new Error("terminal publication refused"), { code: "EIO" });
+          }
+        }
+        actualFs.renameSync(source, target);
+      });
+      await releaseRun(job);
+      if (failPublication) {
+        await h.registry.pollOnce();
+        expect(refused).toBe(1);
+        expect(await readRecord(job.run_dir)).toEqual(job);
+        expect(producer.completed).toEqual([]);
+      }
+      const terminal = await replaceRecord(job, {
+        status: "succeeded",
+        exit_code: 0,
+        finished_at: new Date().toISOString(),
+      });
+      const result = await h.registry.collectShud(job.run_id);
+      expect(producer.completed).toHaveLength(1);
+      expect(result.exit_class).toBe("ok");
+      expect(result.resources.wall_seconds).toBeNull();
+      expect((await readRecord(job.run_dir)).finished_at).toBe(terminal.finished_at);
+    } finally {
+      vi.mocked(fs.renameSync).mockImplementation(actualFs.renameSync);
+      try {
+        await h.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  },
+  15000,
+);
+
+test.each([
+  ["before-settlement", "started_at"],
+  ["before-settlement", "pid"],
+  ["before-settlement", "pid_started_at"],
+  ["after-settlement", "started_at"],
+  ["after-settlement", "pid"],
+  ["after-settlement", "pid_started_at"],
+  ["after-settlement", "finished_at"],
+] as const)(
+  "%s %s mismatch cannot authorize a numeric window",
+  async (phase, field) => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const h = await pollFixture();
+    try {
+      const { producer, pending } = h.start();
+      const job = await pending;
+      await releaseRun(job);
+      if (phase === "after-settlement") {
+        await h.registry.pollOnce();
+        expect(producer.completed).toHaveLength(1);
+      }
+      const current = await readRecord(job.run_dir);
+      let value: number | string;
+      if (field === "pid") value = process.pid;
+      else {
+        const timestamp = current[field];
+        if (timestamp === null) throw new Error(`Missing original ${field} for mismatch test`);
+        value = new Date(
+          Date.parse(timestamp) + (field === "finished_at" ? 1000 : -1000),
+        ).toISOString();
+      }
+      const replacement = await replaceRecord(current, { [field]: value });
+      // A caller can mutate its returned submission object; evidence must be a copied snapshot.
+      if (phase === "before-settlement" && field === "started_at")
+        job.started_at = replacement.started_at;
+      if (phase === "before-settlement") await h.registry.pollOnce();
+      const terminal = await readRecord(job.run_dir);
+      expect(terminal.status).toBe("succeeded");
+      const result = await h.registry.collectShud(job.run_id);
+      expect(result.exit_class).toBe("ok");
+      expect(result.resources.wall_seconds).toBeNull();
+      expect((await readRecord(job.run_dir)).finished_at).toBe(terminal.finished_at);
+      expect(producer.completed).toHaveLength(1);
+    } finally {
+      try {
+        await h.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  },
+  15000,
+);
+
+test("original observation survives failed generation and direct retry after the automatic cap", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const h = await pollFixture();
+  let deny = true;
+  try {
+    const { producer, pending } = h.start();
+    const job = await pending;
+    await releaseRun(job);
+    await h.registry.pollOnce();
+    expect(producer.completed).toHaveLength(1);
+    const terminal = await readRecord(job.run_dir);
+    const jobPath = join(job.run_dir, "run-job.json");
+    const bytes = await io.readFile(jobPath);
+    const mtime = (await io.stat(jobPath, { bigint: true })).mtimeNs;
+    let publications = 0;
+    vi.mocked(io.rename).mockImplementation(async (source, target) => {
+      if (deny && target === join(job.run_dir, "run-record.json")) {
+        publications++;
+        throw Object.assign(new Error("result publication refused"), { code: "EIO" });
+      }
+      await actualIo.rename(source, target);
+    });
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    const clock = Date.now();
+    for (let attempt = 1; attempt <= MAX_COLLECT_ATTEMPTS; attempt++) {
+      vi.setSystemTime(clock + attempt * COLLECT_RETRY_INTERVAL_MS);
+      await h.registry.pollOnce();
+      expect((await readLedger(job.run_dir)).attempts).toBe(attempt);
+      expect(await io.readFile(jobPath)).toEqual(bytes);
+      expect((await io.stat(jobPath, { bigint: true })).mtimeNs).toBe(mtime);
+    }
+    await expectAbsent(join(job.run_dir, "run-record.json"));
+    deny = false;
+    vi.setSystemTime(clock + (MAX_COLLECT_ATTEMPTS + 1) * COLLECT_RETRY_INTERVAL_MS);
+    await h.registry.pollOnce();
+    expect(publications).toBe(MAX_COLLECT_ATTEMPTS);
+    await expectAbsent(join(job.run_dir, "run-record.json"));
+    const result = await h.registry.collectShud(job.run_id);
+    expect(result.resources.wall_seconds).toBeGreaterThanOrEqual(0);
+    if (terminal.started_at === null || terminal.finished_at === null)
+      throw new Error("Retried generation is missing an observed endpoint");
+    expect(result.resources.wall_seconds).toBe(
+      (Date.parse(terminal.finished_at) - Date.parse(terminal.started_at)) / 1000,
+    );
+    expect((await readRecord(job.run_dir)).finished_at).toBe(terminal.finished_at);
+    expect(producer.completed).toHaveLength(1);
+  } finally {
+    deny = false;
+    vi.useRealTimers();
+    await h.close();
   }
 }, 15000);

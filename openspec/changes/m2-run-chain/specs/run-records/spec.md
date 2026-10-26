@@ -39,6 +39,8 @@ RunJob SHALL 含以下字段：`job_id`、`run_id`、`task_id`、`stack_id`、`d
 ### Requirement: RunRecord record
 RunRecord SHALL 含：`run_id`、`job_id`、`task_id`、`stack_id`、`data_id`（M2 可为 `null`）、`status`（`succeeded|failed`）、`command`（argv 数组）、`exit_code`（整数或 `null`）、`exit_class`、`artifacts`（`stdout`、`stderr` 路径，`shud_output` 目录路径，`files` 为 `{path, size_bytes}` 列表，`path` 相对于 `shud_output`）、`numerical_health`（`water_balance_residual`、`cvode_failures`、`negative_state_count`、`max_solver_dt`，M2 均 SHALL 允许为 `null`）、`resources`（`wall_seconds` 数值或 `null`，`peak_memory_mb` 可为 `null`）、`llm.response_model`（非空字符串）、`llm.response_model_source`（`response|configured`：前者为响应体 model 原值，后者为响应体 model 不可得时记录的已配置模型 id）、`collected_at`。`exit_class` SHALL 为 `ok|nan|file_io|input|cvode|consistency|other|cancelled|lost` 之一：退出码 0→`ok`、10→`nan`、12→`file_io`、13→`input`、19→`cvode`、20→`consistency`、其他非 0→`other`；作业被取消且无退出码文件→`cancelled`（`exit_code` 为 `null`）；进程已不存在（或从未启动）且无退出码文件→`lost`（`exit_code` 为 `null`）。`status` SHALL 仅在 `exit_class` 为 `ok` 时为 `succeeded`。`artifacts.files` 是运行目录内的文件清单，SHALL NOT 视为 `ArtifactSchema` 登记的 Artifact 对象（后者要求非空 `task_id`，M2 不为运行产物创建 Artifact 记录）；其 `size_bytes` 语义 SHALL 与 `ArtifactSchema.size_bytes` 相同（非负整数字节数）。RunRecord SHALL NOT 含任何密钥材料。
 
+新生成记录的 `resources.wall_seconds` SHALL 仅在原始提交实例拥有匹配的本地执行起点及自身成功终态观测时为数值，等于该运行 `(finished_at - started_at) / 1000`；否则 SHALL 为 null。`RunJob.finished_at` SHALL 表示结算观测时刻，不是求解器退出时刻。数值 SHALL 明确表述为可能包含起点偏差、检测延迟及在线取消宽限的观测窗口，SHALL NOT 声称求解器耗时上界或固定精度。已知负区间 SHALL 继续拒绝，不因观测缺失而改为成功 null。有效已提交记录 SHALL 保持原值、字节与修改时间，不追溯认证历史数值；不新增持久字段或改变身份时间戳。
+
 #### Scenario: exit code classes
 - **WHEN** 分别以退出码 0、10、12、13、19、20、3 生成 RunRecord
 - **THEN** `exit_class` 依次为 `ok`、`nan`、`file_io`、`input`、`cvode`、`consistency`、`other`，仅第一条 `status` 为 `succeeded`

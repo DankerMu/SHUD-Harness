@@ -30,7 +30,14 @@ import {
 import { processExecutionState } from "./process-identity.ts";
 import { processBirthObservation, type ProcessBirthObservation } from "./process-birth.ts";
 import type { IndexEntry, StateIndexStore } from "./state-indexes.ts";
-import { collectRun, readCollectCheckpoint, type CollectCheckpoint } from "./shud-collect.ts";
+import {
+  collectRun,
+  matchesRunStart,
+  readCollectCheckpoint,
+  type CollectCheckpoint,
+  type RunStartObservation,
+  type RunTerminalObservation,
+} from "./shud-collect.ts";
 import { readExit, type ExitEvidence } from "./shud-exit.ts";
 import type { ShudCancellation } from "./shud-cancellation.ts";
 import {
@@ -96,6 +103,7 @@ function sameRun(first: IndexEntry, second: IndexEntry): boolean {
 
 export interface CompletionReceipt {
   lifecycle: ShudCompletion;
+  originalStart: RunStartObservation | null;
   /** Retain the precise diagnostic across completion retries, without rewriting durable evidence. */
   outcome?: JobOutcome;
 }
@@ -138,6 +146,7 @@ function verifyTakeoverIdentity(record: RunJob, identity: ShudProcessIdentity): 
 export class ShudPoll {
   private readonly steps = new Map<RunId, Promise<void>>();
   private readonly startupPending = new Set<RunId>();
+  private readonly observations = new Map<RunId, RunTerminalObservation>();
   private accepting = true;
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly registry: LocalJobRegistry;
@@ -225,7 +234,7 @@ export class ShudPoll {
         }
         const receipt = this.receipts.get(entry.run_id);
         if (receipt) await this.complete(entry.run_id, receipt, receiptOutcome(routed, receipt));
-        return collectRun(entry, routed, false);
+        return this.collect(entry, routed, false);
       }).catch((error: unknown) => {
         const failure = error instanceof Error ? error : collectFailure("request", error);
         this.report(failure);
@@ -381,7 +390,7 @@ export class ShudPoll {
             "cancelled/lost is not proof that the historical group stopped.",
         );
       }
-      await collectRun(entry, terminal, true);
+      await this.collect(entry, terminal, true);
     }
   }
 
@@ -434,7 +443,7 @@ export class ShudPoll {
         },
         routed,
       );
-      this.receipts.set(entry.run_id, { lifecycle });
+      this.receipts.set(entry.run_id, { lifecycle, originalStart: null });
     } catch (error) {
       this.report(
         new Error(`Cannot register SHUD takeover for run ${entry.run_id}`, {
@@ -476,6 +485,7 @@ export class ShudPoll {
       routed.status === "cancelled"
     ) {
       checkpoint = await readCollectCheckpoint(entry);
+      if (checkpoint.kind === "committed") this.observations.delete(entry.run_id);
       snapshot = {
         status: routed.status,
         notify,
@@ -491,7 +501,7 @@ export class ShudPoll {
         await this.completeNotified(entry, routed.raw.notify);
         return;
       case "collect":
-        await collectRun(entry, routed, true, checkpoint);
+        await this.collect(entry, routed, true, checkpoint);
         return;
       case "retain-terminal":
       case "retain-collected":
@@ -557,7 +567,7 @@ export class ShudPoll {
           checkpoint.ledger.attempts >= MAX_COLLECT_ATTEMPTS
         )
           await this.deliverNotification(entry, routed, checkpoint);
-        else await collectRun(entry, routed, true, checkpoint);
+        else await this.collect(entry, routed, true, checkpoint);
       }
       return;
     }
@@ -589,6 +599,37 @@ export class ShudPoll {
     );
   }
 
+  private collect(
+    entry: IndexEntry,
+    routed: RoutedRun,
+    automatic: false,
+    preparedCheckpoint?: CollectCheckpoint,
+  ): Promise<RunRecord>;
+  private collect(
+    entry: IndexEntry,
+    routed: RoutedRun,
+    automatic: boolean,
+    preparedCheckpoint?: CollectCheckpoint,
+  ): Promise<RunRecord | undefined>;
+  private async collect(
+    entry: IndexEntry,
+    routed: RoutedRun,
+    automatic: boolean,
+    preparedCheckpoint?: CollectCheckpoint,
+  ): Promise<RunRecord | undefined> {
+    const checkpoint = preparedCheckpoint ?? (await readCollectCheckpoint(entry));
+    if (checkpoint.kind === "committed") this.observations.delete(entry.run_id);
+    const result = await collectRun(
+      entry,
+      routed,
+      automatic,
+      this.observations.get(entry.run_id),
+      checkpoint,
+    );
+    if (result) this.observations.delete(entry.run_id);
+    return result;
+  }
+
   /** The dispatcher owns exclusion and drains this publication before releasing state ownership. */
   private async completeNotified(entry: IndexEntry, rawNotify: unknown): Promise<void> {
     const notify = RunJobSchema.shape.notify.safeParse(rawNotify);
@@ -601,6 +642,7 @@ export class ShudPoll {
       pending.clearConfirmedAppend?.();
     }
     await this.indexes.completeActive(entry.run_id);
+    this.observations.delete(entry.run_id);
   }
 
   private async deliverNotification(
@@ -614,6 +656,7 @@ export class ShudPoll {
     const checkpoint = preparedCheckpoint ?? (await readCollectCheckpoint(entry));
     let outcome: RunRecord | string;
     if (checkpoint.kind === "committed") {
+      this.observations.delete(entry.run_id);
       if (record.status !== "collected")
         throw new CollectFailure("notification checkpoint", "NOT_COLLECTED");
       outcome = checkpoint.record;
@@ -852,6 +895,22 @@ export class ShudPoll {
       routed,
     );
     if (!isTerminal(terminal.status)) return;
+    const originalStart = receipt?.originalStart;
+    // outcome exists only when this transition ran; updateRunJob must also have published it.
+    // The existing advance() gate above proves quiescence for a locally requested cancellation.
+    if (
+      outcome &&
+      originalStart &&
+      terminal.finished_at !== null &&
+      (evidence?.code !== undefined ||
+        (terminal.status === "cancelled" && this.cancellations.hasLocalRequest(entry.run_id))) &&
+      matchesRunStart(originalStart, terminal)
+    ) {
+      this.observations.set(entry.run_id, {
+        ...originalStart,
+        finished_at: terminal.finished_at,
+      });
+    }
     if (outcome && evidence?.error) this.report(evidence.error);
     if (receipt) {
       receipt.outcome = outcome ?? receipt.outcome ?? terminalOutcome(terminal);
@@ -885,6 +944,8 @@ export class ShudPoll {
   }
 
   drain(): Promise<void> {
-    return Promise.allSettled(this.steps.values()).then(() => undefined);
+    return Promise.allSettled(this.steps.values()).then(() => {
+      this.observations.clear();
+    });
   }
 }

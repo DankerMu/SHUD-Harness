@@ -144,6 +144,7 @@ test("R5 takeover without external controllers registers the original labelled e
       job_id: record.job_id,
       exit_code: 0,
       exit_class: "ok",
+      resources: { wall_seconds: null },
     });
     const collected = await readRecord(record.run_dir);
     expect(collected.finished_at).toEqual(expect.any(String));
@@ -294,6 +295,7 @@ test("R3 promotion with the actual submission timestamp exposes takeover to a la
       exit_code: 0,
       exit_class: "ok",
       artifacts: { files: [] },
+      resources: { wall_seconds: null },
     });
     expectSingleWake(h, record.run_id, "ok", 0);
     expect(await readRecord(record.run_dir)).toMatchObject({

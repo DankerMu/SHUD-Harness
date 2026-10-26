@@ -25,6 +25,31 @@ import {
   type RoutedRun,
 } from "./shud-run-file.ts";
 
+/** Copied native start accepted by the original submitting instance; never persisted. */
+export interface RunStartObservation extends IndexEntry {
+  pid: number;
+  pid_started_at: string;
+  started_at: string;
+}
+
+export interface RunTerminalObservation extends RunStartObservation {
+  finished_at: string;
+}
+
+/** Observation matching does not replace the process-ownership or file-routing guards. */
+export function matchesRunStart(observed: RunStartObservation, job: RunJob): boolean {
+  return (
+    observed.run_id === job.run_id &&
+    observed.job_id === job.job_id &&
+    observed.run_dir === job.run_dir &&
+    observed.pid === job.pid &&
+    job.pid_started_at !== null &&
+    Date.parse(observed.pid_started_at) === Date.parse(job.pid_started_at) &&
+    job.started_at !== null &&
+    Date.parse(observed.started_at) === Date.parse(job.started_at)
+  );
+}
+
 interface CollectLedger {
   attempts: number;
   last_error: string;
@@ -236,12 +261,14 @@ export function collectRun(
   entry: IndexEntry,
   routed: RoutedRun,
   automatic: false,
+  observation: RunTerminalObservation | undefined,
   checkpoint?: CollectCheckpoint,
 ): Promise<RunRecord>;
 export function collectRun(
   entry: IndexEntry,
   routed: RoutedRun,
-  automatic: true,
+  automatic: boolean,
+  observation: RunTerminalObservation | undefined,
   checkpoint?: CollectCheckpoint,
 ): Promise<RunRecord | undefined>;
 /** Caller owns per-entry exclusion. This is the only generation, retry, and existing-result backend. */
@@ -249,6 +276,7 @@ export async function collectRun(
   entry: IndexEntry,
   routed: RoutedRun,
   automatic: boolean,
+  observation: RunTerminalObservation | undefined,
   preparedCheckpoint?: CollectCheckpoint,
 ): Promise<RunRecord | undefined> {
   const checkpoint = preparedCheckpoint ?? (await readCollectCheckpoint(entry));
@@ -314,6 +342,14 @@ export async function collectRun(
     });
     if (!candidate.success) throw validationFailure("RunRecord", candidate.error.issues);
     result = candidate.data;
+    // Validate the known interval first: missing observations must not hide a negative duration.
+    if (
+      !observation ||
+      !matchesRunStart(observation, job) ||
+      job.finished_at === null ||
+      Date.parse(observation.finished_at) !== Date.parse(job.finished_at)
+    )
+      result.resources.wall_seconds = null;
     verifyRunFile(entry, routed);
     const path = join(entry.run_dir, "run-record.json");
     if (await regularFile(path, "run-record publication", true))

@@ -160,6 +160,14 @@ test.each(["", " \n\t", "13junk", "1.5", "9007199254740992", "NaN"])(
       expect(await io.readFile(evidence, "utf8")).toBe(bytes);
       await expect(h.registry.collectShud(record.run_id)).rejects.toThrow(/exit evidence/iu);
       expect(await io.readdir(record.run_dir)).toContain("collect-error.json");
+      expect(await io.readdir(record.run_dir)).not.toContain("run-record.json");
+      // Removing invalid bytes permits collection, but cannot retroactively turn this
+      // failed terminal observation into an observed numeric exit.
+      await io.rm(evidence);
+      const result = await h.registry.collectShud(record.run_id);
+      expect(result.exit_class).toBe("lost");
+      expect(result.resources.wall_seconds).toBeNull();
+      expect((await readRecord(record.run_dir)).finished_at).toBe(terminal.finished_at);
     } finally {
       await h.close();
     }

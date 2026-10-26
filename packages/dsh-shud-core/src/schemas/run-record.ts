@@ -91,7 +91,19 @@ export const RunRecordSchema = z
       max_solver_dt: z.number().nonnegative().nullable(),
     }),
     resources: z.strictObject({
-      wall_seconds: z.number().nonnegative().nullable(),
+      wall_seconds: z
+        .number()
+        .nonnegative()
+        .nullable()
+        .describe(
+          "Original-instance observation window in seconds: (finished_at - started_at) / 1000. " +
+            "New records require matching original start and successfully published terminal observations; " +
+            "missing, recovered or mismatched observations produce null. finished_at is settlement observation, " +
+            "not solver exit time. The window may include start-clock bias, detection delay and local cancellation grace; " +
+            "it is not solver runtime, a solver-runtime upper bound or a fixed-precision measurement. " +
+            "Negative known intervals are rejected even without observations. Valid committed records remain immutable " +
+            "and historical numeric values are not retroactively certified.",
+        ),
       peak_memory_mb: z.number().nonnegative().nullable(),
     }),
     llm: z.strictObject({

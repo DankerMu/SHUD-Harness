@@ -14,7 +14,7 @@ import { createHarness, installScriptFixture } from "../test-harness.ts";
 
 const HOST_ARGUMENT = "--wake-crash-host";
 const WAIT_MS = 5000;
-type CrashScenario = "flush-window" | "running";
+type CrashScenario = "flush-window" | "running" | "terminal-window" | "projection-window";
 interface CrashHostInput {
   config: { stateDir: string; shudBin: string; pumpPollMs: number };
   request: SubmitShudRequest;
@@ -185,6 +185,30 @@ async function runCrashHost(input: CrashHostInput): Promise<void> {
             if (!fs.existsSync(join(input.directory, `flush-${process.pid}.json`)))
               throw new Error("Delivered marker reached before a flush acknowledgement");
             publish(input.directory, "pre-marker.json", { host: process.pid });
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+          }
+        }
+        originalRename(source, target);
+      };
+      syncBuiltinESMExports();
+    }
+    if (
+      input.phase === "submit" &&
+      (input.scenario === "terminal-window" || input.scenario === "projection-window")
+    ) {
+      fs.renameSync = (source, target) => {
+        if (String(target).endsWith("/run-job.json")) {
+          const candidate = RunJobSchema.parse(JSON.parse(fs.readFileSync(source, "utf8")));
+          if (input.scenario === "terminal-window" && candidate.status === "succeeded") {
+            originalRename(source, target);
+            publish(input.directory, "terminal-published.json", { host: process.pid, candidate });
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+            return;
+          }
+          if (input.scenario === "projection-window" && candidate.status === "collected") {
+            if (!fs.existsSync(join(candidate.run_dir, "run-record.json")))
+              throw new Error("Collected projection reached before RunRecord commit");
+            publish(input.directory, "projection-blocked.json", { host: process.pid });
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
           }
         }

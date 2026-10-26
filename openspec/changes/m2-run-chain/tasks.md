@@ -478,3 +478,8 @@
 - 独立 expanded fixture `orphan-recovery-diagnostic` 管理实现与验证：最终无保留控制的 R7 在成功终态后输出隔离的 stderr 诊断，不改分类/信号/通知/持久格式；保留 R8 控制跨 leader 退出不得误报。成功宿主原先没有可读 runtime logger sink，须验证实际 stderr 而不是测试 exporter 接收。
 - 工程验证：stderr 回归先 6 fail / 26 pass，补实现后 focused 33/33；完整 check 为 75 文件、1748 pass / 1 existing skip，profile smoke 通过。原生 Darwin 同宿主替换观察到后代继续 I/O、恢复信号为空、cancelled 记录和一条 R7 诊断；独立真实 Web SIGTERM/SIGKILL 重启闸均通过，五条持久 verdict 全 true。审查/CI/合并由独立 fixture 管理；这些证据不等于 PI 验收，Epic #293、#318 与本 change 保持开放。
 - 审查修复 1：新 stderr stream 出口在管道关闭时触发未处理 EPIPE；真实子进程永久回归先以 EPIPE/EBADF 两例失败，再以单次异步 fd 写入的 callback 独立拥有失败后通过，不加全局监听、重试或失效开关。修复后 focused 37/37、完整 check 为 1752 pass / 1 existing skip，profile 与原生 R7/关闭管道对照通过；最终完整宿主重启证据、复审及 CI 仍由独立 fixture 收口。
+
+## Follow-up #344：可信在线观测窗口（2026-10-26）
+
+- PI comments 6397950076 / 6405181313 明确：数值是可从 RunJob 起止时间戳复算的原始宿主观测窗口，不要求也不宣称求解器耗时上界或固定精度。重启/接管/观测丢失时新记录为 null；身份时间戳、finished_at 结算语义、已知负区间拒绝及已提交记录不可变均保留。
+- 独立 expanded fixture `run-duration-observation` 管理原始提交证据、终态至 collect 的交接、真实跨进程提交边界证明和 canonical/generated 语义投影。历史已勾选任务及其当时证据保持原样；当前尚未声称实现完成，#293/#318 与本 change 留待集中 PI 验收。

@@ -17,7 +17,7 @@ import {
   type WakeCrashHost,
 } from "./wake-shud-crash/test-harness.ts";
 
-test.each(["flush-window", "running"] as const)(
+test.each(["flush-window", "running", "terminal-window", "projection-window"] as const)(
   "actual host SIGKILL during %s recovers in a fresh process without respawning native SHUD",
   async (scenario) => {
     const h = await submissionFixture();
@@ -53,6 +53,7 @@ test.each(["flush-window", "running"] as const)(
       const resultPath = join(submitted.run_dir, "run-record.json");
       let immutableResult: Buffer | undefined;
       let immutableMtime: bigint | undefined;
+      let observedFinish: string | null | undefined;
       if (scenario === "flush-window") {
         await releaseInvocation(invocation);
         expect(JSON.parse(await first.file("pre-marker.json"))).toEqual({ host: first.pid });
@@ -69,6 +70,40 @@ test.each(["flush-window", "running"] as const)(
         });
         immutableResult = await io.readFile(resultPath);
         immutableMtime = (await io.stat(resultPath, { bigint: true })).mtimeNs;
+      }
+      if (scenario === "terminal-window" || scenario === "projection-window") {
+        await releaseInvocation(invocation);
+        const marker = JSON.parse(
+          await first.file(
+            scenario === "terminal-window" ? "terminal-published.json" : "projection-blocked.json",
+          ),
+        ) as { host: number };
+        expect(marker.host).toBe(first.pid);
+        const terminal = RunJobSchema.parse(
+          JSON.parse(await io.readFile(join(submitted.run_dir, "run-job.json"), "utf8")),
+        );
+        expect(terminal).toMatchObject({
+          status: "succeeded",
+          started_at: submitted.started_at,
+          pid: submitted.pid,
+          pid_started_at: submitted.pid_started_at,
+          exit_code: 0,
+        });
+        expect(terminal.finished_at).toEqual(expect.any(String));
+        observedFinish = terminal.finished_at;
+        if (scenario === "terminal-window") {
+          await expect(io.stat(resultPath)).rejects.toMatchObject({ code: "ENOENT" });
+        } else {
+          immutableResult = await io.readFile(resultPath);
+          immutableMtime = (await io.stat(resultPath, { bigint: true })).mtimeNs;
+          const original = RunRecordSchema.parse(JSON.parse(immutableResult.toString("utf8")));
+          expect(original.resources.wall_seconds).toBeGreaterThanOrEqual(0);
+          if (terminal.finished_at === null || submitted.started_at === null)
+            throw new Error("Original host committed without observed endpoints");
+          expect(original.resources.wall_seconds).toBe(
+            (Date.parse(terminal.finished_at) - Date.parse(submitted.started_at)) / 1000,
+          );
+        }
       }
       expect(await first.kill()).toMatchObject({ signal: "SIGKILL" });
       if (scenario === "running") {
@@ -111,6 +146,10 @@ test.each(["flush-window", "running"] as const)(
         notify: { status: "delivered", attempts: 0 },
       });
       const result = RunRecordSchema.parse(JSON.parse(await io.readFile(resultPath, "utf8")));
+      if (observedFinish !== undefined) expect(final.finished_at).toBe(observedFinish);
+      if (scenario === "terminal-window" || scenario === "running")
+        expect(result.resources.wall_seconds).toBeNull();
+      else expect(result.resources.wall_seconds).toBeGreaterThanOrEqual(0);
       expect(result).toMatchObject({
         run_id: submitted.run_id,
         job_id: submitted.job_id,
