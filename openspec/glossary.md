@@ -50,8 +50,8 @@ status: living
 |---|---|---|---|
 | 收纳 / 挂起 | park | 长任务提交后 agent 退出、状态落盘 | [Park_Resume_Design](../docs/03_SPEC/Park_Resume_Design.md) |
 | 恢复 | resume | 作业完成通知后恢复 agent 上下文续跑 | 同上 |
-| 收集 | collect | 作业 terminal 后解析产物、生成 RunRecord（job 级 `collect.lock`） | [Execution_Jobs_Runs](../docs/03_SPEC/Execution_Jobs_Runs.md) |
-| 看护进程 | watcher | 监视 RunJob 状态变迁并触发 collect 的进程 | 同上 |
+| 收集 | collect | M2：终态后由注册表自动或经 `shud_collect` 走同一收集路径，扫描产物元数据并生成 RunRecord；有效同身份 `run-record.json` 原样返回，生成失败记 `collect-error.json`。排他锁在 `stateDir`、索引修改串行；job 级 `collect.lock` 是后续 TaskCard/job 布局，M2 不使用 | [M2 design D2/D6/D7](changes/m2-run-chain/design.md) + [Park_Resume §5](../docs/03_SPEC/Park_Resume_Design.md#5-collect-阶段)、[§8](../docs/03_SPEC/Park_Resume_Design.md#8-幂等与锁) |
+| 看护进程 | watcher | 两态：M2 由注册表内唯一进程内轮询循环推进结算、收集与通知，不另起 watcher 进程；后续里程碑保留独立看护进程术语（含 Docker/SLURM 方向），不据此推导 M2 实现 | [M2 design D7](changes/m2-run-chain/design.md) + [Park_Resume §4 Job watcher](../docs/03_SPEC/Park_Resume_Design.md#4-job-watcher) |
 | 作业注册表 | `JobRegistry` / `ctx.jobs` | dsh 后台作业 seam；SHUD 自写 durable backend（detach + pid 对账）替换 `jobs-local` | [ADR-0004](../docs/adr/implemented/0004-dsh-kernel.md) K8 + 上游 `docs/subsystems/jobs.md` |
 | 退出类别 | `exit_class` | RunRecord 对退出证据的九类归因：数值退出码确定分类，缺码时显式 cancelled/lost；仅 ok 对应 succeeded | [RunRecord 契约](changes/m2-run-chain/specs/run-records/spec.md#requirement-runrecord-record) + [Minimal_Schemas §5](../docs/03_SPEC/Minimal_Schemas.md#5-runrecord) |
 | 运行目录 | `run_dir` | RunJob 的绝对运行目录，取代 cwd；提交时位于 `<session cwd>/runs/<run_id>`，保存输入副本与运行记录 | [Minimal_Schemas §4](../docs/03_SPEC/Minimal_Schemas.md#4-runjob) |
