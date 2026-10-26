@@ -15,7 +15,7 @@
 ## 3. Integrated engineering delivery
 
 - [x] 3.1 Parent runs focused duration/recovery/cross-process tests and native duration smoke, full pnpm run check, profile:smoke, actual shud:restart and strict validation of both changes. Preserve failed-before/passed-after evidence, clean owned temporary probes, and distinguish engineering proof from PI acceptance.
-- [ ] 3.2 Complete expanded CP4/CP7 three-seat review, adjudication/fix gate and exact-head CI; merge/close #344 under the PI-adjusted observation-window criterion and archive only this change. Keep m2-run-chain/#293/#318 pending centralized PI acceptance.
+- [x] 3.2 Complete expanded CP4/CP7 three-seat review, adjudication/fix gate and exact-head CI; merge/close #344 under the PI-adjusted observation-window criterion and archive only this change. Keep m2-run-chain/#293/#318 pending centralized PI acceptance.
 
 ## Risk packs and scope
 
