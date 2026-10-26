@@ -35,7 +35,7 @@ SHUD-Harness is a **PI-led scientific research engineering assistant** for the S
 |---|---|---|
 | 运行时 | Node ≥24（直接运行 `.ts`） / pnpm workspace | `.tool-versions`（24.13.1 / 11.28.5），`package.json#packageManager` |
 | 语言 | TypeScript strict，NodeNext，`.ts` 后缀导入 | `tsconfig.base.json`，typescript 5.9.3 |
-| 校验/测试 | Zod 4.6.7 · vitest 4.1.12 + coverage-v8 | 根 `package.json` devDependencies |
+| 校验/测试 | Zod 4.6.7 · vitest 5.0.5 + coverage-v8 | 根 `package.json` devDependencies |
 | 质量闸 | eslint 10 + typescript-eslint（type-aware）· prettier · jscpd · knip · commitlint · gitleaks · semgrep（CI） | 同上；`gitleaks`/`semgrep` 为系统二进制 |
 | 宿主 | dsh `dsh-v0.2.1-rc.2`，checkout 在 `../deepseek-harness`，只读 | `profile/shud/package.json` peer |
 | 模型 | DeepSeek Flash via DMXAPI（`deepseek-flash-guan`，`DMXAPI_KEY` 仅环境变量） | `profile/shud/cordis.patch.yml` |
