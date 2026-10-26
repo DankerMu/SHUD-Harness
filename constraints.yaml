@@ -90,6 +90,7 @@ doc_gate:
     - "AGENTS.md"
     - "CONTEXT.md"
     - "openspec/project-profile.md"
+    - "docs/01_CODEBASE/SHUD_IO_Facts.md"
 
 no_bypass: # scripts/guardrails/no-bypass.sh (wired in .claude/settings.json and .codex/hooks.json)
   - "skipping the commit hooks with the no-verify flag"

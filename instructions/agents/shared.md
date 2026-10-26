@@ -63,6 +63,7 @@ SHUD-Harness/
 ## Development Workflow
 
 - 克隆后：`pnpm install`（自动执行 `prepare` → `core.hooksPath=.git-hooks`）。本机需 `gitleaks` 与 `jq`（brew；jq 用于 CI 聚合器的本机自证）；`semgrep` 仅 CI。作业输入安全测试另需系统 POSIX `mkfifo`（Darwin/Linux），用于构造真实 FIFO 并验证提交在读取前拒绝；它不是 npm 依赖，缺失时测试失败而非跳过。
+- 文档/默认闸前：先执行 `git submodule update --init SHUD rSHUD AutoSHUD`，供本地 `pnpm run docs:check` / `pnpm run check` 核对钉版源码路径。
 - 日常：`pnpm run check` 是唯一默认闸（typecheck → lint → format → coverage → dup → deadcode → naming → schema drift → docs gate）。改 Zod 后 `pnpm run schema:generate`；改 `instructions/agents/*.md` 后 `pnpm run instructions:render`；两者产物都由 CI 比对。
 - 运行时：`pnpm run profile:smoke`（dsh 启动 + 路由断言）、`pnpm run shud:tiny`（ccw 30 天）本机运行；CI 有 npm 版 dsh（`profile-smoke` job），无 SHUD。
 - 环境：`DMXAPI_KEY` 只经环境变量；本机跑 dsh/gh 前 `unset ALL_PROXY`；`DSH_HOME` 指向临时目录避免污染真实会话。
