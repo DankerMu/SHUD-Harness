@@ -23,7 +23,7 @@ SHUD-Harness/
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
     dsh-shud-tools/                 # 已挂载 shud_run 与索引式 shud_collect
-    dsh-shud-records/               # TaskCard/RunJob/RunRecord/StackLock/EvidenceReport 的 ctx.storage 域
+    dsh-shud-records/               # 规划：TaskCard/StackLock/EvidenceReport；持久化方案待 M3，M2 运行记录归 runs/<run_id>/
     dsh-shud-presets/               # coordinator / worker / coder / reviewer agent preset 与 system prompt 段
   profile/
     shud/
@@ -96,7 +96,7 @@ HTTP 请求限时 15 秒，Web 启动 60 秒，首次工具提交 3 分钟，重
 $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指定）
   profiles/shud/                    # 由 profile/shud 初始化的 profile
   sessions/                         # session.v4.jsonl（回放 fixture 来源）
-  storages/                         # ctx.storage 域（RunRecord 等）
+  storages/                         # dsh 自有 storage-json 后端（如会话投影缓存）；不存 SHUD RunJob/RunRecord
 <workspace>/                        # 每个研究任务的工作区（session cwd = workspace root）
   shud/                             # SHUD 二进制 + input/ + output/
   runs/<run_id>/                    # 作业日志、pid 记录、产物清单
