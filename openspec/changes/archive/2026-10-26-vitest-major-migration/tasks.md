@@ -8,8 +8,8 @@
 
 ## 2. Delivery
 
-- [ ] 2.1 Review the complete dependency/config/docs diff, pass exact-head CI and publish evidence; keep #289 open with its unsupported TS7 remainder explicitly recorded.
-- [ ] 2.2 Archive this completed runner slice without archiving the M2 acceptance fixture.
+- [x] 2.1 Review the complete dependency/config/docs diff, pass exact-head CI and publish evidence; keep #289 open with its unsupported TS7 remainder explicitly recorded.
+- [x] 2.2 Archive this completed runner slice without archiving the M2 acceptance fixture.
 
 ## Risk mapping
 
