@@ -97,8 +97,8 @@ M2 的 RunJob/RunRecord 不经 `ctx.storage` 域保存；记录落点与索引/�
 
 - SHUD submodule 已初始化；
 - `input/ccw` 可用；
-- patch `END=30` 只发生在 task workspace，不改 root submodule；
-- 编译和运行日志必须成为 artifact。
+- 独立 `shud:tiny` 默认的 `END=30` 只在 scratch 输入副本更新，不改 root submodule，也不是注册表重启入口的输入承诺；
+- 构建是前置条件，不由 fixture 执行；tiny 日志默认随 scratch 清理，`SHUD_TINY_KEEP=1` 可保留。注册表入口的 stdout/stderr/output 由 collect 记入 RunRecord artifacts。
 
 ### 当前可执行入口
 
@@ -116,28 +116,54 @@ pnpm run shud:tiny
 rSHUD 水量平衡函数见 `rSHUD/R/WaterBalance.R` 的 `wb.all`，依赖已配置的数据与初始条件；
 目前没有通用的一键水量平衡 CLI，本入口也不调用该函数。
 
-### 预期输出
+### 预期输出（按入口）
+
+独立 `pnpm run shud:tiny`：以下位于 scratch；默认运行结束后清理，`SHUD_TINY_KEEP=1` 才保留。
 
 ```text
-<workspace>/runs/RUN-001/run_record.yaml
-<workspace>/runs/RUN-001/output/*.dat
+<scratch>/stdout.log
+<scratch>/stderr.log
+<scratch>/output/ccw.out/*.dat
+```
+
+注册表路径 `shud_run` → collect（`project=ccw`；RUN-001 仅为示意 id，不是 tiny 的输出）：
+
+```text
+<workspace>/runs/RUN-001/run-job.json
+<workspace>/runs/RUN-001/run-record.json
 <workspace>/runs/RUN-001/stdout.log
 <workspace>/runs/RUN-001/stderr.log
+<workspace>/runs/RUN-001/output/ccw.out/*.dat
+```
+
+通用注册表布局为 `output/<project>.out/`，记录与 stateDir 索引职责见 [M2](Phased_Plan.md#2-m2-运行主链)。
+上述 registry 结果由实际工具/收集路径验证，不能用独立 tiny smoke 的成功代替。
+
+非 M2 的后续设计示意，不是上述两个入口当前承诺的产物：
+
+```text
 <workspace>/runs/RUN-001/metrics.yaml        # 后续里程碑示意，非 M2；路径未定
-<workspace>/runs/RUN-001/hydrograph.json
 <workspace>/reports/<report_id>.md          # M3 起
 ```
 
-metrics artifact 不属于 M2 预期产物；上面的 metrics 路径仅保留设计示意，
-不承诺其后续里程碑、生产者或最终落点，见 [Collect 阶段](../03_SPEC/Park_Resume_Design.md#5-collect-阶段)。
+metrics/figure 的具体里程碑、生产者、格式和落点未在本节确定，见 [Collect 阶段](../03_SPEC/Park_Resume_Design.md#5-collect-阶段)；
+图与时序的分类示意见 [Artifact 分类](../03_SPEC/Artifact_Registry_Spec.md#2-artifact-分类)，不将其示例当成已有生产者。
 
-### 验收
+### 验收（按入口）
 
-- exit_code=0；
-- RunRecord.status=succeeded；
-- numerical_health.water_balance_residual 小于阈值；
+独立 `shud:tiny`，默认 30 天 END 仅在输入副本更新：
+
+- 30 天运行 exit_code=0；
+- scratch 的 `output/ccw.out/` 有 `.dat` 产出；日志保留与清理按上述 KEEP 设置，不要求注册表记录。
+
+注册表路径及后续对象：
+
+- 注册表路径（`shud_run` → collect）：成功运行 exit_code=0、RunRecord.status=succeeded，RunJob/RunRecord 与 stateDir 索引可追溯；独立 `shud:tiny` 不生成这些记录。
+- `numerical_health.water_balance_residual` 在 M2 collect 中为 `null`，不作为 M2 通过条件；后续计算的阈值沿用 [既有阈值](../03_SPEC/SHUD_Output_Variables.md#13-阈值)（pass `<=0.01`），本节不确定其计算里程碑或生产者。
 - `rivqdown` 序列进入 metrics/figure artifact（后续里程碑，非 M2；具体归属未定）；
-- StackLock/DataProvenance/RunJob/RunRecord 均可追溯。
+- StackLock/DataProvenance 对象接线属于 [M3](Phased_Plan.md#3-m3-mvp-1)；M2 的 `stack_id` / `data_id` 为 null，不能与 RunJob/RunRecord 的已有追溯能力混为一项。
+
+注册表的真实跨重启运行另由 `pnpm run shud:restart` 与 #318 PI 验收覆盖，不把 tiny 的 30 天设置套到这些入口。
 
 ---
 
