@@ -177,7 +177,22 @@ fi
 # 6 pr-size threshold logic
 expect_fail "pr-size" sh scripts/guardrails/pr-size.sh --count 450
 expect_pass "pr-size" sh scripts/guardrails/pr-size.sh --count 10
-expect_pass "pr-size exempt label" env PR_LABELS=size-exempt sh scripts/guardrails/pr-size.sh --count 450
+expect_pass "pr-size exempt label" env PR_LABELS_JSON='["size-exempt"]' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size comma-bearing label" env PR_LABELS_JSON='["x,size-exempt"]' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size comma-suffix label" env PR_LABELS_JSON='["size-exempt,urgent"]' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size near-prefix label" env PR_LABELS_JSON='["not-size-exempt"]' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size near-suffix label" env PR_LABELS_JSON='["size-exempt-extra"]' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size uppercase label" env PR_LABELS_JSON='["SIZE-EXEMPT"]' sh scripts/guardrails/pr-size.sh --count 450
+expect_pass "pr-size exact label among others" env PR_LABELS_JSON='["x,size-exempt","size-exempt,urgent","quoted\"label"," spaced label ","size-exempt"]' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size empty label array" env PR_LABELS_JSON='[]' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size empty label variable" env PR_LABELS_JSON='' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size absent label variable" env -u PR_LABELS_JSON sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size malformed label JSON" env PR_LABELS_JSON='["size-exempt"' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size non-array string" env PR_LABELS_JSON='"size-exempt"' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size non-array object" env PR_LABELS_JSON='{"size-exempt":true}' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size null labels" env PR_LABELS_JSON='null' sh scripts/guardrails/pr-size.sh --count 450
+expect_pass "pr-size at threshold" env PR_LABELS_JSON='[]' sh scripts/guardrails/pr-size.sh --count 400
+expect_fail "pr-size above threshold" env PR_LABELS_JSON='[]' sh scripts/guardrails/pr-size.sh --count 401
 
 # 6b required aggregate: exercise the same command CI runs, with literal job-result fixtures.
 expect_pass "aggregate all success" env RESULTS='{"lint":{"result":"success"},"test":{"result":"success"},"docs-gate":{"result":"success"},"secrets":{"result":"success"},"sast":{"result":"success"},"pr-size":{"result":"success"},"profile-smoke":{"result":"success"}}' sh scripts/guardrails/aggregate-checks.sh
