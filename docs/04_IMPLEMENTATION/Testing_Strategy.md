@@ -81,7 +81,7 @@ ccw tiny 验收：
 - 30 天运行 exit_code=0；
 - 生成 RunRecord；
 - water_balance_residual 达阈值；
-- `rivqdown` 序列进入 metrics/figure artifact。
+- `rivqdown` 序列进入 metrics/figure artifact（后续里程碑，非 M2；具体归属未定）；
 
 ## 6. Report 测试
 
