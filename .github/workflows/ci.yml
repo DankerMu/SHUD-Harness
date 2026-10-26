@@ -110,7 +110,7 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
         run: sh scripts/guardrails/pr-size.sh
       - name: Not a pull request
         if: github.event_name != 'pull_request'
