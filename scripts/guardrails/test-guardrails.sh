@@ -188,6 +188,14 @@ expect_fail "pr-size empty label array" env PR_LABELS_JSON='[]' sh scripts/guard
 expect_fail "pr-size empty label variable" env PR_LABELS_JSON='' sh scripts/guardrails/pr-size.sh --count 450
 expect_fail "pr-size absent label variable" env -u PR_LABELS_JSON sh scripts/guardrails/pr-size.sh --count 450
 expect_fail "pr-size malformed label JSON" env PR_LABELS_JSON='["size-exempt"' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size JSON stream exempt second" env PR_LABELS_JSON='[]
+["size-exempt"]' sh scripts/guardrails/pr-size.sh --count 450
+expect_fail "pr-size JSON stream exempt first" env PR_LABELS_JSON='["size-exempt"]
+[]' sh scripts/guardrails/pr-size.sh --count 450
+expect_pass "pr-size exempt label pretty-printed" env PR_LABELS_JSON='[
+  "docs",
+  "size-exempt"
+]' sh scripts/guardrails/pr-size.sh --count 450
 expect_fail "pr-size non-array string" env PR_LABELS_JSON='"size-exempt"' sh scripts/guardrails/pr-size.sh --count 450
 expect_fail "pr-size non-array object" env PR_LABELS_JSON='{"size-exempt":true}' sh scripts/guardrails/pr-size.sh --count 450
 expect_fail "pr-size null labels" env PR_LABELS_JSON='null' sh scripts/guardrails/pr-size.sh --count 450

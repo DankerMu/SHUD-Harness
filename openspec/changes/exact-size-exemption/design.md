@@ -15,6 +15,7 @@ Current CI joins label names with commas into PR_LABELS; pr-size.sh uses a comma
 
 - Use PR_LABELS_JSON: toJSON(label-name-array). JSON preserves commas, quotes and whitespace in a single label; newline/delimiter alternatives cannot recover lost boundaries.
 - jq membership must first require an array. index on a JSON string is substring lookup and is not a valid label-set test. Non-array or malformed JSON never grants exemption.
+- jq normally evaluates a stream and -e uses its last output; slurp and require exactly one top-level value before the array/member check. Multiple documents in either order reject, while a pretty-printed single array remains valid. This enforces the existing single-array contract, not a new element-type policy.
 - Unset/empty PR_LABELS_JSON means no labels for local use; invalid metadata on an oversized invocation follows the existing non-exempt failure path (exit1), retaining jq diagnostics where applicable, not a new exit2 protocol.
 - Preserve exact lower-case spelling; uppercase aliases, prefixes, suffixes and comma-bearing names alone do not qualify. An array containing the exact name alongside those labels does qualify.
 - Keep the original bypass stderr text and conditional GITHUB_STEP_SUMMARY write only in the true branch.
