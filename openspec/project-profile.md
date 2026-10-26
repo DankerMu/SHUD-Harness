@@ -3,7 +3,7 @@ Project profile: SHUD-Harness（dsh 内核，ADR-0004）
 Living artifact maintained by `subagent-workflow` Phase 0.0/0.5. Rewritten 2026-10-20 at the Phase 4 reset; the Zero-era profile is in tag `archive/zero-v0.8.3`.
 
 Entry surfaces:
-- `packages/dsh-shud-*/` TypeScript plugin packages (pnpm workspace, `tsc` → `lib/`, vitest). Present: `dsh-shud-core` (8 object Zod schemas, policy-gate-core, role-tool-map), `dsh-shud-raw-guard`, `dsh-shud-jobs` (durable registry and file-level startup recovery), and `dsh-shud-tools` (`shud_run`, `shud_collect`). Planned per `docs/04_IMPLEMENTATION/Repository_Layout.md`: `records`, `presets`.
+- `packages/dsh-shud-*/` TypeScript plugin packages (pnpm workspace, `tsc` → `lib/`, vitest). Present: `dsh-shud-core` (8 object Zod schemas, policy-gate-core, role-tool-map), `dsh-shud-raw-guard`, `dsh-shud-jobs` (durable registry and file-level startup recovery), and `dsh-shud-tools` (`shud_run`, `shud_collect`). Planned: `records`, `presets`.
 - `profile/shud/` dsh bundle (`package.json` + `cordis.patch.yml`): model routing, outbound channel switches, plugin mounts by workspace package specifier. The bundle declares `dependencies["@shud-harness/dsh-shud-raw-guard"] = "workspace:*"`; its patch inserts `name: '@shud-harness/dsh-shud-raw-guard'`. The product is `dsh --profile shud`; there is no app of our own.
 - `scripts/schema/` (Zod → `docs/generated/{schema,json-schema}`), `scripts/docs/` (link checker); `skills/`, `scripts/` (R/bash), `templates/` to come with M3.
 - Contract sources: `docs/adr/implemented/0004-dsh-kernel.md`, `docs/04_IMPLEMENTATION/Phased_Plan.md` (M1–M6, sole truth for gates), `docs/03_SPEC/*`, `docs/00_INDEX/CANONICAL_CONTRACTS.md`, `openspec/changes/*`.
@@ -53,8 +53,8 @@ Verification matrix:
 - Canonical home is `AGENTS.md` ## Verification Matrix (mirrored in `constraints.yaml` verification); this profile only adds the per-surface evidence expectations below.
 - Schema surface → focused vitest + schema drift → zero drift, positive/negative parse cases named.
 - Governance surface → focused vitest + typecheck → decision table rows asserted, reserved rule ids intact.
-- Plugin seam surface → unit tests with a fake `ctx` + one headless-template profile boot with the bundle linked + session-log assertions.
-- Job durability surface → SIGTERM and SIGKILL restart cases against a real ccw tiny run → `job/settled` persisted, RunRecord produced.
+- Plugin seam surface → pure-decision tests may use a fake `ctx`; registry/plugin lifecycle tests use real Cordis `Context` (`createScope` stays in test harnesses), plus built-plugin Cordis smoke. Profile evidence covers linked-bundle headless probes and Web startup/restart; wake delivery requires Web because headless has no `session-controller`.
+- Job durability surface → `pnpm run shud:restart` drives real ccw SIGTERM/SIGKILL Web restart cases → [M2 recovery assertions](changes/m2-run-chain/specs/shud-run-jobs/spec.md#requirement-recoverability-invariant): forward-only `run-job.json` state, `run-record.json` or `collect-error.json`, at most one SHUD process per run directory, delivered session-log wake, completed-only index membership; the controlled script rejects `unreachable`. Never use `job/settled` as the oracle: ownerless SHUD jobs do not emit it.
 - Profile/config surface → `pnpm run profile:smoke` (routed model, disabled channel, no secret material).
 - Docs/spec surface → `pnpm run docs:check` → 0 broken links/path claims, generated instructions and decision records in sync.
 
