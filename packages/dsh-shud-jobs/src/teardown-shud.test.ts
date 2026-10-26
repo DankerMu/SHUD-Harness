@@ -346,10 +346,18 @@ test("kill-grace disposal resends TERM before startup cancellation: Linux R8 and
       ]);
       expectUnownedRecoveryWarning(stderr, intent);
     }
-    expect(await readRecord(record.run_dir)).toMatchObject({
+    await expect
+      .poll(async () => (await readRecord(record.run_dir)).notify.detail, { timeout: 5000 })
+      .toMatch(/wait.*session|session.*wait/iu);
+    const collected = await readRecord(record.run_dir);
+    expect(collected.notify.detail).toMatch(/wait.*session|session.*wait/iu);
+    expect(collected).toMatchObject({
       status: "collected",
       cancel_requested_at: intent.cancel_requested_at,
-      notify: intent.notify,
+      notify: {
+        ...intent.notify,
+        detail: collected.notify.detail,
+      },
       exit_code: null,
     });
     expect(await readResult(record.run_dir)).toMatchObject({
