@@ -28,9 +28,17 @@ status: frozen
 
 ### 命令
 
+从仓库根目录执行；先完成 `pnpm install --frozen-lockfile` 与 `pnpm run build`。
+M2 没有独立 dummy-runner CLI，使用 CI 完整覆盖率套件中的提交、日志和收集集成测试：
+
 ```bash
-bash scripts/fixtures/dummy-job.sh --duration-ms 500 --exit-code 0 --lines 10
+pnpm exec vitest run packages/dsh-shud-jobs/src/submit-shud.test.ts packages/dsh-shud-jobs/src/file-output.test.ts packages/dsh-shud-jobs/src/collect-shud.test.ts
 ```
+
+假 SHUD 由 `packages/dsh-shud-jobs/src/test-harness.ts` 的 `installScriptFixture` /
+`createHarness` 在临时目录安装，使用 `scripts/fixtures/exec-script.sh` 跳板；各用例自行断言结果并清理临时目录。
+本命令覆盖 submit、日志增量回读、collect 幂等性，不证明完整宿主重启或报告生成：
+前者另用现有 `pnpm run shud:restart` 本机阻断闸及 #318 PI 验收，后者属于 M3。
 
 ### 预期输出
 
@@ -57,14 +65,14 @@ M2 的 RunJob/RunRecord 不经 `ctx.storage` 域保存；记录落点与索引/�
 ## 3. Dummy batch
 
 > **M5 口径（Phased_Plan M5）**：M5 参数集用最小 OAT（3–5 组），产出用普通 artifact
-> （analysis_progress.json + batch 汇总表），**不产 parquet / heatmap.json**；下述 3×3 命令与 parquet/heatmap
+> （analysis_progress.json + batch 汇总表），**不产 parquet / heatmap.json**；下述 3×3 参数设计与 parquet/heatmap
 > 定义保留供 M5 之后（首个真实敏感性研究任务）复用。
 
 ### 命令
 
-```bash
-bash scripts/fixtures/dummy-batch.sh --params ksat=0.5,1,2 --params roughness=0.7,1,1.3 --fail PSET-005
-```
+尚未落地，无可执行脚本；需在 M5 及后续真实敏感性任务规划中确定实现入口。
+保留的 3×3 设计为 `ksat=0.5,1,2` × `roughness=0.7,1,1.3`，并注入 `PSET-005` 失败，
+不是当前可直接运行的命令，也不改变 M5 最小 OAT 的 3–5 组范围。
 
 ### 预期输出
 
@@ -93,13 +101,21 @@ bash scripts/fixtures/dummy-batch.sh --params ksat=0.5,1,2 --params roughness=0.
 - patch `END=30` 只发生在 task workspace，不改 root submodule；
 - 编译和运行日志必须成为 artifact。
 
-### 命令草案
+### 当前可执行入口
+
+先提供已构建的可执行 SHUD（默认 `SHUD/shud`，或由 `SHUD_BIN` 指定绝对路径）。
+需要构建时，在独立可写的 SHUD 源码副本按其 `configure` / `Makefile` 执行 `./configure` 后
+`make shud`，并准备 `~/sundials`；不要修改本仓库只读 submodule。
 
 ```bash
-bash scripts/shud/build.sh --repo <workspace>/shud
-bash scripts/shud/run_tiny_ccw.sh --repo <workspace>/shud --task TASK-001 --days 30
-Rscript scripts/rshud/water_balance.R --run RUN-001
+pnpm run shud:tiny
 ```
+
+实际入口为 `scripts/runtime/shud-tiny.sh`：复制 ccw 到 scratch workspace，仅在副本更新 END，
+检查 exit 0 与 `.dat` 产出；默认结束后清理 workspace，需保留日志/产物时设置 `SHUD_TINY_KEEP=1`。
+它是独立求解器 smoke，不经过作业注册表，不代表下列全部设计产物/验收项已实现。
+rSHUD 水量平衡函数见 `rSHUD/R/WaterBalance.R` 的 `wb.all`，依赖已配置的数据与初始条件；
+目前没有通用的一键水量平衡 CLI，本入口也不调用该函数。
 
 ### 预期输出
 
