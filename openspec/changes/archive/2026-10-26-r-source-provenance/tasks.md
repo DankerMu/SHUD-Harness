@@ -8,8 +8,8 @@
 
 ## 2. Delivery
 
-- [ ] 2.1 Complete three-seat expanded review including source-anchor verification; pass exact-head CI and retain real pinned-submodule checkout/path-check evidence; verify unchanged source pins and clean submodules before merge.
-- [ ] 2.2 Merge and archive only this completed provenance fixture; preserve active M2 PI acceptance change.
+- [x] 2.1 Complete three-seat expanded review including source-anchor verification; pass exact-head CI and retain real pinned-submodule checkout/path-check evidence; verify unchanged source pins and clean submodules before merge.
+- [x] 2.2 Merge and archive only this completed provenance fixture; preserve active M2 PI acceptance change.
 
 ## Risk mapping
 
