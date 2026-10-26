@@ -128,7 +128,7 @@ describe("canonical role to tool id map", () => {
 
   test("keeps coder as the only role with write, edit, or patch.apply", () => {
     expect(getRoleToolIds("coder")).toEqual(
-      expect.arrayContaining(REPOSITORY_SOURCE_EDIT_TOOL_IDS),
+      expect.arrayContaining([...REPOSITORY_SOURCE_EDIT_TOOL_IDS]),
     );
     expect(rolesContainingAny(REPOSITORY_SOURCE_EDIT_TOOL_IDS)).toEqual(["coder"]);
   });
