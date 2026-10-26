@@ -75,13 +75,23 @@ M2 原生进程 fixture 的清理失败由共享测试诊断入口保留嵌套 `
 
 诊断不得重排清理或改变各面的 stop/continue 语义：detached 与 fault 用例已有的早期静止失败仍停止后续释放，原本收集错误后继续的 polling/cleanupResources 保持原样。body 或已观察的 pending 拒绝与 finally 清理失败同时可见；仅 body 失败时保留同一错误对象。#349 已捕获复现的成因是测试启动身份注入范围过宽，PR #351 已将其改为一次性；更早无 trace 的失败及其与 #313 的因果关系仍未知，不将后续通过称为消除所有间歇失败。此诊断修复不改生产 abort/所有权证明或共享 fixture 默认值。
 
-ccw tiny 验收：
+ccw fixture 按入口验收（完整布局见 [matrix §4](Test_Fixtures_And_Command_Matrix.md#4-ccw-tiny)）：
 
-- SHUD 编译成功；
+- 前置条件：已有已构建、可执行的 SHUD；fixture 不执行编译，缺失二进制明确失败。
+
+独立 `shud:tiny`，默认 30 天 END 仅在输入副本更新：
+
 - 30 天运行 exit_code=0；
-- 生成 RunRecord；
-- water_balance_residual 达阈值；
+- scratch 的 `output/ccw.out/` 有 `.dat` 产出；日志默认随 scratch 清理，`SHUD_TINY_KEEP=1` 可保留。
+
+注册表路径及后续对象：
+
+- 注册表路径（`shud_run` → collect）：成功运行 exit_code=0、RunRecord.status=succeeded，RunJob/RunRecord 与 stateDir 索引可追溯；独立 `shud:tiny` 不生成这些记录。
+- `numerical_health.water_balance_residual` 在 M2 collect 中为 `null`，不作为 M2 通过条件；后续计算的阈值沿用 [既有阈值](../03_SPEC/SHUD_Output_Variables.md#13-阈值)（pass `<=0.01`），本节不确定其计算里程碑或生产者。
 - `rivqdown` 序列进入 metrics/figure artifact（后续里程碑，非 M2；具体归属未定）；
+- StackLock/DataProvenance 对象接线属于 [M3](Phased_Plan.md#3-m3-mvp-1)；M2 的 `stack_id` / `data_id` 为 null，不能与 RunJob/RunRecord 的已有追溯能力混为一项。
+
+注册表的真实跨重启运行另由 `pnpm run shud:restart` 与 #318 PI 验收覆盖，不把 tiny 的 30 天设置套到这些入口。
 
 ## 6. Report 测试
 
