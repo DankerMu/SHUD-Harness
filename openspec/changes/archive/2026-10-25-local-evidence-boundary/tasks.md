@@ -9,7 +9,7 @@
 ## 2. Verify and deliver
 
 - [x] 2.1 Parent exercises actual Git/Prettier discovery for all three namespaces and format:check with probes present; verifies the same unformatted source control fails and formatted control passes. Prove saved evidence bytes and unrelated local excludes unchanged, no tracked evidence, and only owned probes removed.
-- [ ] 2.2 Run full check, instruction/docs/ADR and strict fixture validation. Complete expanded review/adjudication, exact-head CI, merge/close #322 and archive only this independent change; #293/#318 remain unaccepted.
+- [x] 2.2 Run full check, instruction/docs/ADR and strict fixture validation. Complete expanded review/adjudication, exact-head CI, merge/close #322 and archive only this independent change; #293/#318 remain unaccepted.
 
 ## Risk packs
 
