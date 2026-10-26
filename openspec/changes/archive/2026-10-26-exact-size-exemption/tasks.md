@@ -9,8 +9,8 @@
 
 ## 2. Delivery
 
-- [ ] 2.1 Complete expanded review and exact-head CI; post red/green evidence distinguishing old-encoding defect reproduction from new-format negative cases.
-- [ ] 2.2 Merge and archive only this completed gate change, preserving active M2 acceptance.
+- [x] 2.1 Complete expanded review and exact-head CI; post red/green evidence distinguishing old-encoding defect reproduction from new-format negative cases.
+- [x] 2.2 Merge and archive only this completed gate change, preserving active M2 acceptance.
 
 ## Risk mapping
 
