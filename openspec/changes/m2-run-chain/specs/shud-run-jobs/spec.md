@@ -328,6 +328,8 @@ stderr 管道或描述符关闭时，诊断写入失败 SHALL 仅造成该条日
 ### Requirement: Automatic collect
 作业进入 `succeeded`、`failed` 或 `cancelled` 时注册表 SHALL 立即 collect：按 run-records spec 生成 RunRecord（含从 `run-job.json` 复制的 `llm.response_model` 与 `llm.response_model_source`）写入 `run-record.json`，作业状态置 `collected`，之后才唤醒。`run-record.json` 已存在时 collect SHALL 返回已有记录而不改写。collect 失败（`exit_code` 不可读或非整数、产物目录不可读、RunRecord 未通过 schema 校验、写文件失败）时 SHALL 写 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态（`exit_code` 不可读时为 `failed`），SHALL NOT 写 `run-record.json`；`attempts` 未达 core 常量上限时 SHALL 由「Registry poll loop」在重试间隔后重试（重启后由对账 R9 继续），达到上限后 SHALL 停止自动重试并以失败原因唤醒发起会话。
 
+自动与直接 collect SHALL 共用相同的原始宿主观测条件及既有时间区间校验；仅有完整磁盘时间戳或接管登记 SHALL NOT 授权新数值。完成回执释放后，同实例生成重试 SHALL 保留原始已观测端点；实例更替或进程崩溃后，未提交结果的时长 SHALL 为 null。有效已提交记录优先原样返回，SHALL NOT 因缺少新实例观测而重算或改写。
+
 #### Scenario: collect is idempotent
 - **WHEN** 对同一已 collect 的作业再次 collect
 - **THEN** 返回与 `run-record.json` 相同的记录，文件修改时间不变
@@ -347,6 +349,10 @@ stderr 管道或描述符关闭时，诊断写入失败 SHALL 仅造成该条日
 #### Scenario: never-started lost run has no output directory
 - **WHEN** 已结算为 lost 的作业从未启动，退出码和求解器产物目录均不存在
 - **THEN** collect 生成 exit_code 为 null、exit_class 为 lost 的 RunRecord，产物清单为空，未观测的运行时长和数值指标为 null
+
+#### Scenario: duration observation is not reconstructed after a crash
+- **WHEN** 原始宿主发布终态后、RunRecord 提交前崩溃，随后另一个进程收集该运行
+- **THEN** 保留已有 finished_at 结算观测时刻，新 RunRecord 的 wall_seconds 为 null；若 RunRecord 已提交则原样返回其数值与字节，不重新生成
 
 #### Scenario: corrupted retry ledger does not reopen the attempt budget
 - **WHEN** collect-error.json 的 JSON、字段、attempts 或 at 不合法

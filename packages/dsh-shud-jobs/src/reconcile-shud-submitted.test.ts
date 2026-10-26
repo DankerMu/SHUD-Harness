@@ -88,6 +88,7 @@ test.each([
         job_id: record.job_id,
         exit_code: code,
         exit_class: exitClass,
+        resources: { wall_seconds: null },
       });
       const collected = await readRecord(record.run_dir);
       expect(collected.status).toBe("collected");
@@ -406,10 +407,14 @@ test.each([
         job_id: record.job_id,
         exit_code: code,
         exit_class: exitClass,
+        resources: { wall_seconds: null },
       });
       const collected = await readRecord(record.run_dir);
       expect(collected.status).toBe("collected");
       expect(collected.exit_code).toBe(code);
+      expect(collected.started_at).toBe(record.started_at);
+      expect(collected.pid).toBe(record.pid);
+      expect(collected.pid_started_at).toBe(record.pid_started_at);
       expect(collected.notify).toEqual(record.notify);
       expect(collected.dsh_job_id).toBe(record.dsh_job_id);
       expect(collected.dsh_job_ids).toEqual(record.dsh_job_ids);

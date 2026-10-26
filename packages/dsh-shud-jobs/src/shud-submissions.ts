@@ -254,16 +254,24 @@ export class ShudSubmissions {
       const lifecycle = execution.value.hooks;
       const startup = await execution.startup;
       if ("error" in startup) throw startup.error;
-      record = RunJobSchema.parse({
-        ...record,
-        status: "running",
+      const originalStart = {
+        run_id: record.run_id,
+        job_id: record.job_id,
+        run_dir: record.run_dir,
         pid: startup.identity.pid,
         pid_started_at: startup.identity.pid_started_at,
         started_at: startup.identity.pid_started_at,
+      };
+      record = RunJobSchema.parse({
+        ...record,
+        status: "running",
+        pid: originalStart.pid,
+        pid_started_at: originalStart.pid_started_at,
+        started_at: originalStart.started_at,
       });
       await writeJson(recordPath, record);
       this.cancellations.activate(registered, startup.identity);
-      this.receipts.set(record.run_id, { lifecycle });
+      this.receipts.set(record.run_id, { lifecycle, originalStart });
       this.inFlight.delete(record.run_id);
       return record;
     } catch (error) {

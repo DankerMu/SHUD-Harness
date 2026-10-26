@@ -84,6 +84,13 @@ test.each(Object.entries(numericClasses))(
         resources: { peak_memory_mb: null },
       });
       expect(result.resources.wall_seconds).toBeGreaterThanOrEqual(0);
+      const observed = producer.durableAtSettle[0];
+      expect(observed.started_at).toBe(job.started_at);
+      if (observed.started_at === null || observed.finished_at === null)
+        throw new Error("Original online observation is missing an endpoint");
+      expect(result.resources.wall_seconds).toBe(
+        (Date.parse(observed.finished_at) - Date.parse(observed.started_at)) / 1000,
+      );
       expect(Number.isFinite(Date.parse(result.collected_at))).toBe(true);
       expect((await readRecord(job.run_dir)).status).toBe("collected");
       await producer.doneObserved;
@@ -123,6 +130,7 @@ test.each([false, true])(
         exit_class: cancelled ? "cancelled" : "lost",
       });
       expect(result.artifacts.files).toEqual([]);
+      if (!cancelled) expect(result.resources.wall_seconds).toBeNull();
       await expectAbsent(join(job.run_dir, "exit_code"));
       expect((await readRecord(job.run_dir)).status).toBe("collected");
     } finally {
@@ -146,6 +154,20 @@ test("the online dispatcher automatically collects after terminal persistence an
       JSON.parse(await io.readFile(join(job.run_dir, "run-record.json"), "utf8")),
     );
     expect(result.exit_class).toBe("ok");
+    const terminal = producer.durableAtSettle[0];
+    expect(result.resources.wall_seconds).toBeGreaterThanOrEqual(0);
+    if (terminal.started_at === null || terminal.finished_at === null)
+      throw new Error("Automatic collection is missing an observed endpoint");
+    expect(result.resources.wall_seconds).toBe(
+      (Date.parse(terminal.finished_at) - Date.parse(terminal.started_at)) / 1000,
+    );
+    const bytes = await io.readFile(join(job.run_dir, "run-record.json"));
+    const mtime = (await io.stat(join(job.run_dir, "run-record.json"), { bigint: true })).mtimeNs;
+    expect(await h.registry.collectShud(job.run_id)).toEqual(result);
+    expect(await io.readFile(join(job.run_dir, "run-record.json"))).toEqual(bytes);
+    expect((await io.stat(join(job.run_dir, "run-record.json"), { bigint: true })).mtimeNs).toBe(
+      mtime,
+    );
     expect(producer.durableAtSettle[0].status).toBe("succeeded");
     expect(producer.durableAtDone[0].status).toBe("succeeded");
     expect(producer.completed).toHaveLength(1);
@@ -156,7 +178,7 @@ test("the online dispatcher automatically collects after terminal persistence an
   }
 }, 15000);
 
-test("collection copies prescribed references and provenance, with a worked 2.5-second duration and unknown measurements", async () => {
+test("collection copies prescribed references and provenance but disk-only timestamps are not duration observations", async () => {
   const h = await pollFixture();
   try {
     const job = await seedTerminal(h, {
@@ -171,7 +193,7 @@ test("collection copies prescribed references and provenance, with a worked 2.5-
       stack_id: "stack-308",
       data_id: "data-308",
       llm: { response_model: "observed-model-308", response_model_source: "response" },
-      resources: { wall_seconds: 2.5, peak_memory_mb: null },
+      resources: { wall_seconds: null, peak_memory_mb: null },
       numerical_health: {
         water_balance_residual: null,
         cvode_failures: null,

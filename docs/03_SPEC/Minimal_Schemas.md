@@ -12,6 +12,8 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 > **Canonical Source 说明：** Support schema（Artifact、ErrorRecord、PiGate、PiGateDecision、NotificationRecord、ReportExport、AnalysisProgressPayload、User、Session、AuditEvent、LockRecord、IdempotencyRecord 等）的权威定义不在本文件，见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md)。本文件仅定义 8 个核心对象 + MemoryNote。
 
 > **M2 修订来源：** RunJob（§4）与 RunRecord（§5）已按 OpenSpec [m2-run-chain「Run identifiers / RunJob record / RunRecord record」](../../openspec/changes/m2-run-chain/specs/run-records/spec.md) tasks 4.1–4.2 与 `packages/dsh-shud-core/src/schemas/run-job.ts`、`packages/dsh-shud-core/src/schemas/run-record.ts` 对齐。该修订不改变其余对象的当前契约。
+>
+> **M2 计时语义修订（#344，2026-10-25）：** 按 PI [观测证据决策](https://github.com/DankerMu/SHUD-Harness/issues/344#issuecomment-6397950076) 与[可重算观测窗口选择](https://github.com/DankerMu/SHUD-Harness/issues/344#issuecomment-6405181313) 对齐 §4–§5 的时间语义与 canonical schema descriptions；不新增字段、不改变校验形状或改写已提交结果。
 
 ---
 
@@ -173,6 +175,8 @@ created → submitted → running → succeeded | failed | cancelled → collect
 
 `created` 表示输入已复制、记录与活动索引已写；`submitted` 不再表示排队，而是启动意图已持久化、接下来登记并 spawn 的窗口。`running` 必须同时具有非空 `pid` 与 `pid_started_at`，否则 schema 在对应字段报错。时间字段使用 ISO 8601 UTC，未发生时为 `null`。
 
+`started_at` 沿用接受的包装进程 lstart 身份时间，不是精确求解器启动测量；`finished_at` 是终态发布时的结算观测时间，不是进程退出时间，完成/收集重试不推进该端点。持久时间齐全不代表本实例观察过原始执行，恢复或接管也不补发此证明。
+
 **Core 常量：** `MAX_NOTIFY_ATTEMPTS = 3`、`MAX_COLLECT_ATTEMPTS = 3`；`NOTIFY_RETRY_INTERVAL_MS`、`COLLECT_RETRY_INTERVAL_MS`、`KILL_GRACE_PERIOD_MS` 均为 `10_000` 毫秒（10 秒）。`notify.attempts` 记录非负次数，重试调度按这些常量执行。
 
 **相对原文的处置：** `command` 从命令字符串改为 argv 数组；`cwd` 被删除并由 `run_dir` 取代。新增 `run_id`、`project`、`label`、`input_dir`、`run_dir`、`end_days`、`owner_session`、`dsh_job_id`、`dsh_job_ids`、`pid_started_at`、`input_bytes`、`started_at`、`cancel_requested_at`、`exit_code`、`llm` 与 `notify`。M2 不接受 `timed_out`、`local_direct`、`docker_job`、`slurm`、`k8s` 或旧 `backend: local`。
@@ -208,7 +212,7 @@ numerical_health:                   # M2 不计算这些指标，四个字段均
   negative_state_count: null
   max_solver_dt: null
 resources:
-  wall_seconds: 60                  # 非负秒数或 null
+  wall_seconds: 60                  # 原始实例可重算的非负观测窗口（秒），缺观测为 null
   peak_memory_mb: null              # 非负 MB 数值或 null
 llm:
   response_model: deepseek-flash-guan # 必填非空字符串
@@ -217,6 +221,8 @@ collected_at: "2026-10-22T03:16:00Z" # ISO 8601 UTC
 ```
 
 **退出类别：** `classifyRunExit(exitCode, missingOutcome?)` 为唯一映射：`0 → ok`、`10 → nan`、`12 → file_io`、`13 → input`、`19 → cvode`、`20 → consistency`，其它非零整数为 `other`（退出码事实见 [SHUD_IO_Facts](../01_CODEBASE/SHUD_IO_Facts.md#退出码)）。`exit_code: null` 必须明确提供 `cancelled`（取消且无退出码）或 `lost`（进程丢失/从未启动且无退出码），不猜测默认结果。数值退出证据优先于取消意图。schema 拒绝退出码与类别矛盾的记录，并要求 `ok` 对应 `succeeded`，其余八类对应 `failed`。
+
+**时长语义：** 新生成的数值 `resources.wall_seconds` 必须有原始提交实例的匹配启动身份与其成功发布的终态观测，值为 `(Date.parse(finished_at) - Date.parse(started_at)) / 1000`。有效数值退出或本地受控取消达到既有静止条件时可形成观测；丢失执行、非法/不可读退出证据、缺失或不匹配的观测不能授权数值。重启、接管及终态发布后但结果提交前的实例丢失，新结果均为 `null`，即使两端时间都有值；未知端点也为 `null`。两端已知但负区间仍拒绝，不能用 `null` 隐藏错误。该窗口可能包含 lstart 起点偏差、检测延迟及在线取消宽限，不是求解器运行时长、求解器时长上界或固定精度测量。同实例完成/生成重试保留原始端点，包括自动预算耗尽后的手动收集；有效已提交 RunRecord 优先原样返回，历史数值不改写，也不追认证实。
 
 **产物清单：** `artifacts.files` 不是 Artifact 登记对象，不要求非空 `task_id`；`size_bytes` 复用 `ArtifactSchema.size_bytes` 的非负整数约束，但在文件条目中必填。`path` 必须是非空相对路径，拒绝绝对路径、驱动器路径与任一 `..` 路径段（包含反斜杠形式）。这些是词法检查，不证明实际文件或符号链接仍位于 `shud_output` 内；文件系统复核属于 collect。
 

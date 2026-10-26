@@ -39,6 +39,10 @@ Required is evaluated within the immediate parent object.
 | llm.response_model_source | yes | no | enum<string> | values: `response`, `configured` |
 | collected_at | yes | no | string | format=date-time; pattern=^(?:(?:\d\d[2468][048]\|\d\d[13579][26]\|\d\d0[48]\|[02468][048]00\|[13579][26]00)-02-29\|\d{4}-(?:(?:0[13578]\|1[02])-(?:0[1-9]\|[12]\d\|3[01])\|(?:0[469]\|11)-(?:0[1-9]\|[12]\d\|30)\|(?:02)-(?:0[1-9]\|1\d\|2[0-8])))T(?:(?:[01]\d\|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z))$ |
 
+## Field semantics
+
+- resources.wall_seconds: Original-instance observation window in seconds: (finished_at - started_at) / 1000. New records require matching original start and successfully published terminal observations; missing, recovered or mismatched observations produce null. finished_at is settlement observation, not solver exit time. The window may include start-clock bias, detection delay and local cancellation grace; it is not solver runtime, a solver-runtime upper bound or a fixed-precision measurement. Negative known intervals are rejected even without observations. Valid committed records remain immutable and historical numeric values are not retroactively certified.
+
 ## Enums
 
 | Field | Values |
@@ -88,7 +92,7 @@ collected_at: "2026-10-22T03:16:00Z"
 ## Changelog Diff
 
 ```diff
-+ schema RunRecord sha256:77b9a30d22e6ef296cd14e17791c4975efd334d9a5b86e7131473ab5c25ba9a5
++ schema RunRecord sha256:fd8b130f453319d2aef766004688822a160a9c4d8fd7ecbd1f02b6cc2304c6c0
 + field run_id required=yes nullable=no type=string constraints=pattern=^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field job_id required=yes nullable=no type=string constraints=pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field task_id required=yes nullable=yes type=string | null constraints=minLength=1

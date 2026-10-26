@@ -209,10 +209,14 @@ test.each([
       expect(collected.status).toBe("collected");
       expect(collected.exit_code).toBe(code);
       expect(collected.cancel_requested_at).toBe(run.record.cancel_requested_at);
+      expect(collected.started_at).toBe(run.record.started_at);
+      expect(collected.pid).toBe(run.record.pid);
+      expect(collected.pid_started_at).toBe(run.record.pid_started_at);
       expect(collected.notify).toEqual(run.record.notify);
       expect(await readResult(run.record.run_dir)).toMatchObject({
         exit_code: code,
         exit_class: exitClass,
+        resources: { wall_seconds: null },
       });
       expect(actualRegistry(h.ctx).list()).toEqual([]);
       expect(stderr.lines(run.record.run_id)).toEqual([]);
@@ -455,6 +459,7 @@ test("unowned R7 warns only after terminal publication and never repeats after c
     await registry.collectShud(run.record.run_id);
     await registry.pollOnce();
     expect((await readResult(run.record.run_dir)).exit_class).toBe("cancelled");
+    expect((await readResult(run.record.run_dir)).resources.wall_seconds).toBeNull();
     expectUnownedRecoveryWarning(stderr, run.record);
     await fiber.dispose();
     await waitForOwnershipRelease(h.stateDir);

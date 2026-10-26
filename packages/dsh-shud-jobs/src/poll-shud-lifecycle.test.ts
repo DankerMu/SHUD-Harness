@@ -226,7 +226,13 @@ test("completion callback retry does not rewrite terminal bytes, mtime or finish
     await expect.poll(() => producer.completed.length).toBe(1);
     await producer.doneObserved;
     expect(producer.durableAtDone[0]).toEqual(terminal);
-    await h.registry.collectShud(record.run_id);
+    const result = await h.registry.collectShud(record.run_id);
+    expect(result.resources.wall_seconds).toBeGreaterThanOrEqual(0);
+    if (terminal.started_at === null || terminal.finished_at === null)
+      throw new Error("Retried completion is missing an observed endpoint");
+    expect(result.resources.wall_seconds).toBe(
+      (Date.parse(terminal.finished_at) - Date.parse(terminal.started_at)) / 1000,
+    );
     expect((await readRecord(record.run_dir)).finished_at).toBe(terminal.finished_at);
     const attempts = producer.attempts.length;
     await h.registry.pollOnce();
@@ -294,7 +300,7 @@ test("composite disposal drains an accepted settlement before releasing state ow
     await contender.apply(ShudJobRegistry, { ...h.config, pumpPollMs: 7 });
     const replacement = actualRegistry(contender.ctx);
     await replacement.pollOnce();
-    await replacement.collectShud(record.run_id);
+    expect((await replacement.collectShud(record.run_id)).resources.wall_seconds).toBeNull();
     await expect
       .poll(async () => (await readRecord(record.run_dir)).notify.detail, { timeout: 5000 })
       .toMatch(/wait.*session|session.*wait/iu);

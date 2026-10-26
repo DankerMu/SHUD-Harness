@@ -79,6 +79,14 @@ test.each(["cancelled by the user", "stop this model experiment", "jobs service 
       expect(activeGroup(pid)).toEqual([]);
       expect(producer.registration.cancellations).toEqual([]);
       await expect.poll(() => h.registry.get(id, h.ownerId).status).toBe("killed");
+      const collected = await h.registry.collectShud(running.run_id);
+      expect(collected.exit_class).toBe("cancelled");
+      expect(collected.resources.wall_seconds).toBeGreaterThanOrEqual(0);
+      if (terminal.finished_at === null || running.started_at === null)
+        throw new Error("Controlled cancellation is missing an observed endpoint");
+      expect(collected.resources.wall_seconds).toBe(
+        (Date.parse(terminal.finished_at) - Date.parse(running.started_at)) / 1000,
+      );
     } finally {
       restoreKill?.();
       // Existing cleanup terminates/reaps every owned execution even when inherited kill leaves it live.

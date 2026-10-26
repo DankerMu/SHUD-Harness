@@ -360,6 +360,70 @@ function assertGeneratorSemanticContracts(): void {
     failures.push("ArtifactManifest fields omit artifacts[].llm_generated");
   }
 
+  const wrapperDescription = "Observed window | unknown\nsecond line";
+  const fallbackDescription = "Inner annotation fallback";
+  const shadowedDescription = "Inner annotation must not replace the whole-field meaning";
+  const plain = z.strictObject({
+    window: z.number().nonnegative().nullable(),
+    fallback: z.number().min(1).nullable(),
+    mode: z.enum(["fast", "careful"]),
+    unannotated: z.string(),
+  });
+  const annotated = z.strictObject({
+    window: z
+      .number()
+      .nonnegative()
+      .describe(shadowedDescription)
+      .nullable()
+      .describe(wrapperDescription),
+    fallback: z.number().min(1).describe(fallbackDescription).nullable(),
+    mode: z.enum(["fast", "careful"]).describe("Execution mode semantics"),
+    unannotated: z.string(),
+  });
+  const plainDefinition = syntheticStrictDefinition("SyntheticSemantics", plain);
+  const annotatedDefinition = syntheticStrictDefinition("SyntheticSemantics", annotated);
+  const plainJson = buildJsonSchema(plainDefinition);
+  const annotatedJson = buildJsonSchema(annotatedDefinition);
+  const plainMarkdown = buildMarkdown(plainDefinition, plainJson);
+  const annotatedMarkdown = buildMarkdown(annotatedDefinition, annotatedJson);
+  const wrapper = annotatedJson.properties?.window;
+  if (
+    !wrapper ||
+    Reflect.get(wrapper, "description") !== wrapperDescription ||
+    Reflect.get(nonNullSchema(wrapper), "description") !== shadowedDescription
+  ) {
+    failures.push("nullable whole-field and inner annotations are not preserved in JSON Schema");
+  }
+  if (
+    !annotatedMarkdown.includes("Observed window \\| unknown second line") ||
+    !annotatedMarkdown.includes(fallbackDescription) ||
+    !annotatedMarkdown.includes("Execution mode semantics") ||
+    annotatedMarkdown.includes(shadowedDescription)
+  ) {
+    failures.push(
+      "Markdown field semantics lose nullable wrapper precedence, fallback or escaping",
+    );
+  }
+  const [annotatedRows, plainRows] = [annotatedMarkdown, plainMarkdown].map((markdown) =>
+    markdown.split("\n").filter((line) => line.startsWith("|")),
+  );
+  if (JSON.stringify(annotatedRows) !== JSON.stringify(plainRows)) {
+    failures.push("semantic annotations changed field columns, constraints or enum values");
+  }
+  if (
+    JSON.stringify(buildExample(annotatedJson)) !== JSON.stringify(buildExample(plainJson)) ||
+    JSON.stringify(extractExampleYamlLines(annotatedMarkdown)) !==
+      JSON.stringify(extractExampleYamlLines(plainMarkdown))
+  ) {
+    failures.push("semantic annotations changed example values or YAML");
+  }
+  if (
+    !annotated.safeParse({ window: null, fallback: null, mode: "fast", unannotated: "" }).success ||
+    annotated.safeParse({ window: -1, fallback: 1, mode: "fast", unannotated: "" }).success
+  ) {
+    failures.push("semantic annotations changed nullable or nonnegative validation");
+  }
+
   try {
     const looseRootSchema = z.looseObject({ value: z.string() });
     assertThrows(

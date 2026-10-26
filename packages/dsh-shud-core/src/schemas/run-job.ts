@@ -40,8 +40,21 @@ export const RunJobSchema = z
     pid_started_at: z.iso.datetime().nullable(),
     input_bytes: z.number().int().nonnegative(),
     submitted_at: z.iso.datetime().nullable(),
-    started_at: z.iso.datetime().nullable(),
-    finished_at: z.iso.datetime().nullable(),
+    started_at: z.iso
+      .datetime()
+      .nullable()
+      .describe(
+        "Accepted wrapper start identity time from lstart, not a precise solver start measurement; null when unknown. " +
+          "A persisted timestamp, including one retained or adopted during recovery, does not by itself authorize numeric wall_seconds.",
+      ),
+    finished_at: z.iso
+      .datetime()
+      .nullable()
+      .describe(
+        "Settlement-observation timestamp, not solver exit time; null before settlement or when unknown. " +
+          "Completion and collection retries preserve this endpoint. Numeric wall_seconds additionally requires " +
+          "matching start and terminal observations from the original submitting instance.",
+      ),
     cancel_requested_at: z.iso.datetime().nullable(),
     exit_code: z.number().int().nullable(),
     llm: z.strictObject({

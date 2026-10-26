@@ -43,6 +43,11 @@ Required is evaluated within the immediate parent object.
 | notify.at | yes | yes | string \| null | format=date-time; pattern=^(?:(?:\d\d[2468][048]\|\d\d[13579][26]\|\d\d0[48]\|[02468][048]00\|[13579][26]00)-02-29\|\d{4}-(?:(?:0[13578]\|1[02])-(?:0[1-9]\|[12]\d\|3[01])\|(?:0[469]\|11)-(?:0[1-9]\|[12]\d\|30)\|(?:02)-(?:0[1-9]\|1\d\|2[0-8])))T(?:(?:[01]\d\|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z))$ |
 | notify.detail | yes | yes | string \| null | - |
 
+## Field semantics
+
+- started_at: Accepted wrapper start identity time from lstart, not a precise solver start measurement; null when unknown. A persisted timestamp, including one retained or adopted during recovery, does not by itself authorize numeric wall_seconds.
+- finished_at: Settlement-observation timestamp, not solver exit time; null before settlement or when unknown. Completion and collection retries preserve this endpoint. Numeric wall_seconds additionally requires matching start and terminal observations from the original submitting instance.
+
 ## Enums
 
 | Field | Values |
@@ -95,7 +100,7 @@ notify:
 ## Changelog Diff
 
 ```diff
-+ schema RunJob sha256:58968cf5eb3417ff57b0c74e8d779ccabd9c511a78e995b5b6f41fe9277d9ee9
++ schema RunJob sha256:a53bfe9576261f7a47dbe877e777662428e1a0949db65baf85412fcc0930530f
 + field job_id required=yes nullable=no type=string constraints=pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field run_id required=yes nullable=no type=string constraints=pattern=^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field task_id required=yes nullable=yes type=string | null constraints=minLength=1

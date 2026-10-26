@@ -61,6 +61,10 @@ export class ShudCancellation {
     return this.recovered.has(runId);
   }
 
+  hasLocalRequest(runId: RunId): boolean {
+    return this.runs.get(runId)?.requestedAt !== undefined;
+  }
+
   runId(id: JobId): RunId {
     return this.requireRegistration(id).entry.run_id;
   }

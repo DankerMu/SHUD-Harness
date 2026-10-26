@@ -181,7 +181,7 @@ Collect 必须是幂等的。重复调用 `collect` 不应破坏已完成结果�
 
 当前实现：`dsh-shud-jobs` 已提供自动收集与后端 `collectShud(RunId | JobRecordId): Promise<RunRecord>`，共用逐条目队列并等待本地完成回执；先发布不可变 RunRecord，再投影 `collected`。状态投影失败只修复投影，不重做生成或消耗生成尝试；成功重试保留历史错误记录。R9/R10 启动对账复用该收集实现：有效且身份匹配的已有 RunRecord 在读取重试记录前优先返回，即使历史预算耗尽、未到重试间隔或记录损坏，也只修复状态；没有有效已提交结果时，损坏的重试记录阻止新的生成尝试，保留且不重置次数。手动 API 可越过正常重试间隔/次数上限。已挂载 `shud_collect` 工具通过同一 API 接受 `job_id`/`run_id` 二选一，直接返回规范记录；收集本身不投递消息，pending notify 的活动索引在收集后仍保留，由服务初始化后的唯一轮询循环执行 #313 投递，通知终结后迁移索引，见 §9。实现边界与安全规则见 [Runtime Lifecycle](../../instructions/agents/shared.md#runtime-lifecycle)。
 
-M2 collect 先按持久 id 从活动/完成索引找到原运行目录（提交时为 `<session cwd>/runs/<run_id>/`），不从收集调用者 cwd 扫描或推断路径，再读取作业与退出信息：按退出码映射 `exit_class`，扫描 `output/<project>.out/` 得到相对路径/字节数清单，计算 `wall_seconds`，复制模型 id 与来源，经 core schema 校验后写 `run-record.json`，再将 RunJob 置为 `collected`；后续投递步骤由同一轮询循环负责，不由 collector 发消息。有效且身份匹配的已有 `run-record.json` 原样返回，内容和修改时间不变；`shud_collect` 工具复用同一逻辑，通知完成后另一会话/工作区仍可经完成索引读取。当前 `wall_seconds` 由 `(Date.parse(finished_at) - Date.parse(started_at)) / 1000` 计算（缺时间为 null），不是精确求解器计时；测量限制见 §9。
+M2 collect 先按持久 id 从活动/完成索引找到原运行目录（提交时为 `<session cwd>/runs/<run_id>/`），不从收集调用者 cwd 扫描或推断路径，再读取作业与退出信息：按退出码映射 `exit_class`，扫描 `output/<project>.out/` 得到相对路径/字节数清单，按原始实例观测计算或保留未知的 `wall_seconds`，复制模型 id 与来源，经 core schema 校验后写 `run-record.json`，再将 RunJob 置为 `collected`；后续投递步骤由同一轮询循环负责，不由 collector 发消息。有效且身份匹配的已有 `run-record.json` 原样返回，内容和修改时间不变；`shud_collect` 工具复用同一逻辑，通知完成后另一会话/工作区仍可经完成索引读取。新数值须有匹配的原始启动与本实例成功发布的终态观测，按 `(Date.parse(finished_at) - Date.parse(started_at)) / 1000` 重算；缺时间、缺观测或观测不匹配为 null，恢复/接管不补发原始观测。两端已知的负区间仍经原有校验拒绝，不以 null 隐藏；观测窗口不是求解器运行时长，详见 §9。
 
 失败写同目录 `collect-error.json`（`attempts`、`last_error`、`at`），作业保持或置为终态；退出码不可读/非整数时为 `failed`，不写占位 RunRecord、不置 `collected`。唯一轮询循环在距上次尝试至少 10 秒后重试，上限 3 次；达到上限不再自动 collect，后端 `collectShud()` 与 `shud_collect` 仍可手工重试。重启由 R9/R10 接续；耗尽后的投递保留原终态和错误记录，仅使用经受控阶段/代码校验及归一化的实际失败原因，不直接转发任意 `last_error`。不可信的历史诊断或损坏、错身份、链接形式的已有 RunRecord 阻止失败唤醒，不重置预算、不猜测结果；有效同身份 RunRecord 仍优先。工具错误保留本次受控生成原因，包括记账发布同时失败的聚合错误；非终态/提交在途请求只返回当前状态与经校验的 nullable `dsh_job_id`，不生成结果或 ledger。参数、用法及验证边界见 [已挂载的 shud_collect](../04_IMPLEMENTATION/Repository_Layout.md#已挂载的-shud_collect)。
 
@@ -295,7 +295,9 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 原生控制明确区分测试场景：对真实 shell 包装进程先 SIGSTOP 再组 SIGTERM，Linux 保持匹配的 T-state leader，注册表替换可验证 R8 在原始期限 SIGKILL 后组静止且无孤儿告警；Darwin leader 会被 SIGTERM 终止，替换实际走 R7 cancelled，抗 TERM 后代仍活着并产生上述诊断，须由测试的已知所有权显式清理。后者不是 Darwin R8/静止性证据，平台断言不跳过、不用伪 pid/时间或生产 wrapper trap 替代原生行为。同一宿主内的注册表替换证明不等同完整宿主/Web 重启闸；工程验证与本项 PI 语义决策也不等同 Epic #293 / #318 的最终 PI 验收，集中验收仍待完成。
 
-**已裁决、待实现的计时语义**：当前 `started_at` 沿用 lstart，`finished_at` 是结算观测时刻；`wall_seconds` 可能包含起点偏差、退出后未观测延迟或取消宽限，并非精确求解器时长。PI 已在 [#344](https://github.com/DankerMu/SHUD-Harness/issues/344) comment 6397950076 裁决：缺少可信时长证据时记录 null，`finished_at` 保留结算观测语义，在线取消时长包含取消窗口；该决策待 #344 实现。本 #343 切片没有改计时公式或宣称完成真实时长精度测量。
+**原始实例观测窗口（#344）**：PI 的[观测证据决策](https://github.com/DankerMu/SHUD-Harness/issues/344#issuecomment-6397950076) 经[可重算观测窗口选择](https://github.com/DankerMu/SHUD-Harness/issues/344#issuecomment-6405181313) 明确：`started_at` 沿用 lstart，`finished_at` 保留结算观测语义；新数值 `wall_seconds` 只由原始提交实例的匹配启动身份及其成功终态观测授权，窗口可包含起点时钟偏差、检测延迟和本地受控取消宽限，不是求解器运行时长、求解器时长上界或固定精度测量。有效数值退出或受控取消达到既有静止条件可形成观测；丢失执行、非法/不可读退出证据或外部安装的终态不能授权数值。原始观测仅存于该注册表实例，终态发布后但 RunRecord 提交前重启会丢失观测，新结果为 null；R2/R6/R7/R8 恢复和 R3/R5 接管同样为 null，即使磁盘时间齐全。同实例完成/生成失败保留原始端点，包括自动预算耗尽后的直接重试。已提交的有效同身份 RunRecord 始终优先，跨进程保持原值、字节和 mtime；历史数值不改写、不追认证实。此语义调整不改变进程身份、退出分类、信号、通知或持久字段，也不代表 #293/#318 的集中 PI 验收已完成。
+
+同实例重试的观测保留仅覆盖仍存续的活动、未提交交接；完成索引迁移或实例排空关闭会释放交接。若失败唤醒已完成并迁移索引但尚无 RunRecord，后续手动收集因缺少观测生成 null，仍保留原 `finished_at`；有效已提交记录则继续原样返回。
 
 **初始化后的唤醒投递（#313）**：注册表可选注入 `sessionController` 与 `sessions`；缺服务时保持 pending、不消耗尝试，服务撤销后停止使用旧注入 epoch，晚到的恢复结果不能追加消息或计入失败。即使服务已存在，`Service.init` / 启动对账也绝不等待 `resolveAgent`，避免冷会话恢复等待自身插件激活；注入回调只建立可用性，初始化后的既有 cadence 才投递，不新增定时器或完成事件订阅者。
 
