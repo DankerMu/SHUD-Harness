@@ -159,7 +159,7 @@ test("already-finished public kill preserves committed metadata and sends no sig
   }
 }, 15000);
 
-test.each(["bash", "shud"])(
+test.each(["bash", "shud"] as const)(
   "arbitrary kind %s registrations retain parent kill/access semantics",
   async (kind) => {
     const h = await pollFixture();

@@ -4,7 +4,7 @@ import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { expect, test, vi } from "vitest";
-import type { JobEvent, JobOutcome } from "@deepseek-ai/dsh-jobs";
+import { JobId, type JobEvent, type JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { KILL_GRACE_PERIOD_MS } from "@shud-harness/dsh-shud-core";
 import { ShudJobRegistry, startDetachedShud, type ShudExecution } from "./index.ts";
 import { expectAbsent, readResult } from "./collect-shud/test-harness.ts";
@@ -83,7 +83,7 @@ test("plain registry disposal synchronously fails its own SHUD registration with
     waitForEvidence(record.run_dir, "invocation.json");
     const invocation = await readInvocation(record.run_dir);
     if (!invocation) throw new Error("Held SHUD did not publish its invocation receipt");
-    expect(registry.get(record.dsh_job_id).status).toBe("running");
+    expect(registry.get(JobId(record.dsh_job_id)).status).toBe("running");
     expect(record.cancel_requested_at).toBeNull();
     expect(completions).toEqual([]);
     const snapshots = await Promise.all(
@@ -230,9 +230,9 @@ test("kill-grace disposal resends TERM before startup cancellation: Linux R8 and
     signalEvents = signals.events;
     restoreSignals = signals.restore;
     const began = performance.now();
-    expect(registry.kill(record.dsh_job_id, h.ownerId, "stop this run before host exit")).toBe(
-      "requested",
-    );
+    expect(
+      registry.kill(JobId(record.dsh_job_id), h.ownerId, "stop this run before host exit"),
+    ).toBe("requested");
     const intent = await readRecord(record.run_dir);
     if (intent.cancel_requested_at === null) throw new Error("Public kill did not persist intent");
     const requestedAt = Date.parse(intent.cancel_requested_at);

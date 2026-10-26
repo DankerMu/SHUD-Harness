@@ -1,7 +1,7 @@
 import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, vi } from "vitest";
-import type { JobEvent } from "@deepseek-ai/dsh-jobs";
+import { JobId, type JobEvent } from "@deepseek-ai/dsh-jobs";
 import { ShudJobRegistry } from "./index.ts";
 import { expectAbsent } from "./collect-shud/test-harness.ts";
 import { activeGroup, observedStart, readInvocation } from "./detached-shud/test-harness.ts";
@@ -44,7 +44,7 @@ test("R5 takeover without external controllers registers the original labelled e
     if (record.pid === null || record.dsh_job_id === null)
       throw new Error("Original SHUD run has no committed process or registration identity");
     pid = record.pid;
-    const oldId = record.dsh_job_id;
+    const oldId = JobId(record.dsh_job_id);
     expect(record.label).toBe(label);
     expect(record.dsh_job_ids).toEqual([oldId]);
     const originalView = h.registry.get(oldId);

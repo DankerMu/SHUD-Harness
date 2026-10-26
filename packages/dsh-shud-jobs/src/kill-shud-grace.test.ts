@@ -1,5 +1,6 @@
 import * as io from "node:fs/promises";
 import { join } from "node:path";
+import { JobId } from "@deepseek-ai/dsh-jobs";
 import { expect, test, vi } from "vitest";
 import { activeGroup, installFakeShud } from "./detached-shud/test-harness.ts";
 import { pollFixture, settlingProducer, waitForEvidence } from "./poll-shud/test-harness.ts";
@@ -124,7 +125,7 @@ test("local cancellation waits for the genuine native-child waiter before settli
     if (record.pid === null || record.dsh_job_id === null)
       throw new Error("Actual local execution lacks process or registration identity");
     const pid = record.pid;
-    const id = record.dsh_job_id;
+    const id = JobId(record.dsh_job_id);
     waitForEvidence(record.run_dir, "invocation.json");
     const origin = Date.now();
     vi.setSystemTime(origin);

@@ -309,6 +309,14 @@ describe("registry apply configuration", () => {
       const extended = ShudJobRegistry.Config["~standard"].validate(h.config);
       if (!("value" in parent) || !("value" in extended))
         throw new Error("expected synchronous config values");
+      if (
+        typeof parent.value !== "object" ||
+        parent.value === null ||
+        typeof extended.value !== "object" ||
+        extended.value === null
+      )
+        throw new Error("expected non-null parsed config objects");
+      // Both parsed values are now narrowed to non-null objects for reflection.
       for (const key of Object.keys(original.dict ?? {})) {
         expect(Reflect.get(extended.value, key)).toEqual(Reflect.get(parent.value, key));
       }

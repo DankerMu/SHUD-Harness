@@ -24,6 +24,8 @@ import {
   SPAWN_PROFILE_SUBSET_RULE_ID,
   SPAWN_PROFILE_TOOL_ID_MAX_CHARS,
   TOOL_PARAMETER_SCHEMA_RULE_ID,
+  type PolicyGateContext,
+  type PolicyGateRemediation,
   type PolicyGateToolCall,
   type PolicyRule,
   DEFAULT_SHUD_POLICY_GATE_CONTEXT,
@@ -46,7 +48,7 @@ describe("policy gate pure evaluator", () => {
 
   test("returns deterministic deny with remediation from the first denying rule", () => {
     const call = sampleToolCall();
-    const context = {
+    const context: PolicyGateContext = {
       rules: [
         {
           ruleId: "raw-data-write",
@@ -742,7 +744,8 @@ describe("policy gate pure evaluator", () => {
             evaluate: () => ({
               decision: "deny",
               reason: "accessor remediation should be rejected",
-              remediation: accessorRemediation,
+              // Deliberately invalid accessor fixture must reach runtime rejection without invoking the getter.
+              remediation: accessorRemediation as PolicyGateRemediation,
             }),
           },
         ],
