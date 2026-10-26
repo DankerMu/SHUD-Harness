@@ -13,7 +13,7 @@
 - 插件可用 `ctx.inject([服务...], 回调)` 在可选服务出现后才运行回调，与行的 apply 顺序无关（宿主先例 `schedule/tool-schedule/src/index.ts:444`）。宿主没有可供插件订阅的"启动完成"信号（loader、include、app-boot 只 emit `loader/entry-init`、`loader/partial-dispose`、`loader/config-update`、`app-boot/config-reload`）。
 - 重启后的唤醒先例在 `schedule` 插件：`sessionController.resolveAgent(sessionId)` → `agent.followup(...)` → `ctx.sessions.flush(...)`（`schedule/schedule/src/runtime.ts:101-124`）。`sessionController` 只由 web-app bundle 挂载（`bundle/web-app/cordis.patch.yml:121`），headless 模板没有；其 `inject` 列表不含 `jobs`（`api/session-controller/src/index.ts:120-132`）。会话按需冷恢复。
 - 启动：`--dump-config` 只合成 patch、不启动插件（`apps/cli/src/dump-config.ts:1-7`）。真实启动时 `jobs` 不在必需项列表（`boot/app-boot/src/index.ts:951-960`）：该行激活失败只在 stderr 打印 `did not activate` 诊断（含错误消息），其余插件继续运行（`:1152-1166`）。
-- SHUD 调用形如 `cd <ws> && shud -o <ws>/output/<proj>.out <proj>`，读 `<ws>/input/<proj>/`，并向输入目录写回 `.cfg.ic.update`、`.bak`（`docs/03_SPEC/Domain_CLI_Spec.md`，`scripts/runtime/shud-tiny.sh:16-25`）；退出码 0/10/12/13/19/20（`docs/01_CODEBASE/SHUD_IO_Facts.md:96-98`）；ccw 全程约 4m45s。
+- SHUD 调用形如 `cd <ws> && shud -o <ws>/output/<proj>.out <proj>`，读 `<ws>/input/<proj>/`，并向输入目录写回 `.cfg.ic.update`、`.bak`（`docs/03_SPEC/Domain_CLI_Spec.md`，`scripts/runtime/shud-tiny.sh:16-25`）；退出码 0/10/12/13/19/20（[SHUD I/O 退出码事实](../../../docs/01_CODEBASE/SHUD_IO_Facts.md#退出码)）；ccw 全程约 4m45s。
 - Seatbelt 只限制文件与网络访问，不限制 CPU/内存；宿主进程本身不在沙箱内。
 - 现行 eslint 白名单只允许 import `@deepseek-ai/dsh-tools` 与 `@deepseek-ai/cordis`（`eslint.config.mjs`）。
 

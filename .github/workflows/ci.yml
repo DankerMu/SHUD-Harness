@@ -64,7 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: false
+          submodules: true
       - uses: pnpm/action-setup@v6
         with:
           version: 11.28.5
