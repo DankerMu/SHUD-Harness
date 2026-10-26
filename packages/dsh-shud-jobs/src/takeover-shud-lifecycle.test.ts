@@ -1,6 +1,7 @@
 import * as io from "node:fs/promises";
 import { join } from "node:path";
-import { expect, test, vi } from "vitest";
+import { inspect } from "node:util";
+import { expect, onTestFailed, test, vi } from "vitest";
 import type { JobEvent, JobHooks, JobId } from "@deepseek-ai/dsh-jobs";
 import { LocalJobRegistry } from "@deepseek-ai/dsh-jobs-local";
 import { ShudJobRegistry } from "./index.ts";
@@ -46,23 +47,56 @@ function captureTakeovers(beforeStart?: (registry: ShudJobRegistry) => void) {
 test.each(["R3", "R5"] as const)(
   "%s registered-event kill refuses unpublished identity, then committed public kill controls the original group",
   async (row) => {
-    const h = await pollFixture();
     let pid: number | undefined;
     let applying: Promise<unknown> | undefined;
     let capture: ReturnType<typeof captureTakeovers> | undefined;
     let signals: ReturnType<typeof observeSignals> | undefined;
     let unsubscribe: (() => void) | undefined;
+    const state: { fixture?: { errors: readonly unknown[] } } = {};
+    let runDir: string | undefined;
+    let preCleanup: unknown = {
+      phase: "pre-cleanup",
+      unavailable: "fixture setup did not reach cleanup",
+      registrations: 0,
+    };
+    onTestFailed(() => {
+      try {
+        console.error(
+          "[takeover lifecycle failure]",
+          inspect(
+            {
+              row,
+              errors: state.fixture?.errors ?? { unavailable: "fixture setup did not complete" },
+              preCleanup,
+            },
+            {
+              depth: null,
+              maxArrayLength: null,
+              maxStringLength: null,
+              customInspect: false,
+            },
+          ),
+        );
+      } catch {
+        // Diagnostic reporting must not replace the test or cleanup failure.
+      }
+    });
+    const h = await pollFixture();
+    state.fixture = h;
     try {
       await installFakeShud(h.shudBin, 0, "resistant");
       const original = await (row === "R3" ? stopAtSubmitted(h) : stopWhileRunning(h));
       const { record, invocation } = original;
+      runDir = record.run_dir;
       pid = original.pid;
       const invocationPath = join(record.run_dir, "invocation.json");
       const invocationBytes = await io.readFile(invocationPath);
       const invocationMtime = (await io.stat(invocationPath, { bigint: true })).mtimeNs;
+      const realDate = Date;
       vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
-      const origin = Date.now();
-      vi.setSystemTime(origin);
+      const fakeDate = Date;
+      // Keep native startup observations coherent without reinstalling the fake intervals.
+      vi.stubGlobal("Date", realDate);
       signals = observeSignals();
       const refusals: unknown[] = [];
       const snapshots: ReturnType<typeof readDurable>[] = [];
@@ -102,6 +136,9 @@ test.each(["R3", "R5"] as const)(
       expect(committed.dsh_job_id).toBe(adopted.id);
       expect(committed.dsh_job_ids).toEqual([...record.dsh_job_ids, adopted.id]);
       expect(committed.cancel_requested_at).toBeNull();
+      vi.stubGlobal("Date", fakeDate);
+      const origin = realDate.now();
+      vi.setSystemTime(origin);
       expect(registry.kill(adopted.id, h.ownerId, "postcommit public kill")).toBe("requested");
       const intent = readDurable(record.run_dir);
       expect(intent).toEqual({ ...committed, cancel_requested_at: new Date(origin).toISOString() });
@@ -134,14 +171,31 @@ test.each(["R3", "R5"] as const)(
       expect(h.flushes).toEqual([]);
       expect(h.errors).toEqual([]);
     } finally {
-      capture?.restore();
-      unsubscribe?.();
-      signals?.restore();
-      for (const registration of capture?.registrations ?? [])
-        registration.hooks.cancel("test cleanup");
       try {
+        preCleanup = {
+          phase: "pre-cleanup",
+          registrations: capture?.registrations.length ?? 0,
+          durable:
+            runDir === undefined
+              ? { unavailable: "run directory was not established" }
+              : readDurable(runDir),
+        };
+      } catch (error) {
+        preCleanup = {
+          phase: "pre-cleanup",
+          registrations: capture?.registrations.length ?? 0,
+          durable: { unavailable: error },
+        };
+      }
+      try {
+        capture?.restore();
+        unsubscribe?.();
+        signals?.restore();
+        for (const registration of capture?.registrations ?? [])
+          registration.hooks.cancel("test cleanup");
         await closeRecovery(h, pid, applying);
       } finally {
+        vi.unstubAllGlobals();
         vi.useRealTimers();
       }
     }
