@@ -141,7 +141,7 @@ verification:
     command: "pnpm run typecheck"
   - surface: "lint (type-aware eslint, max-lines, import bans)"
     command: "pnpm run lint"
-  - surface: "format"
+  - surface: "format (deliverables; local .workplans/ excluded by shared .gitignore rule; never rewrite consumed evidence)"
     command: "pnpm run format:check"
   - surface: "unit tests"
     command: "pnpm run test"

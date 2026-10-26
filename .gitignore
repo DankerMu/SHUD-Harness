@@ -28,8 +28,8 @@ node_modules/
 !.claude/settings.json
 !.claude/hooks/
 
-# Agent issue workplans
-/.workplans/issue-*/
+# Local agent evidence (all namespaces; shared Git/Prettier ignore source)
+/.workplans/
 
 # Runtime workspace
 /workspace/
