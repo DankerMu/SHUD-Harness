@@ -175,6 +175,36 @@ test.each(["", " \n\t", "13junk", "1.5", "9007199254740992", "NaN"])(
   15000,
 );
 
+test("linked external exit evidence fails settlement without adopting its zero", async () => {
+  const h = await pollFixture();
+  const { producer, pending } = h.start();
+  try {
+    const record = await pending;
+    await h.registry.pollOnce();
+    const evidence = join(record.run_dir, "exit_code");
+    const external = join(h.root, "external-exit-code");
+    await io.writeFile(external, "0\n");
+    await io.symlink(external, evidence);
+    await waitForRecovery(async () => {
+      await h.registry.pollOnce();
+      return producer.completed.length === 1;
+    }, "linked exit evidence producer completion");
+    await producer.doneObserved;
+    expect(producer.durableAtSettle[0]).toMatchObject({ status: "failed", exit_code: null });
+    expect(producer.durableAtDone).toEqual(producer.durableAtSettle);
+    expect(producer.completed[0].status).toBe("failed");
+    expect(producer.completed[0].detail).toMatch(/unreadable/iu);
+    expect(producer.completed[0].detail).not.toMatch(/exited with code|lost/iu);
+    await expect(h.registry.collectShud(record.run_id)).rejects.toThrow(/SYMLINK/u);
+    expect(await io.readdir(record.run_dir)).not.toContain("run-record.json");
+    expect(await io.readFile(external, "utf8")).toBe("0\n");
+    expect(await io.readlink(evidence)).toBe(external);
+    expect((await io.lstat(evidence)).isSymbolicLink()).toBe(true);
+  } finally {
+    await h.close();
+  }
+}, 15000);
+
 test.each(["created", "submitted", "delivered", "unreachable"] as const)(
   "poll skips %s residue rather than claiming later reconciliation or notification work",
   async (kind) => {

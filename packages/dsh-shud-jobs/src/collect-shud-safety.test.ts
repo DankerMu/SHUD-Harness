@@ -21,6 +21,7 @@ vi.mock("node:fs/promises", async (original) => {
   return {
     ...actual,
     readFile: vi.fn(actual.readFile),
+    open: vi.fn(actual.open),
     readdir: vi.fn(actual.readdir),
     lstat: vi.fn(actual.lstat),
   };
@@ -56,9 +57,24 @@ beforeEach(() => {
         fault.contentReads.push(path);
         throw new Error("Collection must not read protected artifact/log contents");
       }
+      return actualIo.readFile(...args);
+    });
+  vi.mocked(io.open)
+    .mockReset()
+    .mockImplementation(async (...args) => {
+      const [path] = args;
       if (path === fault.unreadable)
         throw Object.assign(new Error("private-exit-error-payload"), { code: "EACCES" });
-      return actualIo.readFile(...args);
+      const handle = await actualIo.open(...args);
+      if (typeof path === "string" && fault.protected.includes(path)) {
+        vi.spyOn(handle, "readFile").mockImplementation(() => {
+          fault.contentReads.push(path);
+          return Promise.reject(
+            new Error("Collection must not read protected artifact/log contents"),
+          );
+        });
+      }
+      return handle;
     });
   vi.mocked(fs.readFileSync)
     .mockReset()

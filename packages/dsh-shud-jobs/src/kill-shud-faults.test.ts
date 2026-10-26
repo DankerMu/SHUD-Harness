@@ -61,7 +61,7 @@ vi.mock("node:fs", async (original) => {
 });
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
-  return { ...actual, readFile: vi.fn(actual.readFile) };
+  return { ...actual, open: vi.fn(actual.open) };
 });
 const actualFs = await vi.importActual<typeof NodeFs>("node:fs");
 const actualIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
@@ -69,7 +69,7 @@ beforeEach(() => {
   inspection.mode = "";
   inspection.pid = 0;
   vi.mocked(fs.renameSync).mockReset().mockImplementation(actualFs.renameSync);
-  vi.mocked(io.readFile).mockReset().mockImplementation(actualIo.readFile);
+  vi.mocked(io.open).mockReset().mockImplementation(actualIo.open);
 });
 
 test.each(["rename", "json", "symlink", "job-id", "pid"] as const)(
@@ -460,13 +460,13 @@ test.each(["malformed", "replacement"] as const)(
       const { record, id, pid, producer } = await readyRun(h);
       if (mode === "replacement") {
         let held = false;
-        vi.mocked(io.readFile).mockImplementation(async (...args) => {
+        vi.mocked(io.open).mockImplementation(async (...args) => {
           if (!held && args[0] === join(record.run_dir, "exit_code")) {
             held = true;
             entered.release();
             await release.waiting;
           }
-          return actualIo.readFile(...args);
+          return actualIo.open(...args);
         });
         polling = h.registry.pollOnce();
         await entered.waiting;
@@ -507,10 +507,10 @@ test.each(["invalid", "unreadable"] as const)(
       const path = join(record.run_dir, "exit_code");
       const bytes = kind === "invalid" ? "13junk\n" : "13\n";
       if (kind === "unreadable") {
-        vi.mocked(io.readFile).mockImplementation(async (...args) => {
+        vi.mocked(io.open).mockImplementation(async (...args) => {
           if (args[0] === path)
             throw Object.assign(new Error("exit evidence denied"), { code: "EACCES" });
-          return actualIo.readFile(...args);
+          return actualIo.open(...args);
         });
       }
       // Publish and kill in one turn; no timer may consume this file before cancellation admission.
@@ -534,7 +534,7 @@ test.each(["invalid", "unreadable"] as const)(
       expect(await actualIo.readFile(path, "utf8")).toBe(bytes);
       expect(producer.registration.cancellations).toEqual([]);
     } finally {
-      vi.mocked(io.readFile).mockImplementation(actualIo.readFile);
+      vi.mocked(io.open).mockImplementation(actualIo.open);
       await h.close();
     }
   },

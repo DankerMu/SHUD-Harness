@@ -23,7 +23,7 @@ vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
   return {
     ...actual,
-    readFile: vi.fn(actual.readFile),
+    open: vi.fn(actual.open),
     readdir: vi.fn(actual.readdir),
     rename: vi.fn(actual.rename),
   };
@@ -35,11 +35,11 @@ beforeEach(() => {
   observation.output = "";
   observation.exitReads = 0;
   observation.scans = 0;
-  vi.mocked(io.readFile)
+  vi.mocked(io.open)
     .mockReset()
     .mockImplementation(async (...args) => {
       if (args[0] === observation.exit) observation.exitReads++;
-      return actualIo.readFile(...args);
+      return actualIo.open(...args);
     });
   vi.mocked(io.readdir)
     .mockReset()

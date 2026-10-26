@@ -15,7 +15,7 @@ import {
 
 vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
-  return { ...actual, readdir: vi.fn(actual.readdir), readFile: vi.fn(actual.readFile) };
+  return { ...actual, readdir: vi.fn(actual.readdir), open: vi.fn(actual.open) };
 });
 const actualIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
 const NOW = Date.parse("2026-10-23T03:15:00.000Z");
@@ -39,11 +39,11 @@ beforeEach(() => {
       }
       return actualIo.readdir(...args);
     });
-  vi.mocked(io.readFile)
+  vi.mocked(io.open)
     .mockReset()
     .mockImplementation(async (...args) => {
       if (args[0] === fault.exit) fault.exitReads++;
-      return actualIo.readFile(...args);
+      return actualIo.open(...args);
     });
 });
 afterEach(() => {
