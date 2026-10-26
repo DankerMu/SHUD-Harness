@@ -47,7 +47,6 @@ pnpm exec vitest run packages/dsh-shud-jobs/src/submit-shud.test.ts packages/dsh
 <workspace>/runs/<run_id>/stdout.log
 <workspace>/runs/<run_id>/stderr.log
 <workspace>/runs/<run_id>/run-record.json
-<workspace>/runs/<run_id>/metrics.yaml
 # RunJob/RunRecord 位于上述运行目录；active.json、completed.json 与 lock 位于插件 stateDir
 ```
 
@@ -124,17 +123,20 @@ rSHUD 水量平衡函数见 `rSHUD/R/WaterBalance.R` 的 `wb.all`，依赖已配
 <workspace>/runs/RUN-001/output/*.dat
 <workspace>/runs/RUN-001/stdout.log
 <workspace>/runs/RUN-001/stderr.log
-<workspace>/runs/RUN-001/metrics.yaml
+<workspace>/runs/RUN-001/metrics.yaml        # 后续里程碑示意，非 M2；路径未定
 <workspace>/runs/RUN-001/hydrograph.json
 <workspace>/reports/<report_id>.md          # M3 起
 ```
+
+metrics artifact 不属于 M2 预期产物；上面的 metrics 路径仅保留设计示意，
+不承诺其后续里程碑、生产者或最终落点，见 [Collect 阶段](../03_SPEC/Park_Resume_Design.md#5-collect-阶段)。
 
 ### 验收
 
 - exit_code=0；
 - RunRecord.status=succeeded；
 - numerical_health.water_balance_residual 小于阈值；
-- `rivqdown` 序列进入 metrics/figure artifact；
+- `rivqdown` 序列进入 metrics/figure artifact（后续里程碑，非 M2；具体归属未定）；
 - StackLock/DataProvenance/RunJob/RunRecord 均可追溯。
 
 ---
