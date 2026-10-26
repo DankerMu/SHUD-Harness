@@ -4,12 +4,12 @@
 
 - [x] 1.1 Parent records current pin/clean submodule, the 46-row inventory and fresh default-enrollment versus explicit bad/good path controls in disposable roots before edits; preserve existing source/evidence bytes.
 - [x] 1.2 Repair every SHUD_IO_Facts Source citation and the specified time/header/arithmetic/warning facts using verified anchors, independent backticked paths and real review date. Preserve END semantics, exit-code anchor/values and the byte-identical review checklist; qualify provenance scope rather than claim scientific validation.
-- [ ] 1.3 Enroll the document in existing constraints and enable pinned submodule checkout only for CI docs-gate. Keep parser, other CI jobs and commands unchanged; document local initialization prerequisite and absent-root limitation. Route optional R sibling separately and record its issue URL.
+- [x] 1.3 Enroll the document in existing constraints and enable pinned submodule checkout only for CI docs-gate. Keep parser, other CI jobs and commands unchanged; document local initialization prerequisite and absent-root limitation. Route optional R sibling separately and record its issue URL: [#391](https://github.com/DankerMu/SHUD-Harness/issues/391).
 
 ## 2. Evidence and engineering delivery
 
 - [x] 2.1 Parent checks every citation target/range plus highest-risk content anchors, then observes bad enrolled SHUD citation fail and restored correct copy pass through the actual path command. Run docs:check, full check, test-guardrails and strict fixture validation; prove all submodule pins/worktrees unchanged and clean owned probes.
-- [ ] 2.2 Complete expanded three-seat review/adjudication and exact-head CI; inspect real docs-gate submodule checkout and path-check output. Merge/close #336 and archive only this independent change, leaving #293/#318 and m2-run-chain awaiting PI acceptance.
+- [x] 2.2 Complete expanded three-seat review/adjudication and exact-head CI; inspect real docs-gate submodule checkout and path-check output. Merge/close #336 and archive only this independent change, leaving #293/#318 and m2-run-chain awaiting PI acceptance.
 
 ## Risk packs
 
