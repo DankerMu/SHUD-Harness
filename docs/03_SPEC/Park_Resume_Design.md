@@ -8,7 +8,7 @@ status: frozen
 **适用范围：** 长时间 SHUD 运行、sensitivity batch、AutoSHUD pipeline、HPC/SLURM job、LLM 会话恢复  
 **目标：** 让 Agent 在长任务期间停止消耗推理资源，并在 job 完成后可复盘、可幂等地恢复。
 
-M2 运行主链以 [m2-run-chain design D2/D6/D7/D11/D12](../../openspec/changes/m2-run-chain/design.md) 为准，本文 §5、§9 与附录 A 是对应落地契约；TaskCard park/resume、批次聚合、邮件、metrics/report 以及 Docker/HPC 内容为后续里程碑规划，不是 M2 已实现能力。
+M2 运行主链以 [m2-run-chain design D2/D6/D7/D11/D12](../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md) 为准，本文 §5、§9 与附录 A 是对应落地契约；TaskCard park/resume、批次聚合、邮件、metrics/report 以及 Docker/HPC 内容为后续里程碑规划，不是 M2 已实现能力。
 
 ## 1. 为什么需要 Park/Resume
 
@@ -268,7 +268,7 @@ M2 不使用上面的后续 TaskCard/job 级锁布局：注册表在配置的 `s
 
 ## 9. 服务重启恢复
 
-M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` 中读取 `active.json`，按索引中的绝对运行目录执行 [design D11 的 R1–R12](../../openspec/changes/m2-run-chain/design.md) 对账。`await ctx.plugin(...)` 完成才表示注册表就绪；此前即使经 root/non-strict 取得服务，`submitShud()`、`pollOnce()`、`collectShud()` 也明确拒绝。#310 原始切片只实现不带新 dsh 登记的文件级对账；#312 在其已验证的 R3/R5 分支接入真实接管登记。当前对账仍不读取 `ctx.storage`，不扫描后续 TaskCard 布局，不重新 spawn、不重新入队，也不伪造原生执行或完成回执；原有锁、逐条目排他与启动/关闭 drain 边界不变。
+M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` 中读取 `active.json`，按索引中的绝对运行目录执行 [design D11 的 R1–R12](../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md) 对账。`await ctx.plugin(...)` 完成才表示注册表就绪；此前即使经 root/non-strict 取得服务，`submitShud()`、`pollOnce()`、`collectShud()` 也明确拒绝。#310 原始切片只实现不带新 dsh 登记的文件级对账；#312 在其已验证的 R3/R5 分支接入真实接管登记。当前对账仍不读取 `ctx.storage`，不扫描后续 TaskCard 布局，不重新 spawn、不重新入队，也不伪造原生执行或完成回执；原有锁、逐条目排他与启动/关闭 drain 边界不变。
 
 - **R1–R4（未完成提交）**：created 结算 lost 并 collect；submitted 的退出文件优先，否则只读取已提交的普通、非链接 `wrapper.pid` 并验证真实进程与提交新鲜度，合格才同次写入 running/pid/pid_started_at/started_at。R3 使用该转换返回的新鲜 running 记录进入下述接管，不另造身份通道。确定进程缺失、已死或早于提交时，再读退出文件，仍无才 lost；未知检查错误不等同死亡。没有退出证据且缺有效 `submitted_at` 时保留并报错，不猜测启动边界。
 - **R5–R8（已有运行身份）**：匹配且存活、无取消意图的 R5 进入接管，保留原物理执行并发布新 dsh id/历史；R6 按退出证据结算。R7 在 leader 缺失、不匹配或已死后重读退出文件，仍无才 lost（有取消意图则 cancelled），不向未获所有权的组发信号。R8 保持无 dsh 登记的文件级取消：先以新鲜、匹配且存活的 leader 建立恢复组控制，再沿用在线取消的信号、检查与期限逻辑；组静止后重读退出文件，有效数值始终优先，只有缺失才 cancelled。
@@ -277,7 +277,7 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 **R3/R5 接管登记**：同步恢复已验证进程身份的组能力，在构造时捕获的原始注册表上复用瞬时全局控制器，建立无 owner 的真实 `kind: shud` 登记；label 仍为 run_id 加可选持久 label，输出继续读取原 `stdout.log`，不依赖 tool-jobs 或外部会话控制器。先经新鲜身份/路径校验把旧 `dsh_job_id` 清空为 null；producer 回调内安装托管分类、组能力和身份，父类 start 返回后在任何 await 之前发布新 current id、追加 `dsh_job_ids` 并保存真实完成回执。每个注册表实例只接管一次；重复 tick 不改 id/历史，后续新实例取得新 id 并追加一次，旧非 null id 不代表本实例已登记。
 
-本地提交与接管共用同一 stdout 读取入口：每次打开拒绝最终分量符号链接，以非阻塞方式打开后校验实际描述符为普通文件；目录/FIFO 不被当作空日志，也不会等待 FIFO 写者。失败由父类记 warning 并停止该流，保留已有输出、不追加链接目标字节；正常增量 UTF-8、短读、截断与 spillPath 语义不变。此边界不证明原 inode 身份，不排除同用户硬链接/普通文件替换或祖先目录并发替换；这些残余与 #348 的写入侧非目标见 [design 风险记录](../../openspec/changes/m2-run-chain/design.md#risks--trade-offs)。
+本地提交与接管共用同一 stdout 读取入口：每次打开拒绝最终分量符号链接，以非阻塞方式打开后校验实际描述符为普通文件；目录/FIFO 不被当作空日志，也不会等待 FIFO 写者。失败由父类记 warning 并停止该流，保留已有输出、不追加链接目标字节；正常增量 UTF-8、短读、截断与 spillPath 语义不变。此边界不证明原 inode 身份，不排除同用户硬链接/普通文件替换或祖先目录并发替换；这些残余与 #348 的写入侧非目标见 [design 风险记录](../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md#risks--trade-offs)。
 
 父类 `registered` 事件发生在新 id 持久化之前；监听器中重入公开 kill 必须以 `kill identity / MISMATCH` 拒绝，不写取消意图、不发信号，不排队补发。发布后 kill 使用同一 current id、pid/start 和受控组证明，走 §8 的取消/teardown 路径。
 
@@ -293,7 +293,7 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 这是诊断修复，不是孤儿清理能力：RunJob/RunRecord、通知与退出分类不变，不新增持久字段或证据文件。终态发布后、告警前崩溃，stderr 不可用或日志丢失，都可能使区分永久丢失；后续仅凭 RunRecord 不能重建历史组是否静止的证明。诊断通过单次异步 fd 写入尝试交付，其回调承接本次写入失败；写入失败或短写仅丢失日志，不终止宿主或中断结算/收集，不重试、不回退、不转发原始错误载荷。人工调查必须重新核实当前进程身份、组成员及控制所有权，不能依据历史 pid/pgid 直接发信号。
 
-原生控制明确区分测试场景：对真实 shell 包装进程先 SIGSTOP 再组 SIGTERM，Linux 保持匹配的 T-state leader，注册表替换可验证 R8 在原始期限 SIGKILL 后组静止且无孤儿告警；Darwin leader 会被 SIGTERM 终止，替换实际走 R7 cancelled，抗 TERM 后代仍活着并产生上述诊断，须由测试的已知所有权显式清理。后者不是 Darwin R8/静止性证据，平台断言不跳过、不用伪 pid/时间或生产 wrapper trap 替代原生行为。同一宿主内的注册表替换证明不等同完整宿主/Web 重启闸；工程验证与本项 PI 语义决策也不等同 Epic #293 / #318 的最终 PI 验收，集中验收仍待完成。
+原生控制明确区分测试场景：对真实 shell 包装进程先 SIGSTOP 再组 SIGTERM，Linux 保持匹配的 T-state leader，注册表替换可验证 R8 在原始期限 SIGKILL 后组静止且无孤儿告警；Darwin leader 会被 SIGTERM 终止，替换实际走 R7 cancelled，抗 TERM 后代仍活着并产生上述诊断，须由测试的已知所有权显式清理。后者不是 Darwin R8/静止性证据，平台断言不跳过、不用伪 pid/时间或生产 wrapper trap 替代原生行为。同一宿主内的注册表替换证明不等同完整宿主/Web 重启闸；工程验证与本项 PI 语义决策也不等同 Epic #293 / #318 的最终 PI 验收，PI 已于2026-10-27完成集中验收并明确通过，见 [M2 手工验收记录](../Migration_Plan_dsh.md#m2-手工-web-重启唤醒验收2026-10-27318)。
 
 **原始实例观测窗口（#344）**：PI 的[观测证据决策](https://github.com/DankerMu/SHUD-Harness/issues/344#issuecomment-6397950076) 经[可重算观测窗口选择](https://github.com/DankerMu/SHUD-Harness/issues/344#issuecomment-6405181313) 明确：`started_at` 沿用 lstart，`finished_at` 保留结算观测语义；新数值 `wall_seconds` 只由原始提交实例的匹配启动身份及其成功终态观测授权，窗口可包含起点时钟偏差、检测延迟和本地受控取消宽限，不是求解器运行时长、求解器时长上界或固定精度测量。有效数值退出或受控取消达到既有静止条件可形成观测；丢失执行、非法/不可读退出证据或外部安装的终态不能授权数值。原始观测仅存于该注册表实例，终态发布后但 RunRecord 提交前重启会丢失观测，新结果为 null；R2/R6/R7/R8 恢复和 R3/R5 接管同样为 null，即使磁盘时间齐全。同实例完成/生成失败保留原始端点，包括自动预算耗尽后的直接重试。已提交的有效同身份 RunRecord 始终优先，跨进程保持原值、字节和 mtime；历史数值不改写、不追认证实。此语义调整不改变进程身份、退出分类、信号、通知或持久字段，也不代表 #293/#318 的集中 PI 验收已完成。
 
@@ -305,7 +305,7 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 暂时性恢复、追加或 flush 失败按原失败时间记账，间隔至少 10 秒、上限 3 次；第三次失败与 `unreachable` 原子发布，不进行第四次传输。失败记账写入失败时先重试该次发布，保留原时间/原因，不让 pump cadence 无控制地重发或凭空增加持久次数；若写入实际已提交，服务缺席产生的规范等待提示不能使该记账失效，在运行/owner 身份及次数、时间、状态仍匹配时识别原失败提示或规范等待提示，不重写、不重复计数，也不接受任意变更的提示。确认的追加及成功 flush 回执按 live Session 和完整运行身份保存在进程内：普通注册表重载可继续 flush 或仅补写 delivered，不重复确认过的步骤；实际进程崩溃丢失这些回执，追加与 durable 标记之间的窗口允许重放。这是至少一次语义，不保证 exactly-once；没有新增持久 outbox 或 schema。
 
-协议与验收边界以 [M2 fixture design](../../openspec/changes/m2-run-chain/design.md)、[tasks](../../openspec/changes/m2-run-chain/tasks.md) 为准；实现入口为 [shud-poll.ts](../../packages/dsh-shud-jobs/src/shud-poll.ts)，历史收集诊断的受控校验归 [shud-run-file.ts](../../packages/dsh-shud-jobs/src/shud-run-file.ts) 所有。当前后端验证包含真实原生执行/宿主崩溃与公开会话服务 doubles，工具入口 #314–315 已挂载并经 built/installed 实测；built 完成索引跨工作区读取与 installed headless 活动索引读取的证据分别成立，不等同完整 Web 恢复。完整 Web/PI 验收 #316–318 仍待后续切片，不据此宣称 M2 Epic 完成或 PI 验收。
+协议与验收边界以 [M2 fixture design](../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md)、[tasks](../../openspec/changes/archive/2026-10-27-m2-run-chain/tasks.md) 为准；实现入口为 [shud-poll.ts](../../packages/dsh-shud-jobs/src/shud-poll.ts)，历史收集诊断的受控校验归 [shud-run-file.ts](../../packages/dsh-shud-jobs/src/shud-run-file.ts) 所有。当前后端验证包含真实原生执行/宿主崩溃与公开会话服务 doubles，工具入口 #314–315 已挂载并经 built/installed 实测；built 完成索引跨工作区读取与 installed headless 活动索引读取的证据分别成立，不等同完整 Web 恢复。真实 Web SIGTERM/SIGKILL 重启闸 #316 已交付；PI 已于2026-10-27通过 #318 手工验收，实际日志与 RunRecord 见 [M2 手工验收记录](../Migration_Plan_dsh.md#m2-手工-web-重启唤醒验收2026-10-27318)，不以这些后端测试替代 PI 结论。
 
 ## 10. 用户体验
 

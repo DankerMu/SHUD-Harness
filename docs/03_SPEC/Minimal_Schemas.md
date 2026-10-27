@@ -11,7 +11,7 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 
 > **Canonical Source 说明：** Support schema（Artifact、ErrorRecord、PiGate、PiGateDecision、NotificationRecord、ReportExport、AnalysisProgressPayload、User、Session、AuditEvent、LockRecord、IdempotencyRecord 等）的权威定义不在本文件，见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md)。本文件仅定义 8 个核心对象 + MemoryNote。
 
-> **M2 修订来源：** RunJob（§4）与 RunRecord（§5）已按 OpenSpec [m2-run-chain「Run identifiers / RunJob record / RunRecord record」](../../openspec/changes/m2-run-chain/specs/run-records/spec.md) tasks 4.1–4.2 与 `packages/dsh-shud-core/src/schemas/run-job.ts`、`packages/dsh-shud-core/src/schemas/run-record.ts` 对齐。该修订不改变其余对象的当前契约。
+> **M2 修订来源：** RunJob（§4）与 RunRecord（§5）已按 OpenSpec [m2-run-chain「Run identifiers / RunJob record / RunRecord record」](../../openspec/specs/run-records/spec.md) tasks 4.1–4.2 与 `packages/dsh-shud-core/src/schemas/run-job.ts`、`packages/dsh-shud-core/src/schemas/run-record.ts` 对齐。该修订不改变其余对象的当前契约。
 >
 > **M2 计时语义修订（#344，2026-10-25）：** 按 PI [观测证据决策](https://github.com/DankerMu/SHUD-Harness/issues/344#issuecomment-6397950076) 与[可重算观测窗口选择](https://github.com/DankerMu/SHUD-Harness/issues/344#issuecomment-6405181313) 对齐 §4–§5 的时间语义与 canonical schema descriptions；不新增字段、不改变校验形状或改写已提交结果。
 

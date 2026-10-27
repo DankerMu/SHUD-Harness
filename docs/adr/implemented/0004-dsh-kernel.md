@@ -27,7 +27,7 @@ kind: architecture
 | K5 | **首任务 = ccw 运行 → RunRecord → EvidenceReport**（无代码改动）；openMP RHS 已知答案回放为第二任务。MVP 主链随之改为 TaskCard→RunJob→RunRecord→EvidenceReport，ChangeRequest + VerificationCase 后移 | 取代 ADR-0002 D3/D5；先打通不含 patch 流程的主链，风险分散 |
 | K6 | **单用户维持**（ADR-0002 D6 不变）；多用户不做。若未来需要，路径是作为 dsh-team 风格平台的实例镜像交付，而非在 SHUD-Harness 内实现账号 | PI 决定 |
 | K7 | **MVP 零自定义 UI**：用 dsh 自带聊天、审批卡片、作业卡片 + Markdown 报告文件 | 1.4 调研：自定义卡片需 React 包 + 构建；YAGNI |
-| K8 | **durable JobRegistry backend 是 M2 核心交付，替换全部 `jobs-local`**：实现 `ctx.jobs` 契约，子进程 detach、作业记录落盘、启动时 pid 对账、collect 后投递完成通知；M2 shud 无 owner 登记，证据为运行目录与 `shud-jobs` 唤醒消息，不补 `job/settled`（[m2-run-chain D7/D12](../../../openspec/changes/m2-run-chain/design.md)） | spike 1.3：优雅关停杀子进程且 settled 未落盘；SIGKILL 留孤儿；重启后一律 `unknown job` |
+| K8 | **durable JobRegistry backend 是 M2 核心交付，替换全部 `jobs-local`**：实现 `ctx.jobs` 契约，子进程 detach、作业记录落盘、启动时 pid 对账、collect 后投递完成通知；M2 shud 无 owner 登记，证据为运行目录与 `shud-jobs` 唤醒消息，不补 `job/settled`（[m2-run-chain D7/D12](../../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md)） | spike 1.3：优雅关停杀子进程且 settled 未落盘；SIGKILL 留孤儿；重启后一律 `unknown job` |
 | K9 | **出站通道**：只关闭 `session-log-deepseek`（它把整份会话日志作为 `dsh_session_log` 字段随每次 official-route 请求发往端点，本项目端点是第三方中转）；插件清单上报与 `FEEDBACK_ONLY` 遥测保持 dsh 默认 | spike 1.1 实测 12 次请求曾携带会话日志；PI 决定只关这一条 |
 | K10 | **插件形态 = TypeScript + tsc 构建，pnpm workspace 多包**；profile 的 `cordis.patch.yml` 以 workspace 包说明符挂载（bundle 声明 `workspace:*` 依赖，包入口指向 `lib/`），不发 npm | 复用现有 TS 资产（Zod schema、policy-gate-core）；实测 `link:` 下相对路径解析到 profile 的 `node_modules`，无法导入；bundle 声明 workspace 依赖后可按包说明符导入 |
 | K11 | **MVP 不做记忆**；首任务跑通后再评估 | dsh 无内置 memory 包；跨任务才有价值 |
@@ -59,7 +59,7 @@ K10 revisit（2026-10-20，`m1-skeleton` design D7）：依据 `link:` 安装下
 ## 开放项
 
 - post-MVP UI 插件（PI 意图：设置页 / 聊天卡片 / 右侧栏面板 / 可折叠 terminal），参考实现 = dsh-team 的手写 JS client 插件路线（`window.__ModuleLoader__.load` + `requireClient('react')`，无构建）。
-- JobRegistry 记录落点已由 [M2 design D2](../../../openspec/changes/m2-run-chain/design.md) 关闭：工作区 `runs/<run_id>/` 保存 RunJob/RunRecord 与日志；`stateDir` 保存活动/完成索引与锁；不采用 `ctx.storage` 域存运行记录。
+- JobRegistry 记录落点已由 [M2 design D2](../../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md) 关闭：工作区 `runs/<run_id>/` 保存 RunJob/RunRecord 与日志；`stateDir` 保存活动/完成索引与锁；不采用 `ctx.storage` 域存运行记录。
 - prompt cache 经 DMXAPI 是否透传未测。
 - ADR-0002 D7 邮件通知：dsh 无 SMTP seam；是否保留待首任务后评估。
 

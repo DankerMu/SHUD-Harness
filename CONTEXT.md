@@ -33,7 +33,7 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 10. **时间单位**：SHUD 内部时间为分钟；forcing ×1440、KsatV ÷1440；`ccw.cfg.para` 的 `END` 为天；每个时间值标注单位，不确定标 `[UNCERTAIN]`。
 11. **Closure 代码化**：TaskCard 进入 reporting/done 由确定性谓词裁决，LLM 分类器只是 advisory（`docs/02_ARCHITECTURE/Agent_Architecture.md` §7）。
 12. **Canonicality**：同一逻辑一个实现；禁止 `_v2`/`_new` 等并行版本（naming guard）。
-13. **shud 作业可恢复（M2）**：对 SIGTERM/SIGKILL 前已经返回 `job_id` 的 shud 作业，重启后满足 [Recoverability invariant](openspec/changes/m2-run-chain/specs/shud-run-jobs/spec.md)：
+13. **shud 作业可恢复（M2）**：对 SIGTERM/SIGKILL 前已经返回 `job_id` 的 shud 作业，重启后满足 [Recoverability invariant](openspec/specs/shud-run-jobs/spec.md)：
     1. `run-job.json` 存在，状态只沿 RunJob 状态机前进。
     2. 最终存在 `run-record.json` 或 `collect-error.json`。
     3. 同一运行目录在任一时刻至多一个 SHUD 进程；不同运行目录可并行。
@@ -49,7 +49,7 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
     - 第 10 组，启动对账 / 原执行接管：`packages/dsh-shud-jobs/src/reconcile-shud.test.ts`、`packages/dsh-shud-jobs/src/takeover-shud.test.ts`。
     - 第 11 组，唤醒 / 确认 flush / 重试耗尽 unreachable：`packages/dsh-shud-jobs/src/wake-shud.test.ts`、`packages/dsh-shud-jobs/src/wake-shud-retry.test.ts`。
 
-    上述工程验证不等于 PI 功能验收；#318 仍待 PI 在 Epic 收口时亲自完成 Web 重启与唤醒验收（[ADR-0007](docs/adr/implemented/0007-m2-epic-acceptance.md)），合并子 PR 不代表验收通过。
+    上述工程验证不等于 PI 功能验收；PI 已于2026-10-27明确通过 #318 的 Web 重启与唤醒验收，真实日志与 RunRecord 见 [M2 手工验收记录](docs/Migration_Plan_dsh.md#m2-手工-web-重启唤醒验收2026-10-27318)。[ADR-0007](docs/adr/implemented/0007-m2-epic-acceptance.md) 的独立 PI gate 不变，合并子 PR 本身仍不代表验收通过。
 
 ## Forbidden Logic
 
