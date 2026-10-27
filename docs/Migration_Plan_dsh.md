@@ -236,3 +236,39 @@ SIGKILL 变体（`END 730`）：13:30:50 `kill -KILL 49351`，wrapper 51886 / 1�
 ### M2 raw-guard：`shud_run` 路径保护（2026-10-24，#301）
 
 策略门现按 session cwd 与原有 native realpath／最近存在祖先规则解析路径：`runs` 位于或等于任一 raw 根时优先 deny；否则 raw 内 `input_dir` 以原 provenance 文案 ask；忽略参数中的 `workdir`，缺失或非法输入参数仍检查输出。实际 built Cordis seam 10 场景通过，两次 live `raw-guard:probes` 均 T1–T5 PASS，raw／根外样本 MD5 前后不变。此处只记录策略门及既有工具回归证据；`shud_run` 工具尚未挂载（#314），不代表完整运行链或 PI 验收。
+
+### M2 手工 Web 重启唤醒验收（2026-10-27，#318）
+
+PI 亲自在 Web 提交 ccw，收到 RunRecord 后明确选择“通过”，确认作业运行中重启宿主、返回原会话自动收到同一运行的完成通知与 RunRecord，未重复提交或手动 collect。[PI 结论转录](https://github.com/DankerMu/SHUD-Harness/issues/318#issuecomment-6443324760)与 [Epic 记录](https://github.com/DankerMu/SHUD-Harness/issues/293#issuecomment-6443325571)已公开。agent 只协助验证宿主身份并发送 SIGTERM、启动新宿主、提取磁盘证据；不以自动化结果代替 PI 的 UI 结论。以下是正式 `shud_run` 链路，不是前述 spike。
+
+- 运行版本：SHUD-Harness `319ed3656f1c02fa5ddd89f2e4f38a103f99ba4d`；宿主仍钉 `dsh-v0.2.1-rc.2` / `687f282e8625c6b8d11ff58211a90524be2e4317`。
+- 工作区：`/Users/danker/Documents/SHUD-PI-Acceptance`；`DSH_HOME=/Users/danker/.shud-pi-293-l96_w31g/home`。因 PI 无法在选择器中选择点前缀目录，使用可见工作区；未改宿主选择器或迁移旧会话。
+- Session：`session-b232067e-6fa3-4650-a04a-35456cf8b527`。
+- 原始日志：`/Users/danker/.shud-pi-293-l96_w31g/home/sessions/--Users-danker-Documents-SHUD-PI-Acceptance--/session-b232067e-6fa3-4650-a04a-35456cf8b527/session.v4.jsonl.zstd`。按独立 zstd 帧解压，核对 `seq`、同一 tool call id 与 `source.kind`；本次提取时日志 SHA256 为 `a25f7619513c5a0ba870b33a4c970838b4cb33aaefe87c2cb8f1b937140d59fe`，继续会话后日志可追加。
+- RunJob：`JOB-20261027T132408-0fd5`；run_id：`RUN-20261027T132408-0fd5`。未传 `end_days`，持久记录为 `null`；45份源输入、工作区输入和运行副本 SHA256 逐一相同，完整 END 未缩短。
+
+真实提交为 seq 18 的 `tool/call shud_run`，参数原文：
+
+```json
+{"input_dir": "/Users/danker/Documents/SHUD-PI-Acceptance/input/ccw", "project": "ccw", "label": "ccw acceptance run (no end_days override)"}
+```
+
+seq 19 的成功 `tool/result` 与其共享 `callId` / `toolCallId = call_00_Av9qEaEWRI7W3ny0zwLH3632`，`isError=false`；结果首行为：
+
+```text
+SHUD running: job_id=JOB-20261027T132408-0fd5, run_id=RUN-20261027T132408-0fd5, dsh_job_id=shud-4c340ac15842454d, run_dir=/Users/danker/Documents/SHUD-PI-Acceptance/runs/RUN-20261027T132408-0fd5.
+```
+
+2026-10-27T13:28:25.505Z，agent 在新鲜 `run-job.json` 仍为 `running`、`exit_code` 文件不存在、wrapper PID `43586` / start `2026-10-27T13:24:08.000Z` 同身份且非 Z 的条件下，核对锁中宿主 PID/start 后只向宿主 `59450` 发送 SIGTERM。旧宿主 exit 0 后，原 wrapper 同身份仍存活（`Ss`）；新宿主 `60691` 使用同一 `DSH_HOME` 启动并接管，登记 id 变为 `shud-c76fba5a46454114`，`dsh_job_ids` 保留前后两项，`cancel_requested_at` 仍为 `null`。没有向 SHUD 组发信号；这些是离散身份观测，不主张穷尽进程追踪。
+
+重启后 seq 35（13:29:09.201Z）的实际自动唤醒字段摘录：
+
+```json
+{"type":"user/message","seq":35,"data":{"content":[{"type":"text","text":"SHUD run RUN-20261027T132408-0fd5: exit_class=ok; artifacts=30."}],"source":{"kind":"shud-jobs"},"role":"user","id":"91e7f92a-0d7a-4b1d-8359-d650fd6f7861"}}
+```
+
+本次日志只有一次 `shud_run`、零次 `shud_collect`，且真实用户来源消息只有最初一次提交；唤醒后助手 seq 60 调用 `read` 读取下述 RunRecord，seq 61 同 call id `call_00_ET_pJTQlOPPGJGNI1hcoisY9857` 成功返回。PI 随后报告收到 RunRecord 并确认验收通过，不把模型的口头完成声明作为磁盘结果。
+
+- RunRecord 路径：`/Users/danker/Documents/SHUD-PI-Acceptance/runs/RUN-20261027T132408-0fd5/run-record.json`；SHA256 `6303758674fbcb093ae64b243db56d45c94ba957f708c2214ce88026dd465df4`。
+- 结果：`status=succeeded`、`exit_code=0`、`exit_class=ok`、30个产物文件；`collected_at=2026-10-27T13:29:09.007Z`。恢复生成的 `resources.wall_seconds=null`、`peak_memory_mb=null`，不解释为求解器耗时或性能改善。
+- RunJob 已为 `collected`，`notify.status=delivered`、`attempts=0`、`at=2026-10-27T13:29:09.184Z`。本次验收是实际 Web 的 SIGTERM 重启场景；此前自动化 SIGKILL 证据独立保留，不冒充本次 PI 手工步骤。
