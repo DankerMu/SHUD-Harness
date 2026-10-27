@@ -50,7 +50,7 @@ pnpm exec vitest run packages/dsh-shud-jobs/src/submit-shud.test.ts packages/dsh
 # RunJob/RunRecord 位于上述运行目录；active.json、completed.json 与 lock 位于插件 stateDir
 ```
 
-M2 的 RunJob/RunRecord 不经 `ctx.storage` 域保存；记录落点与索引/锁分工以 [Phased_Plan M2](Phased_Plan.md#2-m2-运行主链) 和 [design D2](../../openspec/changes/m2-run-chain/design.md) 为准。
+M2 的 RunJob/RunRecord 不经 `ctx.storage` 域保存；记录落点与索引/锁分工以 [Phased_Plan M2](Phased_Plan.md#2-m2-运行主链) 和 [design D2](../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md) 为准。
 
 ### 用例
 

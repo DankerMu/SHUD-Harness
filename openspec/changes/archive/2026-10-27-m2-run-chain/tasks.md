@@ -467,7 +467,7 @@
 
 ## 16. Epic 收口 PI 功能验收（ADR-0007）
 
-- [ ] 16.1 第 1–15 组全部合并后，PI 在 `dsh --profile shud` Web 里一句话让 agent 用 `shud_run` 跑 ccw，运行中重启 dsh，完成后会话被唤醒并给出 RunRecord；编排方从 session log 摘录 `tool/call shud_run`、重启后的 `shud-jobs` 唤醒消息与运行目录 `run-record.json`，记入 `docs/Migration_Plan_dsh.md`（「Epic-close manual acceptance」）。验证：PI 明确给出验收结论；记录 PR 的 `docs:check` 通过
+- [x] 16.1 第 1–15 组全部合并后，PI 在 `dsh --profile shud` Web 里一句话让 agent 用 `shud_run` 跑 ccw，运行中重启 dsh，完成后会话被唤醒并给出 RunRecord；编排方从 session log 摘录 `tool/call shud_run`、重启后的 `shud-jobs` 唤醒消息与运行目录 `run-record.json`，记入 `docs/Migration_Plan_dsh.md`（「Epic-close manual acceptance」）。验证：PI 明确给出验收结论；记录 PR 的 `docs:check` 通过
 
 - Suggested fixture level: none - 人工验收与证据记录
 - Minimal mergeable slice: atomic: 单次验收记录
@@ -483,3 +483,9 @@
 
 - PI comments 6397950076 / 6405181313 明确：数值是可从 RunJob 起止时间戳复算的原始宿主观测窗口，不要求也不宣称求解器耗时上界或固定精度。重启/接管/观测丢失时新记录为 null；身份时间戳、finished_at 结算语义、已知负区间拒绝及已提交记录不可变均保留。
 - 独立 expanded fixture `run-duration-observation` 管理原始提交证据、终态至 collect 的交接、真实跨进程提交边界证明和 canonical/generated 语义投影。历史已勾选任务及其当时证据保持原样；当前尚未声称实现完成，#293/#318 与本 change 留待集中 PI 验收。
+
+## Epic 收口记录（2026-10-27）
+
+- PI 已明确确认本次 Web 验收“通过”，见 [#318 结论](https://github.com/DankerMu/SHUD-Harness/issues/318#issuecomment-6443324760)。实际 run `RUN-20261027T132408-0fd5`、session `session-b232067e-6fa3-4650-a04a-35456cf8b527`；运行中由 agent 核实宿主身份后协助 SIGTERM/restart，原包装进程身份保持，自动唤醒与 RunRecord 由 PI 在原会话观察确认。
+- 证据记录 PR [#418](https://github.com/DankerMu/SHUD-Harness/pull/418) 已合并；`docs/Migration_Plan_dsh.md` 含真实日志路径、seq18/19 同 call id 的提交/成功结果、seq35 `shud-jobs` 唤醒、RunRecord 路径与 SHA256。默认 check 1793通过/1既有跳过，精确 head CI40514643435 八项成功。
+- 上述各执行切片中“PI验收待完成”等措辞是当时的历史状态，本条记录其最终完成，不重写历史验证范围。#289/#333按PI决定以not_planned关闭，不计为TS7迁移或宿主文档修复；本次不扩大运行时或科学结论。

@@ -42,9 +42,11 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 **交付**
 - `dsh-shud-jobs`：继承 `LocalJobRegistry`，禁用原 `jobs` 行并插入 `shud-jobs` 行；非 shud 作业保持宿主行为。shud 作业无 owner 登记，包装进程 detach，作业记录与输出落文件；启动按 R1–R12 对账，存活作业接管、已退出作业结算并 collect，统一经 `shud-jobs` 消息唤醒（无 owner 作业不产生 `job/settled`）。
 - `dsh-shud-tools`：`shud_run`（kind=shud 作业）+ `shud_collect`（解析产物 → RunRecord）。
-- `RunJob`/`RunRecord` 记录位于 `<session cwd>/runs/<run_id>/` 的 `run-job.json`/`run-record.json`；必填 `stateDir` 保存 `active.json`、`completed.json` 与排他 `lock`，不经 `ctx.storage` 域保存运行记录。细节以 [m2-run-chain design D2/D7/D11](../../openspec/changes/m2-run-chain/design.md) 为准。
+- `RunJob`/`RunRecord` 记录位于 `<session cwd>/runs/<run_id>/` 的 `run-job.json`/`run-record.json`；必填 `stateDir` 保存 `active.json`、`completed.json` 与排他 `lock`，不经 `ctx.storage` 域保存运行记录。细节以 [m2-run-chain design D2/D7/D11](../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md) 为准。
 
 **验收门**：上表 M2 行；另加 SIGTERM 与 SIGKILL 各一次重启用例。
+
+**状态（2026-10-27）**：PI 已明确通过 Web 中 ccw 运行中重启、原会话自动唤醒与 RunRecord 验收；真实 session log、工具调用/结果及 RunRecord 路径见 [M2 手工验收记录](../Migration_Plan_dsh.md#m2-手工-web-重启唤醒验收2026-10-27318)。#318 的证据 PR #418 已合并，M2 change 随本次收口归档；不扩展为 M3 EvidenceReport 交付或科学结论。
 
 ## 3. M3 MVP-1
 
