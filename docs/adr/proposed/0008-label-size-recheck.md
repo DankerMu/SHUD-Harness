@@ -21,4 +21,4 @@ kind: process
 
 不采用第二 required check（需要改分支保护），不改为运行时 API 拉标签（不能单独触发撤销重评），不使用 privileged trigger/admin bypass。托管实证必须以同一 oversized draft head 验证加标签绿、删标签红，且不能合并该探针 PR。
 
-此记录说明可回退的工程选择，不代表 M2 PI 功能验收。#293/#318 仍待最后集中验收。
+此记录说明可回退的工程选择，不代表 M2 PI 功能验收。PI 已于2026-10-27通过 #318 集中验收，实际证据见 [Migration_Plan](../../Migration_Plan_dsh.md#m2-手工-web-重启唤醒验收2026-10-27318)。本 ADR 仍为 proposed；更新验收事实不等于批准本项流程决策。
