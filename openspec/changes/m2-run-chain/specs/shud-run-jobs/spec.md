@@ -307,7 +307,7 @@ stderr 管道或描述符关闭时，诊断写入失败 SHALL 仅造成该条日
 - **THEN** 正常轮询与 SHUD 提交/手工轮询/collect 不得抢跑；释放先关闭准入、等待已接受的对账工作再释放 stateDir 锁，之后不得启动新轮询
 
 ### Requirement: Takeover registration
-对账中接管的作业（R3、R5）SHALL 立即由「Registry poll loop」继续监视，并在 apply 时以「Shud job submission」相同的瞬时全局控制器、无 owner、相同 label 经父类 `start` 重新登记，把新 `dsh_job_id` 写入 `run-job.json` 并追加到 `dsh_job_ids`；SHALL NOT 等待 `tool-jobs` 挂载。登记失败 SHALL NOT 影响轮询循环、collect 与唤醒：`dsh_job_id` 保持 `null`，失败原因经宿主 logger 记录。
+对账中接管的作业（R3、R5）SHALL 立即由「Registry poll loop」继续监视，并在 apply 时以「Shud job submission」相同的瞬时全局控制器、无 owner、相同 label 经父类 `start` 重新登记，把新 `dsh_job_id` 写入 `run-job.json` 并追加到 `dsh_job_ids`；SHALL NOT 等待 `tool-jobs` 挂载。登记失败 SHALL NOT 影响轮询循环、collect 与唤醒：`dsh_job_id` 保持 `null`，失败原因经宿主 logger 记录。此处日志报告仅指埋点：钉版 dsh-v0.2.1-rc.2 默认成功启动后没有该 logger 的运维可读出口，不能据此声称错误原因已持久保存。实际状态证据取运行目录 `run-job.json`、`run-record.json` 或 `collect-error.json`、索引及 session log 的 `shud-jobs` 唤醒消息；它们不保证覆盖每条 logger 异常原因。#378 仅纠正可见性边界，不新增出口或改变接管与 R1–R12 语义。
 
 #### Scenario: still running after restart
 - **WHEN** dsh 重启时作业仍在运行

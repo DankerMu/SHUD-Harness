@@ -216,6 +216,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 - 结构化日志 = dsh session log（`session.v4.jsonl.zstd`）；插件事件走 dsh 事件而非 `console.log`。
 - 禁止记录：`DMXAPI_KEY`、任何 `sk-` 形态 token、`data/raw` 内容。`profile:smoke` 断言 dump-config 无密钥。
 - 非 shud 作业状态以宿主 `job/settled` 为准；M2 shud 无 owner 作业不产生该事件，以运行目录 `run-job.json`、`run-record.json` 或 `collect-error.json`、索引与 session log 中的 `shud-jobs` 唤醒消息为证。RunRecord 记录退出码及类别与 artifact 路径，不以终端回忆或模型文本代替。
+- `ctx.logger` 埋点不等于 session log 或运维可读日志：钉版 dsh-v0.2.1-rc.2 默认成功启动后没有通用 logger 出口。PI 在 #378 选择仅记录边界、不新增出口；#343 本实例 `shud-recovery`→stderr 保持独立且不扩大载荷。其它可读面为 Web stdout readiness、直接启动 stderr、仅 `StartupError` 的 `$DSH_HOME/logs/startup-*.log`（写入失败则 stderr 回退），以及上述 session/运行记录与求解器日志；不保证保留所有运行时 logger 错误原因。原始启动报告可能含配置/凭据，分享前须审查。不得把内存 buffer 或调高阈值当作可见性证明；详见 M2 design 的 Operator-visible evidence boundary。
 - 无 tracing/metrics（单机单用户，不装空壳）。
 
 ## Agent Operating Rules
