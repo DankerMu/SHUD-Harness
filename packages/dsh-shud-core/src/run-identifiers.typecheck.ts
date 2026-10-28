@@ -3,8 +3,10 @@
 import {
   createBrandedId,
   DataProvenanceSchema,
+  EvidenceReportSchema,
   generateRunIdentifiers,
   JobRecordIdSchema,
+  PiGateDecisionSchema,
   RunIdSchema,
   RunJobSchema,
   StackLockSchema,
@@ -12,7 +14,9 @@ import {
   type DataId,
   type DataProvenance,
   type DecisionId,
+  type EvidenceReport,
   type JobRecordId,
+  type PiGateDecision,
   type RunId,
   type ReportId,
   type StackId,
@@ -83,6 +87,31 @@ const parsedDataProvenanceId: DataId = dataProvenance.data_id;
 // @ts-expect-error Plain strings cannot be assigned to the public DataProvenance data_id field.
 const plainDataProvenanceId: DataProvenance["data_id"] = "DATA-20261027T081000-7d2e";
 
+const report = EvidenceReportSchema.parse(stored);
+const reportId: ReportId = report.report_id;
+const reportTask: TaskId = report.task_id;
+const reportRuns: RunId[] = report.linked_runs;
+const reportStacks: StackId[] = report.stack_ids;
+const reportData: DataId[] = report.data_ids;
+// @ts-expect-error Plain strings cannot be assigned to the public EvidenceReport report_id field.
+const plainReportId: EvidenceReport["report_id"] = "REPORT-20261027T090000-5b10";
+// @ts-expect-error Plain strings cannot be assigned to the public EvidenceReport task_id field.
+const plainReportTask: EvidenceReport["task_id"] = "TASK-20261027T080005-3f9c";
+// @ts-expect-error Plain strings cannot be assigned to public EvidenceReport linked_runs elements.
+const plainReportRun: EvidenceReport["linked_runs"][number] = "RUN-20261027T082000-a1b2";
+// @ts-expect-error Plain strings cannot be assigned to public EvidenceReport stack_ids elements.
+const plainReportStack: EvidenceReport["stack_ids"][number] = "STACK-20261027T080000-a1b2";
+// @ts-expect-error Plain strings cannot be assigned to public EvidenceReport data_ids elements.
+const plainReportData: EvidenceReport["data_ids"][number] = "DATA-20261027T081000-7d2e";
+
+const decision = PiGateDecisionSchema.parse(stored);
+const decisionId: DecisionId = decision.decision_id;
+const decisionReport: ReportId = decision.report_id;
+// @ts-expect-error Plain strings cannot be assigned to the public PiGateDecision decision_id field.
+const plainDecisionId: PiGateDecision["decision_id"] = "DEC-20261027T093012-c4e7";
+// @ts-expect-error Plain strings cannot be assigned to the public PiGateDecision report_id field.
+const plainDecisionReport: PiGateDecision["report_id"] = "REPORT-20261027T090000-5b10";
+
 void [
   generatedJob,
   generatedRun,
@@ -120,4 +149,18 @@ void [
   plainStackLockId,
   parsedDataProvenanceId,
   plainDataProvenanceId,
+  reportId,
+  reportTask,
+  reportRuns,
+  reportStacks,
+  reportData,
+  plainReportId,
+  plainReportTask,
+  plainReportRun,
+  plainReportStack,
+  plainReportData,
+  decisionId,
+  decisionReport,
+  plainDecisionId,
+  plainDecisionReport,
 ];

@@ -271,28 +271,36 @@ rules:
 ## 7. EvidenceReport
 
 ```yaml
-report_id: REPORT-0001                # 格式: REPORT-NNNN
-task_id: TASK-0001
-status: draft | reviewed | awaiting_pi | accepted | revision_requested | rejected | archived
-summary: "Tiny benchmark passes; old-output compatibility failed in rSHUD reader."
+report_id: REPORT-20261027T090000-5b10 # 品牌 ReportId，UTC 秒 + 4 位小写 hex
+task_id: TASK-20261027T080005-3f9c     # 品牌 TaskId
+status: draft
+summary: "Two ccw runs provide evidence from distinct stacks and inputs."
 observations:
-  - "baseline available"
-  - "water balance within threshold"
-  - "old output reader fails when optional event_flux.csv missing"
+  - "Both runs produced output artifacts."
 limitations:
-  - "no holdout event run"
-  - "no full basin batch"
+  - "No scientific metrics were collected."
 pi_questions:
-  - "Should we make diagnostics optional or require schema version bump?"
-linked_runs: [RUN-0001, RUN-0002]     # 支撑本报告的 RunRecord
-created_at: 2026-04-25T15:00:00Z
+  - "Should these runs proceed to scientific review?"
+linked_runs: [RUN-20261027T083000-b2c3, RUN-20261027T082000-a1b2]
+stack_ids: [STACK-20261027T081500-b2c3, STACK-20261027T080000-a1b2]
+data_ids: [DATA-20261027T081500-8e3f, DATA-20261027T081000-7d2e]
+llm_response_models: [deepseek-flash-guan]
+decision_history: []
+created_at: "2026-10-27T09:00:00Z"
+updated_at: "2026-10-27T09:00:00Z"
 ```
 
-**状态流转**: `draft` → `reviewed`（Reviewer 工程检查通过）→ `awaiting_pi` → `accepted | revision_requested | rejected`。
-`revision_requested` 表示 PI 要求修订后重新提交（区别于直接 `rejected`）。
-`archived` 是 `accepted` 或 `rejected` 之后的可选终态，表示报告已归档、不再活跃但保留可查。
+M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [m3-mvp-1 报告契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md)。根对象与嵌套 PiGateDecision 均严格拒绝未知字段，以上字段全部必填，不允许省略或 `undefined`。
 
-**废弃字段**: 旧 4 态 `draft | pi_reviewed | accepted | rejected`（`pi_reviewed` 拆分为 `reviewed` + `awaiting_pi`，增加 `revision_requested`）。
+- `report_id` 从 `REPORT-NNNN` 改为品牌 `ReportId`；`task_id` 为品牌 `TaskId`。品牌格式为 `<PREFIX>-YYYYMMDDTHHMMSS-xxxx`，UTC 秒与 4 位小写 hex。
+- `linked_runs` 改为非空品牌 `RunId[]`，允许重复；新增 `stack_ids: StackId[]`、`data_ids: DataId[]`、`llm_response_models: string[]`，三者均非空且拒绝重复。schema 保留调用方顺序，不排序、不静默去重。后续生成器从关联 RunRecord 取引用并去重，不由 schema 读取运行记录。
+- `summary` 为非空字符串；`observations`、`limitations`、`pi_questions` 可为空数组，但元素必须是非空字符串。响应 model 元素也必须非空。不裁剪、不强制转换、不填默认值。
+- 新增必填 `decision_history: PiGateDecision[]`，允许空数组；新增必填 `updated_at`。`created_at`/`updated_at` 沿用 TaskCard 非空字符串约定，不做时间格式或先后关系校验。仅 PiGateDecision 的 `decided_at` 要求 ISO 8601 UTC。
+- `status` 恰为 `draft | reviewed | awaiting_pi | accepted | revision_requested | rejected | archived`。schema 不强制 history 与状态一致，不校验 history 中 report_id 与外层一致，不检查决策时间顺序或审批权限。
+
+**状态流转边界**：后续记录/工具层负责 `draft` → `reviewed` → `accepted | revision_requested | rejected`；`awaiting_pi` 在 M3 仅表示审批卡挂起瞬时态，不写入持久报告；`archived` 保留但无 M3 入口。解析成功不等同 PI 审批通过。
+
+**废弃字段/写法**：旧 `REPORT-NNNN`/`RUN-NNNN` 引用与旧状态 `pi_reviewed` 被拒绝；决策记录的字段迁移见下方 PiGateDecision 投影。
 
 ---
 
@@ -475,24 +483,20 @@ interface AnalysisProgressPayload {
 
 ```ts
 interface PiGateDecision {
-  decision_id: string;
-  gate_id: string;
-  task_id: string;
-  actor_user_id: string;
-  actor_role: "pi";
-  decision: "approved" | "rejected" | "request_revision";
-  comment?: string;
-  comment_required: boolean;
-  next_action?: string;
-  evidence_refs: string[];
-  created_at: string;
+  decision_id: DecisionId; // DEC-YYYYMMDDTHHMMSS-xxxx
+  report_id: ReportId; // REPORT-YYYYMMDDTHHMMSS-xxxx
+  approval_ref: string; // 本次获准执行的 exec.callId，非空
+  outcome: "accepted" | "rejected" | "revision_requested";
+  comment: string | null; // accepted 当且仅当为 null，其余为非空字符串
+  decided_at: string; // ISO 8601 UTC，Z 后缀
 }
 ```
 
-> **枚举映射（对抗审查 A01-2）**：`decision` 是动词态枚举（`request_revision`），对象状态是名词态
-> （PiGate.status / EvidenceReport.status 的 `revision_requested`）。两个集合不同，实现时必须是
-> 两个独立 Zod enum + 一个显式映射函数（canonical 映射表见 PI_Decision_Comments_Spec）；
-> 禁止 `report.status = decision` 直接赋值——枚举值不相等会静默丢迁移。
+本段投影自 [Support_Schema_Contracts §6](Support_Schema_Contracts.md#6-pigatedecision)，实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`。严格对象仅含以上六个必填字段，缺字段、未知键与非法 outcome/comment 组合均被拒绝，关系错误定位到 `comment`。
+
+`approval_ref` 是本次执行的 callId，不是 approval id 或审批通过证明；审计经 session log 的 `asked.callId` → `asked.id` → `decided.id` 关联。不记录先前被拒 submit 卡引用。schema 不执行审批或跨记录/状态机校验。
+
+保留并品牌化 `decision_id`，新增 `report_id`/`approval_ref`；`decision`→`outcome`、`created_at`→`decided_at`、`comment?`→必填且仅 accepted 为 null。删除 `gate_id`、`task_id`、`actor_user_id`、`actor_role`、`comment_required`、`next_action`、`evidence_refs`，不保留旧枚举映射或兼容字段。
 
 ### MemoryNote(type=pi_decision)
 
@@ -529,7 +533,7 @@ interface TaskCard {
 // EvidenceReport 扩展
 interface EvidenceReport {
   exports?: ReportExport[];
-  decision_history?: PiGateDecision[];
+  // decision_history: PiGateDecision[] 已由 §7 定义为必填，不是可选扩展。
 }
 
 // AnalysisPlan 扩展
