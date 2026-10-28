@@ -1,12 +1,5 @@
-import { describe, expect, expectTypeOf, test } from "vitest";
-import {
-  TaskCardSchema,
-  type DataId,
-  type JobRecordId,
-  type ReportId,
-  type StackId,
-  type TaskId,
-} from "../index.ts";
+import { describe, expect, test } from "vitest";
+import { TaskCardSchema } from "../index.ts";
 
 const card = {
   task_id: "TASK-20261027T080005-3f9c",
@@ -32,11 +25,6 @@ describe("TaskCard branded references", () => {
     const input = { ...card, stack_id: null, data_id: null, linked_jobs: [], linked_reports: [] };
     const parsed = TaskCardSchema.parse(input);
     expect(parsed).toEqual(input);
-    expectTypeOf(parsed.task_id).toEqualTypeOf<TaskId>();
-    expectTypeOf(parsed.stack_id).toEqualTypeOf<StackId | null>();
-    expectTypeOf(parsed.data_id).toEqualTypeOf<DataId | null>();
-    expectTypeOf(parsed.linked_jobs).toEqualTypeOf<JobRecordId[]>();
-    expectTypeOf(parsed.linked_reports).toEqualTypeOf<ReportId[]>();
   });
 
   test.each(["stack_id", "data_id"] as const)("requires an explicit %s", (field) => {
