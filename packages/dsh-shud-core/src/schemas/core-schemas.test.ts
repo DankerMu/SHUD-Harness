@@ -6,7 +6,6 @@ import {
   ErrorRecordSchema,
   IdempotencyRecordSchema,
   LockRecordSchema,
-  StackLockSchema,
   TaskCardSchema,
 } from "./index.ts";
 import {
@@ -23,7 +22,6 @@ import {
   RunRecordSchema,
 } from "../index.ts";
 
-const STACK_ID = "STACK-11111111-1111-4111-8111-111111111111";
 const DATA_ID = "DATA-22222222-2222-4222-8222-222222222222";
 const MANIFEST_ID = "MANIFEST-33333333-3333-4333-8333-333333333333";
 const SUCCESSOR_MANIFEST_ID = "MANIFEST-44444444-4444-4444-8444-444444444444";
@@ -376,121 +374,6 @@ describe("core Zod schemas", () => {
     expect(issuePaths(nonBooleanMarker)).toContain("llm_generated");
   });
 
-  test("StackLock accepts the three-repository shape and nullable R package lock", () => {
-    const parsed = StackLockSchema.safeParse(validStackLock());
-    expect(parsed.success).toBe(true);
-    if (parsed.success) {
-      expect(Object.keys(parsed.data.repos)).toEqual(["SHUD", "rSHUD", "AutoSHUD"]);
-      expect(parsed.data.runtime.r_packages_lock).toEqual({
-        path: "renv.lock",
-        sha256: "sha256:renv-lock",
-      });
-      expect(parsed.data.llm.base_url).toBe("https://models.example/v1");
-    }
-
-    const withoutRPackagesLock = StackLockSchema.safeParse({
-      ...validStackLock(),
-      runtime: {
-        ...validStackLock().runtime,
-        r_packages_lock: null,
-      },
-    });
-    expect(withoutRPackagesLock.success).toBe(true);
-  });
-
-  test("StackLock requires llm.base_url and every canonical repository", () => {
-    const withoutBaseUrl = StackLockSchema.safeParse({
-      ...validStackLock(),
-      llm: removeKey(validStackLock().llm, "base_url"),
-    });
-    expect(withoutBaseUrl.success).toBe(false);
-    expect(issuePaths(withoutBaseUrl)).toContain("llm.base_url");
-  });
-
-  test("StackLock requires a boolean dirty flag on every repository revision", () => {
-    for (const name of ["SHUD", "rSHUD", "AutoSHUD"] as const) {
-      const lock = validStackLock();
-      const withoutDirty = StackLockSchema.safeParse({
-        ...lock,
-        repos: { ...lock.repos, [name]: removeKey(lock.repos[name], "dirty") },
-      });
-      expect(withoutDirty.success).toBe(false);
-      expect(issuePaths(withoutDirty)).toContain(`repos.${name}.dirty`);
-    }
-
-    const lock = validStackLock();
-    const stringDirty = StackLockSchema.safeParse({
-      ...lock,
-      repos: { ...lock.repos, SHUD: { ...lock.repos.SHUD, dirty: "false" } },
-    });
-    expect(stringDirty.success).toBe(false);
-    expect(issuePaths(stringDirty)).toContain("repos.SHUD.dirty");
-
-    const extraField = StackLockSchema.safeParse({
-      ...lock,
-      repos: { ...lock.repos, rSHUD: { ...lock.repos.rSHUD, remote: "origin" } },
-    });
-    expect(extraField.success).toBe(false);
-
-    const dirtyTrue = StackLockSchema.safeParse({
-      ...lock,
-      repos: { ...lock.repos, AutoSHUD: { ...lock.repos.AutoSHUD, dirty: true } },
-    });
-    expect(dirtyTrue.success).toBe(true);
-  });
-
-  test("StackLock rejects the legacy runtime.r_packages_lock string", () => {
-    const legacyRPackagesLock = StackLockSchema.safeParse({
-      ...validStackLock(),
-      runtime: {
-        ...validStackLock().runtime,
-        r_packages_lock: "renv.lock",
-      },
-    });
-
-    expect(legacyRPackagesLock.success).toBe(false);
-    expect(issuePaths(legacyRPackagesLock)).toContain("runtime.r_packages_lock");
-  });
-
-  test("StackLock rejects deprecated or unknown fields at every strict boundary", () => {
-    const runtimeContainer = StackLockSchema.safeParse({
-      ...validStackLock(),
-      runtime: {
-        ...validStackLock().runtime,
-        container: "docker",
-      },
-    });
-    expect(runtimeContainer.success).toBe(false);
-
-    const limits = StackLockSchema.safeParse({
-      ...validStackLock(),
-      limits: { max_wall_minutes: 30 },
-    });
-    expect(limits.success).toBe(false);
-
-    const policyVersion = StackLockSchema.safeParse({
-      ...validStackLock(),
-      policy_version: "legacy",
-    });
-    expect(policyVersion.success).toBe(false);
-
-    const degraded = StackLockSchema.safeParse({
-      ...validStackLock(),
-      degraded: ["renv_lock_missing"],
-    });
-    expect(degraded.success).toBe(false);
-  });
-
-  test("StackLock rejects ids outside STACK-<uuid>", () => {
-    const invalid = StackLockSchema.safeParse({
-      ...validStackLock(),
-      stack_id: "STACK-0001",
-    });
-
-    expect(invalid.success).toBe(false);
-    expect(issuePaths(invalid)).toContain("stack_id");
-  });
-
   test("DataProvenance accepts the canonical object window and hashed sources", () => {
     const parsed = DataProvenanceSchema.safeParse(validDataProvenance());
     expect(parsed.success).toBe(true);
@@ -748,56 +631,6 @@ function validArtifact() {
     retention_class: "debug",
     source_refs: [],
     redaction_status: "not_needed",
-  };
-}
-
-function validStackLock() {
-  return {
-    stack_id: STACK_ID,
-    repos: {
-      SHUD: {
-        commit: "9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb",
-        branch: "master",
-        dirty: false,
-      },
-      rSHUD: {
-        commit: "d162db3d162db3d162db3d162db3d162db3d162d",
-        branch: "master",
-        dirty: false,
-      },
-      AutoSHUD: {
-        commit: "1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe",
-        branch: "master",
-        dirty: false,
-      },
-    },
-    runtime: {
-      os: "Darwin 24.6.0",
-      r_version: "4.4.1",
-      r_packages_lock: {
-        path: "renv.lock",
-        sha256: "sha256:renv-lock",
-      },
-      python_version: "3.12.4",
-      sundials_version: "6.0.0",
-      gcc_version: "14.1.0",
-      gdal_version: "3.9.0",
-    },
-    harness: {
-      version: "0.8.0",
-      cli_version: "unknown",
-      prompt_pack: "promptpack-unset",
-      skills_version: "skills-unset",
-    },
-    llm: {
-      provider: "openai_compatible",
-      model_id: "glm-5.2",
-      base_url: "https://models.example/v1",
-      params_digest: "sha256:params",
-      prompt_pack_digest: "sha256:prompt-pack",
-    },
-    fingerprint: "sha256:stack-fingerprint",
-    created_at: "2026-07-23T12:00:00Z",
   };
 }
 

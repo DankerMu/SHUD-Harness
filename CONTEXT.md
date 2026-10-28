@@ -22,7 +22,7 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 每条在代码里应有伴生断言或测试（`AGENTS.md` ## Architecture Discipline）；尚未有的在 `constraints.yaml` review_only 列出触发点。
 
 1. **K2 Seam-only**：插件只触碰 `tools/pre-execute`、`ctx.approval`、`ctx.jobs`、`ctx.sandbox`、`ctx.storage`、agent preset；缺 seam 是报告偏差，不是 fork，不改 loop。
-2. **K4 StackLock.llm** = `base_url` + `request_alias` + `response_model`；response_model 只记录，永不自动失效锁（代码在 M3 前仍带旧字段，记录于 `docs/04_IMPLEMENTATION/Port_List.md`）。
+2. **K4 StackLock.llm** = `base_url` + `request_alias` + `response_model`，Zod 严格限定三字段；response_model 只记录、排除出指纹，永不自动失效锁。repo 路径及截断标记参与指纹，StackId 统一为品牌时间戳格式。
 3. **K9 出站**：只有 `session-log-deepseek` 关闭，其余 dsh 默认；每次 dsh 升级重审新增出站行。
 4. **K12 治理**：物理方程 / 默认参数 / benchmark baseline 改动需 PI `ask`；原始数据删除禁止或 PI 审批；`data/raw` 在 workspace root 之外且只读。
 5. **K13 作用域**：任何 spike 不以首任务（ccw 运行 → RunRecord → EvidenceReport）的一个用户可见步骤收尾就不准开。
@@ -63,6 +63,5 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 
 ## Open Terminology Questions
 
-- `Minimal_Schemas.md` 对 StackLock.llm 三字段的命名（`request_alias` vs 代码旧字段）在 M3 前双态并存，grep 前查 `openspec/glossary.md` 的两态关键词。
 - "fixture" 在本仓库同时指 SHUD 输入夹具（ccw tiny）与测试夹具（OpenSpec fixture）；文内首次出现需限定。
 - `Spec_Gaps_Register.md` 中 GAP-01..10 的"实现选择"列在 M3 前为空，不是遗漏。

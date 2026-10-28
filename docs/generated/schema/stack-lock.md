@@ -10,82 +10,72 @@ Required is evaluated within the immediate parent object.
 
 | Field | Required | Nullable | Type | Constraints / values |
 |---|---|---|---|---|
-| stack_id | yes | no | string | pattern=^STACK-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ |
+| stack_id | yes | no | string | pattern=^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | repos | yes | no | object | additionalProperties=false |
 | repos.SHUD | yes | no | object | additionalProperties=false |
 | repos.SHUD.commit | yes | no | string | minLength=1 |
 | repos.SHUD.branch | yes | no | string | minLength=1 |
 | repos.SHUD.dirty | yes | no | boolean | - |
+| repos.SHUD.dirty_paths | yes | no | array<string> | items: minLength=1 |
+| repos.SHUD.dirty_paths_truncated | yes | no | boolean | - |
 | repos.rSHUD | yes | no | object | additionalProperties=false |
 | repos.rSHUD.commit | yes | no | string | minLength=1 |
 | repos.rSHUD.branch | yes | no | string | minLength=1 |
 | repos.rSHUD.dirty | yes | no | boolean | - |
+| repos.rSHUD.dirty_paths | yes | no | array<string> | items: minLength=1 |
+| repos.rSHUD.dirty_paths_truncated | yes | no | boolean | - |
 | repos.AutoSHUD | yes | no | object | additionalProperties=false |
 | repos.AutoSHUD.commit | yes | no | string | minLength=1 |
 | repos.AutoSHUD.branch | yes | no | string | minLength=1 |
 | repos.AutoSHUD.dirty | yes | no | boolean | - |
+| repos.AutoSHUD.dirty_paths | yes | no | array<string> | items: minLength=1 |
+| repos.AutoSHUD.dirty_paths_truncated | yes | no | boolean | - |
 | runtime | yes | no | object | additionalProperties=false |
 | runtime.os | yes | no | string | minLength=1 |
-| runtime.r_version | yes | no | string | minLength=1 |
-| runtime.r_packages_lock | yes | yes | object \| null | additionalProperties=false |
-| runtime.r_packages_lock.path | yes | no | string | minLength=1 |
-| runtime.r_packages_lock.sha256 | yes | no | string | minLength=1 |
-| runtime.python_version | yes | no | string | minLength=1 |
-| runtime.sundials_version | yes | no | string | minLength=1 |
-| runtime.gcc_version | yes | no | string | minLength=1 |
-| runtime.gdal_version | yes | no | string | minLength=1 |
+| runtime.sundials_version | yes | yes | string \| null | minLength=1 |
+| runtime.host_version | yes | no | string | minLength=1 |
 | harness | yes | no | object | additionalProperties=false |
 | harness.version | yes | no | string | minLength=1 |
-| harness.cli_version | yes | no | string | minLength=1 |
-| harness.prompt_pack | yes | no | string | minLength=1 |
-| harness.skills_version | yes | no | string | minLength=1 |
 | llm | yes | no | object | additionalProperties=false |
-| llm.provider | yes | no | string | minLength=1 |
-| llm.model_id | yes | no | string | minLength=1 |
 | llm.base_url | yes | no | string | minLength=1 |
-| llm.params_digest | yes | no | string | minLength=1 |
-| llm.prompt_pack_digest | yes | no | string | minLength=1 |
+| llm.request_alias | yes | no | string | minLength=1 |
+| llm.response_model | yes | no | string | minLength=1 |
 | fingerprint | yes | no | string | minLength=1 |
 | created_at | yes | no | string | minLength=1 |
 
 ## Example YAML
 
 ```yaml
-stack_id: "STACK-11111111-1111-4111-8111-111111111111"
+stack_id: "STACK-20261027T080000-3f9a"
 repos:
   SHUD:
-    commit: "example"
-    branch: "example"
+    commit: "9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb"
+    branch: "master"
     dirty: false
+    dirty_paths: []
+    dirty_paths_truncated: false
   rSHUD:
-    commit: "example"
-    branch: "example"
+    commit: "d162db3d162db3d162db3d162db3d162db3d162d"
+    branch: "master"
     dirty: false
+    dirty_paths: []
+    dirty_paths_truncated: false
   AutoSHUD:
-    commit: "example"
-    branch: "example"
+    commit: "1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe"
+    branch: "master"
     dirty: false
+    dirty_paths: []
+    dirty_paths_truncated: false
 runtime:
-  os: "example"
-  r_version: "example"
-  r_packages_lock:
-    path: "example"
-    sha256: "example"
-  python_version: "example"
-  sundials_version: "example"
-  gcc_version: "example"
-  gdal_version: "example"
+  os: "Darwin 24.6.0"
+  sundials_version: null
+  host_version: "0.2.1-rc.2"
 harness:
-  version: "example"
-  cli_version: "example"
-  prompt_pack: "example"
-  skills_version: "example"
+  version: "0.9.0"
 llm:
-  provider: "example"
-  model_id: "example"
-  base_url: "example"
-  params_digest: "example"
-  prompt_pack_digest: "example"
+  base_url: "https://www.dmxapi.cn"
+  request_alias: "deepseek-flash-guan"
+  response_model: "deepseek-flash-guan"
 fingerprint: "example"
 created_at: "example"
 ```
@@ -93,42 +83,37 @@ created_at: "example"
 ## Changelog Diff
 
 ```diff
-+ schema StackLock sha256:43e4a4cdcb20f9392fa443770eb2c7a2a3e55de9aba1008922cc3beb8b6f8927
-+ field stack_id required=yes nullable=no type=string constraints=pattern=^STACK-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$
++ schema StackLock sha256:288041cb0b5d02f1267af88befcd54246435bd0564430cd1b7aba83526f1ffbe
++ field stack_id required=yes nullable=no type=string constraints=pattern=^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field repos required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.SHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.SHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.SHUD.branch required=yes nullable=no type=string constraints=minLength=1
 + field repos.SHUD.dirty required=yes nullable=no type=boolean constraints=-
++ field repos.SHUD.dirty_paths required=yes nullable=no type=array<string> constraints=items: minLength=1
++ field repos.SHUD.dirty_paths_truncated required=yes nullable=no type=boolean constraints=-
 + field repos.rSHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.rSHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.rSHUD.branch required=yes nullable=no type=string constraints=minLength=1
 + field repos.rSHUD.dirty required=yes nullable=no type=boolean constraints=-
++ field repos.rSHUD.dirty_paths required=yes nullable=no type=array<string> constraints=items: minLength=1
++ field repos.rSHUD.dirty_paths_truncated required=yes nullable=no type=boolean constraints=-
 + field repos.AutoSHUD required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.AutoSHUD.commit required=yes nullable=no type=string constraints=minLength=1
 + field repos.AutoSHUD.branch required=yes nullable=no type=string constraints=minLength=1
 + field repos.AutoSHUD.dirty required=yes nullable=no type=boolean constraints=-
++ field repos.AutoSHUD.dirty_paths required=yes nullable=no type=array<string> constraints=items: minLength=1
++ field repos.AutoSHUD.dirty_paths_truncated required=yes nullable=no type=boolean constraints=-
 + field runtime required=yes nullable=no type=object constraints=additionalProperties=false
 + field runtime.os required=yes nullable=no type=string constraints=minLength=1
-+ field runtime.r_version required=yes nullable=no type=string constraints=minLength=1
-+ field runtime.r_packages_lock required=yes nullable=yes type=object | null constraints=additionalProperties=false
-+ field runtime.r_packages_lock.path required=yes nullable=no type=string constraints=minLength=1
-+ field runtime.r_packages_lock.sha256 required=yes nullable=no type=string constraints=minLength=1
-+ field runtime.python_version required=yes nullable=no type=string constraints=minLength=1
-+ field runtime.sundials_version required=yes nullable=no type=string constraints=minLength=1
-+ field runtime.gcc_version required=yes nullable=no type=string constraints=minLength=1
-+ field runtime.gdal_version required=yes nullable=no type=string constraints=minLength=1
++ field runtime.sundials_version required=yes nullable=yes type=string | null constraints=minLength=1
++ field runtime.host_version required=yes nullable=no type=string constraints=minLength=1
 + field harness required=yes nullable=no type=object constraints=additionalProperties=false
 + field harness.version required=yes nullable=no type=string constraints=minLength=1
-+ field harness.cli_version required=yes nullable=no type=string constraints=minLength=1
-+ field harness.prompt_pack required=yes nullable=no type=string constraints=minLength=1
-+ field harness.skills_version required=yes nullable=no type=string constraints=minLength=1
 + field llm required=yes nullable=no type=object constraints=additionalProperties=false
-+ field llm.provider required=yes nullable=no type=string constraints=minLength=1
-+ field llm.model_id required=yes nullable=no type=string constraints=minLength=1
 + field llm.base_url required=yes nullable=no type=string constraints=minLength=1
-+ field llm.params_digest required=yes nullable=no type=string constraints=minLength=1
-+ field llm.prompt_pack_digest required=yes nullable=no type=string constraints=minLength=1
++ field llm.request_alias required=yes nullable=no type=string constraints=minLength=1
++ field llm.response_model required=yes nullable=no type=string constraints=minLength=1
 + field fingerprint required=yes nullable=no type=string constraints=minLength=1
 + field created_at required=yes nullable=no type=string constraints=minLength=1
 ```

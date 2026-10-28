@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import type { RepositoryRevision } from "../schemas/index.ts";
+import { compareRepositoryPaths } from "./compare-paths.ts";
 
 // Variables that would make git read a repository other than the one at repoPath.
 const REPOSITORY_LOCATOR_VARS = [
@@ -71,15 +72,16 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
   }
   const branch = name ?? "HEAD";
 
-  let dirty: boolean;
+  let status: string;
+  let dirty_paths_truncated = false;
   try {
-    const status = run([
+    status = run([
       "status",
       "--porcelain",
+      "-z",
       "--untracked-files=normal",
       "--ignore-submodules=none",
     ]);
-    dirty = status.length > 0;
   } catch (error) {
     // Any porcelain output means dirty, even when the read was cut short by either
     // stream overflowing; an overflow with empty stdout is a failure.
@@ -89,9 +91,40 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
         cause: error,
       });
     }
-    dirty = true;
+    status = stdout;
+    dirty_paths_truncated = true;
   }
-  return { commit, branch, dirty };
+  return {
+    commit,
+    branch,
+    dirty: status.length > 0,
+    dirty_paths: collectDirtyPaths(status),
+    dirty_paths_truncated,
+  };
+}
+
+function collectDirtyPaths(status: string): string[] {
+  const paths = new Set<string>();
+  let offset = 0;
+  while (offset < status.length) {
+    const destinationEnd = status.indexOf("\0", offset);
+    if (destinationEnd === -1) break;
+    let recordEnd = destinationEnd;
+    const indexStatus = status[offset];
+    const worktreeStatus = status[offset + 1];
+    if (
+      indexStatus === "R" ||
+      indexStatus === "C" ||
+      worktreeStatus === "R" ||
+      worktreeStatus === "C"
+    ) {
+      recordEnd = status.indexOf("\0", destinationEnd + 1);
+      if (recordEnd === -1) break;
+    }
+    if (destinationEnd > offset + 3) paths.add(status.slice(offset + 3, destinationEnd));
+    offset = recordEnd + 1;
+  }
+  return [...paths].sort(compareRepositoryPaths);
 }
 
 function failureField(error: unknown, key: "code" | "status" | "stdout" | "stderr"): unknown {

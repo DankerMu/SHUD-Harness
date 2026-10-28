@@ -77,39 +77,34 @@ TaskCard.status 使用粗粒度状态机管理任务生命周期。执行期间�
 ## 2. StackLock
 
 ```yaml
-stack_id: STACK-0001                  # 格式: STACK-NNNN
+stack_id: STACK-20261027T080000-3f9a  # 品牌 StackId：STACK-YYYYMMDDTHHMMSS-xxxx，UTC 秒 + 小写 hex
 repos:
-  SHUD:      { commit: 9b55b0c, branch: master, dirty: false }
-  rSHUD:     { commit: d162db3, branch: master, dirty: false }
-  AutoSHUD:  { commit: 1cbec6f, branch: master, dirty: false }
+  SHUD:      { commit: 9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb, branch: master, dirty: false, dirty_paths: [], dirty_paths_truncated: false }
+  rSHUD:     { commit: d162db3d162db3d162db3d162db3d162db3d162d, branch: master, dirty: false, dirty_paths: [], dirty_paths_truncated: false }
+  AutoSHUD:  { commit: 1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe, branch: master, dirty: false, dirty_paths: [], dirty_paths_truncated: false }
 runtime:
-  os: "Darwin 24.6.0"
-  r_version: "4.4.1"
-  r_packages_lock:                    # { path, sha256 } | null；下方为存在 renv.lock 的示例
-    path: "renv.lock"
-    sha256: "sha256:..."
-  python_version: "3.12.4"
-  sundials_version: "6.0.0"
-  gcc_version: "14.1.0"
-  gdal_version: "3.9.0"
+  os: "Darwin 24.6.0"                # 非空 string
+  sundials_version: null             # 非空 string | null；不可得时明确为 null
+  host_version: "0.2.1-rc.2"         # 非空 string；dsh 宿主版本
 harness:
-  version: "0.8.0"
-  cli_version: "0.1.0"                # 领域 CLI semver，见 Domain_CLI_Spec §5（T2 证据可追溯到生产它的 CLI 版本）
-  prompt_pack: promptpack-0001
-  skills_version: skills-0001
-llm:                                  # 恰好三字段（ADR-0004 K4）
-  base_url: "https://www.dmxapi.cn"   # string；第三方端点必锁：同名模型在不同端点可能被静默换版/量化
-  request_alias: "deepseek-flash-guan" # string；请求中发送的 model id（ADR-0004 K3）
-  response_model: "<响应体 model 字段原值>"  # string；API 返回的 `model` 字段，仅记录、不强制校验（K4）
-fingerprint: "sha256:..."             # sha256: + 去掉 stack_id/created_at/fingerprint 后按键排序的紧凑 JSON 的 SHA-256，用于快速比对
-created_at: 2026-04-25T10:00:00Z
+  version: "0.9.0"                   # 非空 string
+llm:                                 # 恰好三个非空 string（ADR-0004 K4）
+  base_url: "https://www.dmxapi.cn"   # 第三方端点必锁
+  request_alias: "deepseek-flash-guan" # 请求中发送的 model id
+  response_model: "deepseek-flash-guan" # 仅记录、不使 lock 失效；来源由对应 RunRecord 标注
+fingerprint: "sha256:..."            # 排除 stack_id/created_at/fingerprint/llm.response_model 后的规范 JSON SHA-256
+created_at: 2026-10-27T08:00:00Z
 ```
 
-**repos.dirty 说明**：`git status --porcelain --untracked-files=normal --ignore-submodules=none` 输出非空即 `true`（含 tracked 修改与 untracked 文件；沿用 git status 忽略语义，不含被 `.gitignore`、`.git/info/exclude` 或 `core.excludesFile`（未设置时为 `~/.config/git/ignore`）排除的文件；读取因输出超出缓冲上限而中断时，stdout 已有输出判 `true`，stdout 为空则抛错）；`commit` 为 HEAD 完整 id，`branch` 为 `refs/heads/<name>` 的 `<name>`，detached HEAD 时为 `HEAD`，HEAD 指向非分支引用（如 tag）或名为 `HEAD` 的分支时抛错。采集只读（`collectRepositoryRevision`），同一 commit 的 clean 与 dirty checkout 指纹不同。
+**仓库修订与路径**：三仓库固定为 `SHUD`、`rSHUD`、`AutoSHUD`；每个修订必填非空 `commit`、`branch`，boolean `dirty`、`dirty_paths_truncated`，以及 `dirty_paths` 字符串数组。路径相对仓库 top-level，非空、不得为绝对路径、含 `..` 路径段或 NUL；去重后按 Unicode 码点升序，不依赖 locale 或 UTF-16 单元排序。合法 POSIX 文件名中的空格、tab、换行、反斜杠及 untracked 目录的尾部 `/` 原样保留，不规范化。未截断时 `dirty` 必须等于路径非空；截断时必须 `dirty: true`，允许空路径数组。
 
-**llm 字段说明**（ADR-0004 K4，取代 AGA-P0-1 的 model + params + prompt 锁）：`base_url` 或 `request_alias` 变化视为 **stack 变更**——需要新 StackLock，且触发行为 eval 子集（见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)）。`response_model` 是滚动别名（`deepseek-flash`）在建 lock 时的实际解析结果，只记录不强制：其变化**不**自动使 lock 失效，每条 RunRecord 另记 `llm.response_model`，可比性由 PI 看报告判断。cost_record 中的 per-call model 字段是计费粒度，不能替代本处的复现锁。
+`collectRepositoryRevision` 只执行原有四条只读 git 子命令；status 使用 `--porcelain -z --untracked-files=normal --ignore-submodules=none`。路径来自同一次 stdout，只接受完整 NUL 记录，重命名/复制必须完整读到新旧路径两个终止符，且只记新路径。stdout 非空的缓冲溢出返回已完整读取的路径与 `dirty_paths_truncated: true`；非溢出错误或 stdout 为空的溢出仍抛错并保留原始错误。忽略规则沿用 git（`.gitignore`、`.git/info/exclude`、`core.excludesFile` 等），禁用 fsmonitor/optional locks、剔除继承的仓库定位环境变量，不改 index、不新增 git 调用。`commit` 为 HEAD 完整 id；`branch` 为 `refs/heads/<name>` 的 `<name>`，detached HEAD 为 `HEAD`；非分支引用或名为 `HEAD` 的分支拒绝，路径必须是物理仓库根。git 配置的外部 filter 驱动副作用不属于 git 自身只读保证。
+
+**llm 与指纹**（ADR-0004 K4）：`base_url`、`request_alias` 以及仓库修订（含路径与截断标记）、runtime、harness 都参与指纹；`response_model` 只记录，不自动使 lock 失效。每条 RunRecord 另记模型与来源；不可把 configured 模型 id 冒称为响应体原值。指纹恰排除根 `stack_id`、`created_at`、`fingerprint` 和 `llm.response_model`，其余内容按每层键名排序、数组保持顺序、无空白 JSON 的 UTF-8 字节计算 SHA-256，加 `sha256:` 前缀。键顺序、身份、创建时间、响应模型变化不影响指纹；`base_url` 或 `request_alias` 变化仍为 stack 变更，行为 eval 子集见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)。
 
 **废弃字段**: `runtime.container`（MVP 不强制容器）、`limits`（已移入 RunJob.resources）、`policy_version`（已合并入 harness.version）、`repos.zero`（内核改为 dsh，ADR-0004 K1）、`llm.provider` / `llm.model_id` / `llm.params_digest` / `llm.prompt_pack_digest`（K4 收窄为三字段）。
+
+**M3 对齐处置（#430）**：根对象和所有嵌套对象严格拒绝未知键；`stack_id` 统一复用 `StackIdSchema`，拒绝旧 `STACK-NNNN`、UUID 与大写 hex。repo 新增必填路径及截断标记；llm 收窄为上列三字段并将响应模型排除出指纹。runtime 只保留 `os`、nullable `sundials_version`，新增 `host_version`，删除 `r_version`、`r_packages_lock`、`python_version`、`gcc_version`、`gdal_version`；harness 只保留 `version`，删除 `cli_version`、`prompt_pack`、`skills_version`。已删除字段作为多余字段拒绝，不以 nullable 形式保留。这里只对齐 core schema、修订采集与指纹，不交付 StackLock 文件持久化或提交时采集流程。
 
 ---
 

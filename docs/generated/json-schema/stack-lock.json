@@ -6,7 +6,7 @@
   "properties": {
     "stack_id": {
       "type": "string",
-      "pattern": "^STACK-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+      "pattern": "^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
     },
     "repos": {
       "type": "object",
@@ -24,12 +24,24 @@
             },
             "dirty": {
               "type": "boolean"
+            },
+            "dirty_paths": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "dirty_paths_truncated": {
+              "type": "boolean"
             }
           },
           "required": [
             "commit",
             "branch",
-            "dirty"
+            "dirty",
+            "dirty_paths",
+            "dirty_paths_truncated"
           ],
           "additionalProperties": false
         },
@@ -46,12 +58,24 @@
             },
             "dirty": {
               "type": "boolean"
+            },
+            "dirty_paths": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "dirty_paths_truncated": {
+              "type": "boolean"
             }
           },
           "required": [
             "commit",
             "branch",
-            "dirty"
+            "dirty",
+            "dirty_paths",
+            "dirty_paths_truncated"
           ],
           "additionalProperties": false
         },
@@ -68,12 +92,24 @@
             },
             "dirty": {
               "type": "boolean"
+            },
+            "dirty_paths": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "dirty_paths_truncated": {
+              "type": "boolean"
             }
           },
           "required": [
             "commit",
             "branch",
-            "dirty"
+            "dirty",
+            "dirty_paths",
+            "dirty_paths_truncated"
           ],
           "additionalProperties": false
         }
@@ -92,60 +128,26 @@
           "type": "string",
           "minLength": 1
         },
-        "r_version": {
-          "type": "string",
-          "minLength": 1
-        },
-        "r_packages_lock": {
+        "sundials_version": {
           "anyOf": [
             {
-              "type": "object",
-              "properties": {
-                "path": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "sha256": {
-                  "type": "string",
-                  "minLength": 1
-                }
-              },
-              "required": [
-                "path",
-                "sha256"
-              ],
-              "additionalProperties": false
+              "type": "string",
+              "minLength": 1
             },
             {
               "type": "null"
             }
           ]
         },
-        "python_version": {
-          "type": "string",
-          "minLength": 1
-        },
-        "sundials_version": {
-          "type": "string",
-          "minLength": 1
-        },
-        "gcc_version": {
-          "type": "string",
-          "minLength": 1
-        },
-        "gdal_version": {
+        "host_version": {
           "type": "string",
           "minLength": 1
         }
       },
       "required": [
         "os",
-        "r_version",
-        "r_packages_lock",
-        "python_version",
         "sundials_version",
-        "gcc_version",
-        "gdal_version"
+        "host_version"
       ],
       "additionalProperties": false
     },
@@ -155,58 +157,33 @@
         "version": {
           "type": "string",
           "minLength": 1
-        },
-        "cli_version": {
-          "type": "string",
-          "minLength": 1
-        },
-        "prompt_pack": {
-          "type": "string",
-          "minLength": 1
-        },
-        "skills_version": {
-          "type": "string",
-          "minLength": 1
         }
       },
       "required": [
-        "version",
-        "cli_version",
-        "prompt_pack",
-        "skills_version"
+        "version"
       ],
       "additionalProperties": false
     },
     "llm": {
       "type": "object",
       "properties": {
-        "provider": {
-          "type": "string",
-          "minLength": 1
-        },
-        "model_id": {
-          "type": "string",
-          "minLength": 1
-        },
         "base_url": {
           "type": "string",
           "minLength": 1
         },
-        "params_digest": {
+        "request_alias": {
           "type": "string",
           "minLength": 1
         },
-        "prompt_pack_digest": {
+        "response_model": {
           "type": "string",
           "minLength": 1
         }
       },
       "required": [
-        "provider",
-        "model_id",
         "base_url",
-        "params_digest",
-        "prompt_pack_digest"
+        "request_alias",
+        "response_model"
       ],
       "additionalProperties": false
     },
