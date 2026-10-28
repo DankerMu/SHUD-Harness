@@ -100,6 +100,8 @@ created_at: 2026-10-27T08:00:00Z
 
 `collectRepositoryRevision` 只执行原有四条只读 git 子命令；status 使用 `--porcelain -z --untracked-files=normal --ignore-submodules=none`。路径来自同一次 stdout，只接受完整 NUL 记录，重命名/复制必须完整读到新旧路径两个终止符，且只记新路径。stdout 非空的缓冲溢出返回已完整读取的路径与 `dirty_paths_truncated: true`；非溢出错误或 stdout 为空的溢出仍抛错并保留原始错误。忽略规则沿用 git（`.gitignore`、`.git/info/exclude`、`core.excludesFile` 等），禁用 fsmonitor/optional locks、剔除继承的仓库定位环境变量，不改 index、不新增 git 调用。`commit` 为 HEAD 完整 id；`branch` 为 `refs/heads/<name>` 的 `<name>`，detached HEAD 为 `HEAD`；非分支引用或名为 `HEAD` 的分支拒绝，路径必须是物理仓库根。git 配置的外部 filter 驱动副作用不属于 git 自身只读保证。
 
+status stdout 先按原始字节确定完整 NUL 记录和 R/C 双路径边界，再对保留的新路径严格解码 UTF-8；完整路径含非法 UTF-8 时，以含仓库路径的受控读取错误失败并保留解码异常 cause，不返回替换字符或转义格式。合法字面 U+FFFD 与路径开头 U+FEFF 原样保留。溢出的未完整尾记录先丢弃，即使截在多字节字符中也不解码、不误拒绝完整前缀；前三条 git 命令的解码/错误行为、四次调用与既有缓冲上限不变。
+
 **llm 与指纹**（ADR-0004 K4）：`base_url`、`request_alias` 以及仓库修订（含路径与截断标记）、runtime、harness 都参与指纹；`response_model` 只记录，不自动使 lock 失效。每条 RunRecord 另记模型与来源；不可把 configured 模型 id 冒称为响应体原值。指纹恰排除根 `stack_id`、`created_at`、`fingerprint` 和 `llm.response_model`，其余内容按每层键名排序、数组保持顺序、无空白 JSON 的 UTF-8 字节计算 SHA-256，加 `sha256:` 前缀。键顺序、身份、创建时间、响应模型变化不影响指纹；`base_url` 或 `request_alias` 变化仍为 stack 变更，行为 eval 子集见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)。
 
 **废弃字段**: `runtime.container`（MVP 不强制容器）、`limits`（已移入 RunJob.resources）、`policy_version`（已合并入 harness.version）、`repos.zero`（内核改为 dsh，ADR-0004 K1）、`llm.provider` / `llm.model_id` / `llm.params_digest` / `llm.prompt_pack_digest`（K4 收窄为三字段）。

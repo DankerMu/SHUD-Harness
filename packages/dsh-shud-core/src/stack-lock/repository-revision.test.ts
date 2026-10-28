@@ -113,6 +113,85 @@ describe("collectRepositoryRevision", () => {
     });
   });
 
+  test.each([
+    { label: "ordinary invalid byte 80", output: "?? bad-\\200\\000" },
+    { label: "ordinary invalid byte 81", output: "?? bad-\\201\\000" },
+    { label: "terminated partial multibyte sequence", output: "?? bad-\\342\\202\\000" },
+    { label: "rename destination", output: "R  bad-\\200\\000old.txt\\000" },
+    { label: "copy destination", output: "C  bad-\\201\\000old.txt\\000" },
+  ])("rejects a complete invalid UTF-8 path: $label", ({ output }) => {
+    const repo = committedRepo("invalid-utf8");
+    shimGit("status", `printf '${output}'; exit 0`);
+    const error = thrownBy(() => collectRepositoryRevision(repo));
+    expect(error.message).toBe(`cannot read git status at ${repo}: invalid UTF-8 repository path`);
+  });
+
+  test("rejects a complete invalid UTF-8 path before an overflow tail", () => {
+    const repo = committedRepo("invalid-utf8-overflow");
+    shimGit(
+      "status",
+      "printf '?? bad-\\200\\000?? tail'; yes warning | head -n 200000 >&2; exit 0",
+    );
+    const error = thrownBy(() => collectRepositoryRevision(repo));
+    expect(error.message).toBe(`cannot read git status at ${repo}: invalid UTF-8 repository path`);
+  });
+
+  test("preserves valid UTF-8 literal replacement characters and path-leading BOM", () => {
+    const repo = committedRepo("valid-utf8");
+    shimGit(
+      "status",
+      "printf '?? \\357\\277\\275name.txt\\000?? \\357\\273\\277name.txt\\000'; exit 0",
+    );
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: git(repo, "rev-parse", "HEAD"),
+      branch: "main",
+      dirty: true,
+      dirty_paths: ["\uFEFFname.txt", "\uFFFDname.txt"],
+      dirty_paths_truncated: false,
+    });
+  });
+
+  test.each([
+    { label: "ordinary path", tail: "?? partial-\\342\\202" },
+    { label: "rename destination", tail: "R  partial-\\342\\202" },
+    { label: "copy destination", tail: "C  partial-\\342\\202" },
+    { label: "rename source", tail: "R  destination.txt\\000partial-\\342\\202" },
+    { label: "copy source", tail: "C  destination.txt\\000partial-\\342\\202" },
+    {
+      label: "invalid destination in incomplete rename pair",
+      tail: "R  bad-\\200\\000partial-\\342\\202",
+    },
+  ])("ignores an incomplete UTF-8 overflow tail: $label", ({ tail }) => {
+    const repo = committedRepo("utf8-overflow-tail");
+    shimGit(
+      "status",
+      `printf '?? complete.txt\\000${tail}'; yes warning | head -n 200000 >&2; exit 0`,
+    );
+    const revision = collectRepositoryRevision(repo);
+    expect(revision.dirty).toBe(true);
+    expect(revision.dirty_paths_truncated).toBe(true);
+    expect(revision.dirty_paths).toEqual(["complete.txt"]);
+  });
+
+  test.runIf(process.platform === "linux")(
+    "rejects real distinct invalid UTF-8 filenames rather than collapsing them",
+    () => {
+      const repo = committedRepo("byte-paths");
+      const prefix = Buffer.from(`${repo}/bad-`);
+      const invalidPaths = [0x80, 0x81].map((byte) => Buffer.concat([prefix, Buffer.from([byte])]));
+      for (const path of invalidPaths) writeFileSync(path, "");
+      writeFileSync(join(repo, "bad-\uFFFD"), "");
+
+      const error = thrownBy(() => collectRepositoryRevision(repo));
+      expect(error.message).toBe(
+        `cannot read git status at ${repo}: invalid UTF-8 repository path`,
+      );
+
+      for (const path of invalidPaths) rmSync(path);
+      expect(collectRepositoryRevision(repo).dirty_paths).toEqual(["bad-\uFFFD"]);
+    },
+  );
+
   test.each(["R ", " R", "C ", " C"])(
     "records only the destination of complete %j records and deduplicates paths",
     (status) => {

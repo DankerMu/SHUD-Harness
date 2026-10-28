@@ -14,6 +14,8 @@ const REPOSITORY_LOCATOR_VARS = [
   "GIT_NAMESPACE",
 ] as const;
 
+const PATH_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
 /**
  * Read-only snapshot of the git repository rooted exactly at `repoPath`.
  * Never writes to the repository: optional locks (index refresh) and fsmonitor are disabled.
@@ -72,21 +74,33 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
   }
   const branch = name ?? "HEAD";
 
-  let status: string;
+  let status: Buffer;
   let dirty_paths_truncated = false;
   try {
-    status = run([
-      "status",
-      "--porcelain",
-      "-z",
-      "--untracked-files=normal",
-      "--ignore-submodules=none",
-    ]);
+    status = execFileSync(
+      "git",
+      [
+        "-C",
+        repoPath,
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+      ],
+      { encoding: "buffer", env, stdio: ["ignore", "pipe", "pipe"] },
+    );
   } catch (error) {
     // Any porcelain output means dirty, even when the read was cut short by either
     // stream overflowing; an overflow with empty stdout is a failure.
     const stdout = failureField(error, "stdout");
-    if (failureField(error, "code") !== "ENOBUFS" || typeof stdout !== "string" || stdout === "") {
+    if (
+      failureField(error, "code") !== "ENOBUFS" ||
+      !Buffer.isBuffer(stdout) ||
+      stdout.length === 0
+    ) {
       throw new Error(`cannot read git status at ${repoPath}: ${failureDetail(error)}`, {
         cause: error,
       });
@@ -98,30 +112,42 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
     commit,
     branch,
     dirty: status.length > 0,
-    dirty_paths: collectDirtyPaths(status),
+    dirty_paths: collectDirtyPaths(status, repoPath),
     dirty_paths_truncated,
   };
 }
 
-function collectDirtyPaths(status: string): string[] {
+function collectDirtyPaths(status: Buffer, repoPath: string): string[] {
   const paths = new Set<string>();
   let offset = 0;
   while (offset < status.length) {
-    const destinationEnd = status.indexOf("\0", offset);
+    const destinationEnd = status.indexOf(0, offset);
     if (destinationEnd === -1) break;
     let recordEnd = destinationEnd;
     const indexStatus = status[offset];
     const worktreeStatus = status[offset + 1];
+    // ASCII R/C in either status column means a second NUL-terminated source path.
     if (
-      indexStatus === "R" ||
-      indexStatus === "C" ||
-      worktreeStatus === "R" ||
-      worktreeStatus === "C"
+      indexStatus === 0x52 ||
+      indexStatus === 0x43 ||
+      worktreeStatus === 0x52 ||
+      worktreeStatus === 0x43
     ) {
-      recordEnd = status.indexOf("\0", destinationEnd + 1);
+      recordEnd = status.indexOf(0, destinationEnd + 1);
       if (recordEnd === -1) break;
     }
-    if (destinationEnd > offset + 3) paths.add(status.slice(offset + 3, destinationEnd));
+    if (destinationEnd > offset + 3) {
+      // Decode only complete records; an overflow tail may split a UTF-8 character.
+      let path: string;
+      try {
+        path = PATH_DECODER.decode(status.subarray(offset + 3, destinationEnd));
+      } catch (error) {
+        throw new Error(`cannot read git status at ${repoPath}: invalid UTF-8 repository path`, {
+          cause: error,
+        });
+      }
+      paths.add(path);
+    }
     offset = recordEnd + 1;
   }
   return [...paths].sort(compareRepositoryPaths);
@@ -135,7 +161,8 @@ function failureField(error: unknown, key: "code" | "status" | "stdout" | "stder
 
 function failureDetail(error: unknown): string {
   const stderr = failureField(error, "stderr");
-  const firstLine = typeof stderr === "string" ? (stderr.trim().split("\n")[0] ?? "") : "";
+  const text = Buffer.isBuffer(stderr) ? stderr.toString("utf8") : stderr;
+  const firstLine = typeof text === "string" ? (text.trim().split("\n")[0] ?? "") : "";
   if (firstLine !== "") return firstLine;
   return error instanceof Error ? error.message : "unknown git failure";
 }
