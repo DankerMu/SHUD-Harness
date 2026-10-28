@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/evidence-report.json",
+  "title": "EvidenceReport",
+  "type": "object",
+  "properties": {
+    "report_id": {
+      "type": "string",
+      "pattern": "^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "reviewed",
+        "awaiting_pi",
+        "accepted",
+        "revision_requested",
+        "rejected",
+        "archived"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "pi_questions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "linked_runs": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
+    "stack_ids": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
+    "data_ids": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^DATA-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
+    "llm_response_models": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "decision_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "decision_id": {
+            "type": "string",
+            "pattern": "^DEC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+          },
+          "report_id": {
+            "type": "string",
+            "pattern": "^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+          },
+          "approval_ref": {
+            "type": "string",
+            "minLength": 1
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rejected",
+              "revision_requested"
+            ]
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decided_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          }
+        },
+        "required": [
+          "decision_id",
+          "report_id",
+          "approval_ref",
+          "outcome",
+          "comment",
+          "decided_at"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "report_id",
+    "task_id",
+    "status",
+    "summary",
+    "observations",
+    "limitations",
+    "pi_questions",
+    "linked_runs",
+    "stack_ids",
+    "data_ids",
+    "llm_response_models",
+    "decision_history",
+    "created_at",
+    "updated_at"
+  ],
+  "additionalProperties": false
+}

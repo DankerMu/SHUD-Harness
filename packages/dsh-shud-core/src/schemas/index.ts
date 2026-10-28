@@ -2,6 +2,7 @@ export * from "./artifact.ts";
 export * from "./artifact-manifest.ts";
 export * from "./data-provenance.ts";
 export * from "./error.ts";
+export * from "./evidence-report.ts";
 export * from "./idempotency.ts";
 export * from "./lock.ts";
 export * from "./run-constants.ts";

@@ -7,6 +7,10 @@ import { ArtifactSchema } from "../../packages/dsh-shud-core/src/schemas/artifac
 import { ArtifactManifestSchema } from "../../packages/dsh-shud-core/src/schemas/artifact-manifest.ts";
 import { DataProvenanceSchema } from "../../packages/dsh-shud-core/src/schemas/data-provenance.ts";
 import { ErrorRecordSchema } from "../../packages/dsh-shud-core/src/schemas/error.ts";
+import {
+  EvidenceReportSchema,
+  PiGateDecisionSchema,
+} from "../../packages/dsh-shud-core/src/schemas/evidence-report.ts";
 import { IdempotencyRecordSchema } from "../../packages/dsh-shud-core/src/schemas/idempotency.ts";
 import { LockRecordSchema } from "../../packages/dsh-shud-core/src/schemas/lock.ts";
 import { RunJobSchema } from "../../packages/dsh-shud-core/src/schemas/run-job.ts";
@@ -109,6 +113,46 @@ export const schemaDefinitions: SchemaDefinition[] = [
       },
       preprocess: null,
       uncertainty_notes: null,
+    },
+  },
+  {
+    name: "EvidenceReport",
+    slug: "evidence-report",
+    sourcePath: "packages/dsh-shud-core/src/schemas/evidence-report.ts",
+    exportName: "EvidenceReportSchema",
+    schema: EvidenceReportSchema,
+    strictInput: true,
+    exampleOverrides: {
+      report_id: "REPORT-20261027T090000-5b10",
+      task_id: "TASK-20261027T080005-3f9c",
+      status: "draft",
+      summary: "Two ccw runs provide evidence from distinct stacks and inputs.",
+      observations: ["Both runs produced output artifacts."],
+      limitations: ["No scientific metrics were collected."],
+      pi_questions: ["Should these runs proceed to scientific review?"],
+      linked_runs: ["RUN-20261027T083000-b2c3", "RUN-20261027T082000-a1b2"],
+      stack_ids: ["STACK-20261027T081500-b2c3", "STACK-20261027T080000-a1b2"],
+      data_ids: ["DATA-20261027T081500-8e3f", "DATA-20261027T081000-7d2e"],
+      llm_response_models: ["deepseek-flash-guan"],
+      decision_history: [],
+      created_at: "2026-10-27T09:00:00Z",
+      updated_at: "2026-10-27T09:00:00Z",
+    },
+  },
+  {
+    name: "PiGateDecision",
+    slug: "pi-gate-decision",
+    sourcePath: "packages/dsh-shud-core/src/schemas/evidence-report.ts",
+    exportName: "PiGateDecisionSchema",
+    schema: PiGateDecisionSchema,
+    strictInput: true,
+    exampleOverrides: {
+      decision_id: "DEC-20261027T093012-c4e7",
+      report_id: "REPORT-20261027T090000-5b10",
+      approval_ref: "call-report-submit-1",
+      outcome: "accepted",
+      comment: null,
+      decided_at: "2026-10-27T09:30:12Z",
     },
   },
   {

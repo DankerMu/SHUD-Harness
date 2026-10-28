@@ -225,20 +225,20 @@ interface PiGate {
 
 ```ts
 interface PiGateDecision {
-  decision_id: string;
-  gate_id: string;
-  task_id: string;
-  actor_user_id: string;
-  actor_role: "pi";
-  decision: "approved" | "rejected" | "request_revision";
-  comment?: string;
-  comment_required: boolean;
-  next_action?: string;
-  evidence_refs: string[];
-  idempotency_key?: string;
-  created_at: string;
+  decision_id: DecisionId; // DEC-YYYYMMDDTHHMMSS-xxxx
+  report_id: ReportId; // REPORT-YYYYMMDDTHHMMSS-xxxx
+  approval_ref: string; // 本次获准执行的 exec.callId，非空
+  outcome: "accepted" | "rejected" | "revision_requested";
+  comment: string | null; // accepted 当且仅当为 null，其余为非空字符串
+  decided_at: string; // ISO 8601 UTC，Z 后缀
 }
 ```
+
+M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [m3-mvp-1 报告契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md)。对象严格限定以上六个必填字段，拒绝未知键；品牌 id 使用 UTC 秒与 4 位小写十六进制随机段。`comment` 不允许缺省或 `undefined`，违反 outcome/comment 关系的错误定位到 `comment`。非空字符串不裁剪、不强制转换；`decided_at` 使用 `z.iso.datetime()`，不接受本地时间或时区偏移形式。
+
+`approval_ref` 记录执行上下文的 callId，不是 approval id，也不是 schema 可验证的审批凭证。审计经 session log 的 `approval/asked.callId` → `asked.id` → `decided.id` 关联；不新增日志订阅或先前被拒 submit 卡的引用。schema 不执行审批、不检查报告状态迁移、跨记录 report_id 一致性或时间先后。
+
+旧 `decision_id: string` 收窄为 DecisionId；`decision` 改为 `outcome`，`created_at` 改为 `decided_at`，`comment?` 改为必填。删除 `gate_id`、`task_id`、`actor_user_id`、`actor_role`、`comment_required`、`next_action`、`evidence_refs` 与 `idempotency_key`，不保留兼容字段。
 
 ## 7. NotificationRecord
 
