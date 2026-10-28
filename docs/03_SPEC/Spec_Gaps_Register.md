@@ -12,11 +12,9 @@ canonical_for: [spec-gaps-register]
 
 ### GAP-01: EvidenceReport revision_requested 是否回退
 
-- Minimal_Schemas.md (line 202-218): `revision_requested` 列为终态之一
-- PI_Decision_Comments_Spec.md (line 45-48): 暗示 agent 修改后重新提交
-- **歧义**: 同一 EvidenceReport 对象回退到 draft，还是新建一个?
-- **影响**: idempotency key 设计、report 历史追溯
-- **实现选择**: （待填写）
+- **已定选择（M3 design D4/D7）**：revision_requested 的 EvidenceReport 保持终态，TaskCard 回 planned；每次 report_generate 分配新 report_id，旧报告字节与 decision_history 不变。
+- **边界**：不定义新旧报告的延续关系，不复用旧 report_id、不把旧报告回退 draft、不继承旧决定历史。
+- **依据**：[m3-mvp-1 design](../../openspec/changes/m3-mvp-1/design.md#d4-taskcard-状态机与-closure-谓词)。这是已定实现契约，工具/状态机仍随 M3 对应切片交付。
 
 ### GAP-02: RunJob.timed_out 时 TaskCard 如何转换
 
@@ -107,7 +105,7 @@ canonical_for: [spec-gaps-register]
 不是所有检查项都适用于每个 PR。只检查与 diff 相关的项:
 
 ### 如果 diff 涉及 EvidenceReport / report 相关代码:
-- [ ] GAP-01: 验证 revision_requested 处理方式——是同一对象回退 draft，还是新建?
+- [ ] GAP-01：revision_requested 保持旧报告终态、TaskCard 回 planned；重新生成使用新 report_id，旧报告与决定历史不变。
 - [ ] 如果两处代码做了不同选择，标注不一致
 
 ### 如果 diff 涉及 RunJob / TaskCard 状态转换:
