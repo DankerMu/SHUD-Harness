@@ -8,6 +8,8 @@ status: frozen
 **适用范围：** EvidenceReport、Reviewer、PI gate、ReportExport、language guard。  
 **目标：** 将报告中的关键陈述追溯到 RunRecord、metrics、figure、artifact 或 PI comment，避免 LLM narrative 脱离证据。
 
+本页 assertion、AnalysisPlan 派生与完整 lineage guard 是后续里程碑设计；M3 的有限确定性校验以 [Report Generation §8](Report_Generation_Spec.md#8-reviewer-检查清单) 为准，不实现本页的 tmp 路径禁用或完整 assertion 模型。M3 Markdown 仍保留真实记录引用，不据此声称科学表述已合规。
+
 ## 1. 报告陈述分层
 
 报告正文中的陈述分为：
@@ -119,23 +121,14 @@ refs 含 T3 对象（draft note / session digest / LLM 叙述）→ 上限 `llm_
 `pi_confirmed` 要求 refs 含 PiGateDecision 或 pi_decision note。自填级别高于派生上限 → 拒绝进入
 reviewed。这是 [Context_Trust §2](Context_Trust_And_Injection_Spec.md) 来源链规则在 guard 里的确定性执行点。
 
-## 5. Report export
+## 5. Markdown 报告投影
 
-Standalone HTML export 必须保留：
-
-- report status；
-- watermark；
-- decision history；
-- artifact manifest 摘要；
-- key assertion evidence refs；
-- generated/exported timestamp。
-
-导出文件可以简化 assertion 展示，但不能丢掉 report status 和 draft watermark。
+M3 只生成 `reports/<report_id>.json` 与同名 `.md`；Markdown 保留状态水印、决定记录及 RunRecord/StackLock/DataProvenance 引用。七态显示规则由 [Report Generation §7.1](Report_Generation_Spec.md#71-standalone-report-export) 唯一定义。后续完整 assertion/导出 manifest 不作为 M3 报告生成前提。
 
 ## 6. 验收标准
 
 - [ ] Report reviewed 前执行 lineage guard。
 - [ ] 关键指标没有 source_ref 时 report 不能进入 reviewed。
 - [ ] PI comment 不自动进入 observations，除非标记为 `pi_decision` 或 `hypothesis`。
-- [ ] HTML export 保留 evidence refs 或 manifest 摘要。
+- [ ] M3 Markdown 保留状态、水印及记录引用；后续 lineage 产物不得在导出时丢失其证据来源。
 - [ ] language guard 和 lineage guard 均有负例测试。

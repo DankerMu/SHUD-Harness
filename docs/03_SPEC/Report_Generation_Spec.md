@@ -6,8 +6,10 @@ canonical_for: [language-guard, reviewer-checklist]
 # EvidenceReport 生成规范
 
 **状态：** P1 设计规范  
-**适用范围：** EvidenceReport、ResultsPanel、report artifact、Reviewer  
+**适用范围：** EvidenceReport、Markdown 投影、确定性 validator 与 PI 审阅；Reviewer preset 与完整 evidence lineage 属于后续里程碑。
 **目标：** 将 deterministic evidence 与 LLM 叙述分离，避免 Agent 过度解释模型结果。
+
+M3 目标契约以 [m3-mvp-1 design D7/D8](../../openspec/changes/m3-mvp-1/design.md#d7-evidencereport-生成模板与水印) 与 [evidence-reports](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 为准，随对应实现切片交付；本文不表示报告工具已经挂载。
 
 ## 1. 报告定位
 
@@ -23,38 +25,28 @@ EvidenceReport 是给 PI 阅读和决策的证据包，不是论文结论，也�
 
 ## 2. 输入依赖
 
-生成报告前必须具备：
+M3 生成报告前必须通过 TaskCard closure 谓词，并解析其链接的 RunRecord、StackLock、DataProvenance。模型提供 summary、observations、limitations、pi_questions，事实表由记录确定性生成。
 
-```text
-TaskCard
-StackLock
-DataProvenance
-RunRecord 或 AnalysisPlan result
-metrics artifact
-artifact manifest
-log summary
-```
-
-缺少 RunRecord 的结果只能进入“待验证/未复盘信息”部分，不能进入 evidence section。
+M3 没有 metrics/图表/AnalysisPlan 生产者，不把这些作为生成前提；§5“指标与图表”固定说明本里程碑无指标 artifact，缺失写入 limitations。没有 RunRecord 的信息不能冒充已复盘结果。失败运行在渲染器/validator fixture 中保持可见；正常 report_generate 的 closure 已拒绝失败/取消运行。
 
 ## 3. 生成流程
 
 ```text
-collect deterministic artifacts
-→ build report facts table
-→ run report language guard
-→ LLM draft narrative
-→ deterministic citation/reference insertion
-→ reference existence validation（生成时强制）
-→ Reviewer check
-→ PI review
+coordinator 提供叙述参数
+→ reconcile TaskCard / closure 检查 / 读取 RunRecord
+→ 品牌 id 引用存在性校验
+→ 确定性事实表与模板填充
+→ 写 reports/<report_id>.json（draft）
+→ TaskCard reporting / linked_reports 回写
+→ 渲染同名 .md
+→ report_validate 的 13 项确定性检查
+→ reviewed
+→ report_submit / report_decide 经宿主审批
 ```
 
-LLM 不应自行计算指标；指标由脚本或 rSHUD pipeline 生成。
+工具不另调 LLM、不自行计算科学指标。引用参数中的 `TASK-/STACK-/DATA-/RUN-/JOB-/REPORT-` 品牌 id 逐一解析；缺失引用返回工具错误，不写 draft、不自动重试，由 coordinator 修正后重新生成。没有额外的 M3 artifact registry/hash 校验或 Reviewer preset 前置门。
 
-**引用存在性校验（AGA-P2）**：LLM narrative 中出现的每个 `ART-*`/`RUN-*`/`REPORT-*`/路径引用在**生成时**逐一解析：
-引用对象不存在、不在 registry、或 hash 不匹配 → 报告生成失败（计入 `llm_output_error`，重生成 ≤ 2 次），
-不产出 draft。幻觉引用必须在生成侧拦截，而不是指望 Reviewer 逐条点开。
+报告 JSON 是提交点，其后 TaskCard/Markdown 失败不回滚已提交对象；下一次针对同报告的工具调用按 [写入与修复契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 修复。重新生成总是新 report_id，保留旧报告字节与决定历史，不把旧终态改回 draft。
 
 ## 4. 报告模板
 
@@ -83,6 +75,8 @@ LLM 不应自行计算指标；指标由脚本或 rSHUD pipeline 生成。
 ```
 
 ## 4.1 Theory-to-Code Evidence 章节
+
+本节为 M4 科学变更规划；M3 只有 science_assist 首任务，不引入 Theory-to-Code 生产者或据此增加 closure 前提。
 
 对以下任务类型（semantic_level），报告必须增加 `Theory-to-Code Evidence` 章节：
 
@@ -167,13 +161,13 @@ LLM 不应自行计算指标；指标由脚本或 rSHUD pipeline 生成。
 
 Language guard 是**枚举短语的确定性 lint**，必须清楚它能做什么、不能做什么：
 
-- **能**：拦截 §5 / §5.1 枚举的禁止用语及其配置化扩展；在 draft → reviewed 状态迁移前强制执行，命中即拒绝迁移（负例测试见 TR-003）。
+- **能**：拦截 §5 / §5.1 枚举的十条禁止用语；在 draft → reviewed 前扫描模型撰写的 summary/observations/limitations/pi_questions，命中即拒绝迁移（负例测试见 TR-003）。不扫描固定治理不变式来误拒报告。
 - **不能**：识别换一种说法的越权表述（paraphrase evasion）。LLM 把“已验证”换写成“表现出稳健的普适性改善”时，guard 不会命中。
-- **因此**：guard 通过 ≠ 报告表述合规。语义级别的越权表述由两道后置防线兜底：lineage guard（关键陈述必须有 evidence_refs，见 [Report_Review_And_Evidence_Lineage_Spec.md](Report_Review_And_Evidence_Lineage_Spec.md)）和 **PI 审阅（最终防线）**。任何文档不得把 language guard 描述为科学表述合规的充分条件。
+- **因此**：guard 通过 ≠ 报告表述合规。PI 审阅是最终防线；完整 assertion/lineage guard 是后续里程碑规划，不能当作 M3 已交付的语义保障。
 
-禁止用语清单应作为配置维护（不硬编码在实现里），发现新的越权表述模式时由 PI/工程师追加，并同步补负例测试。
-结构化兜底：calibration 语义的 assertion 带派生字段 `analysis_mode`，其 assertion_type 受确定性限制
-（见 [Report_Review_And_Evidence_Lineage §4](Report_Review_And_Evidence_Lineage_Spec.md)，对抗审查 A05-3）。
+禁止用语的唯一实现来源是 core `governance/wording.ts` 的 `FORBIDDEN_REPORT_PHRASES`，与 `GOVERNANCE_INVARIANTS`、`REPORT_SECRET_PATTERN` 一起随 M3 常量切片交付；无 profile 覆写。新增短语需更新常量与正反例，放宽既有规则需独立 ADR。四句不变式逐字渲染，不能用语言模型判断代替确定性检查。
+
+calibration 的 `analysis_mode` 与 assertion_type 结构化约束见 [后续 lineage 设计](Report_Review_And_Evidence_Lineage_Spec.md#4-language-guard-与-lineage-guard)，不在 M3 science_assist 报告字段中伪造。
 
 ## 6. 证据等级
 
@@ -189,7 +183,7 @@ Language guard 是**枚举短语的确定性 lint**，必须清楚它能做什�
 
 ## 7. Artifact 引用
 
-报告引用 artifact 时使用相对路径或 artifact id：
+下面的 metrics/figure 引用示例是后续分析产物规划；M3 仅列 RunRecord 中的真实产物元数据与日志路径，不创建这些示例文件。后续报告引用 artifact 时使用相对路径或 artifact id：
 
 ```markdown
 见 `artifacts/metrics/RUN-001.yaml#numerical_health.water_balance_residual`。
@@ -205,28 +199,28 @@ Language guard 是**枚举短语的确定性 lint**，必须清楚它能做什�
 
 ## 7.1 Standalone Report Export
 
-EvidenceReport 生成时应同时生成可分享的静态导出 artifact：
+M3 的规范对象与唯一阅读格式：
 
 ```text
+<workspace>/reports/<report_id>.json
 <workspace>/reports/<report_id>.md
-<workspace>/reports/<report_id>.export_manifest.yaml
 ```
 
-报告唯一产出格式是 standalone Markdown 文件（ADR-0004 K7；HTML 导出随 Report_Export_Spec 删除）。PI 在 dsh 聊天中阅读，或复制到论文草稿/协作工具。
+Markdown 由 JSON 及其引用记录确定性渲染；PI 通过 dsh 对话提供的路径或文件面板阅读。`export_manifest.yaml` 属于 M4 导出规划，不在 M3 生成，也不是 M3 验收前提。
 
 **水印表（canonical，原 Report_Export_Spec §4 并入）**——按报告状态查表，7 态各有标记；布尔判据 `status != accepted` 已废除，它会把 accepted 后归档的报告误标为草稿（对抗审查 A06-6）：
 
 | status | 文件内可见标记 |
 |---|---|
 | `draft` / `reviewed` / `awaiting_pi` | `DRAFT — not accepted by PI` |
-| `accepted` | 无水印；首部一行 `Accepted by PI · <decision_at> · <decision_id>` |
+| `accepted` | 无水印；首部一行 `Accepted by PI · <decided_at> · <decision_id>` |
 | `revision_requested` | `REVISION REQUESTED — not accepted by PI` |
 | `rejected` | `REJECTED — not accepted by PI` |
 | `archived` | 按归档前终态显示（accepted → 接受标记；其余 → 对应水印），另加 `ARCHIVED` |
 
-规则：水印是正文的一部分（标题下第一行 + 文末最后一行），不得仅靠样式/注释承载；报告只引用 `evidence_usable` 的 artifact；可引用 `figures/` 下的小型 PNG/SVG 与 metrics summary，但不得内联完整 stdout/stderr、raw SHUD binary output、大型 timeseries 或 secrets。
+规则：水印是正文的一部分（标题下第一行 + 文末最后一行），不得仅靠样式/注释承载；accepted 例外按表只在首部显示接受标记。后续 artifact registry 的 evidence_usable 与小型图表内联规则不作 M3 前提；任何阶段不得内联完整 stdout/stderr、raw SHUD binary output、大型 timeseries 或 secrets。
 
-Export manifest 应记录 included/excluded artifacts，说明哪些图表被内联、哪些大型日志或数据只保留引用。
+M4 的 export manifest 规划记录 included/excluded artifacts；M3 仅引用 RunRecord 中的日志路径与产物清单，不读取/内联日志、raw 或求解器产物内容。`awaiting_pi` 保留水印渲染分支但只在审批卡挂起期间瞬时存在，M3 不将其落盘；`archived` 无 M3 状态转换生产者。
 
 ### Evidence Lineage
 
@@ -234,86 +228,54 @@ Export manifest 应记录 included/excluded artifacts，说明哪些图表被内
 
 ## 8. Reviewer 检查清单
 
-**实现规则：凡可机械判定的检查项必须实现为确定性 validator（代码），Reviewer LLM 只负责语义判断项。**
-validator 失败直接阻断 draft → reviewed，不消耗 LLM 调用；LLM 判断项失败产生 review note，由 Coordinator 修订后重检。
+M3 的 draft → reviewed 唯一入口是 `report_validate`；每次列出全部 13 项结果，任一失败保持原状态，不消耗额外 LLM 调用。确定性 validator（D）：
 
-确定性 validator 项（D，代码强制）：
+1. StackLock 引用存在且 id 一致；
+2. DataProvenance 引用存在；
+3. 每个 linked_run 有 RunRecord；
+4. 指标来自确定性 artifact（M3 无指标，恒真并明确标注）；
+5. limitations 非空；
+6. pi_questions 非空；
+7. 模型撰写节无十条禁止用语，命中指出短语与字段；
+8. 失败运行在“风险和失败项”列出（渲染/validator fixture 覆盖，正常生成仍受 closure 限制）；
+9. 每个 dirty 仓库在 Markdown 有标注；
+10. 关键指标有 source_ref（M3 无指标，恒真并明确标注）；
+11. 图表观察有 artifact ref（M3 无图表，恒真并明确标注）；
+12. 四句 GOVERNANCE_INVARIANTS 在渲染 Markdown 中逐字出现；
+13. 整份 Markdown 不匹配 REPORT_SECRET_PATTERN；失败只指出所在节，不回显密钥匹配文本。
 
-- [ ] (D) 是否有 StackLock；
-- [ ] (D) 是否有 DataProvenance；
-- [ ] (D) 所有结果是否绑定 RunRecord；
-- [ ] (D) 指标是否来自 deterministic artifact；
-- [ ] (D) 是否列出 limitations（非空）；
-- [ ] (D) 是否列出 PI questions（非空）；
-- [ ] (D) 是否存在禁止用语（language guard）；
-- [ ] (D) 是否包含失败运行；
-- [ ] (D) 是否清楚标注 dirty stack；
-- [ ] (D) 每个关键指标有 source_ref；
-- [ ] (D) 每个图表观察有 figure/timeseries artifact ref；
-- [ ] (D) report 没有引用 tmp 路径。
+不按路径含 tmp 或位于 `$TMPDIR` 拒绝报告：scratch 工作区与运行目录是合法事实来源。语义判断（L）仍由 PI 审阅，M3 无 Reviewer preset：
 
-LLM 语义判断项（L，validator 无法覆盖）：
-
-- [ ] (L) 是否把 calibration 结果误写成验证（含 guard 未枚举的换述形式）；
-- [ ] (L) PI comment 没有被自动写成科学事实；
-- [ ] (L) observations 是否存在其他越权表述或因果跳跃。
+- calibration 是否被换述为结构验证；
+- PI comment 是否被误当科学事实；
+- observations 是否有其它越权表述或因果跳跃。
 
 ## 9. 报告状态
 
 ```text
-draft
-→ reviewed
-→ awaiting_pi
-→ accepted | revision_requested | rejected | archived
+draft → reviewed → accepted | revision_requested | rejected
 ```
 
-**终态 ACL（对抗审查 A06-3）**：四个终态转换（accepted / revision_requested / rejected / archived）
-一律只能由 PI 或授权用户经 decision/archive endpoint 设置，API 层对 agent principal 返回 403；
-agent 最多把报告推进到 `awaiting_pi`。原规则只约束 accepted，留下 agent 单方面以
-rejected/archived 终结报告、绕过 PI 审阅的通道。`archived` 仅对已达 accepted|rejected 的报告可用
-（[Minimal_Schemas §7](Minimal_Schemas.md) 状态流转），操作者与时间记录进 decision_history。
+终态只由宿主审批结果授权写入：`report_submit` / `report_decide` 的审批为 allowed-once 时工具才执行；rejected/cancelled/无审批服务保持 reviewed，不写决定。模型不能绕开该工具路径直接声明 accepted。`awaiting_pi` 是审批卡挂起的瞬时状态，不落盘；没有 M3 archive endpoint 或归档生产者。
+
+revision_requested 的报告保持该终态，TaskCard 回 planned；下一次 report_generate 分配新 report_id，不覆盖旧报告。新旧报告的延续关系未定义，不虚构父子字段。完整审批/comment 契约由 [M3 policy-gate](../../openspec/changes/m3-mvp-1/specs/policy-gate/spec.md) 定义。
 
 ## 10. 报告元数据
 
-```yaml
-report:
-  report_id: REPORT-001
-  task_id: TASK-001
-  status: draft
-  created_at: ...
-  generated_by: coordinator
-  reviewed_by: reviewer_01
-  accepted_by: null
-  run_records:
-    - RUN-001
-  evidence_level: deterministic_plus_llm_summary
-  limitations_count: 3
-  pi_questions_count: 2
-  exports:
-    - export_id: EXPORT-001
-      format: html
-      output_path: artifacts/reports/REPORT-001.standalone.html
-      status_at_export: draft
-      created_at: ...
-  decision_history:
-    - decision_id: DECISION-001
-      gate_id: GATE-001
-      decision: approved
-      actor: user_pi
-      comment: "同意仅用于 ccw tiny benchmark。"
-      timestamp: ...
-```
+M3 EvidenceReport/PiGateDecision 字段以 [evidence-reports schema 契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 为准，由 core schema 切片同步 Minimal_Schemas 和生成投影。本文不保留另一套 export/actor/gate 元数据示例。
+
+报告用品牌 REPORT id，决定用品牌 DEC id；decision_history 含 report_id、approval_ref、outcome、comment、decided_at。approval_ref 为本次工具执行 callId，经 session log asked.callId → asked.id → decided.id 关联审批；accepted 的 comment 为 null，rejected/revision_requested 必须非空。
 
 ## 11. 验收标准
 
 - [ ] 报告不能在缺少 RunRecord 时标为 reviewed。
 - [ ] LLM narrative 不负责计算指标。
-- [ ] Reviewer 能检测禁止用语。
-- [ ] PI questions 必须非空，除非任务类型为纯 ops。
-- [ ] accepted 状态需要权限。
-- [ ] 报告引用的 artifact 均存在：生成时逐一解析校验，幻觉引用导致生成失败而非流入 draft（负例测试）。
+- [ ] 确定性 validator 拦截禁止用语，PI 负责未枚举的语义越权。
+- [ ] M3 science_assist 报告的 PI questions 必须非空。
+- [ ] accepted/rejected/revision_requested 只由 allowed-once 授权的工具执行写入。
+- [ ] M3 参数中的品牌 id 引用均存在：生成时逐一解析，虚构引用导致工具错误而非流入 draft（负例测试），不另称已验证任意路径或 artifact registry/hash。
 - [ ] 每个 EvidenceReport 落为 standalone Markdown 文件。
-- [ ] 非 accepted 状态的报告文件正文带可见水印（水印表 7 态逐一测试，含 archived 的终态继承）。
+- [ ] 七态逐一匹配水印表，包括 archived 的终态继承；awaiting_pi/archived 渲染覆盖不冒充 M3 转换已实现。
 - [ ] 报告文件不包含 secrets、完整日志或 raw binary output。
-- [ ] export manifest 记录 included/excluded artifacts。
+- [ ] M4 export manifest 不作为 M3 验收前提。
 - [ ] PI decision comments 出现在 report decision history 中。
