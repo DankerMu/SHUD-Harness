@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  DataIdSchema,
+  JobRecordIdSchema,
+  ReportIdSchema,
+  StackIdSchema,
+  TaskIdSchema,
+} from "./run-identifiers.ts";
 
 export const TaskStatusSchema = z.enum([
   "created",
@@ -29,7 +36,7 @@ export const InferenceBudgetSchema = z.object({
 });
 
 export const TaskCardSchema = z.object({
-  task_id: z.string().min(1),
+  task_id: TaskIdSchema,
   type: TaskTypeSchema,
   status: TaskStatusSchema,
   runtime_phase: TaskRuntimePhaseSchema.nullable().optional(),
@@ -38,11 +45,11 @@ export const TaskCardSchema = z.object({
   created_by: z.string().min(1),
   current_owner: z.string().min(1),
   reviewer: z.string().min(1),
-  stack_id: z.string().min(1).optional(),
-  data_id: z.string().min(1).optional(),
+  stack_id: StackIdSchema.nullable(),
+  data_id: DataIdSchema.nullable(),
   inference_budget: InferenceBudgetSchema,
-  linked_jobs: z.array(z.string().min(1)),
-  linked_reports: z.array(z.string().min(1)),
+  linked_jobs: z.array(JobRecordIdSchema),
+  linked_reports: z.array(ReportIdSchema),
   created_at: z.string().min(1),
   updated_at: z.string().min(1),
   theory_bundle_ids: z.array(z.string().min(1)).optional(),

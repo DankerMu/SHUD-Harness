@@ -10,7 +10,7 @@ Required is evaluated within the immediate parent object.
 
 | Field | Required | Nullable | Type | Constraints / values |
 |---|---|---|---|---|
-| task_id | yes | no | string | minLength=1 |
+| task_id | yes | no | string | pattern=^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | type | yes | no | enum<string> | values: `engineering`, `science_assist`, `ops` |
 | status | yes | no | enum<string> | values: `created`, `planned`, `running`, `parked`, `reporting`, `awaiting_pi`, `done`, `cancelled`, `blocked` |
 | runtime_phase | no | yes | enum<string> \| null | values: `running_local`, `submitted_job`, `waiting_for_job`, `collecting` |
@@ -19,15 +19,15 @@ Required is evaluated within the immediate parent object.
 | created_by | yes | no | string | minLength=1 |
 | current_owner | yes | no | string | minLength=1 |
 | reviewer | yes | no | string | minLength=1 |
-| stack_id | no | no | string | minLength=1 |
-| data_id | no | no | string | minLength=1 |
+| stack_id | yes | yes | string \| null | pattern=^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| data_id | yes | yes | string \| null | pattern=^DATA-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | inference_budget | yes | no | object | - |
 | inference_budget.mode | yes | no | enum<string> | values: `cheap`, `normal`, `deep` |
 | inference_budget.advisory_usd | no | no | number | minimum=0 |
 | inference_budget.advisory_model_calls | no | no | integer | minimum=0; maximum=9007199254740991 |
 | inference_budget.reviewer_enabled | no | no | boolean | - |
-| linked_jobs | yes | no | array<string> | items: minLength=1 |
-| linked_reports | yes | no | array<string> | items: minLength=1 |
+| linked_jobs | yes | no | array<string> | items: pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| linked_reports | yes | no | array<string> | items: pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | created_at | yes | no | string | minLength=1 |
 | updated_at | yes | no | string | minLength=1 |
 | theory_bundle_ids | no | no | array<string> | items: minLength=1 |
@@ -44,7 +44,7 @@ Required is evaluated within the immediate parent object.
 ## Example YAML
 
 ```yaml
-task_id: "example"
+task_id: "TASK-20261027T080005-3f9c"
 type: "engineering"
 status: "created"
 runtime_phase: "running_local"
@@ -53,17 +53,17 @@ question_or_goal: "example"
 created_by: "example"
 current_owner: "example"
 reviewer: "example"
-stack_id: "example"
-data_id: "example"
+stack_id: null
+data_id: null
 inference_budget:
   mode: "cheap"
   advisory_usd: 0
   advisory_model_calls: 0
   reviewer_enabled: false
 linked_jobs:
-  - "example"
+  - "JOB-20261027T081000-0123"
 linked_reports:
-  - "example"
+  - "REPORT-20261027T090000-5b10"
 created_at: "example"
 updated_at: "example"
 theory_bundle_ids:
@@ -73,8 +73,8 @@ theory_bundle_ids:
 ## Changelog Diff
 
 ```diff
-+ schema TaskCard sha256:ef43325f8dd823819fdb395461d3a11136e75dc66d4b7808345b5aa5407d0b22
-+ field task_id required=yes nullable=no type=string constraints=minLength=1
++ schema TaskCard sha256:cad96eaf530af14760a06fec3715e8c8486c29571079efd5868ddabe6ef9f96e
++ field task_id required=yes nullable=no type=string constraints=pattern=^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field type required=yes nullable=no type=enum<string> constraints=values: `engineering`, `science_assist`, `ops`
 + field status required=yes nullable=no type=enum<string> constraints=values: `created`, `planned`, `running`, `parked`, `reporting`, `awaiting_pi`, `done`, `cancelled`, `blocked`
 + field runtime_phase required=no nullable=yes type=enum<string> | null constraints=values: `running_local`, `submitted_job`, `waiting_for_job`, `collecting`
@@ -83,15 +83,15 @@ theory_bundle_ids:
 + field created_by required=yes nullable=no type=string constraints=minLength=1
 + field current_owner required=yes nullable=no type=string constraints=minLength=1
 + field reviewer required=yes nullable=no type=string constraints=minLength=1
-+ field stack_id required=no nullable=no type=string constraints=minLength=1
-+ field data_id required=no nullable=no type=string constraints=minLength=1
++ field stack_id required=yes nullable=yes type=string | null constraints=pattern=^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field data_id required=yes nullable=yes type=string | null constraints=pattern=^DATA-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field inference_budget required=yes nullable=no type=object constraints=-
 + field inference_budget.mode required=yes nullable=no type=enum<string> constraints=values: `cheap`, `normal`, `deep`
 + field inference_budget.advisory_usd required=no nullable=no type=number constraints=minimum=0
 + field inference_budget.advisory_model_calls required=no nullable=no type=integer constraints=minimum=0; maximum=9007199254740991
 + field inference_budget.reviewer_enabled required=no nullable=no type=boolean constraints=-
-+ field linked_jobs required=yes nullable=no type=array<string> constraints=items: minLength=1
-+ field linked_reports required=yes nullable=no type=array<string> constraints=items: minLength=1
++ field linked_jobs required=yes nullable=no type=array<string> constraints=items: pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field linked_reports required=yes nullable=no type=array<string> constraints=items: pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field created_at required=yes nullable=no type=string constraints=minLength=1
 + field updated_at required=yes nullable=no type=string constraints=minLength=1
 + field theory_bundle_ids required=no nullable=no type=array<string> constraints=items: minLength=1

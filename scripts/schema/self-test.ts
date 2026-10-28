@@ -522,7 +522,7 @@ async function assertGeneratedPathRejectsSymlinkAncestor(): Promise<void> {
 
 function assertTaskCardUnknownKeyParity(): void {
   const candidate = {
-    task_id: "TASK-0001",
+    task_id: "TASK-20260706T000000-3f9c",
     type: "engineering",
     status: "created",
     runtime_phase: null,
@@ -531,6 +531,8 @@ function assertTaskCardUnknownKeyParity(): void {
     created_by: "codex",
     current_owner: "codex",
     reviewer: "reviewer",
+    stack_id: null,
+    data_id: null,
     inference_budget: {
       mode: "normal",
       advisory_usd: 1,
