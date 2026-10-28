@@ -100,7 +100,15 @@ export const schemaDefinitions: SchemaDefinition[] = [
     schema: DataProvenanceSchema,
     strictInput: true,
     exampleOverrides: {
-      data_id: "DATA-22222222-2222-4222-8222-222222222222",
+      data_id: "DATA-20261027T081000-7d2e",
+      basin: "ccw",
+      event_window: { start: null, end: null },
+      sources: {
+        input_root: "/workspace/input/ccw",
+        files: [{ path: "ccw.sp.mesh", sha256: "sha256:mesh", size_bytes: 1024 }],
+      },
+      preprocess: null,
+      uncertainty_notes: null,
     },
   },
   {

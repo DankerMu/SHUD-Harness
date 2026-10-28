@@ -6,7 +6,7 @@
   "properties": {
     "data_id": {
       "type": "string",
-      "pattern": "^DATA-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+      "pattern": "^DATA-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
     },
     "basin": {
       "type": "string",
@@ -16,12 +16,26 @@
       "type": "object",
       "properties": {
         "start": {
-          "type": "string",
-          "minLength": 1
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "end": {
-          "type": "string",
-          "minLength": 1
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -33,73 +47,15 @@
     "sources": {
       "type": "object",
       "properties": {
-        "terrain": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sha256": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required": [
-            "path",
-            "sha256"
-          ],
-          "additionalProperties": false
+        "input_root": {
+          "type": "string",
+          "minLength": 1
         },
-        "mesh": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sha256": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required": [
-            "path",
-            "sha256"
-          ],
-          "additionalProperties": false
-        },
-        "forcing": {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "minLength": 1
-            },
-            "sha256": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required": [
-            "path",
-            "sha256"
-          ],
-          "additionalProperties": false
-        },
-        "observations": {
+        "files": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
-              "variable": {
-                "type": "string",
-                "minLength": 1
-              },
-              "station": {
-                "type": "string",
-                "minLength": 1
-              },
               "path": {
                 "type": "string",
                 "minLength": 1
@@ -107,62 +63,44 @@
               "sha256": {
                 "type": "string",
                 "minLength": 1
+              },
+              "size_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
               }
             },
             "required": [
-              "variable",
-              "station",
               "path",
-              "sha256"
+              "sha256",
+              "size_bytes"
             ],
             "additionalProperties": false
           }
         }
       },
       "required": [
-        "terrain",
-        "mesh",
-        "forcing",
-        "observations"
+        "input_root",
+        "files"
       ],
       "additionalProperties": false
     },
     "preprocess": {
-      "type": "object",
-      "properties": {
-        "script": {
-          "type": "string",
-          "minLength": 1
-        },
-        "params": {
-          "type": "object",
-          "propertyNames": {
-            "type": "string"
-          },
-          "additionalProperties": {}
-        },
-        "output_sha256": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "required": [
-        "script",
-        "params",
-        "output_sha256"
-      ],
-      "additionalProperties": false
+      "type": "null",
+      "const": null
     },
     "uncertainty_notes": {
-      "type": "string",
-      "minLength": 1
+      "type": "null",
+      "const": null
     }
   },
   "required": [
     "data_id",
     "basin",
     "event_window",
-    "sources"
+    "sources",
+    "preprocess",
+    "uncertainty_notes"
   ],
   "additionalProperties": false
 }

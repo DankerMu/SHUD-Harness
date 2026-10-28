@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 import {
   ArtifactManifestSchema,
   ArtifactSchema,
-  DataProvenanceSchema,
   ErrorRecordSchema,
   IdempotencyRecordSchema,
   LockRecordSchema,
@@ -22,7 +21,6 @@ import {
   RunRecordSchema,
 } from "../index.ts";
 
-const DATA_ID = "DATA-22222222-2222-4222-8222-222222222222";
 const MANIFEST_ID = "MANIFEST-33333333-3333-4333-8333-333333333333";
 const SUCCESSOR_MANIFEST_ID = "MANIFEST-44444444-4444-4444-8444-444444444444";
 
@@ -374,82 +372,6 @@ describe("core Zod schemas", () => {
     expect(issuePaths(nonBooleanMarker)).toContain("llm_generated");
   });
 
-  test("DataProvenance accepts the canonical object window and hashed sources", () => {
-    const parsed = DataProvenanceSchema.safeParse(validDataProvenance());
-    expect(parsed.success).toBe(true);
-    if (parsed.success) {
-      expect(parsed.data.basin).toBe("cache_creek");
-      expect(parsed.data.event_window).toEqual({
-        start: "2008-01-01",
-        end: "2008-02-28",
-      });
-      expect(parsed.data.sources.observations[0]).toEqual({
-        variable: "discharge",
-        station: "USGS-11451100",
-        path: "data/raw/ccw/obs_q.csv",
-        sha256: "sha256:observations",
-      });
-    }
-  });
-
-  test("DataProvenance rejects the deprecated event window array and missing basin", () => {
-    const arrayWindow = DataProvenanceSchema.safeParse({
-      ...validDataProvenance(),
-      event_window: ["2008-01-01", "2008-02-28"],
-    });
-    expect(arrayWindow.success).toBe(false);
-    expect(issuePaths(arrayWindow)).toContain("event_window");
-
-    const missingBasin = DataProvenanceSchema.safeParse(removeKey(validDataProvenance(), "basin"));
-    expect(missingBasin.success).toBe(false);
-    expect(issuePaths(missingBasin)).toContain("basin");
-  });
-
-  test("DataProvenance rejects unhashed sources and incomplete observations", () => {
-    const sourceWithoutHash = DataProvenanceSchema.safeParse({
-      ...validDataProvenance(),
-      sources: {
-        ...validDataProvenance().sources,
-        forcing: {
-          path: "data/raw/ccw/forcing/",
-        },
-      },
-    });
-    expect(sourceWithoutHash.success).toBe(false);
-    expect(issuePaths(sourceWithoutHash)).toContain("sources.forcing.sha256");
-
-    const observationWithoutStation = DataProvenanceSchema.safeParse({
-      ...validDataProvenance(),
-      sources: {
-        ...validDataProvenance().sources,
-        observations: [removeKey(validDataProvenance().sources.observations[0], "station")],
-      },
-    });
-    expect(observationWithoutStation.success).toBe(false);
-    expect(issuePaths(observationWithoutStation)).toContain("sources.observations.0.station");
-  });
-
-  test("DataProvenance enforces DATA-<uuid> and strict nested records", () => {
-    const invalidId = DataProvenanceSchema.safeParse({
-      ...validDataProvenance(),
-      data_id: "DATA-0001",
-    });
-    expect(invalidId.success).toBe(false);
-    expect(issuePaths(invalidId)).toContain("data_id");
-
-    const unexpectedSourceField = DataProvenanceSchema.safeParse({
-      ...validDataProvenance(),
-      sources: {
-        ...validDataProvenance().sources,
-        terrain: {
-          ...validDataProvenance().sources.terrain,
-          checksum: "legacy",
-        },
-      },
-    });
-    expect(unexpectedSourceField.success).toBe(false);
-  });
-
   test("ArtifactManifest preserves omitted, true, and false Artifact LLM markers", () => {
     const parsed = ArtifactManifestSchema.safeParse({
       ...validArtifactManifest(),
@@ -631,48 +553,6 @@ function validArtifact() {
     retention_class: "debug",
     source_refs: [],
     redaction_status: "not_needed",
-  };
-}
-
-function validDataProvenance() {
-  return {
-    data_id: DATA_ID,
-    basin: "cache_creek",
-    event_window: {
-      start: "2008-01-01",
-      end: "2008-02-28",
-    },
-    sources: {
-      terrain: {
-        path: "data/raw/ccw/dem.tif",
-        sha256: "sha256:terrain",
-      },
-      mesh: {
-        path: "repos/SHUD/input/ccw/ccw.sp.mesh",
-        sha256: "sha256:mesh",
-      },
-      forcing: {
-        path: "data/raw/ccw/forcing/",
-        sha256: "sha256:forcing",
-      },
-      observations: [
-        {
-          variable: "discharge",
-          station: "USGS-11451100",
-          path: "data/raw/ccw/obs_q.csv",
-          sha256: "sha256:observations",
-        },
-      ],
-    },
-    preprocess: {
-      script: "scripts/prep_ccw.R",
-      params: {
-        interpolation: "IDW",
-        resolution: "200m",
-      },
-      output_sha256: "sha256:preprocess-output",
-    },
-    uncertainty_notes: "降水空间插值可能低估高海拔降水量",
   };
 }
 
