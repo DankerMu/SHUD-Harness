@@ -12,6 +12,18 @@ Non-goals: aligning StackLock/DataProvenance/EvidenceReport objects, filesystem 
 Review focus: one generation implementation, JOB/RUN pairing, required nullable references, unchanged unrelated schemas, generated projections and public exports.
 Scope correction approved by PI during issue execution: both `core-schemas.test.ts` `validTaskCard()` and `scripts/schema/self-test.ts` `assertTaskCardUnknownKeyParity()` use `TASK-0001` and omit both references, contradicting the new schema. Migrate only those fixtures to a valid branded task id and explicit null references; preserve all assertions, including root/nested unknown-key stripping, and every JOB/RUN test. `shud-collect.test.ts` remains unchanged. The existing schema registry's TaskCard entry needs valid `exampleOverrides` for branded ids/links; this is the issue's required schema-registration work, not a new generator convention.
 
+## Issue #425 implementation boundary
+
+Change surface: tools strict-tool registration and one TaskCard file module; core caller-preset reader; jobs index export of existing `writeJsonSync`.
+Must preserve: shud_run/shud_collect behavior and strict-tool validation, shared atomic writer, schema from #424, unknown role value as a nonempty original string or `unknown`.
+Governing invariant: valid task_create publishes one schema-valid planned card only in the calling session workspace; invalid input or unsafe paths never write through a link or alter an existing card.
+Sibling surfaces: tool schema/runtime validation, caller identity, workspace directory and target validation, shared writer, public registrations and tests.
+PI scope decision: missing agent/session cwd rejects before file IO; present cwd with missing preset succeeds with unknown attribution. No implicit launch-directory fallback. This corrects the former no-agent success scenario, since ToolExecution has no independent session/cwd field.
+Required evidence: science_assist success with exact deterministic fields and valid id; missing/non-science type, empty fields, wrong root and unknown keys reject without files; absent workspace rejects; absent preset returns unknown; unsafe tasks directory/allocated directory/target rejects without outside mutation; generated-id collision preserves original bytes and retries; no leftover atomic temporary file.
+Reuse existing strict-tool and jobs writeJsonSync; one synchronous allocation/validation/write boundary prevents in-process interleaving. Existing genuine task directory collisions regenerate ids; links/special files fail closed rather than being treated as reusable directories.
+No new retry timer/configuration, second atomic writer, schema changes, records package, report tool or job mutation. File module and writer migrate once to records in #437.
+Review focus: model-visible closed arguments; validation-before-IO; caller workspace/identity separation; lstat on managed descendants and target; existing-card preservation.
+
 ## Context
 
 动机见 proposal.md「Why」。约束均已在钉版 `dsh-v0.2.1-rc.2` 的 npm 包/文档核查（#420 证明 rc.4 对这些 seam 逐字节无变化）：
