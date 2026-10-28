@@ -98,6 +98,8 @@ TaskCard 状态 SHALL 只按下表转换；每次转换 SHALL 同时写入表中
 ### Requirement: task_create
 `task_create` SHALL 接受参数：`type`（必填，取值只能为 `science_assist`，无缺省值）、`title`（必填，非空字符串）、`question_or_goal`（必填，非空字符串）。`type` 缺失或为 `engineering`、`ops`，其它必填参数缺失或为空，或出现未知参数时，调用 SHALL 返回指出原因的工具错误且 SHALL NOT 创建 `tasks/` 下任何文件。成功时 SHALL 确定性写入 TaskCard：`status: planned`、`runtime_phase: null`、`created_by` 与 `current_owner` 为调用 Agent 的 preset id——经 policy-gate「Caller role derivation」的同一读取路径 `exec.agent?.session.header.agentPreset` 取得的非空字符串原值，读取路径中任一环节缺失时为 `unknown`（首任务中为 `coordinator`）——、`reviewer: pi`、`inference_budget: {mode: "normal"}`、`stack_id: null`、`data_id: null`、`linked_jobs: []`、`linked_reports: []`，并在结果中返回 `task_id` 与 `status: planned`。
 
+调用 SHALL 提供有效会话 cwd；缺少 agent、session 或非空 cwd 时 SHALL 在访问文件系统前返回指出工作区缺失的错误，SHALL NOT 回退宿主进程目录。preset 身份缺失与工作区缺失 SHALL 分别处理。
+
 #### Scenario: create science_assist card
 - **WHEN** 模型调用 `task_create`，`type: science_assist`、`title: "ccw 30 天运行"`、`question_or_goal: "跑通 ccw 并生成证据报告"`
 - **THEN** 工具结果含 `TASK-…` 格式的 `task_id` 与 `status: planned`，`tasks/<task_id>/task.json` 的 `status` 为 `planned`、`created_by` 与 `current_owner` 为 `coordinator`、`reviewer` 为 `pi`、`inference_budget` 为 `{mode: "normal"}`
@@ -107,8 +109,12 @@ TaskCard 状态 SHALL 只按下表转换；每次转换 SHALL 同时写入表中
 - **THEN** 工具返回错误结果，会话 cwd 下不新增 `tasks/` 条目
 
 #### Scenario: creator without a preset header
-- **WHEN** 工具执行上下文没有 `exec.agent` 或其会话 header 没有 `agentPreset` 时调用合法的 `task_create`
+- **WHEN** 工具执行上下文具有会话 cwd，但会话 header 没有 `agentPreset` 时调用合法的 `task_create`
 - **THEN** 建卡成功，`created_by` 与 `current_owner` 均为 `unknown`
+
+#### Scenario: missing calling workspace
+- **WHEN** 工具执行上下文缺少 agent、session 或非空 cwd 时调用合法的 `task_create`
+- **THEN** 返回指出工作区缺失的工具错误，不创建任何文件，不使用宿主进程目录
 
 #### Scenario: missing goal or unknown argument
 - **WHEN** 模型调用 `task_create` 时省略 `question_or_goal`，或传入 `status: done`
