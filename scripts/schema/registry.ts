@@ -59,7 +59,37 @@ export const schemaDefinitions: SchemaDefinition[] = [
     schema: StackLockSchema,
     strictInput: true,
     exampleOverrides: {
-      stack_id: "STACK-11111111-1111-4111-8111-111111111111",
+      stack_id: "STACK-20261027T080000-3f9a",
+      repos: {
+        SHUD: {
+          commit: "9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb",
+          branch: "master",
+          dirty: false,
+          dirty_paths: [],
+          dirty_paths_truncated: false,
+        },
+        rSHUD: {
+          commit: "d162db3d162db3d162db3d162db3d162db3d162d",
+          branch: "master",
+          dirty: false,
+          dirty_paths: [],
+          dirty_paths_truncated: false,
+        },
+        AutoSHUD: {
+          commit: "1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe",
+          branch: "master",
+          dirty: false,
+          dirty_paths: [],
+          dirty_paths_truncated: false,
+        },
+      },
+      runtime: { os: "Darwin 24.6.0", sundials_version: null, host_version: "0.2.1-rc.2" },
+      harness: { version: "0.9.0" },
+      llm: {
+        base_url: "https://www.dmxapi.cn",
+        request_alias: "deepseek-flash-guan",
+        response_model: "deepseek-flash-guan",
+      },
     },
   },
   {

@@ -6,6 +6,7 @@ import {
   JobRecordIdSchema,
   RunIdSchema,
   RunJobSchema,
+  StackLockSchema,
   TaskCardSchema,
   type DataId,
   type DecisionId,
@@ -13,6 +14,7 @@ import {
   type RunId,
   type ReportId,
   type StackId,
+  type StackLock,
   type TaskId,
 } from "./index.ts";
 
@@ -69,6 +71,11 @@ const cardReports: ReportId[] = card.linked_reports;
 const nullStack: typeof card.stack_id = null;
 const nullData: typeof card.data_id = null;
 
+const stackLock = StackLockSchema.parse(stored);
+const parsedStackLockId: StackId = stackLock.stack_id;
+// @ts-expect-error Plain strings cannot be assigned to the public StackLock stack_id field.
+const plainStackLockId: StackLock["stack_id"] = "STACK-20261027T080000-3f9a";
+
 void [
   generatedJob,
   generatedRun,
@@ -102,4 +109,6 @@ void [
   cardReports,
   nullStack,
   nullData,
+  parsedStackLockId,
+  plainStackLockId,
 ];

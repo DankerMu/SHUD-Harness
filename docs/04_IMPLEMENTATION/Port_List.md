@@ -8,7 +8,7 @@ reset 时只有本表列出的代码资产可以从 `archive/zero-v0.8.3` 搬入
 
 | 资产 | 旧路径（tag archive/zero-v0.8.3） | 新落点 | 处置 | 理由 |
 |---|---|---|---|---|
-| 8 对象 Zod schema | `packages/core/src/domain/schemas/` | `packages/dsh-shud-core/src/schemas/` | 已移植；RunJob/RunRecord schema 与收集链已在 M2 交付 | `RunRecord.llm.response_model` 已存在；`StackLock.llm` 仍是旧字段，其三字段、runtime 与品牌 id 对齐归 M3 `m3-mvp-1`，不再列为 RunRecord 缺失 |
+| 8 对象 Zod schema | `packages/core/src/domain/schemas/` | `packages/dsh-shud-core/src/schemas/` | 已移植；RunJob/RunRecord schema 与收集链已在 M2 交付 | `RunRecord.llm.response_model` 已存在；#430 已对齐 StackLock 三字段、最小 runtime/harness、品牌 id、仓库 dirty 路径/截断与排除响应模型的指纹；`captureStackLock` 持久化及提交集成仍归后续 M3，不在本刀交付 |
 | policy-gate-core 纯函数 + 单测 | `packages/core/src/tools/policy-gate-core.ts`（1.5K 行）+ `.test.ts` | `packages/dsh-shud-core/src/governance/` | ✅ 已移植；`DEFAULT_SHUD_POLICY_GATE_CONTEXT`（三条 spawn 规则的纯数据）从 registry 一并搬入；随 M3 棘轮（constraints.yaml baseline） | 直接挂 `tools/pre-execute`。两份文件 >1000 行，已在 `.large-file-guard.json` 显式排除并注明理由 |
 | role→tool_id 映射与快照 | `packages/core/src/tools/role-tool-map*.ts` | `packages/dsh-shud-core/src/governance/`（与 policy-gate-core 互相引用类型，必须同包） | ✅ 已移植；M3 的 presets 包从 core 消费它生成 `ctx.tools.restrict()` 配置 | 角色工具面 |
 | 治理措辞规则 | spec 与 prompt 文本 | `packages/dsh-shud-core/src/governance/wording.ts` | M3 重写为常量 + 测试（消费者 EvidenceReport） | 校准 ≠ 验证等四条不变式 |

@@ -32,6 +32,8 @@
 ### Requirement: Read-only repository revision collection
 `collectRepositoryRevision(repoPath)` SHALL 只用 `git rev-parse --show-toplevel`、`git rev-parse --verify HEAD`、`git symbolic-ref -q HEAD`、`git status --porcelain -z --untracked-files=normal --ignore-submodules=none` 采集 `repoPath` 指向的仓库，以参数数组调用 git（无 shell）并附 `-c core.fsmonitor=false`，环境 SHALL 设置 `GIT_OPTIONAL_LOCKS=0` 并剔除继承的仓库定位变量（`GIT_DIR`、`GIT_WORK_TREE`、`GIT_INDEX_FILE` 等）。`repoPath` 的规范路径（`realpathSync.native`：解析 symlink，并取文件系统上的实际大小写与 Unicode 写法）SHALL 等于仓库 top-level，否则抛错（不得向上采集父仓库）。`commit` 为 HEAD 的完整 commit id；`branch` 为 HEAD 所指 `refs/heads/<name>` 的 `<name>`（去掉该前缀，同名 tag 不影响）；detached HEAD（`symbolic-ref -q` 静默退出 1）时 SHALL 为 `HEAD`；HEAD 指向 `refs/heads/` 以外的引用（如手写的 `ref: refs/tags/v1`，annotated tag 时 `rev-parse` 得到的是 tag 对象而非提交），或分支名恰为 `HEAD`（只能经 `git update-ref` 等底层命令创建，与 detached 哨兵冲突）时 SHALL 抛出含路径的错误；`symbolic-ref` 的其他失败（非 1 退出码，或退出 1 但有输出）SHALL 抛出含路径的错误；`dirty` 在上述 status 输出非空时为 `true`（含 tracked 修改与 untracked 文件，不受 `status.showUntrackedFiles` 配置影响）；读取因任一输出流超出缓冲上限而中断但 stdout 已有输出时同样 SHALL 为 `true`；stdout 为空的溢出（如大量 `could not open directory` 警告只写入 stderr）SHALL 视为失败并抛错，不得因警告量把干净工作区记为 dirty。`dirty_paths` SHALL 由同一次 status 调用的 stdout 解析得到，SHALL NOT 为此新增任何 git 调用：输出按 NUL 分隔为记录（无引号转义，`core.quotePath` 不影响路径），每条记录取其路径字段；重命名或复制条目（状态 `R`/`C`）只记新路径、不记原路径；结果去重后按与 locale 无关的码点升序排列。status 未溢出时 `dirty_paths_truncated` 为 `false`，因「缓冲溢出且 stdout 非空」判 dirty 时为 `true`，此时 `dirty_paths` 只含已完整读到的记录。`dirty` 沿用 `git status` 的忽略语义：被 `.gitignore`、`.git/info/exclude` 或 `core.excludesFile`（未设置时为 `$XDG_CONFIG_HOME/git/ignore`，默认 `~/.config/git/ignore`）排除的文件不计入，因此宿主的全局忽略规则会影响结果。git 自身 SHALL NOT 写入被采集仓库（含 `.git/index`），采集 SHALL NOT 访问网络；宿主配置的外部 filter 驱动（如 git-lfs 的 clean filter）在 status 比对内容时由 git 调用，其副作用不在此保证内。`repoPath` 不是 git 仓库、没有提交，或 status 因「缓冲溢出且 stdout 非空」以外的原因失败时，SHALL 抛出含该路径的错误。
 
+status 的 stdout SHALL 按原始字节读取，先确定完整 NUL 记录与 R/C 双路径边界，再对要记录的新路径严格解码 UTF-8。完整路径含非法 UTF-8 时 SHALL 明确抛出含 repoPath 的读取错误，不能以替换字符静默合并路径；合法字面 U+FFFD 与开头 U+FEFF SHALL 原样保留。溢出时未完整读取的尾记录先丢弃，不因尾部切在多字节字符中而误报；前三个 git 命令的解码/错误行为、四次调用与缓冲上限保持不变。非 UTF-8 文件名的可逆字节表示不在本契约内。
+
 #### Scenario: clean checkout
 - **WHEN** 对一个刚提交、工作区干净的 `main` 分支临时仓库采集
 - **THEN** 结果为 `{ commit: <HEAD 完整 id>, branch: "main", dirty: false, dirty_paths: [], dirty_paths_truncated: false }`
@@ -51,6 +53,14 @@
 #### Scenario: special characters are recorded verbatim
 - **WHEN** 新建未跟踪文件 `数据 a.txt`（含非 ASCII 字符与空格），且仓库 `core.quotePath` 为默认值
 - **THEN** `dirty_paths` 含原样的 `数据 a.txt`，不带引号或八进制转义
+
+#### Scenario: invalid UTF-8 path fails closed
+- **WHEN** Linux 仓库含非法 UTF-8 字节文件名，status 成功输出该完整 NUL 路径
+- **THEN** 采集明确失败，不返回替换字符路径或碰撞的 StackLock；合法字面 U+FFFD 与开头 U+FEFF 文件名仍原样采集
+
+#### Scenario: incomplete multibyte overflow tail is ignored
+- **WHEN** status 溢出，完整路径之后的尾记录在 UTF-8 多字节字符或 R/C 第二路径中间截断
+- **THEN** 只保留前面的完整有效记录，dirty 与 dirty_paths_truncated 均为 true，不解码不完整尾记录、不错误拒绝整个观测
 
 #### Scenario: untracked-files config cannot hide dirt
 - **WHEN** 仓库配置 `status.showUntrackedFiles no` 后新建一个未跟踪文件

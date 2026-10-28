@@ -57,7 +57,223 @@ describe("collectRepositoryRevision", () => {
     const head = git(repo, "rev-parse", "HEAD");
 
     expect(head).toMatch(/^[0-9a-f]{40}$/u);
-    expect(collectRepositoryRevision(repo)).toEqual({ commit: head, branch: "main", dirty: false });
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: head,
+      branch: "main",
+      dirty: false,
+      dirty_paths: [],
+      dirty_paths_truncated: false,
+    });
+  });
+
+  test("reports sorted dirty paths with rename destinations and untracked files", () => {
+    const repo = committedRepo("dirty-paths");
+    const head = git(repo, "rev-parse", "HEAD");
+    git(repo, "mv", "model.txt", "renamed.txt");
+    writeFileSync(join(repo, "b.txt"), "b\n");
+    writeFileSync(join(repo, "a.txt"), "a\n");
+
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: head,
+      branch: "main",
+      dirty: true,
+      dirty_paths: ["a.txt", "b.txt", "renamed.txt"],
+      dirty_paths_truncated: false,
+    });
+  });
+
+  test("preserves real special filenames, directory slashes and code-point order", () => {
+    const repo = committedRepo("special-paths");
+    const paths = [
+      "back\\slash.txt",
+      "line\nbreak.txt",
+      "tab\tname.txt",
+      "数据 a.txt",
+      "\uE000.txt",
+      "\u{10000}.txt",
+    ];
+    for (const path of paths) writeFileSync(join(repo, path), "");
+    mkdirSync(join(repo, "folder"));
+    writeFileSync(join(repo, "folder", "child.txt"), "");
+
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: git(repo, "rev-parse", "HEAD"),
+      branch: "main",
+      dirty: true,
+      dirty_paths: [
+        "back\\slash.txt",
+        "folder/",
+        "line\nbreak.txt",
+        "tab\tname.txt",
+        "数据 a.txt",
+        "\uE000.txt",
+        "\u{10000}.txt",
+      ],
+      dirty_paths_truncated: false,
+    });
+  });
+
+  test.each([
+    { label: "ordinary invalid byte 80", output: "?? bad-\\200\\000" },
+    { label: "ordinary invalid byte 81", output: "?? bad-\\201\\000" },
+    { label: "terminated partial multibyte sequence", output: "?? bad-\\342\\202\\000" },
+    { label: "rename destination", output: "R  bad-\\200\\000old.txt\\000" },
+    { label: "copy destination", output: "C  bad-\\201\\000old.txt\\000" },
+  ])("rejects a complete invalid UTF-8 path: $label", ({ output }) => {
+    const repo = committedRepo("invalid-utf8");
+    shimGit("status", `printf '${output}'; exit 0`);
+    const error = thrownBy(() => collectRepositoryRevision(repo));
+    expect(error.message).toBe(`cannot read git status at ${repo}: invalid UTF-8 repository path`);
+  });
+
+  test("rejects a complete invalid UTF-8 path before an overflow tail", () => {
+    const repo = committedRepo("invalid-utf8-overflow");
+    shimGit(
+      "status",
+      "printf '?? bad-\\200\\000?? tail'; yes warning | head -n 200000 >&2; exit 0",
+    );
+    const error = thrownBy(() => collectRepositoryRevision(repo));
+    expect(error.message).toBe(`cannot read git status at ${repo}: invalid UTF-8 repository path`);
+  });
+
+  test("preserves valid UTF-8 literal replacement characters and path-leading BOM", () => {
+    const repo = committedRepo("valid-utf8");
+    shimGit(
+      "status",
+      "printf '?? \\357\\277\\275name.txt\\000?? \\357\\273\\277name.txt\\000'; exit 0",
+    );
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: git(repo, "rev-parse", "HEAD"),
+      branch: "main",
+      dirty: true,
+      dirty_paths: ["\uFEFFname.txt", "\uFFFDname.txt"],
+      dirty_paths_truncated: false,
+    });
+  });
+
+  test.each([
+    { label: "ordinary path", tail: "?? partial-\\342\\202" },
+    { label: "rename destination", tail: "R  partial-\\342\\202" },
+    { label: "copy destination", tail: "C  partial-\\342\\202" },
+    { label: "rename source", tail: "R  destination.txt\\000partial-\\342\\202" },
+    { label: "copy source", tail: "C  destination.txt\\000partial-\\342\\202" },
+    {
+      label: "invalid destination in incomplete rename pair",
+      tail: "R  bad-\\200\\000partial-\\342\\202",
+    },
+  ])("ignores an incomplete UTF-8 overflow tail: $label", ({ tail }) => {
+    const repo = committedRepo("utf8-overflow-tail");
+    shimGit(
+      "status",
+      `printf '?? complete.txt\\000${tail}'; yes warning | head -n 200000 >&2; exit 0`,
+    );
+    const revision = collectRepositoryRevision(repo);
+    expect(revision.dirty).toBe(true);
+    expect(revision.dirty_paths_truncated).toBe(true);
+    expect(revision.dirty_paths).toEqual(["complete.txt"]);
+  });
+
+  test.runIf(process.platform === "linux")(
+    "rejects real distinct invalid UTF-8 filenames rather than collapsing them",
+    () => {
+      const repo = committedRepo("byte-paths");
+      const prefix = Buffer.from(`${repo}/bad-`);
+      const invalidPaths = [0x80, 0x81].map((byte) => Buffer.concat([prefix, Buffer.from([byte])]));
+      for (const path of invalidPaths) writeFileSync(path, "");
+      writeFileSync(join(repo, "bad-\uFFFD"), "");
+
+      const error = thrownBy(() => collectRepositoryRevision(repo));
+      expect(error.message).toBe(
+        `cannot read git status at ${repo}: invalid UTF-8 repository path`,
+      );
+
+      for (const path of invalidPaths) rmSync(path);
+      expect(collectRepositoryRevision(repo).dirty_paths).toEqual(["bad-\uFFFD"]);
+    },
+  );
+
+  test.each(["R ", " R", "C ", " C"])(
+    "records only the destination of complete %j records and deduplicates paths",
+    (status) => {
+      const repo = committedRepo("paired-paths");
+      shimGit(
+        "status",
+        `printf '?? z.txt\\000${status} a.txt\\000old.txt\\000?? a.txt\\000'; exit 0`,
+      );
+      expect(collectRepositoryRevision(repo)).toEqual({
+        commit: git(repo, "rev-parse", "HEAD"),
+        branch: "main",
+        dirty: true,
+        dirty_paths: ["a.txt", "z.txt"],
+        dirty_paths_truncated: false,
+      });
+    },
+  );
+
+  test.each([
+    {
+      label: "partial ordinary record",
+      output: "?? complete.txt\\000?? partial.txt",
+      paths: ["complete.txt"],
+    },
+    {
+      label: "partial rename destination",
+      output: "?? complete.txt\\000R  new.txt",
+      paths: ["complete.txt"],
+    },
+    {
+      label: "missing rename source",
+      output: "?? complete.txt\\000R  new.txt\\000",
+      paths: ["complete.txt"],
+    },
+    {
+      label: "partial rename source",
+      output: "?? complete.txt\\000R  new.txt\\000old.txt",
+      paths: ["complete.txt"],
+    },
+    {
+      label: "partial copy source",
+      output: "?? complete.txt\\000C  new.txt\\000old.txt",
+      paths: ["complete.txt"],
+    },
+    {
+      label: "complete rename then partial record",
+      output: "R  new.txt\\000old.txt\\000?? partial",
+      paths: ["new.txt"],
+    },
+    { label: "no complete record", output: "?? partial", paths: [] },
+  ])("keeps only complete records on overflow: $label", ({ output, paths }) => {
+    const repo = committedRepo("partial-status");
+    shimGit("status", `printf '${output}'; yes warning | head -n 200000 >&2; exit 0`);
+    const revision = collectRepositoryRevision(repo);
+    expect(revision.dirty).toBe(true);
+    expect(revision.dirty_paths_truncated).toBe(true);
+    expect(revision.dirty_paths).toEqual(paths);
+  });
+
+  test("collects paths with exactly the four read-only git argument arrays", () => {
+    const repo = committedRepo("four-commands");
+    const trace = join(root, "git-calls");
+    shimGit("never", ":", trace);
+    collectRepositoryRevision(repo);
+    const calls = readFileSync(trace, "utf8")
+      .split("\0\0")
+      .slice(0, -1)
+      .map((call) => call.split("\0"));
+    const prefix = ["-C", repo, "-c", "core.fsmonitor=false"];
+    expect(calls).toEqual([
+      [...prefix, "rev-parse", "--show-toplevel"],
+      [...prefix, "rev-parse", "--verify", "HEAD"],
+      [...prefix, "symbolic-ref", "-q", "HEAD"],
+      [
+        ...prefix,
+        "status",
+        "--porcelain",
+        "-z",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+      ],
+    ]);
   });
 
   test("a tracked modification marks dirty without changing the commit", () => {
@@ -65,7 +281,13 @@ describe("collectRepositoryRevision", () => {
     const head = git(repo, "rev-parse", "HEAD");
     writeFileSync(join(repo, "model.txt"), "edited\n");
 
-    expect(collectRepositoryRevision(repo)).toEqual({ commit: head, branch: "main", dirty: true });
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: head,
+      branch: "main",
+      dirty: true,
+      dirty_paths: ["model.txt"],
+      dirty_paths_truncated: false,
+    });
   });
 
   test("an untracked file marks dirty", () => {
@@ -89,7 +311,13 @@ describe("collectRepositoryRevision", () => {
     const head = git(repo, "rev-parse", "HEAD");
     git(repo, "checkout", "--detach");
 
-    expect(collectRepositoryRevision(repo)).toEqual({ commit: head, branch: "HEAD", dirty: false });
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: head,
+      branch: "HEAD",
+      dirty: false,
+      dirty_paths: [],
+      dirty_paths_truncated: false,
+    });
   });
 
   test("a gitfile checkout (like a submodule) is collected normally", () => {
@@ -100,7 +328,13 @@ describe("collectRepositoryRevision", () => {
     const head = git(repo, "rev-parse", "HEAD");
 
     expect(statSync(join(repo, ".git")).isFile()).toBe(true);
-    expect(collectRepositoryRevision(repo)).toEqual({ commit: head, branch: "main", dirty: false });
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: head,
+      branch: "main",
+      dirty: false,
+      dirty_paths: [],
+      dirty_paths_truncated: false,
+    });
   });
 
   test("an inherited GIT_DIR pointing at another repository does not redirect collection", () => {
@@ -115,6 +349,8 @@ describe("collectRepositoryRevision", () => {
       commit: targetHead,
       branch: "main",
       dirty: false,
+      dirty_paths: [],
+      dirty_paths_truncated: false,
     });
   });
 
@@ -168,13 +404,23 @@ describe("collectRepositoryRevision", () => {
 
   test("status output larger than the read buffer still marks dirty without throwing", () => {
     const repo = committedRepo("flood");
-    // 6000 lines of "?? <200-char name>\n" is ~1.2 MB, above execFileSync's 1 MiB default.
+    // 6000 NUL-terminated records of ~204 bytes exceed execFileSync's 1 MiB default.
     const stem = "u".repeat(195);
     for (let i = 0; i < 6000; i += 1) {
       writeFileSync(join(repo, `${stem}${String(i).padStart(5, "0")}`), "");
     }
 
-    expect(collectRepositoryRevision(repo).dirty).toBe(true);
+    const revision = collectRepositoryRevision(repo);
+    expect(revision.dirty).toBe(true);
+    expect(revision.dirty_paths_truncated).toBe(true);
+    expect(revision.dirty_paths.length).toBeGreaterThan(0);
+    expect(revision.dirty_paths.length).toBeLessThan(6000);
+    expect(revision.dirty_paths).toEqual(
+      Array.from(
+        { length: revision.dirty_paths.length },
+        (_, index) => `${stem}${String(index).padStart(5, "0")}`,
+      ),
+    );
   }, 60_000);
 
   test("any other status failure throws with the path", () => {
@@ -258,6 +504,8 @@ describe("collectRepositoryRevision", () => {
         commit: head,
         branch: "main",
         dirty: false,
+        dirty_paths: [],
+        dirty_paths_truncated: false,
       });
     },
   );
@@ -302,14 +550,18 @@ function sha256(path: string): string {
 // Puts a `git` shim first on PATH that runs `action` when the collector's subcommand matches
 // exactly (`$5` in `git -C <repo> -c core.fsmonitor=false <sub> ...`) and otherwise execs the
 // real git. Call after the fixture repos are built; afterEach's unstubAllEnvs restores PATH.
-function shimGit(subcommand: string, action: string): void {
+function shimGit(subcommand: string, action: string, tracePath?: string): void {
   const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
   const shimDir = join(root, "shim");
   mkdirSync(shimDir);
   const shimPath = join(shimDir, "git");
+  const trace =
+    tracePath === undefined
+      ? ""
+      : `printf '%s\\0' "$@" >> "${tracePath}"\nprintf '\\0' >> "${tracePath}"\n`;
   writeFileSync(
     `${shimPath}.script`,
-    `#!/bin/sh\nif [ "$5" = "${subcommand}" ]; then\n${action}\nfi\nexec "${realGit}" "$@"\n`,
+    `#!/bin/sh\n${trace}if [ "$5" = "${subcommand}" ]; then\n${action}\nfi\nexec "${realGit}" "$@"\n`,
   );
   rmSync(shimPath, { force: true });
   symlinkSync(

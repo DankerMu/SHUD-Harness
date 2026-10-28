@@ -24,6 +24,24 @@ Reuse existing strict-tool and jobs writeJsonSync; one synchronous allocation/va
 No new retry timer/configuration, second atomic writer, schema changes, records package, report tool or job mutation. File module and writer migrate once to records in #437.
 Review focus: model-visible closed arguments; validation-before-IO; caller workspace/identity separation; lstat on managed descendants and target; existing-card preservation.
 
+## Issue #430 implementation boundary
+
+Change surface: core `schemas/stack-lock.ts`, `stack-lock/repository-revision.ts`, `stack-lock/fingerprint.ts` and their tests; generated StackLock projections, Minimal_Schemas §2, CONTEXT K4 lines and glossary StackLock entry.
+Must change: reuse StackIdSchema; strict three-field llm, minimal runtime/harness; repo dirty_paths and truncation invariant; porcelain -z parser; exclude only llm.response_model in addition to the existing fingerprint exclusions.
+Must preserve: exactly four git subprocess commands, argument-array execution, fsmonitor disabled, optional locks disabled, inherited repository locator removal, physical-root equality, detached/invalid HEAD semantics, ignored-file semantics, no index mutation, existing overflow/error distinction and original errors.
+Governing invariant: a schema-valid revision describes the same status observation used for dirty; only complete NUL records contribute paths, sorted/deduplicated independently of locale, with dirty=true on nonempty-stdout overflow.
+Parser boundaries: R/C records use destination only and are complete only after both destination and source terminators; spaces, tabs, newlines and Unicode filenames remain verbatim. Code-point ordering must cover astral versus BMP characters, not merely ASCII or locale collation.
+Review correction (PR #462): Linux reproduction confirmed malformed UTF-8 names collapse under replacement decoding. Read only status stdout as bytes, delimit complete records first, decode retained paths strictly with literal U+FFFD/BOM preserved; fail closed on invalid complete paths and ignore incomplete overflow tails. No byte-escape representation, extra git call or buffer-limit change.
+Schema boundaries: required dirty_paths/truncation, nonempty relative POSIX path entries in canonical unique order, dirty equals nonempty paths unless truncated; truncated requires dirty=true and may have no complete paths.
+Sibling surfaces: existing core-schemas StackLock cases and typed fingerprint fixtures migrate to the new contract without weakening unrelated schemas; tests move/consolidate rather than leaving obsolete R-package-lock expectations. Public exports/signatures remain, only StackLock/RepositoryRevision field types intentionally cut over.
+PI-approved exception: `scripts/schema/registry.ts` StackLock exampleOverrides migrates to a schema-valid example; no other registry entries, render/generator logic or checks change. Generated examples must parse with the new schema.
+PI-approved documentation companions: update only the stale StackLock current-state notes in `openspec/project-profile.md` and `docs/04_IMPLEMENTATION/Port_List.md`; record schema/fingerprint alignment without claiming captureStackLock or submission integration is delivered.
+Required evidence: new tests run red before implementation; positive/negative schema cases, genuine git dirty/rename/special-character/index-byte checks, overflow partial-record and R/C parser boundaries, preserved failures, fingerprint response-model invariance and dirty-path sensitivity, independent `shasum -a 256` fixed vector.
+Compile-time evidence additionally binds `StackLockSchema.parse(...).stack_id` to StackId in the existing compiler-owned fixture, with plain-string rejection and a regex-preserving brand-removal negative control. Real Linux Git/Buffer filename reproduction and valid replacement/BOM controls prove the path-fidelity correction.
+Smoke: direct Node invocation against a disposable git repository yields a schema-valid lock and paths; changing response_model leaves the fingerprint equal while changing paths changes it. Do not mutate the real repo/submodules as test input.
+Non-goals: captureStackLock, records package, installer/jobs configuration, other object schema alignment, buffer-limit changes, extra git calls, dependencies or compatibility shims.
+Review focus: NUL/R/C completeness, code-point order, strict nested shapes, read-only guarantees, overflow classification, canonical serialization/exclusion precision and generated-example validity.
+
 ## Context
 
 动机见 proposal.md「Why」。约束均已在钉版 `dsh-v0.2.1-rc.2` 的 npm 包/文档核查（#420 证明 rc.4 对这些 seam 逐字节无变化）：

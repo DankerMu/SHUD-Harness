@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import type { StackLock } from "../schemas/index.ts";
+import { StackIdSchema, StackLockSchema, type StackLock } from "../schemas/index.ts";
 import { computeStackFingerprint } from "./fingerprint.ts";
 
 describe("computeStackFingerprint", () => {
@@ -11,6 +11,7 @@ describe("computeStackFingerprint", () => {
     const clean = baseLock();
     const dirty = baseLock();
     dirty.repos.rSHUD.dirty = true;
+    dirty.repos.rSHUD.dirty_paths = ["model.txt"];
 
     expect(computeStackFingerprint(dirty)).not.toBe(computeStackFingerprint(clean));
   });
@@ -21,7 +22,7 @@ describe("computeStackFingerprint", () => {
     expect(
       computeStackFingerprint({
         ...baseLock(),
-        stack_id: "STACK-99999999-9999-4999-8999-999999999999",
+        stack_id: StackIdSchema.parse("STACK-20261028T090000-abcd"),
       }),
     ).toBe(reference);
     expect(computeStackFingerprint({ ...baseLock(), created_at: "2030-01-01T00:00:00Z" })).toBe(
@@ -40,31 +41,40 @@ describe("computeStackFingerprint", () => {
       created_at: lock.created_at,
       fingerprint: lock.fingerprint,
       llm: {
-        prompt_pack_digest: lock.llm.prompt_pack_digest,
-        provider: lock.llm.provider,
-        params_digest: lock.llm.params_digest,
-        model_id: lock.llm.model_id,
+        response_model: lock.llm.response_model,
+        request_alias: lock.llm.request_alias,
         base_url: lock.llm.base_url,
       },
       harness: {
         version: lock.harness.version,
-        skills_version: lock.harness.skills_version,
-        prompt_pack: lock.harness.prompt_pack,
-        cli_version: lock.harness.cli_version,
       },
       runtime: {
         sundials_version: lock.runtime.sundials_version,
-        r_version: lock.runtime.r_version,
-        r_packages_lock: { sha256: "sha256:renv-lock", path: "renv.lock" },
-        python_version: lock.runtime.python_version,
+        host_version: lock.runtime.host_version,
         os: lock.runtime.os,
-        gdal_version: lock.runtime.gdal_version,
-        gcc_version: lock.runtime.gcc_version,
       },
       repos: {
-        rSHUD: { dirty: false, commit: lock.repos.rSHUD.commit, branch: "master" },
-        AutoSHUD: { dirty: false, commit: lock.repos.AutoSHUD.commit, branch: "master" },
-        SHUD: { dirty: false, commit: lock.repos.SHUD.commit, branch: "master" },
+        rSHUD: {
+          dirty_paths_truncated: false,
+          dirty_paths: [],
+          dirty: false,
+          commit: lock.repos.rSHUD.commit,
+          branch: "master",
+        },
+        AutoSHUD: {
+          dirty_paths_truncated: false,
+          dirty_paths: [],
+          dirty: false,
+          commit: lock.repos.AutoSHUD.commit,
+          branch: "master",
+        },
+        SHUD: {
+          dirty_paths_truncated: false,
+          dirty_paths: [],
+          dirty: false,
+          commit: lock.repos.SHUD.commit,
+          branch: "master",
+        },
       },
       stack_id: lock.stack_id,
     };
@@ -72,69 +82,90 @@ describe("computeStackFingerprint", () => {
     expect(computeStackFingerprint(reordered)).toBe(computeStackFingerprint(lock));
   });
 
-  test("a null R package lock and an object R package lock produce different fingerprints", () => {
-    const withLock = baseLock();
-    const withoutLock = baseLock();
-    withoutLock.runtime.r_packages_lock = null;
+  test("a missing and an installed SUNDIALS version produce different fingerprints", () => {
+    const installed = baseLock();
+    const absent = baseLock();
+    absent.runtime.sundials_version = null;
 
-    expect(computeStackFingerprint(withoutLock)).not.toBe(computeStackFingerprint(withLock));
+    expect(computeStackFingerprint(absent)).not.toBe(computeStackFingerprint(installed));
   });
 
+  test("response_model does not affect the fingerprint", () => {
+    const reference = baseLock();
+    const changed = baseLock();
+    changed.llm.response_model = "another-response-model";
+    expect(computeStackFingerprint(changed)).toBe(computeStackFingerprint(reference));
+  });
+
+  test("different dirty paths change the fingerprint even while both locks are dirty", () => {
+    const first = baseLock();
+    const second = baseLock();
+    first.repos.SHUD = { ...first.repos.SHUD, dirty: true, dirty_paths: ["a.txt"] };
+    second.repos.SHUD = { ...second.repos.SHUD, dirty: true, dirty_paths: ["b.txt"] };
+    expect(computeStackFingerprint(first)).not.toBe(computeStackFingerprint(second));
+    second.repos.SHUD = { ...first.repos.SHUD, dirty_paths_truncated: true };
+    expect(computeStackFingerprint(first)).not.toBe(computeStackFingerprint(second));
+  });
+
+  test.each(["base_url", "request_alias"] as const)(
+    "%s remains part of the fingerprint",
+    (field) => {
+      const reference = baseLock();
+      const changed = baseLock();
+      changed.llm[field] = "changed-value";
+      expect(computeStackFingerprint(changed)).not.toBe(computeStackFingerprint(reference));
+    },
+  );
+
   test("matches an independently computed fixed vector", () => {
-    // Canonical JSON of baseLock() minus stack_id/created_at/fingerprint, keys sorted by UTF-16
-    // code unit at every level, no whitespace. Recompute independently with:
-    //   printf '%s' '<canonical json>' | shasum -a 256
-    // <canonical json>:
-    // {"harness":{"cli_version":"unknown","prompt_pack":"promptpack-unset","skills_version":"skills-unset","version":"0.8.0"},"llm":{"base_url":"https://models.example/v1","model_id":"glm-5.2","params_digest":"sha256:params","prompt_pack_digest":"sha256:prompt-pack","provider":"openai_compatible"},"repos":{"AutoSHUD":{"branch":"master","commit":"1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe","dirty":false},"SHUD":{"branch":"master","commit":"9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb","dirty":false},"rSHUD":{"branch":"master","commit":"d162db3d162db3d162db3d162db3d162db3d162d","dirty":false}},"runtime":{"gcc_version":"14.1.0","gdal_version":"3.9.0","os":"Darwin 24.6.0","python_version":"3.12.4","r_packages_lock":{"path":"renv.lock","sha256":"sha256:renv-lock"},"r_version":"4.4.1","sundials_version":"6.0.0"}}
-    // This vector also pins the current five-field `llm` shape. When M3 narrows `llm` to the
-    // three K4 fields (ADR-0004), recompute this vector: that change is expected, not a regression.
+    // Independently hashed with `shasum -a 256`; canonical UTF-8 bytes have no trailing newline.
+    // Exclusions: stack_id, created_at, fingerprint and llm.response_model.
+    // {"harness":{"version":"0.8.0"},"llm":{"base_url":"https://models.example/v1","request_alias":"deepseek-flash-guan"},"repos":{"AutoSHUD":{"branch":"master","commit":"1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe","dirty":false,"dirty_paths":[],"dirty_paths_truncated":false},"SHUD":{"branch":"master","commit":"9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb","dirty":false,"dirty_paths":[],"dirty_paths_truncated":false},"rSHUD":{"branch":"master","commit":"d162db3d162db3d162db3d162db3d162db3d162d","dirty":false,"dirty_paths":[],"dirty_paths_truncated":false}},"runtime":{"host_version":"0.2.1-rc.2","os":"Darwin 24.6.0","sundials_version":"6.0.0"}}
+    expect(StackLockSchema.parse(baseLock())).toEqual(baseLock());
     expect(computeStackFingerprint(baseLock())).toBe(
-      "sha256:7183da1b3d90efd8dcf7e2571ed1de140c514be7a84c5baf8b06156850c12ca8",
+      "sha256:974a68b60908c59c718e3e4e84a9a7f5af2e079337bc0450be529f06fbb64948",
     );
   });
 });
 
 function baseLock(): StackLock {
   return {
-    stack_id: "STACK-11111111-1111-4111-8111-111111111111",
+    stack_id: StackIdSchema.parse("STACK-20261027T080000-3f9a"),
     repos: {
       SHUD: {
         commit: "9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb",
         branch: "master",
         dirty: false,
+        dirty_paths: [],
+        dirty_paths_truncated: false,
       },
       rSHUD: {
         commit: "d162db3d162db3d162db3d162db3d162db3d162d",
         branch: "master",
         dirty: false,
+        dirty_paths: [],
+        dirty_paths_truncated: false,
       },
       AutoSHUD: {
         commit: "1cbec6f1cbec6f1cbec6f1cbec6f1cbec6f1cbe",
         branch: "master",
         dirty: false,
+        dirty_paths: [],
+        dirty_paths_truncated: false,
       },
     },
     runtime: {
       os: "Darwin 24.6.0",
-      r_version: "4.4.1",
-      r_packages_lock: { path: "renv.lock", sha256: "sha256:renv-lock" },
-      python_version: "3.12.4",
       sundials_version: "6.0.0",
-      gcc_version: "14.1.0",
-      gdal_version: "3.9.0",
+      host_version: "0.2.1-rc.2",
     },
     harness: {
       version: "0.8.0",
-      cli_version: "unknown",
-      prompt_pack: "promptpack-unset",
-      skills_version: "skills-unset",
     },
     llm: {
-      provider: "openai_compatible",
-      model_id: "glm-5.2",
       base_url: "https://models.example/v1",
-      params_digest: "sha256:params",
-      prompt_pack_digest: "sha256:prompt-pack",
+      request_alias: "deepseek-flash-guan",
+      response_model: "deepseek-flash-guan",
     },
     fingerprint: "sha256:stack-fingerprint",
     created_at: "2026-07-23T12:00:00Z",
