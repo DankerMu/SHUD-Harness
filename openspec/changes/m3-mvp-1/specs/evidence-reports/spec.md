@@ -32,7 +32,7 @@ EvidenceReport SHALL 含：`report_id`、`task_id`（品牌 `TaskId`）、`statu
 - **THEN** schema 解析失败
 
 ### Requirement: PiGateDecision record
-PiGateDecision SHALL 为严格对象，恰含：`decision_id`、`report_id`（品牌 `ReportId`）、`approval_ref`（授权写入本条终态的那张审批卡的 `approval/asked.id`；工具执行上下文取不到时为该次工具调用的 `callId`；非空字符串）、`outcome`（`accepted|rejected|revision_requested`）、`comment`、`decided_at`（ISO 8601 UTC）。`comment` SHALL 当且仅当 `outcome` 为 `accepted` 时为 `null`；`outcome` 为 `rejected` 或 `revision_requested` 时 schema SHALL 要求 `comment` 为非空字符串。PiGateDecision SHALL NOT 含先前被拒 `report_submit` 审批卡的引用字段：审批 id 只出现在 session log 中，模型没有来源；被拒提交卡与本条决定的审计关联经 session log 中两张卡 `reason` 携带的同一 `report_id` 完成（见 policy-gate「PI comment conversation carrier」）。未知字段 SHALL 使解析失败。
+PiGateDecision SHALL 为严格对象，恰含 decision_id（DecisionId）、report_id（ReportId）、approval_ref（授权该终态写入的工具执行上下文 exec.callId，非空字符串）、outcome（accepted/rejected/revision_requested）、comment、decided_at（ISO 8601 UTC）。accepted 当且仅当 comment 为 null，其余 outcome 要求非空 comment；未知字段拒绝。O5 已证实审批 id 不在工具上下文，approval_ref SHALL 固定记 callId，不从日志另造读取订阅者；审计经 approval/asked.callId 关联 asked.id/decided.id。PiGateDecision 不含先前被拒 submit 卡引用，其关联仍经两张卡 reason 中同一 report_id（见 policy-gate「PI comment conversation carrier」）。
 
 #### Scenario: accepted without comment
 - **WHEN** 解析 `outcome: accepted`、`comment: null`、`approval_ref` 非空的 PiGateDecision
@@ -242,7 +242,7 @@ EvidenceReport SHALL 持久化为会话 cwd 下的 `reports/<report_id>.json`（
 - **THEN** 13 项均通过，报告变为 `reviewed`
 
 ### Requirement: report_submit
-`report_submit` SHALL 接受参数 `report_id`（未知参数使调用失败）。每次未被角色规则拒绝的调用 SHALL 先经 PI 审批卡（policy-gate 返回 ask），卡片 `reason` 含 `report_id`，卡片说明 SHALL 含 `report_id`、`summary` 首行与报告 `.md` 文件路径。审批结果为 `allowed-once` 时工具执行：报告须处于 `reviewed`，否则返回工具错误、不写文件；满足时 SHALL 按「Report write order and repair」的顺序，先在 `.json` 中向 `decision_history` 追加一条 `{decision_id, report_id, approval_ref, outcome: accepted, comment: null, decided_at}`（`approval_ref` 为本次放行的审批卡）并写入 `status: accepted`，再使 TaskCard 由 `reporting` 变为 `done`，最后重新渲染 `.md`（含 accepted 首行）。审批结果为其它任何 outcome（拒绝、取消、无审批服务等）时工具 SHALL NOT 执行，报告 SHALL 保持 `reviewed` 且不新增 `decision_history` 条目，TaskCard SHALL 保持 `reporting`，模型收到说明 PI 未放行的工具错误。
+report_submit SHALL 只接受 report_id。未被角色规则拒绝时先由 policy-gate ask，reason 含 report_id，displayReason 含 id/摘要首行/报告路径。allowed-once 后要求 reviewed 前态，否则错误且不写；满足时按「Report write order and repair」先写 accepted 与 decision_history（decision_id、report_id、approval_ref=本次 exec.callId、outcome accepted、comment null、decided_at），再 TaskCard reporting→done，再重渲染 accepted 水印。拒绝/取消/无审批服务等其它结果不执行，报告维持 reviewed、history 不增、TaskCard reporting，模型得到未放行错误。
 
 #### Scenario: allow once accepts report
 - **WHEN** 对 `reviewed` 报告调用 `report_submit`，PI 在审批卡选 Allow once
@@ -257,11 +257,11 @@ EvidenceReport SHALL 持久化为会话 cwd 下的 `reports/<report_id>.json`（
 - **THEN** 工具未执行，报告与 TaskCard 均不变
 
 ### Requirement: report_decide
-`report_decide` SHALL 恰接受参数 `report_id`、`disposition`（必填，`rejected` 或 `revision_requested`，无缺省值）、`comment`（必填，非空字符串）；`disposition` 缺失或取其它值、`comment` 缺失或为空、或出现未知参数（包括已删除的 `rejected_approval_ref`）时 SHALL 返回工具错误且不写文件。每次未被角色规则拒绝的调用 SHALL 先经 PI 审批卡，卡片 `reason` 含 `report_id`，卡片说明 SHALL 回显 `disposition` 与 `comment` 全文。审批结果为 `allowed-once` 时工具执行：报告须处于 `reviewed`；处于 `accepted` 或其它终态时 SHALL 返回工具错误且不覆盖；满足时 SHALL 按「Report write order and repair」的顺序，先在 `.json` 中向 `decision_history` 追加一条 PiGateDecision（`outcome` 等于 `disposition`，`comment` 为该参数，`approval_ref` 为本次放行的 `report_decide` 审批卡）并写入 `status` 为 `disposition`，再使 TaskCard 由 `reporting` 在 `revision_requested` 时变为 `planned`、在 `rejected` 时变为 `cancelled`，最后重新渲染 `.md` 水印。审批结果为其它任何 outcome 时工具 SHALL NOT 执行，报告与 TaskCard SHALL 保持不变。
+report_decide SHALL 恰接受 report_id、必填 disposition（rejected/revision_requested，无默认）、必填非空 comment；非法/缺失值或未知键（含旧 rejected_approval_ref）错误且不写。未被角色拒绝时先 ask，reason 含 report_id、displayReason 回显 disposition/comment。allowed-once 后仅 reviewed 前态可写，任何终态不可覆盖；按规范顺序先写 PiGateDecision（outcome=disposition、comment=参数、approval_ref=本次 exec.callId）及 status，再 TaskCard reporting→planned（revision_requested）或 cancelled（rejected），最后重渲染。其它审批结果不执行且报告/卡片不变。
 
 #### Scenario: revision requested with comment
 - **WHEN** `report_submit` 被拒后，对仍为 `reviewed` 的报告调用 `report_decide`，`disposition: revision_requested`、`comment: "补一个 holdout 窗口"`，PI 在卡片上看到该 comment 并选 Allow once
-- **THEN** 报告 `status` 为 `revision_requested`，`decision_history` 末条 `outcome` 为 `revision_requested`、`comment` 为 `补一个 holdout 窗口`、`approval_ref` 为本次 decide 卡，`.md` 水印为 `REVISION REQUESTED — not accepted by PI`，TaskCard 为 `planned`；session log 中该 `report_id` 先有一张非 `allowed-once` 的 `report_submit` 卡
+- **THEN** 报告为 revision_requested，history 末条 outcome/comment 与参数一致，approval_ref 为本次 report_decide 的 callId，水印 REVISION REQUESTED — not accepted by PI，TaskCard planned；session log 中同 report_id 先有未放行 submit 卡，并能以 decide callId 关联本次审批 id
 
 #### Scenario: rejection cancels the task
 - **WHEN** 对 `reviewed` 报告以 `disposition: rejected` 与非空 comment 调用 `report_decide` 并获 Allow once
@@ -280,7 +280,7 @@ EvidenceReport SHALL 持久化为会话 cwd 下的 `reports/<report_id>.json`（
 - **THEN** 工具未执行，报告保持 `reviewed`，不新增 `decision_history` 条目
 
 ### Requirement: EvidenceReport generated projection
-EvidenceReport 与 PiGateDecision 的 Zod schema SHALL 位于 `packages/dsh-shud-core/src/schemas/` 并登记进 schema 生成注册表，经 `pnpm run schema:generate` 投影到 `docs/generated/`；`pnpm run schema:check` SHALL 在二者不一致时失败。`docs/03_SPEC/Minimal_Schemas.md` 的 EvidenceReport 段 SHALL 与本 spec 一致，并写明 id 格式由 `REPORT-NNNN` 改为品牌格式、`linked_runs` 改为非空品牌 id 数组、新增 `stack_ids`、`data_ids`、`llm_response_models`、`decision_history`、`updated_at`。该文件既有的 PiGateDecision 段 SHALL 被改写（不另增一段）为本 spec 的 `{decision_id, report_id, approval_ref, outcome, comment, decided_at}`，并逐项写明处置：保留 `decision_id`；删除 `gate_id`、`task_id`、`actor_user_id`、`actor_role`、`comment_required`、`next_action`、`evidence_refs`（gate 与 actor 由审批卡引用 `approval_ref` 承载，task 经 `report_id` → TaskCard `linked_reports` 关联）；新增 `report_id`、`approval_ref`；`decision: approved|rejected|request_revision` 改为 `outcome: accepted|rejected|revision_requested`；`comment?` 改为必填且当且仅当 `accepted` 为 `null`；`created_at` 改为 `decided_at`；A01-2 枚举映射删除。字段权威源 `docs/03_SPEC/Support_Schema_Contracts.md` §6 SHALL 同刀改写为同一字段集（其 `idempotency_key` 一并删除），Minimal_Schemas 的投影声明继续指向它。
+EvidenceReport 与 PiGateDecision 的 Zod schema SHALL 位于 `packages/dsh-shud-core/src/schemas/` 并登记进 schema 生成注册表，经 `pnpm run schema:generate` 投影到 `docs/generated/`；`pnpm run schema:check` SHALL 在二者不一致时失败。`docs/03_SPEC/Minimal_Schemas.md` 的 EvidenceReport 段 SHALL 与本 spec 一致，并写明 id 格式由 `REPORT-NNNN` 改为品牌格式、`linked_runs` 改为非空品牌 id 数组、新增 `stack_ids`、`data_ids`、`llm_response_models`、`decision_history`、`updated_at`。该文件既有的 PiGateDecision 段 SHALL 被改写（不另增一段）为本 spec 的 `{decision_id, report_id, approval_ref, outcome, comment, decided_at}`，并逐项写明处置：保留 `decision_id`；删除 `gate_id`、`task_id`、`actor_user_id`、`actor_role`、`comment_required`、`next_action`、`evidence_refs`（approval_ref 仅保存本次执行 callId，经 session log 的 asked.callId → asked.id → decided.id 关联审批证据，不直接承载 gate/actor；task 经 `report_id` → TaskCard `linked_reports` 关联）；新增 `report_id`、`approval_ref`；`decision: approved|rejected|request_revision` 改为 `outcome: accepted|rejected|revision_requested`；`comment?` 改为必填且当且仅当 `accepted` 为 `null`；`created_at` 改为 `decided_at`；A01-2 枚举映射删除。字段权威源 `docs/03_SPEC/Support_Schema_Contracts.md` §6 SHALL 同刀改写为同一字段集（其 `idempotency_key` 一并删除），Minimal_Schemas 的投影声明继续指向它。
 
 #### Scenario: drift detected
 - **WHEN** 修改 EvidenceReport 或 PiGateDecision 的 Zod 字段而未重新生成

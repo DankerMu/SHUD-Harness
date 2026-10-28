@@ -31,8 +31,8 @@ Review focus: model-visible closed arguments; validation-before-IO; caller works
 - `tools/pre-execute` 是 waterfall，决策 `allow|deny|cancel|ask`；`ask` 由宿主 `serviceAsk` 走 `ctx.approval`，无 approval 服务、无 agent 或结果非 `allowed-once` 一律 deny（`packages/core/tools/src/index.ts:1737-1773`）。插件不直接调 `ctx.approval`。参数不可改写。
 - `approval/asked {id, toolName, callId?, reason?}` 与 `approval/decided {id, outcome}` 是 log-only 审计事件，`displayReason` 不落日志，**无 comment 字段**（`packages/interaction/user-approval/src/types.ts:44-60`）。
 - 响应体 model 在 rc.2 不可得（`llm-deepseek` 丢弃 `message_start.message.model`）；M2 D10 定为记 configured 别名 + `response_model_source: configured`。
-- agent preset = `@deepseek-ai/dsh-agent-preset` 行，`config.plugins` 为该 Agent 的子插件树（`bundle/web-app/presets/standard.patch.yml`）；`agent-preset-registry` 行的 `config.default` 选默认 preset。`ctx.tools.restrict({allow?, deny?})` 只能在作用域上下文调用，空过滤、保留名 `run_code` 抛错；对任何它不认识的名字立即抛错（`packages/core/tools/src/index.ts:1105-1131`），认识的集合只有全局与祖先作用域注册的工具——preset 自身子树行注册的工具（`tool-jobs`、`tool-subagent`）在 preset 内既不能被点名也不受过滤（`view()` :1195-1216；preset 作用域见 `packages/preset/agent-preset-registry/src/index.ts:104-110, 250-266`）；限制取交集。子代理深度：`maxDepth` 设置默认 1，只有 in-process spawn 接受 `agentPreset`；subagent 注册表及其后端留在宿主平面（`packages/bundle/web-app/cordis.patch.yml` 注释 "The subagent registry and its backends STAY in the host plane"）。
-- preset id 的读取路径：`tools/pre-execute` 与工具 execute 收到 `exec.agent?: Agent`（`packages/core/tools/src/index.ts:340,394,154`）；preset id 是 `exec.agent.session.header.agentPreset`（`core/agent/src/runtime-types.ts:168`、`core/session/src/index.ts:540`、`core/session/src/types.ts:131`），由 `agents.create({meta.agentPreset})` 写入（`core/agent/src/index.ts:85`、`core/session/src/index.ts:1183`）；Web 会话控制器解析注册表 default 并作为 `meta.agentPreset` 传入（`api/session-controller/src/agent.ts:387-397,574`）；会话中途切换 preset 由 `agentPreset` 会话投影跟踪（`preset/agent-preset-registry/src/session.ts:38-45`）。
+- agent preset = `@deepseek-ai/dsh-agent-preset` 行，`config.plugins` 在 preset 作用域装配。O3 实测：preset apply 时 shud 全局工具尚未注册；Agent 作用域的 `restrict` 会过滤继承的 `job_*`，不能沿用只含 shud 全局工具的 allow。`tool-subagent` 后续把 `subagent` 注册为 Agent 自有工具，不受继承过滤。采用 D11 的 inherited/local 两集合与全局生命周期插件；子代理注册表/provider 仍在宿主平面，maxDepth 默认 1。
+- preset 当前身份通过公开 `agent.ctx` 的 `sessionProjections.stateOf(session, "agentPreset")` 读取；header 只记录创建 preset。O6 空白会话切换实测 header 不变，`tools/change` 早于投影提交；`agent-preset/selected` 会话事件后投影与实际组合一致。D10 的唯一读取函数改用投影，不以旧 header 回退。
 - 现有 `packages/dsh-shud-raw-guard/src/index.ts` 是 pre-execute 挂载范式（apply → 规范化配置 → `ctx.on("tools/pre-execute")` → duck-type exec → 纯决策 → 返回 decision）。`policy-gate-core` 的 `evaluatePolicyGate(call, context)` 只产 `allow|deny`，输入 `{toolId, role, input, workDir?, spawnDepth?, activeSubagentCount?}`，零消费者。
 - M2 事实：`shud_run` 在注册表同步提交，RunJob/RunRecord 落 `<cwd>/runs/<run_id>/`；唤醒投递到 `owner_session`；shud 作业无 owner 登记。`collectRepositoryRevision`/`computeStackFingerprint` 已在 core。`run-identifiers.ts` 生成 `JOB-/RUN-<UTC>-xxxx`。
 - 代码现状：`stack-lock.ts` llm 为旧五字段；`task.ts` id 裸 string、`stack_id/data_id` optional；`data-provenance.ts` 为 `DATA-<UUID>`；无 EvidenceReport/PiGateDecision schema；无 `wording.ts`；profile 无 preset/subagent 行。
@@ -44,7 +44,7 @@ Stage 1 grill 结论（`.workplans/m3-mvp-1/grill-gate.json`，22 分支 + 4 开
 ## Goals / Non-Goals
 
 **Goals:**
-- 在 `dsh --profile shud` 的 Web 里：coordinator 建 TaskCard → 派 worker 用 `shud_run` 跑 ccw → 唤醒后生成 EvidenceReport（Markdown，含 StackLock 三字段与响应 model、水印）→ `report_submit` 弹出 PI 审批卡 → accepted 落盘、TaskCard done。
+- 在 `dsh --profile shud` 的 Web 里：coordinator 建 TaskCard → 派 worker 用 `shud_run` 跑 ccw → worker 等待并成功收集后返回 → coordinator 生成 EvidenceReport（Markdown，含 StackLock 三字段与响应 model、水印）→ `report_submit` 弹出 PI 审批卡 → accepted 落盘、TaskCard done。
 - 四个对象零 LLM 参与自动采集/校验；报告措辞由测试常量守住；终态只由审批结果写入。
 - 所有新行为在钉版 rc.2 seam 上，无 dsh 升级、无第三方新依赖。
 
@@ -64,7 +64,7 @@ Stage 1 grill 结论（`.workplans/m3-mvp-1/grill-gate.json`，22 分支 + 4 开
 
 - `@shud-harness/dsh-shud-records`（运行时无 Cordis 依赖的文件层）：四对象的工作区文件读写、原子写入、品牌 id 分配、StackLock/DataProvenance 确定性采集、EvidenceReport 模板填充/水印/validator/状态机、TaskCard 状态机与 closure 谓词的持久化绑定。只依赖 `dsh-shud-core` 与 Node 内置模块。
 - `@shud-harness/dsh-shud-policy-gate`（Cordis 插件）：第二个 `tools/pre-execute` 监听。
-- `@shud-harness/dsh-shud-presets`（Cordis 插件 + bundle patch 片段）：两个 preset 行与 preset 内的 restrict 插件。
+- `@shud-harness/dsh-shud-presets`（Cordis 插件 + bundle patch 片段）：两个 preset 行与全局 `shud-role-restrict` 生命周期插件。
 - 模型工具（`task_create`、`report_generate`、`report_validate`、`report_submit`、`report_decide`）放在现有 `dsh-shud-tools`，复用其 strict-tool 适配；`dsh-shud-jobs` 在提交时经 records 解析/采集 lock 与 provenance。依赖方向：core ← records ← jobs ← tools；policy-gate、presets 只依赖 core（+ records 读报告状态）。
 
 备选：把对象持久化并入 jobs（jobs 已 >10K 行且是 Critical Path #4，混入报告逻辑扩大白盒审查面）；并入 tools（tools 是工具契约层，records 要被 jobs 消费会倒置依赖）。均否决。
@@ -98,7 +98,7 @@ Stage 1 grill 结论（`.workplans/m3-mvp-1/grill-gate.json`，22 分支 + 4 开
 - `StackLockSchema`：`llm` 收窄为 `{ base_url, request_alias, response_model }` 三个非空字符串；`repos.<name>` 增加 `dirty_paths: string[]`（排序后的 POSIX 相对路径，来自 `git status --porcelain` 第二列，`dirty === dirty_paths.length > 0`，但溢出判 dirty 时 `dirty_paths` 可能不完整——记录 `dirty_paths_truncated: boolean`）；`runtime` 改为 `{ os: string, sundials_version: string | null, host_version: string }`（`host_version` 为钉版 dsh 版本，来自 `shud-jobs` 行配置 `hostVersion`），删除 `r_version/r_packages_lock/python_version/gcc_version/gdal_version`（nullable 也不保留：无采集者的字段是假数据）；`harness` 改为 `{ version: string }`（本仓库 `package.json` version），删除 `cli_version/prompt_pack/skills_version`。`computeStackFingerprint` 排除集加入 `llm.response_model`（K4）。
 - `DataProvenanceSchema`：`data_id: DataId`；`sources` 改为 `{ input_root: string, files: [{ path, sha256, size_bytes }] }`（排序 POSIX 相对路径，覆盖输入目录副本全部普通文件）；`basin: string`（= project）；`event_window: { start: string | null, end: string | null }`（M3 为 null，见 Not yet specified）；`preprocess`、`uncertainty_notes` 为 `null`。原 `terrain/mesh/forcing/observations` 分类删除（无采集者）。
 - 新增 `EvidenceReportSchema`：`report_id`、`task_id`、`status`（7 态）、`summary`、`observations[]`、`limitations[]`、`pi_questions[]`（非空字符串数组）、`linked_runs: RunId[]`（非空）、`stack_ids: StackId[]`、`data_ids: DataId[]`（非空、去重，生成时从每个 linked RunRecord 解析；多运行可含多个 lock）、`llm_response_models: string[]`（来自 linked RunRecord，去重非空）、`decision_history: PiGateDecision[]`、`created_at`、`updated_at`。
-- 新增 `PiGateDecisionSchema`，字段恰为 `{decision_id, report_id, approval_ref, outcome, comment, decided_at}`：`decision_id: DecisionId`、`report_id`、`approval_ref`（写入本条终态的那张审批卡的 `approval/asked.id`，O5 不可得时为 `callId`；非空字符串）、`outcome`（`accepted|rejected|revision_requested`）、`comment`（当且仅当 `outcome === accepted` 时为 `null`，其余为非空字符串）、`decided_at`。不设被拒 `report_submit` 卡的引用字段：审批 id 只在 log 中出现，模型没有来源；被拒卡的审计关联经 session log 完成（D9）。
+- 新增严格 PiGateDecisionSchema，字段恰为 decision_id（DecisionId）、report_id、approval_ref（本次工具调用的 callId，非空；经日志 approval/asked.callId 关联审批 id）、outcome（accepted/rejected/revision_requested）、comment（accepted 仅 null，其余非空）、decided_at。O5 实测工具上下文没有 approval id；不新增日志订阅取 id 的第二路径，不记录先前被拒 submit 卡引用。
 - `Minimal_Schemas.md` 对应段按本 D3 逐项写处置，其中既有 `PiGateDecision` 段（原字段 `decision_id, gate_id, task_id, actor_user_id, actor_role, decision, comment?, comment_required, next_action?, evidence_refs, created_at` 与 A01-2 映射）被**改写**为本条 M3 schema，不另增一段：只保留 `decision_id`，`decision`→`outcome`、`created_at`→`decided_at`、`comment?`→必填且仅 `accepted` 为 null，其余字段删除；权威源 `Support_Schema_Contracts.md` §6 同刀改写（连同 `idempotency_key`），投影声明不变；`pnpm run schema:generate` 刷新投影；`CONTEXT.md` 第 2 条"代码在 M3 前仍带旧字段"解除。
 
 备选：保留 StackLock 全量 runtime/harness 字段设 nullable——否决（没有采集者的字段是假数据，违反"无 placeholder"；PI 于 2026-10-27 Stage 3 确认删除）。备选：PiGateDecision 记录被拒 `report_submit` 卡的引用并由 `report_decide` 参数传入——否决（PI 2026-10-27：审批 id 仅 log 可见，模型无来源）。
@@ -177,8 +177,8 @@ closure 谓词（`science_assist`）在 `report_generate` 内、reconcile 之后
 
 ### D9 审批接线：`report_submit`、`report_decide` 与 PiGateDecision（Critical Path #3）
 
-- `report_submit(report_id)`：前置 `status == reviewed`。policy-gate 对该工具**无条件**（不依赖参数内容；角色 deny 之后，D10）返回 `{kind: "ask", reason, displayReason: {en, zh}}`：`reason` = 固定前缀常量 + `report_id`（`reason` 会进入 `approval/asked` 审计事件，`displayReason` 不落日志，因此审计关联所需的 `report_id` 必须在 `reason` 中）；displayReason 含 report_id、摘要首行与报告文件路径（PI 在卡片决定前可在 Web 工作区文件面板打开文件）。宿主 `serviceAsk`：`allowed-once` → 工具执行：写 `decision_history` 一条 `{outcome: accepted, approval_ref: <本卡>, comment: null}`、`status: accepted`，按 D7 提交点顺序 TaskCard → `done` 并重渲染水印；其它 outcome → 工具不执行（宿主 deny），报告保持 `reviewed`，模型看到的工具错误文本即"PI 未放行"。`approval_ref` 取自 exec 上下文可得的 `callId` 对应 `approval/asked.id`（spike 核实可得性；不可得则记 `callId`，Open Question O5）。
-- 拒绝后的 comment（候选 (a)）：preset 指令要求 coordinator 向 PI 索要 comment 与**明确的**处置（`rejected` 或 `revision_requested`，PI 未说明时不得默认、须再问），随后调 `report_decide(report_id, disposition, comment)`。policy-gate 对 `report_decide` 同样**无条件 ask**（角色 deny 之后，D10），`reason` 同样为固定前缀常量 + `report_id`，displayReason 回显 disposition 与 comment 全文——PI 在卡片上确认自己的话被正确转述；`allowed-once` 才写入终态与 `decision_history`（`approval_ref` 为本张 decide 卡，comment 非空由 schema 强制，GR-003），TaskCard 按 D4 转换。两次卡片都是 `approval/asked|decided` 审计事件，模型可见即落 session log。
+- report_submit(report_id) 前态 reviewed。policy-gate 在角色 deny 之后无条件 ask；reason 为固定前缀+report_id（落日志），displayReason 给摘要/路径（不落日志）。allowed-once 后工具先写 accepted 与 decision_history（approval_ref = 本次 exec.callId，comment null），再 TaskCard done、重渲染；其它 outcome 不执行、不改文件。O5 已通过真实 Web 卡证明：审批 id 仅在 asked/decided 事件，执行上下文只提供 callId。
+- 拒绝后按候选(a)：coordinator 向 PI 索要非空 comment 与明确 rejected/revision_requested；不默认处置。report_decide 的二次卡回显两者，allowed-once 才记录 outcome、comment 与本次 exec.callId 并推进状态。两卡由日志中 report_id/callId 与审批 id 关联，模型可见即记录；不伪称 callId 本身是审批 id。
 - 被拒 submit 卡的审计关联只经 session log：`approval/asked{toolName: "report_submit"}`（其 `reason` 携带该 `report_id`）之后紧随 `approval/decided{outcome ≠ allowed-once}`；同一 `report_id` 的 `report_decide` 卡 `reason` 也携带 `report_id`，两者由此在日志中关联。PiGateDecision 不记录被拒卡的引用。
 - `accepted` 之后的 `report_decide` 拒绝（终态不可覆盖）；`archived` 无 M3 入口。
 - 因此终态只在 `allowed-once` 分支写入；agent 无任何不经审批卡写终态的路径（grill Q12）。单用户工作台下 PI 自己用 bash 改文件不在保护范围（Non-Goal）。
@@ -188,28 +188,28 @@ closure 谓词（`science_assist`）在 `report_generate` 内、reconcile 之后
 ### D10 policy-gate 插件与 policy-gate-core 的去留（Critical Path #1）
 
 - 插件挂全局行 `shud-policy-gate`（与 raw-guard 并列，不进 preset）。监听逻辑按固定顺序：先构造 `PolicyGateToolCall{ toolId, role, input, workDir }`（`spawnDepth`/`activeSubagentCount` 随 spawn 规则删除）调 `evaluatePolicyGate`，`deny` → `{kind: "deny", reason}`；求值器抛错 → fail-closed `deny`（受控 reason，不转发原始异常）；未被 deny 且工具为 `report_submit`/`report_decide` → `ask`（D9）；其余 → `next()`。角色 deny 先于报告工具 ask，因此 worker 调 `report_submit` 被直接拒绝，而不是弹卡问 PI。
-- `role` 的读取路径：role = map(`exec.agent?.session.header.agentPreset`) → `coordinator|worker|unknown`；缺 agent 或缺 header → `unknown`（不属于本 profile 两个 preset 的会话不受角色规则约束）。依据见 Context 的 preset id 读取路径；根 Web 会话与派生 worker 是否真的携带该 header、preset 切换是否改写 header 由 O6 核实。O2 核实 raw-guard 与本插件的相对顺序，两者都只 `deny|ask|next`，顺序不影响结果但影响日志归因。
-- 默认规则集的实际内容：现有 `DEFAULT_SHUD_POLICY_GATE_CONTEXT` 只有三条 spawn 规则（`policy-gate-core.ts:579-585`），删除后为空；`raw-data-write` 与 `tool-parameter-schema-validation` 只是保留 id 与框架，没有已挂载实现。M3 的 deny 层因此由**一条新规则 `role-tool-surface`** 构成：`role ∈ {coordinator, worker}` 且 `toolId ∉ global(role) ∪ preset(role)` → deny（reason 含角色与工具名）；`role === "unknown"` → 规则不适用；`guardClass: "authority"`，id 加入 `RESERVED_AUTHORITY_POLICY_RULE_IDS`（与 `raw-data-write`、`tool-parameter-schema-validation` 并列）。`role-tool-map` 每个角色一条、含两个集合：`global`（由全局 bundle 行挂载的工具，即 shud 工具）与 `preset`（由该角色自身 preset 子树挂载的工具）；`getRoleToolIds(role)` 返回 `{ global, preset }`，`isRoleToolIdAllowed(role, toolId)` 当且仅当 `toolId ∈ global ∪ preset` 为真；`shud-role-restrict` 调 `restrict({allow: global})`，本规则检查 `global ∪ preset`——单一事实源、两个消费者（D11）。`restrict` 决定模型看到什么，本规则是执行时的强制面。`tool-parameter-schema-validation` 框架与 `raw-data-write` 保留 id 原样保留（M3 不挂新实现，raw 写保护仍由 raw-guard 承担）。
+- `role` = map(`readCallerPresetId(exec.agent)`) → coordinator/worker/unknown。唯一读取函数经公开 sessionProjections 服务读当前 agentPreset 投影；缺 Agent/会话/服务/有效值为 unknown。#425 的 header-only reader 在 #444 原地迁移，task_create 与 policy/restrict 共用，不另造读取路径；头部创建事实不能覆盖已切换身份。
+- `DEFAULT_SHUD_POLICY_GATE_CONTEXT` 的三条 spawn 规则移除后，只加入 authority 规则 `role-tool-surface`：已知角色调用不在 `inherited ∪ local` 的工具即 deny（reason 仅角色/工具名），unknown 不适用。保留 id 恰为 raw-data-write、tool-parameter-schema-validation、role-tool-surface；前两者框架不新增实现。role-tool-map 是唯一两集合数据源：restrict 消费 inherited，执行门消费并集。模型可见性与执行授权分别验证。
 - `policy-gate-core` 按规则族拆分为 `governance/policy-gate/{types,role-tool-surface,parameter-schema,evaluate}.ts`（每文件 ≤1000 行，测试同步拆）；删除 `spawn-depth-limit`/`spawn-concurrency-limit`/`spawn-profile-subset` 三条规则及其常量（dsh 原生 `maxDepth`、`maxActiveSubagents`、preset 子集语义取代——Canonicality），`RESERVED_AUTHORITY_POLICY_RULE_IDS` 中对应 id 一并移除并在 spec 写 Reason/Migration；删除 `isReservedAuthorityPolicyEvidenceId` 别名；`constraints.yaml` 的三条 baseline 与 `.large-file-guard.json` 排除项移除；knip `rules.duplicates` 转 error。
 - 日志：每条 deny/ask 经 `ctx.logger("shud-policy-gate")` 一行（同 raw-guard 约定，#378 的可见性边界不变）。
 
 ### D11 preset 与角色工具面
 
 - bundle patch 插入两行 `@deepseek-ai/dsh-agent-preset`：`preset-coordinator`（`order: 1`，`agent-preset-registry.default = coordinator`）与 `preset-worker`。两者的 `plugins` 子树逐行显式列出，不沿用 stock `standard` 骨架：
-  - coordinator 子树：`persona`、`agent-instructions`、`time-context`、`tool-jobs`（`job_output`、`job_list`、`job_kill`）、`tool-subagent`（provider spawn，`toolName: subagent`，`modelSelectionSettings: false`，因此不挂 `list_subagent_models`）、`shud-role-restrict{role: coordinator}`。
-  - worker 子树：`persona`、`agent-instructions`、`time-context`、`tool-jobs`、`shud-role-restrict{role: worker}`。没有委派行，worker 不能 spawn 是结构性事实，不是规则。
-  - 两个子树都不挂 `tool-fs`/`tool-fs-search`/`tool-bash`/`tool-skill`/`skill-filesystem`/`tool-subagent-control`/`tool-ask-user`/`tool-todo`/`tool-web`/`tool-schedule`/`plan-mode`/`compaction`/`present`/`tool-goal`。两个角色都没有 `read`：`tool-fs` 会同时挂上 `write`/`edit`，而 preset 内的 `restrict` 无法过滤自身子树挂载的工具；PI 经 Web 工作区文件面板打开报告文件，不经模型。
+  - coordinator 子树：persona、agent-instructions（maxBytes: 65536）、time-context、tool-jobs、tool-subagent（provider spawn、toolName: subagent、agentPreset: worker、modelSelectionSettings: false）。指定 worker，不能默认继承 coordinator。
+  - worker 子树：persona、agent-instructions（maxBytes: 65536）、time-context、tool-jobs。无委派行。
+  - 两个子树均无 shud-role-restrict、tool-fs/fs-search、tool-bash、tool-skill/skill-filesystem、tool-subagent-control、tool-ask-user、tool-todo、tool-web、tool-schedule、plan-mode、compaction、present、tool-goal。PI 在 Web 文件面板读报告，不给模型 read/write/edit 工具。
   - subagent 注册表与 `subagent-spawn-in-process` provider 行保持 stock web bundle 的宿主平面全局行位置（`packages/bundle/web-app/cordis.patch.yml` 注释 "The subagent registry and its backends STAY in the host plane"），由 profile bundle patch 保持启用并只出现一次，`profile:smoke` 断言其存在；coordinator preset 只添加 `tool-subagent` 这一工具行。`maxDepth` 用 dsh 设置默认 1。
-- `role-tool-map` 每个角色一条、含两个集合（实际挂载名）：
-  - coordinator：`global` = `task_create`、`report_generate`、`report_validate`、`report_submit`、`report_decide`、`shud_collect`；`preset` = `subagent`、`job_output`、`job_list`、`job_kill`。
-  - worker：`global` = `shud_run`、`shud_collect`；`preset` = `job_output`、`job_list`、`job_kill`。
-  - repo_explorer/coder/reviewer 行保留现有 id：整体放入 `global`，`preset` 为空，注明"M4 契约，M3 无 preset 消费、不经 restrict 校验"。
-  - API：`getRoleToolIds(role)` 返回 `{ global, preset }`；`isRoleToolIdAllowed(role, toolId)` 检查并集；`ROLE_TOOL_IDS` 为全部条目两集合的并集，去掉只由旧 coordinator/worker 行使用的 Zero 时代 id（`shud.run`、`harness.job.submit`、`harness.job.collect`、`harness.report.generate`、`spawn_agent`、`wait_agent` 等）。
-  - `shud-role-restrict` 在 apply 时调 `ctx.tools.restrict({ allow: global(role) })`：`global` 名必须是已注册全局工具名（未知名立即抛错），`preset` 集合不交给 `restrict`（自身子树工具在 preset 内既不能点名也不受过滤）；policy-gate `role-tool-surface` 以 `global ∪ preset` 为执行面（D10）。profile:smoke 以 `--dump-config` 断言两 preset 行、default 与宿主平面 subagent 行。
+- role-tool-map 每个角色恰有 `{ inherited, local }` 两集合，按 Agent 的实际作用域而非插件行位置分类：
+  - coordinator inherited = task_create、report_generate、report_validate、report_submit、report_decide、shud_collect、job_output、job_list、job_kill；local = subagent。
+  - worker inherited = shud_run、shud_collect、job_output、job_list、job_kill；local 为空。
+  - repo_explorer/coder/reviewer 既有 id 全部放 inherited，local 为空；注明 M4 契约，无 M3 preset 消费。
+  - getRoleToolIds 返回两集合，isRoleToolIdAllowed 检查并集，ROLE_TOOL_IDS 为所有并集；移除 Zero 时代 coordinator/worker 名称。原 global/preset 分类被原地替换，不留别名。
+  - shud-role-restrict 是无 role 配置的全局插件；agent/created 与 committed agent-preset/selected 后按当前投影经 agent.ctx 绑定 inherited allow。先成功安装新限制，再同步释放旧限制；unknown 释放本插件旧限制，重复同角色不叠加；Agent/插件释放撤销自身限制。禁止用 tools/change 的未提交身份重绑。空/未知 inherited 名明确失败，不删掉失败项继续。local 不传 restrict；policy-gate 检查并集。
 - headless profile（`shud-probe`）：web 与 headless 共用同一 bundle，但 headless 模板没有 `agent-preset-registry`，因此当 `PROFILE_TEMPLATE=headless` 时安装器（`scripts/runtime/profile-patch.ts`）沿写 `shud-jobs` 行的同一路径，在用户 patch 中为 `preset-coordinator` 与 `preset-worker` 写入 `disabled: true`；`shud-probe` 的 `profile:smoke` 断言这两行已禁用。其会话角色为 `unknown`、不受角色限制；`shud-policy-gate` 仍挂载，报告工具的 ask 照常生效。
 - persona/agent-instructions 的 system prompt 段放 `packages/dsh-shud-presets/prompts/{coordinator,worker}.md`：coordinator 指令含首任务流程、comment 索要规则、禁止科学结论措辞、"guard 通过≠合规"。prompt 中出现的 wording 文案由漂移测试与 `governance/wording.ts` 常量逐字比对；对 LLM 行为的要求写成 prompt 内容要求（"coordinator.md 含……文本"），实际行为序列以首任务脚本在 session log 中的证据为准。
-- 首任务编排：coordinator `task_create` → `subagent`（preset worker，任务文本含 task_id 与 input_dir）→ worker 调 `shud_run(task_id)`，**等待**该运行到达终态且已收集（唤醒消息到达其自身会话，或以 `job_output`/`shud_collect` 轮询），再向 coordinator 返回 `run_id` 与终态 → coordinator `report_generate`/`report_validate`/`report_submit`。O1 只决定唤醒以哪种方式送达，不决定 worker 是否等待；O1 否定（唤醒到达不了任何存活会话）时的退路是 coordinator 自己轮询 `shud_collect`。
-- O3（spike）重述：preset `plugins` 子树内的 workspace 插件行能否在 apply 时调用 `restrict`，此时全局 shud 工具名是否已注册（顺序），以及掩码是否作用于该 agent 作用域。O3 否定时的退路：`shud-role-restrict` 改挂为全局行，经 agent 作用域（`agent.ctx`）按 agent 绑定，allow 列表不变。
+- 首任务：coordinator 建卡并显式派 worker；worker shud_run(task_id)，用 dsh_job_id 调 job_output 等待、用持久 run_id/job_id 调 shud_collect 确认收集后返回。O1 本次真实 worker 作业 notify unreachable，恢复失败根因未诊断；轮询成功，原生 subagent-settled 携带结果回 coordinator。不把该通知冒充 shud-jobs wake，不改 M2 jobs；coordinator 未得已收集结果时保留自行 collect 的兜底。
+- O3 原方案与原备选实测均失败，已按 #426 停止条件报告；PI 明确授权重开。真实 Web inherited allow 方案保留 job_* 与 coordinator 自有 subagent，隐藏 off-role shud 工具；O6 的 committed event 重绑避免旧限制残留。详细命令、会话与限制见 Migration_Plan_dsh 的 M3 spike 记录。
 
 备选"coordinator 直调 shud_run"（worker preset 零使用，grill Q18 否决）。
 
@@ -233,15 +233,15 @@ closure 谓词（`science_assist`）在 `report_generate` 内、reconcile 之后
 
 ## Risks / Trade-offs
 
-- [preset 内 workspace 插件行在 apply 时调 `restrict` 不可行、全局 shud 工具名尚未注册，或掩码不作用于 agent 作用域（O3）] → spike 首刀验证；否定则 `shud-role-restrict` 改挂全局行、经 agent 作用域（`agent.ctx`）按 agent 绑定，allow 列表不变；policy-gate `role-tool-surface` 的执行面不受影响，不改 spec 的角色契约。
-- [worker 的唤醒到达不了任何存活会话（O1 否定）] → worker 仍等待运行到达终态且已收集（以 `job_output`/`shud_collect` 轮询）；唤醒完全不可用时退路是 coordinator 自己轮询 `shud_collect`。两者都不改 jobs 的唤醒契约。
-- [preset id 在根 Web 会话或派生 worker 的 `exec.agent.session.header` 中不可读（O6）] → 若会话投影可读则改读投影；两者都不可读则重开 D10 角色读取与 D4 `created_by`。
-- [`approval/asked.id` 在工具执行上下文不可得（O5）] → PiGateDecision 记 `callId`，审计关联经 session log 的 `callId` 完成；schema 字段名 `approval_ref` 覆盖两种来源。
+- [O3 原 preset apply 与原 global-only allow 备选失败] → 已记录停止与 PI 重开；采用真实 Web 验证的 agent.ctx inherited allow，job_* 保留、local subagent 不传 restrict，角色执行面不变。
+- [本次子代理 SHUD wake 未投递、原因未诊断] → 已实测 worker job_output/shud_collect 路径取得 succeeded RunRecord；prompt 必须等待收集再返回，coordinator 可兜底 collect。保留 M2 通知状态/预算，不因 M3 另造通知通道，不推广为所有子代理均不可唤醒。
+- [creation header 在 preset 切换后过期] → O6 已观测 header 不变，committed agentPreset 投影为当前身份；唯一 reader 原地迁移，限制在 selected 事件后同步重绑，测试覆盖双向空白会话切换与未知角色释放。
+- [审批 id 不在执行上下文] → O5 已答：approval_ref 固定为 exec.callId；以 session log 的 asked.callId → asked.id → decided.id 审计，不新增推测或日志抓取订阅者。
 - [候选 (a) 的 comment 由 coordinator 转述] → `report_decide` 二次审批卡回显全文，PI 不确认即不落盘。
 - [语言护栏只是子串 lint] → 文档与 preset 指令明示边界，PI 审阅是最终防线（§5.2）。
 - [StackLock 采集需要三 submodule 为 git 仓库] → `profile:install` 校验路径；未初始化 submodule 时 `shud_run` 明确失败（不降级为 null）。
 - [`dsh-shud-jobs` 增加对 records 的依赖与提交路径改动（Critical Path #4）] → 只在输入复制之后、RunJob 首次原子写之前插入采集步骤，失败走既有回滚；集成测试覆盖采集失败不留运行目录。
-- [两个 pre-execute 监听的顺序] → 两者决策互不依赖（都 next 委托），O2 只为日志归因。
+- [两个 pre-execute 监听的顺序] → O2 实测 raw-guard 先于第二监听器，产品保持该顺序。next 委托后续监听，deny/ask 会短路；未挂载的 auto-review/hooks 顺序与优先级不在证据内。
 - [M2 记录 `task_id` 等为 null] → schema 保持 nullable，报告生成对 null `stack_id` 的运行拒绝（closure 谓词），不回猜。
 
 ## Migration Plan
@@ -270,9 +270,9 @@ closure 谓词（`science_assist`）在 `report_generate` 内、reconcile 之后
 
 ## Open Questions
 
-- O1（spike）：worker 子代理提交的 shud 作业，`owner_session` 是子代理会话还是主会话，唤醒以哪种方式送达。worker 无论如何都等待运行到达终态且已收集再返回（D11）；O1 只决定唤醒送达方式。否定（唤醒到达不了任何存活会话）时 coordinator 自己轮询 `shud_collect`。
-- O2（spike）：`shud-policy-gate` 与 `shud-raw-guard`、`auto-review`、hooks 在 `tools/pre-execute` 的相对顺序。
-- O3（spike）：preset `plugins` 子树内的 workspace 插件行能否在 apply 时调用 `restrict`，此时全局 shud 工具名是否已注册（顺序），掩码是否作用于该 agent 作用域。否定时 `shud-role-restrict` 改挂全局行、经 `agent.ctx` 按 agent 绑定，allow 列表不变。
-- O5（spike）：工具执行上下文能否取得本次 `approval/asked.id`；不可得则 `approval_ref` 记 `callId`。
-- O6（spike）：运行时确认 (a) 由 `agent-preset-registry.default = coordinator` 创建的根 Web 会话、(b) 以 preset `worker` 派生的子代理，其 `exec.agent.session.header.agentPreset` 携带对应值；以及 preset 切换是否改写 header（不改写则改读 `agentPreset` 会话投影）。停止条件：两处都不可读 → 重开 D10 角色读取与 D4 `created_by`。
+- O1（已答）：owner_session 是 worker 子会话；本机 ccw30 RunJob 最终 collected、notify unreachable/3，worker 已取得 succeeded/exit0 RunRecord。原生 subagent-settled 回主会话，不是 SHUD wake。采用 worker 等待/轮询，保留 coordinator collect 兜底。
+- O2（已答）：实测 raw-guard 先进入并 next 到 policy-shaped 第二监听；ask 沿链返回，再由宿主产生审批事件。auto-review/hooks 未挂载，只记录该边界，不声称验证不存在监听的相对顺序；两者都 next 的调用仍完整到达工具。
+- O3（已答）：原 preset apply 时 shud 工具未注册，原 agent.ctx/global-only 备选隐藏 job_*。已停止并获 PI 重开授权；真实 Web 证据确定 inherited/local 两集合、agent.ctx 生命周期绑定与 committed preset 事件重绑，详 D11。
+- O5（已答）：真实 Web harmless approval probe 的执行键没有 approval id；asked/decided 有独立 id 且 asked.callId 匹配执行 callId。approval_ref 固定用 exec.callId。
+- O6（已答）：真实主/worker 子会话分别有 coordinator/worker header；header 是创建事实，空白会话切换不改写。当前投影在 committed selected 事件更新，双向重绑工具面通过；唯一 reader 在 #444 迁移到公开当前投影。
 - O4：metrics 生产者归属（#422，M5），不影响本 change。

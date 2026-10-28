@@ -2,7 +2,7 @@
 
 ## Purpose
 
-定义 `shud` profile 中 coordinator 与 worker 两个 agent preset 的可观察组成与角色工具面：preset 行与默认 preset、逐行列出的插件子树、宿主平面的子代理注册表与 provider 行、preset 作用域内的工具 `restrict`、两集合角色工具清单、system prompt 的内容要求，以及首任务"建卡 → worker 跑 ccw 并等到收集 → 报告 → PI 审批"的编排、K13 spike、本机首任务验收脚本与 Epic 收口 PI 验收的证据形态。
+定义 `shud` profile 中 coordinator 与 worker 两个 agent preset 的可观察组成与角色工具面：preset 行与默认 preset、逐行列出的插件子树、宿主平面的子代理注册表与 provider 行、全局 `shud-role-restrict` 生命周期插件经 agent.ctx 绑定的限制、inherited/local 两集合角色工具清单、system prompt 的内容要求，以及首任务"建卡 → worker 跑 ccw 并等到收集 → 报告 → PI 审批"的编排、K13 spike、本机首任务验收脚本与 Epic 收口 PI 验收的证据形态。
 
 ## ADDED Requirements
 
@@ -19,19 +19,19 @@ bundle patch（`profile/shud/cordis.patch.yml`）SHALL 插入两行 `@deepseek-a
 
 ### Requirement: Preset plugin subtrees
 两个 preset 的 `config.plugins` 子树 SHALL 逐行显式列出，不沿用 stock `standard` preset 的骨架：
-- coordinator 子树 SHALL 恰为 `persona`、`agent-instructions`、`time-context`、`tool-jobs`（挂载 `job_output`、`job_list`、`job_kill`）、`tool-subagent`（provider `spawn`，`toolName: subagent`，`modelSelectionSettings: false`，因而不挂载 `list_subagent_models`）与 `config.role: coordinator` 的 `shud-role-restrict`。
-- worker 子树 SHALL 恰为 `persona`、`agent-instructions`、`time-context`、`tool-jobs` 与 `config.role: worker` 的 `shud-role-restrict`；worker 子树没有任何委派行，worker 不能派生子代理是装配的结构性事实，不依赖规则。
-- 两个子树 SHALL NOT 挂载 `tool-fs`、`tool-fs-search`、`tool-bash`、`tool-skill`、`skill-filesystem`、`tool-subagent-control`、`tool-ask-user`、`tool-todo`、`tool-web`、`tool-schedule`、`plan-mode`、`compaction`、`present` 或 `tool-goal` 行。文件读工具不在任一角色的工具面内：`tool-fs` 会同时挂载 `write`/`edit`，而 preset 内的 `restrict` 无法过滤 preset 子树自身挂载的工具；PI 经 Web 工作区文件面板打开报告文件，不经模型。
+- coordinator 子树 SHALL 恰为 `persona`、`agent-instructions`（`maxBytes: 65536`）、`time-context`、`tool-jobs`（挂载 `job_output`、`job_list`、`job_kill`）、`tool-subagent`（provider `spawn`，`toolName: subagent`，`agentPreset: worker`，`modelSelectionSettings: false`）。显式 worker 选择 SHALL NOT 省略，否则子代理继承 coordinator。
+- worker 子树 SHALL 恰为 `persona`、`agent-instructions`（`maxBytes: 65536`）、`time-context`、`tool-jobs`；没有任何委派行，worker 不能派生子代理是装配的结构性事实。
+- 两个子树 SHALL NOT 挂载 `shud-role-restrict`、`tool-fs`、`tool-fs-search`、`tool-bash`、`tool-skill`、`skill-filesystem`、`tool-subagent-control`、`tool-ask-user`、`tool-todo`、`tool-web`、`tool-schedule`、`plan-mode`、`compaction`、`present` 或 `tool-goal` 行。角色工具面不含 `read`；PI 经 Web 工作区文件面板打开报告文件，不经模型。
 
 子代理注册表（`subagent` 行）与 provider 行 `subagent-spawn-in-process` SHALL 保持 stock bundle 的宿主平面全局行位置（`packages/bundle/web-app/cordis.patch.yml` 注释"The subagent registry and its backends STAY in the host plane"：注册表是进程单例，provider 名全局唯一），由 shud bundle patch 保持启用、各只出现一次，SHALL NOT 出现在任何 preset 子树中；coordinator preset 只添加委派工具行 `tool-subagent`。子代理深度沿用 dsh `maxDepth` 设置的默认值 1，不另设。
 
 #### Scenario: coordinator subtree rows are exact
 - **WHEN** 检查 dump-config 中 `preset-coordinator` 的 `config.plugins`
-- **THEN** 行集合恰为 `persona`、`agent-instructions`、`time-context`、`tool-jobs`、`tool-subagent`（`toolName: subagent`、`modelSelectionSettings: false`）与 `shud-role-restrict`（`config.role: coordinator`），不含 `subagent-spawn-in-process`、`tool-fs`、`tool-bash` 或 `tool-skill`，未覆写 `maxDepth`
+- **THEN** 行集合恰为 `persona`、`agent-instructions`、`time-context`、`tool-jobs`、`tool-subagent`（`toolName: subagent`、`agentPreset: worker`、`modelSelectionSettings: false`），不含 `shud-role-restrict`、`subagent-spawn-in-process`、`tool-fs` 或 `tool-bash`，未覆写 `maxDepth`
 
 #### Scenario: worker subtree rows are exact
 - **WHEN** 检查 dump-config 中 `preset-worker` 的 `config.plugins`
-- **THEN** 行集合恰为 `persona`、`agent-instructions`、`time-context`、`tool-jobs` 与 `shud-role-restrict`（`config.role: worker`），不含 `tool-subagent` 或任何其它 `tool-subagent*` 行
+- **THEN** 行集合恰为 `persona`、`agent-instructions`、`time-context`、`tool-jobs`，不含 `shud-role-restrict`、`tool-subagent` 或任何其它 `tool-subagent*` 行
 
 #### Scenario: subagent registry and provider stay in the host plane
 - **WHEN** 检查同一 dump-config 的全局插件列表
@@ -42,9 +42,9 @@ bundle patch（`profile/shud/cordis.patch.yml`）SHALL 插入两行 `@deepseek-a
 - **THEN** 工具列表不含 `subagent`（worker 子树没有委派行），调用不产生新的子代理会话；即使调用到达 `tools/pre-execute`，`role-tool-surface` 也返回 `deny`
 
 ### Requirement: Role tool surface restriction
-内嵌插件 `shud-role-restrict` SHALL 接受配置 `role: "coordinator" | "worker"`，在 `apply` 时于所在 preset 的作用域上下文调用 `ctx.tools.restrict({ allow })`，`allow` SHALL 恰为该角色 `role-tool-map` 条目的 `global` 集合（见「Role tool map uses mounted names」）。宿主 `restrict` 对任何未知名立即抛错，已知名只包括全局与祖先作用域注册的工具；preset 子树自身行注册的工具（`job_*`、`subagent`）既不能被点名，也不受作用域内过滤，因此 `preset` 集合 SHALL NOT 传给 `restrict`。`role` 缺失或不是上述两值、`global` 为空、或 `restrict` 因未知名抛错时，`apply` SHALL 抛出含 `shud-role-restrict` 与出错 `role` 或工具名的错误使该行启动失败，SHALL NOT 静默退化为不限制。`shud-policy-gate` 的 `role-tool-surface` 规则始终按同一条目的 `global ∪ preset` 执行 deny（双层）。
+插件 `shud-role-restrict` SHALL 作为全局行挂载，无固定 `role` 配置。在真实 `agent/created` 时按 policy-gate「Caller role derivation」读取当前角色，经该 Agent 的 `agent.ctx.tools.restrict({allow})` 绑定限制；`allow` SHALL 恰为该角色条目的 `inherited` 集合。`local` 集合 SHALL NOT 传给 restrict：钉版 `tool-subagent` 把 `subagent` 注册在 Agent 自身作用域；`job_*` 则从 preset 继承，必须纳入 allow。`inherited` 为空或含未知工具时 SHALL 明确失败，不静默移除不认识的名字或退化为无限制。policy-gate 始终以 `inherited ∪ local` 做执行时 deny；两者共用唯一 role-tool-map。
 
-K13 spike（O3）SHALL 核实：preset `plugins` 子树内的 workspace 插件行能否在 apply 时调用 `restrict`，此时全局 shud 工具名是否已注册（装配顺序），以及掩码是否作用于该 agent 作用域。O3 否定时，`shud-role-restrict` SHALL 改为全局行：不带 `role` 配置，经每个 agent 的作用域上下文（`agent.ctx`）按 policy-gate「Caller role derivation」推导的角色绑定，以同一 `global` 清单调用 `restrict`，角色为 `unknown` 的 agent 不受限制；两个 preset 子树随之去掉 `shud-role-restrict` 行，角色工具清单不变。
+插件 SHALL 在已提交的 `agent-preset/selected` 会话事件后同步重绑该 Agent 的限制，不以早于投影更新的 `tools/change` 决定角色；成功安装新限制后才释放旧限制。同一角色重复事件不叠加限制；切到 unknown 时释放本插件的旧限制，不影响其它插件的限制；Agent/插件释放时移除自身注册与限制。不得使用 creation header 决定切换后的角色。K13 O3 已证明原 preset apply 时全局 shud 工具尚未注册、原 allow(global) 备选会隐藏 job_*；PI 已授权重开并采用经真实 Web 验证的 inherited/local 设计。
 
 #### Scenario: coordinator sees only its tool surface
 - **WHEN** 在 Web 以默认 coordinator preset 开会话并查看模型可见工具
@@ -54,33 +54,37 @@ K13 spike（O3）SHALL 核实：preset `plugins` 子树内的 workspace 插件�
 - **WHEN** coordinator 以 preset `worker` 派发子代理，在 Web 查看该子代理会话的模型可见工具
 - **THEN** 可见工具集合恰为 `shud_run`、`shud_collect`、`job_output`、`job_list`、`job_kill`；`subagent`、`report_generate`、`bash` 不可见
 
-#### Scenario: empty or unknown allow fails loudly
-- **WHEN** 以 `role: "reviewer"`、缺失 `role`，或使 `global` 含未挂载名（如 `shud.run`）的配置 `apply` `shud-role-restrict`
-- **THEN** `apply` 抛出含 `shud-role-restrict` 与出错 `role` 或工具名的错误，该 preset 作用域不注册任何放宽
+#### Scenario: empty or unknown inherited allow fails loudly
+- **WHEN** 已知角色的 `inherited` 为空或含未挂载名 `shud.run` 时绑定限制
+- **THEN** 返回含 `shud-role-restrict` 与角色或工具名的错误，不静默放宽
 
-#### Scenario: preset-owned tools are not passed to restrict
-- **WHEN** 检查 `shud-role-restrict` 以 `role: coordinator` apply 时传给 `restrict` 的 `allow`
-- **THEN** 它恰为 coordinator 的 `global` 集合，不含 `subagent`、`job_output`、`job_list`、`job_kill`
+#### Scenario: inherited jobs are included and agent-owned subagent is excluded
+- **WHEN** 检查 coordinator 经 `agent.ctx` 传给 restrict 的 allow
+- **THEN** 它等于 `inherited`，包含三个 job 工具、不含 `subagent`；真实模型工具面仍包含 `subagent`
 
-#### Scenario: O3-negative fallback keeps the role contract
-- **WHEN** K13 spike 记录 O3 否定，`shud-role-restrict` 以全局行挂载，preset `worker` 的子代理调用 `report_generate`
-- **THEN** `report_generate` 在该 agent 作用域不可见；即使调用到达 `tools/pre-execute`，`shud-policy-gate` 的 `role-tool-surface` 也返回 `deny`，worker 清单本身不变
+#### Scenario: blank-session preset switch rebinds the tool surface
+- **WHEN** Web 空白会话由 coordinator 切到 worker，再切回 coordinator
+- **THEN** 每次 committed selected 事件后工具面匹配当前角色，旧限制不残留；角色执行门与 TaskCard attribution 使用同一当前投影
+
+#### Scenario: unknown role releases only this plugin restriction
+- **WHEN** 已限制的 Agent 切换到 standard 或插件释放
+- **THEN** 本插件旧限制与登记被释放，不移除其它来源的工具限制
 
 ### Requirement: Role tool map uses mounted names
-`packages/dsh-shud-core/src/governance/role-tool-map.ts` SHALL 为每个角色保留一个条目，条目含两份集合：`global`（由全局 bundle 行挂载的工具，即 shud 工具）与 `preset`（由该角色自身 preset 子树挂载的工具），二者均为实际挂载名。`getRoleToolIds(role)` SHALL 返回 `{ global, preset }`；`isRoleToolIdAllowed(role, toolId)` SHALL 当且仅当 `toolId ∈ global ∪ preset` 时为 `true`。该文件是 `shud-role-restrict`（只取 `global`）与 `role-tool-surface`（取 `global ∪ preset`）唯一的清单来源：
-- coordinator：`global` = `task_create`、`report_generate`、`report_validate`、`report_submit`、`report_decide`、`shud_collect`；`preset` = `subagent`、`job_output`、`job_list`、`job_kill`。
-- worker：`global` = `shud_run`、`shud_collect`；`preset` = `job_output`、`job_list`、`job_kill`。
-- `repo_explorer`、`coder`、`reviewer` 三行 SHALL 保留现有 id 不变，整体置于 `global`、`preset` 为空，并注明"M4 契约，M3 无 preset 消费、不经 restrict 校验"；M3 中这三个 preset id 在 policy-gate 推导为 `unknown`。
+`packages/dsh-shud-core/src/governance/role-tool-map.ts` SHALL 为每个角色保留一个条目，含 `{ inherited, local }` 两份实际工具名集合。`inherited` 是 Agent 从全局及 preset 祖先作用域继承、可被 restrict 过滤的工具；`local` 是宿主按 Agent 注册的自有工具。`getRoleToolIds(role)` SHALL 返回这两份集合；`isRoleToolIdAllowed(role, toolId)` SHALL 检查其并集。该条目是 restrict（只取 inherited）与 policy-gate（取并集）的唯一来源。
+- coordinator：`inherited` = `task_create`、`report_generate`、`report_validate`、`report_submit`、`report_decide`、`shud_collect`、`job_output`、`job_list`、`job_kill`；`local` = `subagent`。
+- worker：`inherited` = `shud_run`、`shud_collect`、`job_output`、`job_list`、`job_kill`；`local` 为空。
+- `repo_explorer`、`coder`、`reviewer` 三行保留现有 id，整体置于 `inherited`、`local` 为空，注明"M4 契约，M3 无 preset 消费、不经 restrict 校验"；M3 仍推导为 unknown。
 
 `ROLE_TOOL_IDS` SHALL 为全部条目两份集合的并集，SHALL NOT 保留只由旧 coordinator/worker 行使用的 Zero 时代 id（`shud.run`、`harness.job.submit`、`harness.job.collect`、`harness.report.generate`、`spawn_agent`、`wait_agent` 等）。
 
 #### Scenario: worker sets are the mounted names
 - **WHEN** 调用 `getRoleToolIds("worker")`
-- **THEN** 返回 `global` 为 `shud_run`、`shud_collect`，`preset` 为 `job_output`、`job_list`、`job_kill`
+- **THEN** 返回 `inherited` 为 `shud_run`、`shud_collect`、`job_output`、`job_list`、`job_kill`，`local` 为空
 
 #### Scenario: coordinator sets are the mounted names
 - **WHEN** 调用 `getRoleToolIds("coordinator")`
-- **THEN** 返回 `global` 为 `task_create`、`report_generate`、`report_validate`、`report_submit`、`report_decide`、`shud_collect`，`preset` 为 `subagent`、`job_output`、`job_list`、`job_kill`
+- **THEN** 返回 `inherited` 为六个 coordinator SHUD 工具与三个 job 工具，`local` 为 `subagent`
 
 #### Scenario: legacy ids are rejected
 - **WHEN** 调用 `isRoleToolIdAllowed("worker", "shud.run")` 或 `isRoleToolIdAllowed("coordinator", "spawn_agent")`
@@ -88,7 +92,7 @@ K13 spike（O3）SHALL 核实：preset `plugins` 子树内的 workspace 插件�
 
 #### Scenario: M4 rows survive unchanged
 - **WHEN** 读取 `ROLE_TOOL_MAP`
-- **THEN** 仍含 `repo_explorer`、`coder`、`reviewer` 三行，其 `global` 等于本 change 之前的 id 列表、`preset` 为空，且其 id 均在 `ROLE_TOOL_IDS` 内
+- **THEN** 仍含 `repo_explorer`、`coder`、`reviewer` 三行，其 `inherited` 等于本 change 之前的 id 列表、`local` 为空，且其 id 均在 `ROLE_TOOL_IDS` 内
 
 ### Requirement: Profile smoke covers presets
 两个 preset 行、`agent-preset-registry.default`、宿主平面 `subagent` 与 `subagent-spawn-in-process` 行和 `shud-policy-gate` 行的存在性，以及 `shud-jobs` 行采集键与 `llm-deepseek`/`agent-default-model` 的一致性断言，SHALL 由 shud-profile 的「Local profile smoke」唯一规定；本 capability SHALL NOT 另行定义 `pnpm run profile:smoke` 的断言集合。records 包是文件层，SHALL NOT 有自己的插件行。
@@ -104,7 +108,7 @@ K13 spike（O3）SHALL 核实：preset `plugins` 子树内的 workspace 插件�
 ### Requirement: Preset system prompts
 preset 的 persona/agent-instructions 段 SHALL 来自 `packages/dsh-shud-presets/prompts/coordinator.md` 与 `packages/dsh-shud-presets/prompts/worker.md`，由对应 preset 行引用。对模型行为的要求 SHALL 表述为 prompt 文件的内容要求，实际行为序列以「Local first-task acceptance script」在 session log 中的证据为准。
 - `coordinator.md` SHALL 含：首任务步骤的文字说明（`task_create` 建卡 → 以 `subagent` 派发 preset `worker`，任务文本含 `task_id` 与 `input_dir` → 等待 worker 返回 `run_id` 与终态 → `report_generate` → `report_validate` → `report_submit`）；"不直接调用 `shud_run`"；"worker 未带回已收集的终态时，自行以 `shud_collect` 轮询该运行"；"`report_validate` 失败时修正输入并重新调用 `report_generate`（得到新 `report_id`）"；"`report_submit` 未获放行后，向 PI 索要 comment 与明确处置（`rejected` 或 `revision_requested`），PI 未说明处置时不得默认、须再问，取得二者之前不调用 `report_decide`，随后调用 `report_decide(report_id, disposition, comment)`"；core `governance/wording.ts` 的 `FORBIDDEN_REPORT_PHRASES` 全部 10 条与 `GOVERNANCE_INVARIANTS` 全部 4 句的逐字文本；以及"语言护栏只是枚举短语 lint，通过 ≠ 合规，PI 审阅是最终防线"的边界说明。
-- `worker.md` SHALL 含：以任务文本中的 `task_id` 调用 `shud_run`；等待该运行到达终态且已收集（唤醒消息到达本会话，或以 `job_output`/`shud_collect` 轮询）后再返回；返回内容含 `run_id` 与终态；不调用报告工具。
+- `worker.md` SHALL 含：以任务文本中的 task_id 调用 shud_run；不依赖 SHUD wake，用 job_output（dsh_job_id）等待并用 shud_collect（持久 run_id/job_id，不是 dsh_job_id）确认收集；取得终态 RunRecord 后才返回 run_id 与终态，不调用报告工具。本次 spike 唤醒未投递、原因未诊断，不宣称钉版全部子代理都不能被唤醒。
 
 presets 包 SHALL 有一项纳入默认 `pnpm run test` 的漂移测试：读取 `coordinator.md`，断言其逐字含 `FORBIDDEN_REPORT_PHRASES` 与 `GOVERNANCE_INVARIANTS` 的每一项；常量增删或改字而 prompt 未同步时测试失败。prompt 中的这些文案 SHALL NOT 另有手写副本作为来源。
 
@@ -125,18 +129,18 @@ presets 包 SHALL 有一项纳入默认 `pnpm run test` 的漂移测试：读取
 - **THEN** 漂移测试失败并指出缺失的文案，`pnpm run test` 非 0 退出
 
 ### Requirement: First-task orchestration
-首任务 SHALL 按以下顺序编排：coordinator 调 `task_create` 建 TaskCard → 调 `subagent`（preset `worker`，任务文本含 `task_id` 与 `input_dir`）→ worker 调 `shud_run(task_id)`，随后等待该运行到达终态且已收集（唤醒消息到达 worker 自身会话，或以 `job_output`/`shud_collect` 轮询），再向 coordinator 返回 `run_id` 与终态 → coordinator 依次调 `report_generate`、`report_validate`、`report_submit` → PI 审批卡。coordinator SHALL NOT 直接调用 `shud_run`。K13 spike（O1）只决定唤醒以哪种方式送达，SHALL NOT 改变 worker 等待收集后再返回这一要求，也不改 shud-jobs 的唤醒契约。O1 否定（唤醒到达不了任何存活会话）时，退路 SHALL 为 coordinator 自己以 `shud_collect` 轮询该运行，直至其已收集后再调 `report_generate`。
+首任务 SHALL 为 coordinator task_create → subagent（显式 worker，任务含 task_id/input_dir）→ worker shud_run(task_id) → worker 以 job_output 等待并以 shud_collect 确认已收集 → 返回 run_id 与终态 → coordinator report_generate/report_validate/report_submit → PI 审批。coordinator 不直接 shud_run。O1 本次实测 owner_session 为真实 worker 子会话，SHUD notify 最终 unreachable，恢复失败根因未诊断；worker 轮询成功，原生 subagent-settled 通知携带结果回到 coordinator。不得把该通知当作 shud-jobs wake。coordinator 若未收到已收集结果，可按既有兜底自行 collect；不改变 M2 jobs 的通知契约。
 
 #### Scenario: first task reaches the approval card
 - **WHEN** PI 在 Web 默认会话中要求对 ccw 跑首任务
-- **THEN** session log 中依次出现 `task_create`、`subagent`（preset `worker`）、worker 会话内的 `shud_run`（参数含该 `task_id`）、该运行已收集的证据（worker 会话内的唤醒消息、`shud_collect` 或 `job_output` 结果）、`subagent` 的返回（含 `run_id`）、`report_generate`、`report_validate` 的 `tool/result`，以及 `report_submit` 的 `approval/asked`
+- **THEN** session log 中依次出现 `task_create`、`subagent`（preset `worker`）、worker 会话内的 `shud_run`（参数含该 `task_id`）、worker 的 `job_output` 等待结果及随后成功 `shud_collect` 返回的终态 RunRecord、worker 完成并向 coordinator 返回 `run_id` 与终态、`report_generate`、`report_validate` 的 `tool/result`，以及 `report_submit` 的 `approval/asked`；仅有 job_output 或唤醒消息但无 worker 成功收集时，此 happy-path 验收失败，coordinator 兜底收集不能冒充 worker 收集证据
 
 #### Scenario: coordinator cannot run SHUD directly
 - **WHEN** coordinator 会话中模型尝试调用 `shud_run`
-- **THEN** 调用不执行（`restrict` 生效时工具不可见；无论 O3 结论，`shud-policy-gate` 的 `role-tool-surface` 均返回 `deny`），不产生运行目录
+- **THEN** 调用不执行（restrict 隐藏，执行门也 deny），不产生运行目录
 
 ### Requirement: Time-boxed K13 spike
-本 change 的第一个实现性子 issue SHALL 是限时 K13 spike（时间预算 2 个工作日），核实 O1（worker 提交作业的唤醒去向）、O2（`shud-policy-gate` 与 `shud-raw-guard`、`auto-review`、hooks 在 `tools/pre-execute` 的相对顺序）、O3（preset `plugins` 子树内的 workspace 插件行能否在 apply 时 `restrict`、全局 shud 工具名此时是否已注册、掩码是否作用于该 agent 作用域）、O5（工具执行上下文能否取得 `approval/asked.id`）与 O6（Web 主会话与 preset `worker` 子代理会话的 `session.header.agentPreset` 是否携带对应 preset id，preset 切换是否改写该 header），证据取 session log 与 dump-config。spike 依赖的最小可合入切片 SHALL 先行：`TaskId` 与 TaskCard schema（含 `Minimal_Schemas.md` §1），以及只建卡、不做链接回写的最小 `task_create`。spike SHALL 以首任务的一个用户可见步骤收尾：在 Web 内 coordinator 以该 `task_create` 建卡并派 worker 跑 ccw，worker 调用不带 `task_id` 的 `shud_run`（卡片回写尚未交付）。每个 O 项的结论（含否定时采用的备选）SHALL 记入 spike issue，后续子 issue 按结论实现。O6 在主会话与子代理会话都读不到 preset id 时，SHALL 停下回报并重开角色推导与 `created_by` 的设计决策。
+本 change 的限时 K13 spike（2 个工作日）SHALL 在 TaskCard 品牌/schema 与最小 task_create 合入后执行，且记录 O1/O2/O3/O5/O6 的真实会话、配置与一次性探针证据，不能以源码推测替代。记录 SHALL 包含：子代理 owner_session 与 worker 收集路径；两个实际监听的顺序与未挂载 auto-review/hooks 的边界；O3 原方案/备选失败、PI 授权重开及 inherited/local 方案证据；审批 callId 与 asked/decided 关联；header/当前投影及空白 preset 切换。收尾 SHALL 含 Web coordinator 建卡、真实 worker 子代理跑 ccw（不带 task_id）并等待已收集终态。停止条件（预算/O3 两路径均失败/O1 无收集路径/O6 无身份路径）触发时必须先报告再经设计授权重开；后续切片只消费已复审的结论。
 
 #### Scenario: spike closes with the Web step
 - **WHEN** spike 收尾

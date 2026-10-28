@@ -7,7 +7,7 @@
 ## ADDED Requirements
 
 ### Requirement: Global pre-execute mounting
-策略门 SHALL 以插件 `@shud-harness/dsh-shud-policy-gate` 作为 bundle patch 中的全局行 `shud-policy-gate` 挂载（与 `shud-raw-guard` 并列），SHALL NOT 挂进任何 agent preset 的 `plugins` 子树；该行与插件、`profile:smoke` 对该行的断言在同一个交付切片中落地，先于 `report_submit`/`report_decide` 工具挂载，使报告终态工具从挂载起就经过审批。`apply` 时 SHALL 经 `ctx.on("tools/pre-execute")` 注册且仅注册一个监听器；插件 SHALL NOT 直接调用 `ctx.approval`，SHALL NOT 改写工具参数。监听器只返回 `{kind: "deny"}`、`{kind: "ask"}` 或 `next()` 的结果，SHALL NOT 返回 `{kind: "allow"}`（它会终止瀑布，使后续 raw-guard 等监听器失效）。监听器内部的求值顺序 SHALL 固定为：先推导调用角色（见「Caller role derivation」），再以规范规则集求值（见「Policy core deny layer」），规则集拒绝即返回 `deny`；未被拒绝时，`report_submit` 与 `report_decide` 返回 `ask`（见「Report terminal tools always ask」），其它工具调用 `next()`。本插件与 `shud-raw-guard`、`auto-review`、hooks 的相对顺序由 K13 spike（O2）核实并记录；两者决策互不依赖，顺序只影响日志归因，不影响决策结果。
+策略门 SHALL 以插件 `@shud-harness/dsh-shud-policy-gate` 作为 bundle patch 中的全局行 `shud-policy-gate` 挂载（与 `shud-raw-guard` 并列），SHALL NOT 挂进任何 agent preset 的 `plugins` 子树；该行与插件、`profile:smoke` 对该行的断言在同一个交付切片中落地，先于 `report_submit`/`report_decide` 工具挂载，使报告终态工具从挂载起就经过审批。`apply` 时 SHALL 经 `ctx.on("tools/pre-execute")` 注册且仅注册一个监听器；插件 SHALL NOT 直接调用 `ctx.approval`，SHALL NOT 改写工具参数。监听器只返回 `{kind: "deny"}`、`{kind: "ask"}` 或 `next()` 的结果，SHALL NOT 返回 `{kind: "allow"}`（它会终止瀑布，使后续监听器失效）。监听器内部 SHALL 先推导当前调用角色，再以规范规则集求值；拒绝即返回 deny，否则 report_submit/report_decide 返回 ask，其它工具调用 next。O2 实测组合中 raw-guard 先于策略形态监听器，产品组合 SHALL 保持此顺序；组合未挂 auto-review/hooks，不声称已验证其顺序或短路优先级。
 
 #### Scenario: dump-config shows the global row
 - **WHEN** 在已执行 `profile:install` 的 `DSH_HOME` 上执行 `dsh --profile shud --dump-config`
@@ -22,15 +22,19 @@
 - **THEN** 返回值的 `kind` 不是 `allow`
 
 ### Requirement: Caller role derivation
-策略门 SHALL 从 `tools/pre-execute` 事件携带的执行上下文 `exec.agent`（dsh `Agent`）读取调用 Agent 的 preset id：`exec.agent?.session.header.agentPreset`。该值由宿主在 `agents.create({meta.agentPreset})` 时写入会话 header；Web 会话控制器以 `agent-preset-registry` 的默认 preset 作为主 Agent 的 `meta.agentPreset`，子代理以派发时指定的 preset 创建。映射 SHALL 为：`coordinator` → `"coordinator"`，`worker` → `"worker"`，其它任何值（含 `exec.agent` 缺失、header 缺失、无 preset、未知 preset，以及 M4 角色 `repo_explorer`、`coder`、`reviewer` 的 preset id）→ `"unknown"`。读取 SHALL NOT 抛错，读取路径中任一环节缺失即为 `"unknown"`。K13 spike（O6）SHALL 在运行时核实：(a) 由 `agent-preset-registry.default = coordinator` 创建的 Web 主会话与 (b) 以 preset `worker` 派发的子代理会话都在该 header 中携带对应值，以及会话中途切换 preset 是否改写该 header；不改写时改读 `agent-preset-registry` 的 `agentPreset` 会话投影，映射不变。两条路径都读不到时，本角色推导与 task-cards `task_create` 的 `created_by` 设计 SHALL 重开，不以猜测值代替。
+策略门、TaskCard attribution 与工具限制 SHALL 共用 core 的唯一 `readCallerPresetId(agent)`：从公开 `agent.ctx` 的 `sessionProjections` 服务读取当前 `agentPreset` 会话投影，非空字符串原样返回；缺 Agent、会话、服务、投影或非空值时返回 unknown，不以 creation header 冒充当前身份。映射为 coordinator/worker 自身，其它值（含 standard、M4 preset）为 unknown。读取缺失路径不得抛错。K13 O6 已证明 header 为冻结的创建事实，空白会话切换后不改写；committed `agent-preset/selected` 后投影才代表新角色。
 
-#### Scenario: role derives from the session header preset id
-- **WHEN** 同一工具分别由会话 header `agentPreset` 为 `coordinator`、`worker` 的 Agent 与 `exec.agent` 缺失的调用触发
+#### Scenario: role derives from current preset projection
+- **WHEN** 同一工具分别由当前投影为 coordinator、worker 的 Agent 与缺 Agent 的调用触发
 - **THEN** 传给 `evaluatePolicyGate` 的 `role` 依次为 `"coordinator"`、`"worker"`、`"unknown"`
 
 #### Scenario: unknown or M4 preset maps to unknown
-- **WHEN** 会话 header `agentPreset` 为 `standard`、`reviewer`，或 header 中没有 `agentPreset`
+- **WHEN** 当前投影为 standard、reviewer，或调用没有当前 preset 投影
 - **THEN** `role` 为 `"unknown"`，监听器不抛出
+
+#### Scenario: preset switch overrides the creation header
+- **WHEN** 空白会话 header 为 coordinator，但已提交的当前 preset 投影为 worker
+- **THEN** 唯一身份读取函数返回 worker，执行门按 worker 判定并拒绝 task_create，不返回 header 的 coordinator 或创建卡片
 
 ### Requirement: Report terminal tools always ask
 对 `report_submit` 与 `report_decide`，在规范规则集未返回 `deny`（即调用角色为 `coordinator` 或 `"unknown"`）时，策略门 SHALL 无条件返回 `{kind: "ask", reason, displayReason}`，不论报告状态或参数形态。`reason` 落入 session log 的 `approval/asked`，是审批卡唯一的审计载体：它 SHALL 为插件导出的固定前缀常量加一个空格加经 core `ReportId` 品牌 schema 校验通过的 `report_id`；参数中的 `report_id` 缺失或未通过校验时，SHALL 为该前缀加空格加插件导出的受控标记常量，SHALL NOT 含原始参数文本。`displayReason` SHALL 含非空 `en` 与 `zh`：对 `report_submit`，内容含 `report_id`、报告 `summary` 首行与报告文件路径（`reports/<report_id>.md`，PI 可在卡片决定前打开）；对 `report_decide`，另含 `disposition` 与 `comment` 全文，使 PI 在卡片上确认自己的话被正确转述。`displayReason` 不落 session log（宿主 `approval/asked` 只记 `id/toolName/callId/reason`），SHALL NOT 被当作审计证据。读取报告文件以组装 `displayReason` 时，策略门 SHALL 只从通过 `ReportId` 校验的 id 构造路径，并遵循 task-cards「TaskCard workspace file」的工作区文件安全规则（`reports/` 与目标文件经 `lstat` 确认，符号链接与特殊文件 fail-closed）；参数缺失、类型不符、id 未通过校验或报告文件不可读时 SHALL 仍返回 `ask`，SHALL NOT 抛错，`displayReason` 中不可得的部分以明确的"无法读取"说明代替。工具自身的前置条件校验（如 `status == reviewed`）属于工具，不由策略门放行或拒绝。
@@ -48,7 +52,7 @@
 - **THEN** 不抛出异常，决策 `kind` 仍为 `ask`，`reason` 为前缀加受控标记（或通过校验的 id）且不含 `../tasks/x`，`displayReason` 含"无法读取"说明，`next()` 未被调用，未读取 `reports/` 之外的路径
 
 #### Scenario: worker calling report_submit is denied, not asked
-- **WHEN** 会话 header preset 为 `worker` 的 Agent 调用 `report_submit`
+- **WHEN** 当前 committed preset 投影为 `worker` 的 Agent 调用 `report_submit`，即使其创建 header 仍为 `coordinator`
 - **THEN** 决策 `kind` 为 `deny`（`role-tool-surface`），宿主不发起审批卡，session log 中没有该调用的 `approval/asked`
 
 #### Scenario: unknown caller still asks
@@ -60,7 +64,7 @@
 
 #### Scenario: allowed-once executes the tool
 - **WHEN** `report_submit` 的审批卡结果为 `allowed-once`
-- **THEN** 工具执行，session log 依次出现 `approval/asked{toolName: "report_submit", reason: <前缀常量> <report_id>}`、`approval/decided{outcome: "allowed-once"}` 与该调用的成功 `tool/result`；`decision_history` 新增 `outcome: accepted`、`approval_ref` 为该卡引用、`comment: null`
+- **THEN** 工具执行，session log 依次出现 `approval/asked{toolName: "report_submit", reason: <前缀常量> <report_id>}`、`approval/decided{outcome: "allowed-once"}` 与该调用的成功 `tool/result`；`decision_history` 新增 `outcome: accepted`、`approval_ref` 等于本次 `exec.callId`（对应 asked.callId，不是 asked.id）、`comment: null`
 
 #### Scenario: no approval service denies
 - **WHEN** 宿主没有 approval 服务（如 headless 模板）时调用 `report_submit`
@@ -94,7 +98,7 @@
 - **THEN** 决策 `kind` 为 `deny`，`reason` 等于导出的受控文案且不含 `secret-detail`，`next()` 未被调用，监听器本身不抛出
 
 ### Requirement: Role tool surface rule
-core SHALL 提供规则 `role-tool-surface`（`guardClass: "authority"`，其 id 列入 `RESERVED_AUTHORITY_POLICY_RULE_IDS`）并作为规范 SHUD 规则集的唯一规则：`role` 为 `coordinator` 或 `worker` 且 `toolId` 不在该角色 `role-tool-map` 条目的 `global ∪ preset` 内时返回 `deny`，`reason` 指明该角色与工具 id（不含工具参数）；`role` 为 `"unknown"` 时规则不适用，返回 `allow`；`toolId` 在 `global ∪ preset` 内时返回 `allow`。`role-tool-map` 每个角色条目 SHALL 含两份集合（见 agent-presets「Role tool map uses mounted names」）：`global` 为全局 bundle 行挂载的工具（shud 工具），`preset` 为该角色 preset 子树自身行挂载的工具；preset 内的 `shud-role-restrict` 只把 `global` 传给 `restrict`（宿主 `restrict` 对未知名立即抛错，而 preset 子树自身注册的工具既不能被点名也不受作用域内过滤），本规则按 `global ∪ preset` 判定——同一份数据两个消费者，SHALL NOT 另存副本。K13 spike 肯定 O3 时，`restrict` 与本规则双层执行；否定 O3 时按 agent-presets「Role tool surface restriction」的备选挂载，角色契约（两份集合）不变。
+core SHALL 提供 authority 规则 `role-tool-surface`，其 id 列入 `RESERVED_AUTHORITY_POLICY_RULE_IDS`，作为规范 SHUD 规则集唯一规则。coordinator/worker 调用不在 `inherited ∪ local` 内的工具时 deny，reason 仅含角色与工具 id、不含参数；集合内或 unknown 角色返回 allow。两集合由 agent-presets「Role tool map uses mounted names」唯一规定；restrict 消费 inherited，本规则消费并集，不另存清单副本。preset-owned job_* 属 Agent 的 inherited；agent-owned subagent 属 local。
 
 #### Scenario: off-role tool is denied
 - **WHEN** preset `worker` 调用 `report_generate` 或 `subagent`，或 preset `coordinator` 调用 `shud_run`
@@ -114,7 +118,7 @@ core SHALL 提供规则 `role-tool-surface`（`guardClass: "authority"`，其 id
 
 #### Scenario: single source with restrict
 - **WHEN** 比较 `role-tool-surface` 对每个角色放行的工具 id 集合与 `shud-role-restrict` 对同一角色传给 `restrict` 的 `allow`
-- **THEN** 前者等于该角色 `getRoleToolIds(role)` 返回的 `global ∪ preset`，后者等于其 `global`，二者取自同一个 `ROLE_TOOL_MAP` 条目
+- **THEN** 前者等于 `inherited ∪ local`，后者等于 `inherited`，二者取自同一 `ROLE_TOOL_MAP` 条目
 
 ### Requirement: Policy core split and spawn rule removal
 `packages/dsh-shud-core/src/governance/policy-gate-core.ts` SHALL 按规则族拆分到 `governance/policy-gate/{types,role-tool-surface,parameter-schema,evaluate}.ts`，每个文件（含拆分后的测试文件）≤1000 行并通过 `pnpm run lint` 的 `max-lines`；`tool-parameter-schema-validation` 框架与保留 id `raw-data-write` SHALL 保持现状、不新增规则实现；拆分后对既有保留内容——参数 schema 校验框架、`raw-data-write` 保留 id——以及评估器契约（首个 deny 胜出、相同 `(call, context)` 得相同决策、ruleId 裁剪与重复拒绝、保留 id 不得降级为 `capability`、保留 id 前缀冒充拒绝、决策快照拒绝 proxy/accessor/可枚举 `toJSON`）SHALL 与拆分前给出相同决策，既有非 spawn 测试的期望值不变。规范 SHUD 规则集由三条 spawn 规则改为仅 `role-tool-surface`。core SHALL 删除 `spawn-profile-subset`、`spawn-depth-limit`、`spawn-concurrency-limit` 三条规则及其专属常量、求值与输入规范化函数，`PolicyGateToolCall` SHALL NOT 再含 `spawnDepth`/`activeSubagentCount`；`RESERVED_AUTHORITY_POLICY_RULE_IDS` SHALL 精确为 `["raw-data-write", "tool-parameter-schema-validation", "role-tool-surface"]`；别名 `isReservedAuthorityPolicyEvidenceId` SHALL 删除（`isReservedAuthorityPolicyErrorId` 保留）。
@@ -139,11 +143,11 @@ core SHALL 提供规则 `role-tool-surface`（`guardClass: "authority"`，其 id
 - **THEN** `pnpm run lint` 报 `max-lines` 错误，`pnpm run check` 失败
 
 ### Requirement: PI comment conversation carrier
-审批卡只承载放行/拒绝，没有 comment 字段；PI comment SHALL 经对话承载（候选 (a)，决策记录 `docs/adr/proposed/0011-pi-comment-conversation-carrier.md`）。`report_submit` 未获放行后，coordinator SHALL 在下一轮对话向 PI 索要 comment 与明确的处置（`rejected` 或 `revision_requested`），在取得非空 comment 与 PI 明确说明的处置之前 SHALL NOT 调用 `report_decide`（GR-003）；PI 未说明处置时 SHALL NOT 默认任何一种，须再次询问。随后 coordinator 调 `report_decide(report_id, disposition, comment)`，其审批卡回显 `disposition` 与 `comment` 全文（见「Report terminal tools always ask」）；只有该卡 `allowed-once` 才写入 PiGateDecision（comment 非空由 schema 强制）与报告终态，TaskCard 按状态机转换（`revision_requested` → `planned`，`rejected` → `cancelled`）。PiGateDecision 的 `approval_ref` SHALL 为授权本次写入的那张卡的 `approval/asked.id`（`report_decide` 为其自身的卡，`accepted` 为 `report_submit` 的卡）；若 K13 spike 否定 O5（执行上下文取不到该 id），改记该次调用的 `callId`，审计关联经 session log 的 `callId` 完成。先前被拒的 `report_submit` 卡 SHALL NOT 由模型以参数传入或写进 PiGateDecision（审批 id 只在 session log 中，模型无来源）；其审计关联 SHALL 经 session log 完成：同一会话中 `approval/asked{toolName: "report_submit"}` 的 `reason` 含该 `report_id`，其后同一审批 id 的 `approval/decided{outcome}` 不是 `allowed-once`；`report_decide` 卡的 `reason` 同样含该 `report_id`，二者以 `report_id` 相连。两张卡都以 `approval/asked|decided` 进入 session log。
+审批卡没有 comment 字段，PI comment SHALL 经对话承载（ADR-0011）。submit 未获放行后 coordinator 必须索要非空 comment 与明确 rejected/revision_requested；任一缺失不调用 decide、不默认处置。decide 二次卡回显全文，allowed-once 后才写 PiGateDecision 与终态，并按状态机推进 TaskCard。approval_ref SHALL 为本次工具执行的 callId（submit accepted 或 decide 的各自 callId）；O5 已证明工具没有 approval id，审计通过 asked.callId → asked.id → decided.id，不另造日志订阅取 id。先前被拒 submit 卡不得作为模型参数或写入决定对象；两张卡 reason 携带同一 report_id，在同一 session log 关联拒绝 submit 与后续 decide。两张卡均记录 asked/decided。
 
 #### Scenario: reject then comment then decide
 - **WHEN** `report_submit` 卡被拒，coordinator 在下一轮取得 PI comment 与处置 `revision_requested`，调用 `report_decide` 且其卡为 `allowed-once`
-- **THEN** session log 依次含 `reason` 含该 `report_id` 的 `report_submit` `approval/asked` 与其非 `allowed-once` 的 `approval/decided`，以及 `reason` 含同一 `report_id` 的 `report_decide` `approval/asked` 与 `approval/decided{outcome: "allowed-once"}`；报告 `decision_history` 新增一条 `outcome: revision_requested`、`comment` 等于 PI 原文、`approval_ref` 为 `report_decide` 卡的引用，且该条不含被拒提交卡的字段；TaskCard 为 `planned`
+- **THEN** session log 依次含 `reason` 含该 `report_id` 的 `report_submit` `approval/asked` 与其非 `allowed-once` 的 `approval/decided`，以及 `reason` 含同一 `report_id` 的 `report_decide` `approval/asked` 与 `approval/decided{outcome: "allowed-once"}`；报告 `decision_history` 新增一条 `outcome: revision_requested`、`comment` 等于 PI 原文、`approval_ref` 为本次 report_decide 的 exec.callId，且该条不含被拒提交卡的字段；TaskCard 为 `planned`
 
 #### Scenario: no comment does not close the gate
 - **WHEN** coordinator 以空串或缺失的 `comment` 调用 `report_decide`（无论参数校验先于还是后于审批卡发生、卡结果为何）
