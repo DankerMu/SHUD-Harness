@@ -132,8 +132,6 @@ review_only: # project invariants without mechanical enforcement yet; each has a
     trigger: "PR template checkbox + reviewer; user chose review-only"
   - rule: "dsh upgrades only via chore(dsh-upgrade) issue"
     trigger: "process; no-bypass hook blocks direct writes to ../deepseek-harness"
-  - rule: "scientific wording rules in prose"
-    trigger: "M3 EvidenceReport language guard → tested constants"
 
 # Mirror of AGENTS.md ## Verification Matrix — harnesses execute from here.
 verification:
@@ -146,6 +144,8 @@ verification:
   - surface: "format (deliverables; local .workplans/ excluded by shared .gitignore rule; never rewrite consumed evidence)"
     command: "pnpm run format:check"
   - surface: "unit tests"
+    command: "pnpm run test"
+  - surface: "scientific wording constants and model-authored phrase lint (not semantic compliance)"
     command: "pnpm run test"
   - surface: "unit tests + coverage floor"
     command: "pnpm run test:coverage"

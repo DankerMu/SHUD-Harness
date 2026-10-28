@@ -260,7 +260,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | PI 功能验收（Epic #210 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 验收记录；工程门禁不变 | gate |
 | 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
 | docs 随代码改 | PR 模板 | review-only | review-only |
-| 科学措辞规则（M3 转测试常量） | 报告生成 | review-only until M3 | review-only |
+| 科学措辞规则（测试常量与枚举短语 lint） | `packages/dsh-shud-core/src/governance/wording.ts` 及其测试 | `pnpm run test`（纳入默认 `check`）；报告门禁的机器边界为四句不变式逐字出现且模型撰写字段无禁止短语，完整报告校验器另行交付；guard 通过 ≠ 语义合规，仍由 PI 审阅 | block |
 | 运行时不变量伴生（M2 作业持久化） | `CONTEXT.md` 第 13 条及其 `packages/dsh-shud-jobs/src/` 集成测试路径 | 本机 + CI `pnpm run test:coverage`（纳入 `pnpm run check`）；本机独立 `pnpm run shud:restart` | block |
 | dsh 升级只走 issue | 流程 | review-only | review-only |
 

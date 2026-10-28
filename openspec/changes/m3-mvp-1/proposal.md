@@ -40,6 +40,14 @@ Selected risk packs: Public API; Schema; Legacy compatibility/examples; Error ha
 Evidence floor: parent-mediated red/green runtime and compiler field tests, real generated-example parsing, schema drift/default check, direct built public API smoke and white-box review.
 Only task 3.1d is selected. PI approved bounded additions to the existing compiler fixture and removal of the contradictory optional decision_history extension declaration (6470602398). Registry registration and public schema barrel are required integration, not a new generator implementation.
 
+## Issue #433 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream; Critical Path #6).
+Blast radius: public deterministic wording constants/scanner and their blocking control-plane registration.
+Selected risk packs: Public API; Config/control-plane registration; Error handling; Documentation; scientific governance/secrets shape.
+Evidence floor: parent-mediated scanner red/green, all ten literal phrase/overlap/field and regex boundaries, generated instruction drift, direct built public API smoke, full check and white-box review.
+Only task 3.2 is selected. No renderer/validator/preset integration or semantic-compliance claim. Core root barrel addition is the required export path for the requested public constants/API.
+
 ## Why
 
 M3 的用户可见步骤是"从任务卡到 Markdown 证据报告，含 PI 审批"（`docs/04_IMPLEMENTATION/Phased_Plan.md` §0 M3 行、§3）：首任务 "ccw 运行 → RunRecord → EvidenceReport" 端到端跑通，报告含 StackLock 三字段与响应 model，措辞过治理四条不变式。M2 已于 2026-10-27 通过 PI 验收（#318，ADR-0007），运行主链（`shud_run` → durable JobRegistry → RunRecord → 唤醒）就绪，但 M3 的四个对象（TaskCard、StackLock 三字段、DataProvenance、EvidenceReport）在代码里要么不存在、要么仍是 Zero 时代的旧字段（`docs/04_IMPLEMENTATION/Port_List.md`）；`policy-gate-core` 零消费者、profile 无 agent preset、`approval` seam 没有 PI comment 字段（ADR-0004 附录 ⑫）。M2→M3 边界升级评估（#420）确认钉版 rc.2 的 seam 事实在 rc.4 不变，设计据此冻结。

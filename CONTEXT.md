@@ -51,6 +51,8 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 
     上述工程验证不等于 PI 功能验收；PI 已于2026-10-27明确通过 #318 的 Web 重启与唤醒验收，真实日志与 RunRecord 见 [M2 手工验收记录](docs/Migration_Plan_dsh.md#m2-手工-web-重启唤醒验收2026-10-27318)。[ADR-0007](docs/adr/implemented/0007-m2-epic-acceptance.md) 的独立 PI gate 不变，合并子 PR 本身仍不代表验收通过。
 
+14. **科学措辞枚举护栏**：core 导出的十条 `FORBIDDEN_REPORT_PHRASES`、四句 `GOVERNANCE_INVARIANTS` 与无状态 `REPORT_SECRET_PATTERN` 由 `packages/dsh-shud-core/src/governance/wording.test.ts` 钉住，无 profile 覆写，纳入默认测试闸。`scanForbiddenPhrases` 只扫描模型撰写的 `summary/observations/limitations/pi_questions`，按字段和清单顺序返回命中短语，不拼接数组条目、不回显原文；模板拥有的四句不变式不作为扫描输入，也不构成模型文本白名单。完整报告校验器另行交付；枚举 lint 通过 ≠ 语义合规，PI 审阅仍是最终防线。
+
 ## Forbidden Logic
 
 - Agent 陈述科学结论；"单流域指标提升 = 模型改进"；"校准结果 = 结构验证"；"模型机制已验证"；"普遍改进"。
