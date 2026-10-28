@@ -43,6 +43,13 @@ export const schemaDefinitions: SchemaDefinition[] = [
     sourcePath: "packages/dsh-shud-core/src/schemas/task.ts",
     exportName: "TaskCardSchema",
     schema: TaskCardSchema,
+    exampleOverrides: {
+      task_id: "TASK-20261027T080005-3f9c",
+      stack_id: null,
+      data_id: null,
+      linked_jobs: ["JOB-20261027T081000-0123"],
+      linked_reports: ["REPORT-20261027T090000-5b10"],
+    },
   },
   {
     name: "StackLock",

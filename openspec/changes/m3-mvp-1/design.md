@@ -1,5 +1,17 @@
 # Design
 
+## Issue #424 implementation boundary
+
+Change surface: `schemas/run-identifiers.ts`, `schemas/task.ts`, schema exports, tests and generated TaskCard projections; `scripts/schema/registry.ts` TaskCard example overrides; `scripts/schema/self-test.ts` TaskCard fixture; `Minimal_Schemas.md` §1.
+Must preserve: `generateRunIdentifiers(now?)` signature, UTC-second formatting and shared JOB/RUN suffix; TaskCard type/status enums, reviewer and optional theory bundles.
+Governing invariant: TaskCard identifiers and references accept only their matching branded format, while a newly created card has explicit null stack/data references.
+Sibling surfaces: public core exports, TaskCard validators, schema registry/example generation, generated JSON Schema/Markdown, existing schema and collection consumers.
+Seams under test: exported identifier generation and schema parsing; generated TaskCard contract. No dsh seam.
+Required evidence: all five new prefixes accept valid lowercase ids and reject legacy/wrong-prefix/uppercase ids; empty-reference card parses, malformed links and missing required references fail; existing JOB/RUN tests remain green.
+Non-goals: aligning StackLock/DataProvenance/EvidenceReport objects, filesystem collision handling, tools, governance, jobs and profile changes.
+Review focus: one generation implementation, JOB/RUN pairing, required nullable references, unchanged unrelated schemas, generated projections and public exports.
+Scope correction approved by PI during issue execution: both `core-schemas.test.ts` `validTaskCard()` and `scripts/schema/self-test.ts` `assertTaskCardUnknownKeyParity()` use `TASK-0001` and omit both references, contradicting the new schema. Migrate only those fixtures to a valid branded task id and explicit null references; preserve all assertions, including root/nested unknown-key stripping, and every JOB/RUN test. `shud-collect.test.ts` remains unchanged. The existing schema registry's TaskCard entry needs valid `exampleOverrides` for branded ids/links; this is the issue's required schema-registration work, not a new generator convention.
+
 ## Context
 
 动机见 proposal.md「Why」。约束均已在钉版 `dsh-v0.2.1-rc.2` 的 npm 包/文档核查（#420 证明 rc.4 对这些 seam 逐字节无变化）：

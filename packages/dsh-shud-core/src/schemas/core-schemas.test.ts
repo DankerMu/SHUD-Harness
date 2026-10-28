@@ -711,7 +711,7 @@ describe("core Zod schemas", () => {
 
 function validTaskCard() {
   return {
-    task_id: "TASK-0001",
+    task_id: "TASK-20260425T100000-3f9c",
     type: "engineering",
     status: "created",
     runtime_phase: null,
@@ -720,6 +720,8 @@ function validTaskCard() {
     created_by: "alice",
     current_owner: "alice",
     reviewer: "pi_name",
+    stack_id: null,
+    data_id: null,
     inference_budget: {
       mode: "normal",
       advisory_usd: 1,

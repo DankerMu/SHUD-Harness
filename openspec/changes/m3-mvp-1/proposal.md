@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #424 fixture
+
+Issue type: feature. Fixture level: expanded. Upstream suggested level: expanded (agree).
+Blast radius: core TaskCard parsing, public identifier generation, generated schema consumers.
+Selected risk packs: Public API; Schema; Legacy compatibility; Documentation.
+Evidence floor: branded-id and TaskCard positive/negative tests, unchanged JOB/RUN pairing tests, runtime schema smoke, `pnpm run schema:check`, `pnpm run check`, Critical Path #7 white-box review.
+Only task 3.1a is implemented by #424; the remaining M3 tasks and PI acceptance remain open.
+
 ## Why
 
 M3 的用户可见步骤是"从任务卡到 Markdown 证据报告，含 PI 审批"（`docs/04_IMPLEMENTATION/Phased_Plan.md` §0 M3 行、§3）：首任务 "ccw 运行 → RunRecord → EvidenceReport" 端到端跑通，报告含 StackLock 三字段与响应 model，措辞过治理四条不变式。M2 已于 2026-10-27 通过 PI 验收（#318，ADR-0007），运行主链（`shud_run` → durable JobRegistry → RunRecord → 唤醒）就绪，但 M3 的四个对象（TaskCard、StackLock 三字段、DataProvenance、EvidenceReport）在代码里要么不存在、要么仍是 Zero 时代的旧字段（`docs/04_IMPLEMENTATION/Port_List.md`）；`policy-gate-core` 零消费者、profile 无 agent preset、`approval` seam 没有 PI comment 字段（ADR-0004 附录 ⑫）。M2→M3 边界升级评估（#420）确认钉版 rc.2 的 seam 事实在 rc.4 不变，设计据此冻结。

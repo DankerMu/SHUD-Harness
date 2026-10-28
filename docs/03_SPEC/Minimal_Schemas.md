@@ -19,8 +19,10 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 
 ## 1. TaskCard
 
+M3 品牌标识符修订（#424）的实现源为 `packages/dsh-shud-core/src/schemas/task.ts` 与 `run-identifiers.ts`，依据 [m3-mvp-1 TaskCard 契约](../../openspec/changes/m3-mvp-1/specs/task-cards/spec.md)。本刀仅对齐 TaskCard，不改变其余对象的当前契约。
+
 ```yaml
-task_id: TASK-0001                    # 格式: TASK-NNNN
+task_id: TASK-20261027T080005-3f9c    # TaskId；UTC 秒 + 4 位小写 hex
 type: engineering | science_assist | ops
 status: created | planned | running | parked | reporting | awaiting_pi | done | cancelled | blocked
 runtime_phase: null               # 运行时辅助字段，见下方说明
@@ -29,18 +31,26 @@ question_or_goal: "在不破坏 rSHUD 旧版读取的前提下，添加 event_fl
 created_by: alice                     # 创建者，不可变
 current_owner: alice                  # 当前负责人，可转移
 reviewer: pi_name                     # PI 或指定审阅者
-stack_id: STACK-0001
-data_id: DATA-0001
+stack_id: null                      # 必填；StackId | null，建卡时为 null
+data_id: null                       # 必填；DataId | null，建卡时为 null
 inference_budget:
   mode: cheap | normal | deep
   advisory_usd: 1.00                  # 软监控，超出时状态栏标黄，不自动中断
   advisory_model_calls: 12            # 同上
   reviewer_enabled: false
-linked_jobs: [JOB-0001]              # RunJob ID 列表
-linked_reports: [REPORT-0001]        # EvidenceReport ID 列表
-created_at: 2026-04-25T10:00:00Z
-updated_at: 2026-04-25T14:30:00Z
+linked_jobs: []                     # JobRecordId[]，如 JOB-20261027T081000-0123
+linked_reports: []                  # ReportId[]，如 REPORT-20261027T090000-5b10
+created_at: 2026-10-27T08:00:05Z
+updated_at: 2026-10-27T08:00:05Z
 ```
+
+**M3 字段处置：**
+
+- `task_id` 保留并收窄为 `TaskId`，格式为 `TASK-YYYYMMDDTHHMMSS-xxxx`；`stack_id`、`data_id` 保留并改为必填可空的 `StackId`、`DataId`，非空时分别使用 `STACK-`、`DATA-` 前缀。缺失不等于 `null`。
+- `linked_jobs`、`linked_reports` 保留并收窄为 `JobRecordId[]`、`ReportId[]`，分别使用 `JOB-`、`REPORT-` 前缀；允许空数组。
+- 所有上述品牌 id 使用 UTC 秒与 4 位小写十六进制随机段，拒绝旧短 id、UUID 格式、大写 hex 和错误前缀；关联对象不要求共享随机段。`generateRunIdentifiers(now?)` 的 JOB/RUN 同后缀配对保持不变。
+- `reviewer`、`type`/`status`/`runtime_phase` 枚举与其余字段保持不变；`theory_bundle_ids` 仍为可选非空字符串数组（数组可为空），`runtime_phase` 仍允许缺省或 `null`。根对象与 `inference_budget` 的未知键仍接受后剥离，不改为严格拒绝。
+- 新建卡的 `stack_id`、`data_id` 显式为 `null`；后续提交回填品牌引用。StackLock、DataProvenance、EvidenceReport 的对象对齐与回填流程不在本刀交付。
 
 **废弃字段**: 单个 `owner`（歧义）、嵌套 `linked_objects`（过深）。
 
