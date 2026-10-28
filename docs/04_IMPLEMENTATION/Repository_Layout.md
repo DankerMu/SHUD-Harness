@@ -22,9 +22,11 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # 已挂载 shud_run 与索引式 shud_collect
-    dsh-shud-records/               # 规划：TaskCard/StackLock/EvidenceReport；持久化方案待 M3，M2 运行记录归 runs/<run_id>/
-    dsh-shud-presets/               # coordinator / worker / coder / reviewer agent preset 与 system prompt 段
+    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create；report_* 为 M3 后续切片
+    dsh-shud-records/               # M3 规划：四对象文件层、采集、报告渲染/校验/状态机；非 Cordis 插件
+      templates/                   # M3 规划：报告 Markdown 模板，仅此一个落点
+    dsh-shud-policy-gate/           # M3 规划：全局 tools/pre-execute，角色 deny + 报告 ask
+    dsh-shud-presets/               # M3 规划：coordinator/worker prompt + 全局 shud-role-restrict
   profile/
     shud/
       package.json                  # dsh bundle 声明（dsh.bundle.patch）
@@ -32,7 +34,6 @@ SHUD-Harness/
       overlays/                     # 可选 --patch 覆盖（本机 / CI）
   skills/                           # SHUD 专用 SKILL.md（run-shud-tiny-case 等，经 dsh skill-filesystem 加载）
   scripts/                          # 确定性脚本（TypeScript/R/bash），非 LLM
-  templates/                        # evidence_report.md 模板
   docs/                             # ADR + 计划 + 精简 spec（处置表执行后）
   openspec/                         # glossary + changes
   SHUD/ rSHUD/ AutoSHUD/            # 只读参考 submodule（保留）
@@ -95,12 +96,16 @@ HTTP 请求限时 15 秒，Web 启动 60 秒，首次工具提交 3 分钟，重
 ```text
 $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指定）
   profiles/shud/                    # 由 profile/shud 初始化的 profile
-  sessions/                         # session.v4.jsonl（回放 fixture 来源）
-  storages/                         # dsh 自有 storage-json 后端（如会话投影缓存）；不存 SHUD RunJob/RunRecord
-<workspace>/                        # 每个研究任务的工作区（session cwd = workspace root）
-  shud/                             # SHUD 二进制 + input/ + output/
-  runs/<run_id>/                    # 作业日志、pid 记录、产物清单
-  reports/                          # EvidenceReport Markdown
+  sessions/                         # 宿主 session.v4.jsonl.zstd（审计/回放证据）
+  storages/                         # dsh 自有 storage-json 后端，不存 SHUD 领域对象
+  profiles/shud/shud-jobs/          # 注册表 stateDir：active/completed 索引与排他锁
+<workspace>/                        # session cwd = workspace root；可容纳多张 TaskCard
+  tasks/<task_id>/task.json         # 已有最小 task_create；后续状态转换归 M3
+  stacks/<stack_id>.json            # M3 规划
+  provenance/<data_id>.json         # M3 规划
+  reports/<report_id>.json          # M3 规划：规范 EvidenceReport 对象
+  reports/<report_id>.md            # M3 规划：同名 JSON 的确定性 Markdown 投影
+  runs/<run_id>/                    # M2 运行记录、输入副本、日志、pid/退出码与 output 产物
 <data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```
 
