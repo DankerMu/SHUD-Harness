@@ -7,7 +7,7 @@ canonical_for: [pi-decision-verbs, pi-decision-memory-note]
 
 **状态：** v0.8.1 设计补充  
 **适用范围：** PI gate、EvidenceReport、MemoryNote、audit log、dsh 审批卡  
-**目标：** 让 PI 在 approve / reject / request_revision 时留下科学判断和上下文批注，使决策可复盘、可审计、但不被 Agent 自动泛化。
+**目标：** 让 PI 在接受、拒绝或要求修订时留下明确决定与上下文批注，使决策可复盘，但不被 Agent 自动泛化。
 
 ## 1. 背景
 
@@ -23,57 +23,28 @@ PI 的判断经常不是简单“接受/拒绝”。例如：
 
 ## 3. Decision enum
 
-```text
-approved
-rejected
-request_revision
-```
-
-报告状态可映射为：
-
-```text
-approved → accepted
-rejected → rejected
-request_revision → revision_requested
-```
+M3 报告 PiGateDecision 的 outcome 为 `accepted | rejected | revision_requested`，与对应报告终态同名；这是领域结果，不是宿主审批 outcome。宿主 `allowed-once` 只授权执行本次工具，`rejected` 不自动映射为报告 rejected 或 revision_requested。具体双卡流程见 §7。
 
 ## 4. Comment 必填规则
 
-| 场景 | comment 是否必填 |
+| M3 场景 | comment |
 |---|---|
-| 普通 approve report | 可选 |
-| reject | 必填 |
-| request_revision | 必填 |
-| approve scientific interpretation | 必填 |
-| 将 calibration 结果标记为 validated | 必填 |
-| 覆盖 benchmark baseline | 必填 |
-| 修改默认参数 | 必填 |
-| 应用影响论文结论的 patch | 必填 |
+| report_submit 获 allowed-once，accepted | null |
+| report_decide(rejected) 获 allowed-once | 必填非空 |
+| report_decide(revision_requested) 获 allowed-once | 必填非空 |
+| 任何工具审批未放行 | 工具不执行，不写领域决定 |
+
+高风险科学变更的额外 comment 要求仍见 [Scientific Change Gating §5](Scientific_Change_Gating_Spec.md#5-comment-required-rules)，属于后续科学变更链，不把这些动作伪装为普通 M3 报告接受。
 
 ## 5. PiGateDecision schema
 
-> 投影声明：PiGateDecision 字段事实源 = [Support_Schema_Contracts.md](Support_Schema_Contracts.md)，
-> 本节为语义解释用投影；本文的 **PiDecisionMemoryNote 是权威源**（Minimal_Schemas 中为其投影）。
+M3 的字段契约为 [evidence-reports / PiGateDecision](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md#requirement-pigatedecision-record)，schema 切片将同步 [Support_Schema_Contracts](Support_Schema_Contracts.md) 与 Minimal_Schemas。本文不再保留旧 gate_id/actor/decision 字段的第二套接口。`approval_ref` 固定取本次执行 callId，审计关联见 §8。
 
-```ts
-interface PiGateDecision {
-  decision_id: string;
-  gate_id: string;
-  task_id: string;
-  actor_user_id: string;
-  actor_role: "pi";
-  decision: "approved" | "rejected" | "request_revision";
-  comment?: string;
-  comment_required: boolean;
-  next_action?: string;
-  evidence_refs: string[];
-  created_at: string;
-}
-```
+本文的 **PiDecisionMemoryNote 是后续记忆对象权威源**（Minimal_Schemas 中为其投影），不是 M3 PiGateDecision 的替代持久化路径。
 
 ## 6. MemoryNote(type=pi_decision)
 
-PI comment 可以写入 MemoryNote，但必须保持任务级范围：
+MemoryNote 属于后续 M6 记忆评估，M3 不生成；若后续保存 PI comment，必须保持任务级范围：
 
 ```ts
 interface PiDecisionMemoryNote {
@@ -103,60 +74,39 @@ Agent 可以在同一任务上下文中引用该决策记录，但不能把它�
 
 ## 7. dsh 审批卡字段
 
-MVP 用 dsh 自带审批卡（ADR-0004 K7），PI gate 经 `tools/pre-execute` 返回 `ask` 进入 `ctx.approval`。
-dsh 审批 seam 的词汇是封闭、单次的（源：`../deepseek-harness` `docs/persistence-catalog.md` `approval/*`、
-`.agents/notes/implemented/feature/2026-07-06-approval-seam.md`）：
+M3 采用 design D9 候选 (a)：dsh 原生审批卡只放行/拒绝，comment 经同一会话对话承载，再以 `report_decide(report_id, disposition, comment)` 二次卡确认。不改宿主，不等新 form seam，也不新增 PI 专用工具。
 
-| 本规范 | dsh 审批 seam | 说明 |
-|---|---|---|
-| `approved` | `approval/decided` outcome = `allowed-once` | 只放行被询问的那一次调用，不持久授权 |
-| `rejected` | outcome = `rejected` | 调用 fail-closed 拒绝 |
-| `request_revision` | outcome = `rejected`（与 `rejected` 不可区分） | 审批卡只能放行/拒绝；修订要求的承载与 `comment` 同为开放项 |
-| —（非 PI 决定） | outcome = `cancelled` / `unavailable` | 中止或通道缺失，fail-closed 拒绝，不写 PiGateDecision |
-| 卡片展示的申请理由 | `ApprovalRequest.reason` / `displayReason` | 由发起方（策略门/agent）填写，**不是** PI comment |
-| `comment` | 无字段 | `approval/decided` 只有 `{ id, outcome }`；PI comment 的承载方式（对话 turn 或 user-interaction seam）为开放设计项 |
+1. coordinator 调 `report_submit(report_id)`，策略门返回 ask；allowed-once 执行后写 accepted、comment=null。
+2. submit 卡未获放行时报告保持 reviewed，TaskCard 保持 reporting，不写 PiGateDecision。
+3. coordinator 向 PI 索要非空 comment **及明确 disposition**（rejected 或 revision_requested）；任何一项缺失都不调用 decide，不把“拒绝＋comment”自动解释为修订。
+4. coordinator 调 `report_decide`，二次卡完整回显 disposition/comment；只有 allowed-once 后才写决定与终态，TaskCard 分别变 cancelled/planned。
+5. 二次卡被拒、取消或审批服务不可用时不执行工具、不写决定；先前被拒 submit 卡的字段不作为模型参数传入或写进决定对象。
 
-**开放设计项（M3 审批接线前定）**：PI comment 与 `request_revision` 在该 seam 上无字段。候选：(a) 审批卡只承载放行/拒绝，comment 由 PI 在同一会话的下一轮对话给出，coordinator 以 `approval/decided` 的 `id` 关联写入 `PiGateDecision.comment`，并把"拒绝 + 有 comment"映射为 `request_revision`；(b) dsh 升级若提供 user-interaction / form seam，则在卡片上直接收 comment；(c) 提供 PI 专用 `pi_decide` 工具（agent 身份被策略门 deny），决定与 comment 一次写入。MVP 硬约束不变：reject / request_revision / high-risk approve 没有 comment 时 gate 不得关闭（GR-003）——按 (a) 实现时 coordinator 必须先索要 comment 再落 PiGateDecision。
+| 字段/结果 | dsh seam 与 M3 含义 |
+|---|---|
+| allowed-once | 仅授权被询问的本次调用，不持久授权 |
+| rejected / cancelled / unavailable | fail-closed，报告保持 reviewed，无领域决定 |
+| ApprovalRequest.reason / displayReason | 策略门提供展示理由，不是 PI comment；decide 的卡片回显供 PI 核对的完整 comment |
+| approval/decided | 只有 id/outcome，无 comment 字段 |
+| approval_ref | 本次执行的 exec.callId；#426已证实工具拿不到approval id |
 
-MVP 不做行级批注。
+GR-003 在此路径的含义是不允许无 comment 的 rejected/revision_requested 终态；卡片拒绝本身不是报告终态。M3 不做行级批注；原始对话批注不得被自动提升为科学事实。
 
 ## 8. 审计
 
-每个 PI decision 必须写 audit log：
+M3 审计使用宿主 session log，不另造 AuditEvent 文件或日志订阅器：工具执行 callId 对应 `approval/asked.callId`，再以 asked.id 关联 decided.id；工具成功结果与持久 decision_history 相互核对。submit 与 decide 的 reason 均含 report_id，便于同会话中关联前次未放行与后次决定。
 
-```yaml
-audit_event:
-  id: AUDIT-001
-  actor_type: user
-  actor_id: user_pi
-  action: decide_pi_gate
-  target_id: GATE-001
-  decision_id: DECISION-001
-  result: success
-  timestamp: ...
-```
-
-Agent 永远不能自行做出 PI decision。
+只有本次获准执行的 callId 写入 approval_ref；不声称它直接携带 actor/gate 身份。Agent 只能转述 PI comment 与明确处置并提交二次卡，不能自行批准 PI 决定。
 
 ## 9. 报告 decision history
 
-EvidenceReport 应追加：
-
-```yaml
-decision_history:
-  - decision_id: DECISION-001
-    gate_id: GATE-001
-    decision: approved
-    actor: user_pi
-    comment: "同意仅用于 ccw tiny benchmark。"
-    timestamp: ...
-```
+EvidenceReport 的 decision_history 只追加规范 PiGateDecision，完整字段/状态规则见 §5 的唯一契约；accepted 的 comment 为 null，其余终态保存 PI 确认的非空原文。旧报告终态不覆盖，修订后新 report_id 不继承旧决定历史。
 
 ## 10. 验收标准
 
-- [ ] reject/request_revision 缺少 comment 时 server 返回 400。
-- [ ] Agent 调用 PI decision endpoint 被拒绝。
-- [ ] PI comment 写入 audit log。
-- [ ] PI comment 写入 MemoryNote，且 `generalization_allowed=false`。
-- [ ] EvidenceReport export 包含 decision history。
-- [ ] comment 不作为科学结论自动进入 observations。
+- [ ] 缺少非空 comment 或明确 disposition 时不调用 report_decide；非法参数被工具校验拒绝，不用 REST 400/403 作为契约。
+- [ ] report_submit/report_decide 只在 allowed-once 后执行；其他 outcome 或无审批服务时报告/卡片字节不变。
+- [ ] decide 卡完整回显 disposition/comment；PI 未确认不落领域决定。
+- [ ] decision_history 的 approval_ref 可经 session log callId/approval id 关联本次批准。
+- [ ] M3 不生成 MemoryNote 或独立 AuditEvent；报告 Markdown 含决定历史。
+- [ ] comment 不作为科学结论自动进入 observations；后续 MemoryNote 保持 generalization_allowed=false。
