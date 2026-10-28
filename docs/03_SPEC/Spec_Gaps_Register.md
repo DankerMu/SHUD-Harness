@@ -36,18 +36,15 @@ canonical_for: [spec-gaps-register]
 
 ### GAP-04: ID 生成策略
 
-- Minimal_Schemas.md 使用 TASK-0001, JOB-0001 等示例
-- 无任何文档定义: sequential vs UUID, 计数器存储位置, 并发安全
-- **影响**: 并发创建时 ID 碰撞
-- **实现选择**: （待填写）
+- **已定并已交付生成器**：core `createBrandedId(prefix)` 使用 `<PREFIX>-YYYYMMDDTHHMMSS-xxxx`（UTC 秒 + 两字节随机数的四位小写 hex），不是计数器或 UUID。TASK/STACK/DATA/REPORT/DEC 品牌 schema 随 #424 / PR #455 交付；各对象 schema 的后续迁移仍由 M3 对应切片完成。
+- **配对与碰撞**：同一次运行的 JOB/RUN 共享时间戳与随机段；其它对象独立生成。文件创建方必须检查冲突并按对象契约重分配，不把短随机后缀当成无碰撞保证；不新增全局计数器。
+- **依据**：[运行标识符实现](../../packages/dsh-shud-core/src/schemas/run-identifiers.ts) 与 [M3 design D3](../../openspec/changes/m3-mvp-1/design.md#d3-品牌-id-与-schema-对齐critical-path-7)。
 
 ### GAP-05: output_digest 算法（幂等 collect）
 
-- Park_Resume_Design.md (line 135-149): "collect 必须幂等"
-- Idempotency_Concurrency_Locking_Spec.md (line 49): key = `job_id + output_digest_or_exit_marker`
-- **未定义**: digest 是什么? 内容 hash 会因日志追加而变化
-- **建议**: exit_code + file_count + total_bytes（不用内容 hash）
-- **实现选择**: （待填写）
+- **M2 已解决**：collect 不使用 output_digest 或日志内容 hash。身份匹配且 schema 合法的既有 run-record.json 优先原样返回，字节与 mtime 不变；生成时仅扫描 output 产物的路径/大小元数据，日志只记路径。
+- **提交边界**：RunRecord 原子发布后，RunJob 的 collected 投影失败只重试投影，不重新扫描/改写已提交结果；日志追加不使结果失效。
+- **依据**：[M2 收集契约](../../openspec/changes/archive/2026-10-27-m2-run-chain/specs/run-records/spec.md) 与 [Park/Resume 收集说明](Park_Resume_Design.md#5-collect-阶段)。不采用旧建议的 exit_code/file_count/total_bytes 摘要键。
 
 ### GAP-06: RunJob.pid 条件存在性
 
@@ -113,11 +110,11 @@ canonical_for: [spec-gaps-register]
 - [ ] GAP-03: 验证 cost_budget.max_compute_minutes 是硬限制（SIGTERM）还是软监控
 
 ### 如果 diff 涉及对象创建（TaskCard/RunJob/RunRecord 等）:
-- [ ] GAP-04: 验证 ID 生成方式——sequential counter 还是 UUID?
+- [ ] GAP-04：品牌 id 是否复用唯一生成器、JOB/RUN 配对是否保持、文件冲突是否按对象契约处理？
 - [ ] 如果多处代码生成 ID，检查策略是否一致
 
 ### 如果 diff 涉及 collect / 幂等逻辑:
-- [ ] GAP-05: 验证 output_digest 算法——用了什么? 日志追加是否会改变 digest?
+- [ ] GAP-05：合法同身份 RunRecord 是否原样返回，提交后投影重试是否保持字节/mtime，是否误引入 output_digest/内容 hash？
 
 ### 如果 diff 涉及 RunJob schema:
 - [ ] GAP-06: 验证 pid 字段在不同 backend 下的处理

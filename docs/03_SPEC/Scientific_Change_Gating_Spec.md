@@ -8,6 +8,8 @@ canonical_for: [scientific-semantic-levels]
 **状态**：v0.8.3 P0 补充规范  
 **目标**：根据科学语义风险对 ChangeRequest 分级，并决定是否需要 Theory-to-Code Bundle、VerificationCase 和 PI approval。
 
+本页 ChangeRequest/VerificationCase 科学分级链属于 M4；M3 仅接线报告终态审批，按 [M3 policy-gate 契约](../../openspec/changes/m3-mvp-1/specs/policy-gate/spec.md) 执行。下列后续科学规则不表示 M3 已有相应工具或校验生产者。
+
 ## 1. Semantic level
 
 ```ts
@@ -169,11 +171,11 @@ calibration improved
 
 ## 7. 验收标准
 
-- [ ] semantic_level 高风险但缺 bundle 时 API 返回 422。
-- [ ] high-risk approve 无 comment 返回 400。
-- [ ] Agent 角色不能 approve scientific gate。
-- [ ] PI decision 写入 AuditEvent、MemoryNote、report decision history。
-- [ ] search/calibration 前置检查 bundle status。
+- [ ] semantic_level 高风险但缺 bundle 时，在相应工具/校验前置阶段返回明确错误，不执行变更；不以 REST 422 为契约。
+- [ ] high-risk approve 缺必需 comment 时校验拒绝，不关闭领域 gate；不以 REST 400 为契约。
+- [ ] Agent 不自行 approve scientific gate；需审批的工具经 tools/pre-execute ask，只有宿主 allowed-once 才执行，其余 outcome/无服务 fail-closed，不以 agent principal 的 API 403 代替审批语义。
+- [ ] 决定与批准证据可追溯：M3 为 session log 与 report decision_history，后续 AuditEvent/MemoryNote 不冒充当前已实现。
+- [ ] 后续 search/calibration 工具执行前校验 bundle status，失败为工具错误、不启动搜索。
 - [ ] 负例：files_changed 触及 floor=numerical_implementation 的路径而声明 pure_engineering → effective_level 按 floor 生效，gate 照常触发（EVAL-GOV-001）。
 - [ ] 负例：worktree 实际改动 solver 路径但 files_changed 漏报 → observed 集仍触发 floor，且对账失败拒绝进入 reviewed（EVAL-GOV-005，对抗审查 A01-1）。
 - [ ] 负例：AnalysisPlan.parameters 含 solver 容差键且无 accepted_for_search bundle → preflight 拒绝（对抗审查 A05-1）；含未登记键 → 直接 block。

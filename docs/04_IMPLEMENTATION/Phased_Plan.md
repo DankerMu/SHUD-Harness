@@ -50,8 +50,8 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 
 ## 3. M3 MVP-1
 
-**交付**：TaskCard 建卡/状态机；EvidenceReport Markdown 生成（模板 + RunRecord 引用）；StackLock（SHUD/rSHUD/AutoSHUD 版本 + 路径名 `git status` + llm 三字段）；DataProvenance 最小记录；审批接线（治理动作经 `tools/pre-execute` 返回 `ask`）；coordinator/worker 两个 agent preset。
-**验收门**：首任务端到端；报告措辞通过治理四条不变式检查。
+**交付**：TaskCard 建卡/状态机；EvidenceReport Markdown 生成（模板 + RunRecord 引用）；StackLock llm 三字段（base_url/request_alias/response_model）与 SHUD/rSHUD/AutoSHUD 三 submodule 修订、dirty 路径；DataProvenance 最小记录；审批接线（治理动作经 `tools/pre-execute` 返回 `ask`）；coordinator/worker 两个 agent preset。
+**验收门**：首任务端到端；报告含上述 StackLock llm 三字段与三 submodule 修订。“措辞过四条不变式”的机器判据仅为四句 GOVERNANCE_INVARIANTS 逐字出现且模型撰写节无禁止用语；语义合规不做机器判断，仍由 PI 审阅。此处定义验收，不声明 M3 已交付。
 
 ## 4. M4 MVP-2
 
