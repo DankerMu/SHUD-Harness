@@ -274,3 +274,38 @@ SHUD running: job_id=JOB-20261027T132408-0fd5, run_id=RUN-20261027T132408-0fd5, 
 - RunRecord 路径：`/Users/danker/Documents/SHUD-PI-Acceptance/runs/RUN-20261027T132408-0fd5/run-record.json`；SHA256 `6303758674fbcb093ae64b243db56d45c94ba957f708c2214ce88026dd465df4`。
 - 结果：`status=succeeded`、`exit_code=0`、`exit_class=ok`、30个产物文件；`collected_at=2026-10-27T13:29:09.007Z`。恢复生成的 `resources.wall_seconds=null`、`peak_memory_mb=null`，不解释为求解器耗时或性能改善。
 - RunJob 已为 `collected`，`notify.status=delivered`、`attempts=0`、`at=2026-10-27T13:29:09.184Z`。本次验收是实际 Web 的 SIGTERM 重启场景；此前自动化 SIGKILL 证据独立保留，不冒充本次 PI 手工步骤。
+
+### M3 K13 Web spike（2026-10-28，#426）
+
+本次使用钉版 dsh-v0.2.1-rc.2、已合入 #424/#425 的 bundle 与真实 `deepseek-flash-guan`。仅在仓库外 `../dsh-spike/runs/m3-issue426/` 放置一次性驱动、overlay、探针及独立 DSH_HOME/workspace；不改宿主、产品代码或 submodule。凭据只继承环境变量。此记录是后续 M3 契约依据，不是 EvidenceReport、科学结论或 #452 PI 验收。
+
+已执行的历史命令（证据目录已存在，不可直接复跑覆盖）：
+
+```sh
+env -u ALL_PROXY node ../dsh-spike/runs/m3-issue426/run-o3.mjs inherited
+env -u ALL_PROXY node ../dsh-spike/runs/m3-issue426/run-remaining.mjs remaining-d
+node ../dsh-spike/runs/m3-issue426/summarize-remaining.mjs remaining-d
+env -u ALL_PROXY node ../dsh-spike/runs/m3-issue426/run-remaining.mjs remaining-f switch-only
+```
+
+复现 remaining 驱动时必须换成新名称，例如先确认 `../dsh-spike/runs/m3-issue426/reproduce-full/` 不存在，再运行 `env -u ALL_PROXY node ../dsh-spike/runs/m3-issue426/run-remaining.mjs reproduce-full`；switch-only 同理使用另一个未用名称 `reproduce-switch`。名称只允许小写字母、数字和连字符。驱动拒绝已有目录，不删除或覆盖上面的历史证据；O3 历史模式目录同样应保留，不以重跑改写已消费证据。
+
+原始 O3 文件为 `probe.mjs`、`overlay.yml`、`run-o3.mjs` 与各模式 results/probe 文件；后半程为 `remaining-probe.mjs`、`remaining-overlay.yml`、`run-remaining.mjs`。后者实际启动命令是 `node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --patch <remaining-overlay.yml> --no-open --port 47935`，安装与启动共用该 run 的 DSH_HOME。通过真实 Web session/create、prompt、agentPresets/select 与 WebSocket 事件执行，不以直接调用工具替代模型路径；审批由实际 HTTP 事件回包完成。完整命令与终端回执保留在各 run 的 `result.json`，配置在 `dump-config.yml`，事件在 `probe.jsonl`、`browser-events.json`；`REMAINING-RESULTS.md` 保存失败尝试及逐条序号。
+
+首任务用户可见步骤：coordinator `c7fb7945-c071-445c-b7ec-1f10dca3562a` 的 task_create call/result seq17/24 创建 `TASK-20261028T065922-46e2`，subagent seq28 派生真实 worker `00ca8b1c-c462-41ba-96a8-751e1a6dd339`。worker shud_run seq16/23 使用 scratch ccw、end_days=30，**不带 task_id**，返回 `RUN-20261028T065929-d63a` / `JOB-20261028T065929-d63a`。job_output seq27/34 等待后，shud_collect seq49/56 按 run_id 成功；seq60/67 按持久 JOB id 也成功。worker final/end seq70/72 后，coordinator 收到原生 subagent-settled seq96，final/end seq97/100。两 agent 曾把 dsh 登记 id 误传给 collect，收到 Invalid job_id 后改用持久 id；没有隐藏错误或再次提交。
+
+持久证据在 `../dsh-spike/runs/m3-issue426/remaining-d/workspace/runs/RUN-20261028T065929-d63a/`：RunJob 为 collected、task_id=null、owner_session 为上述 worker；RunRecord 为 succeeded、exit_code=0、exit_class=ok，30 个产物，collected_at=2026-10-28T06:59:35.353Z。45 个 scratch 输入文件与源文件 SHA256 全部相同；END 仅由提交器在进一步复制的 run input 中修改。
+
+| 问题 | 实测结果与采用契约 |
+|---|---|
+| O1 owner / 唤醒 | owner 是真实 worker。notify 为 unreachable、attempts=3，detail 为 SHUD notification session restoration failed；两个会话均无 shud-jobs 来源消息。worker 等待/收集成功，coordinator 另以 run_id collect seq85/92 成功，故两条路径共同失败的停止条件未触发。worker 必须等待并收集，不依赖 SHUD 唤醒；subagent-settled 不是 SHUD 唤醒。未诊断宿主恢复失败根因。 |
+| O2 waterfall | 探针包装并实际调用构建后的 raw-guard，记录 worker seq17–22：raw enter→next→第二监听 enter→next→return allow→raw return allow。审批探针第二监听返回 ask，raw 原样返回 ask。实际组合没有 auto-review/hooks，不声称验证其顺序；产品保持 raw-guard 先于 policy-gate。 |
+| O3 restrict | preset apply 阶段全局工具未注册，task_create/shud_collect 为未知名，session/create 失败。最初全局备选仅允许 SHUD globals，会把 preset 提供的 job_* 一并过滤，因而停止回报；PI 在 issue comment 6462574806 明确重开，保留角色工具面与双重治理。新 inherited 模式实测允许 SHUD globals + job_*，coordinator 的 agent-owned subagent 留在 local，worker 无 local 工具；全局插件经 agent.ctx 绑定可行。唯一 role map 因此改为 inherited/local，restrict 取 inherited，policy 取并集；不是删除治理层。 |
+| O5 approval_ref | 真实 asked/decided seq23/24 的 id 为 1d160026-4a8b-451b-889c-2b236ac6465a，allowed-once 后才执行探针。execute 暴露 callId/rootCallId，不暴露 approval id；approval_ref 固定为本次 exec.callId，经 asked.callId→asked.id→decided.id 审计。WebSocket eventId 是不同标识。此无害探针审批不代表 PI 科学批准。 |
+| O6 当前角色 | root/child header 分别 coordinator/worker；真实空白会话 coordinator→worker→coordinator 切换不改创建 header。tools/change 时投影仍旧，committed agent-preset/selected 后投影与 composed role 一致；先装新 mask 再同步释放旧 mask 可恢复正确工具面。remaining-f 证实 agent.ctx.sessionProjections.stateOf(session, 'agentPreset') 可读；可选 agent.ctx.get('agentPresets') 也可读，未经注入的直接 agent.ctx.agentPresets 访问不可用。#444 将原地迁移唯一 readCallerPresetId 及 task_create 用例，不在本 spike 修改产品。 |
+
+压缩 session log 根为 `../dsh-spike/runs/m3-issue426/remaining-d/home/sessions/--Users-danker-Desktop-Hydro-SHUD-dsh-spike-runs-m3-issue426-remaining-d-workspace--/`，其下 `<id>/session.v4.jsonl.zstd`：coordinator `session-c7fb7945-c071-445c-b7ec-1f10dca3562a`、worker `00ca8b1c-c462-41ba-96a8-751e1a6dd339`、approval `session-78caab10-e0f0-4051-8f41-813b29b523cc`、blank switch `session-83dbeb6e-7bbc-46f6-b5f6-3bb61e7cf1fa`。父编排独立解压核对工具事件与持久记录；路径和解压副本同存 result/summary，证据不入库。
+
+边界与清理：remaining-a/b 因 Web interactions=none 无模型/求解器运行；修正为 answer。remaining-c 驱动误将 coordinator 首轮结束当完成而过早关宿主，`limits.json` 明确作废其 K13/O1 verdict，不计成功；其求解器自然退出0。remaining-d 才是完整闭环。remaining-e 的直接未注入服务访问失败，remaining-f 用公开 agent.ctx 服务验证。所有自有宿主与 wrapper 的指定 PID 检查均已退出，两次实际求解器都有 exit_code=0；没有广域 kill。O3 原停止记录保留于 issue comment 6462425572，重开是 PI 明确授权，不追认原失败为通过。后续必须按受影响 OpenSpec requirement 实现并复审；本次没有验证报告工具、产品角色切换清理或完整 M3 首任务。
+
+子会话通知恢复失败的独立诊断已登记 [#457](https://github.com/DankerMu/SHUD-Harness/issues/457)，不阻塞本次已验证的等待/收集路径，不放宽 `shud:restart` 的 delivered 判据。

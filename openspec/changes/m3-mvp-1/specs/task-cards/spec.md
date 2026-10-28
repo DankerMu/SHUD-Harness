@@ -96,7 +96,7 @@ TaskCard 状态 SHALL 只按下表转换；每次转换 SHALL 同时写入表中
 - **THEN** 写入的 `status` 从不为 `awaiting_pi`、`parked`、`blocked` 或 `created`
 
 ### Requirement: task_create
-`task_create` SHALL 接受参数：`type`（必填，取值只能为 `science_assist`，无缺省值）、`title`（必填，非空字符串）、`question_or_goal`（必填，非空字符串）。`type` 缺失或为 `engineering`、`ops`，其它必填参数缺失或为空，或出现未知参数时，调用 SHALL 返回指出原因的工具错误且 SHALL NOT 创建 `tasks/` 下任何文件。成功时 SHALL 确定性写入 TaskCard：`status: planned`、`runtime_phase: null`、`created_by` 与 `current_owner` 为调用 Agent 的 preset id——经 policy-gate「Caller role derivation」的同一读取路径 `exec.agent?.session.header.agentPreset` 取得的非空字符串原值，读取路径中任一环节缺失时为 `unknown`（首任务中为 `coordinator`）——、`reviewer: pi`、`inference_budget: {mode: "normal"}`、`stack_id: null`、`data_id: null`、`linked_jobs: []`、`linked_reports: []`，并在结果中返回 `task_id` 与 `status: planned`。
+`task_create` SHALL 接受必填参数 `type: science_assist`、非空 `title`、非空 `question_or_goal`，无 type 缺省值。非法 type、缺失/空字段、未知参数或错误根类型 SHALL 返回明确工具错误且不创建文件。成功卡片固定为 planned、runtime_phase null、reviewer pi、inference_budget `{mode: normal}`、stack_id/data_id null、空 linked_jobs/linked_reports。created_by/current_owner SHALL 经 policy-gate「Caller role derivation」同一 `readCallerPresetId` 取得当前 preset 投影的非空原值，缺失为 unknown；不能用冻结的创建 header 覆盖当前身份。结果返回 task_id 与 status planned。
 
 调用 SHALL 提供有效会话 cwd；缺少 agent、session 或非空 cwd 时 SHALL 在访问文件系统前返回指出工作区缺失的错误，SHALL NOT 回退宿主进程目录。preset 身份缺失与工作区缺失 SHALL 分别处理。
 
@@ -108,8 +108,8 @@ TaskCard 状态 SHALL 只按下表转换；每次转换 SHALL 同时写入表中
 - **WHEN** 模型以 `type: engineering` 或 `type: ops` 调用 `task_create`，或省略 `type`
 - **THEN** 工具返回错误结果，会话 cwd 下不新增 `tasks/` 条目
 
-#### Scenario: creator without a preset header
-- **WHEN** 工具执行上下文具有会话 cwd，但会话 header 没有 `agentPreset` 时调用合法的 `task_create`
+#### Scenario: creator without a current preset
+- **WHEN** 工具执行上下文具有会话 cwd，但没有有效当前 preset 投影时调用合法的 task_create
 - **THEN** 建卡成功，`created_by` 与 `current_owner` 均为 `unknown`
 
 #### Scenario: missing calling workspace
