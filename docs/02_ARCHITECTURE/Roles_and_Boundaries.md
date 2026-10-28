@@ -81,9 +81,7 @@ Coordinator 负责：
 - 提出“建议下一步”，但不做最终科学判断。
 ```
 
-> **修订注（2026-07-16，例外批次 7）**：上列「选择是否直接 bash」已被 ADR-0002 开工三决②取代——
-> coordinator **无直接 bash**；其可用工具面以 tool-registry-governance 的 role→tool_id canonical
-> 映射表为唯一权威（该 spec 已显式声明优先级）。本句保留仅作历史记录。
+> Coordinator 无直接 bash；角色工具清单的唯一代码来源为 [core role-tool-map](../../packages/dsh-shud-core/src/governance/role-tool-map.ts)。M3 目标清单与 inherited/local 分类见 [agent-presets 契约](../../openspec/changes/m3-mvp-1/specs/agent-presets/spec.md#requirement-role-tool-map-uses-mounted-names)：coordinator 派 worker 调用 shud_run，不直接提交运行；restrict 与 policy-gate 共用该清单。其余角色的后续画像不代表 M3 已挂载对应 preset。
 
 Coordinator 不负责：
 

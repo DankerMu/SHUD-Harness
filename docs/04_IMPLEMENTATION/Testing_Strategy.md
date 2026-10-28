@@ -27,7 +27,7 @@ status: frozen
 |---|---|---|---|
 | M1 | core schema 正反例、policy-gate 决策表、raw-guard 单测 + 5 探针、profile `--dump-config` 自检、docs link | schema-only | PR |
 | M2 | `shud_run`/`shud_collect`、durable JobRegistry 落盘与对账、SIGTERM/SIGKILL 重启用例、RunRecord 产出 | dummy-runner + ccw tiny | PR（dummy）/ nightly·manual（ccw） |
-| M3 | TaskCard 状态机、StackLock 三仓库 + llm 三字段、EvidenceReport 语言护栏与水印、PI decision 负例 | report fixture | PR |
+| M3 | TaskCard 状态机、StackLock 三仓库 + llm 三字段、EvidenceReport 语言护栏与水印、PI decision 负例 | 1 成功 + 1 失败 RunRecord，带可解析 TaskCard/StackLock/DataProvenance 引用；无 metrics/figure/AnalysisPlan 产物 | PR |
 | M4 | ChangeRequest/VerificationCase、openMP RHS 回放与 serial baseline 一致性、故意注入错误 patch 被拦截 | old-output | PR/nightly |
 | M5 | AnalysisPlan OAT 批次、失败参数集可见、汇总表可复算 | dummy-batch | PR |
 | M6 | 各项评估的一页文档链接检查 | none | PR |

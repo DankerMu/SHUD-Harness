@@ -28,29 +28,21 @@ SHUD-Harness/          ← 项目根
 
 ### 1.2 Runtime workspace (执行副本)
 
-每个 TaskCard 对应的运行时工作区：
+会话 cwd 是工作区根；一个工作区可包含多张 TaskCard。M3 的对象落点如下（目标契约，随 [m3-mvp-1](../../openspec/changes/m3-mvp-1/design.md#d2-工作区文件落点与原子写) 交付；M2 runs 布局保持不变）：
 
 ```text
 workspace/
-  repos/
-    SHUD/              ← 从 source submodule clone 或 worktree
-    rSHUD/
-    AutoSHUD/
-  stacks/
-  provenance/
-  secrets/
-  data/             ← 仅派生/中间数据；原始数据 raw/ 不在此处（见下）
-  tasks/
-  jobs/
-  runs/
-  artifacts/
-  reports/
-  sessions/
-  warehouse/
-  tmp/
+  tasks/<task_id>/task.json
+  stacks/<stack_id>.json
+  provenance/<data_id>.json
+  reports/<report_id>.json
+  reports/<report_id>.md
+  runs/<run_id>/
 ```
 
-原始数据目录 `<data_root>/raw/` **必须位于 workspace root 之外**（ADR-0004 治理不变式：dsh `workspace-write` 沙箱下由 Seatbelt 拒写，`data/raw` 字节保护不依赖字符串扫描）。`DataProvenance` 以绝对路径 + sha256 引用它。布局以 `04_IMPLEMENTATION/Repository_Layout.md` §2 为准。
+`repos/`、task worktree、分析 artifacts、warehouse、通知等下文目录是后续能力的预留布局，不由 M3 创建。会话与作业索引属于宿主/profile stateDir，不混入这张领域对象目录表。
+
+原始数据目录 `<data_root>/raw/` **必须位于 workspace root 之外**（ADR-0004 治理不变式：dsh `workspace-write` 沙箱下由 Seatbelt 拒写，`data/raw` 字节保护不依赖字符串扫描）。M3 DataProvenance 记录提交输入副本的文件级 sha256，不在此定义原始数据语义分类。布局以 [Repository Layout §2](../04_IMPLEMENTATION/Repository_Layout.md#2-运行时资产不进代码仓) 为准。
 
 ### 1.3 映射关系
 
@@ -76,56 +68,43 @@ workspace/
 ## 2. Task 目录
 
 ```text
-tasks/TASK-001/
-  task.yaml
-  plan.md
-  parked_state.yaml
-  gates/
-  notes.md
-  locks/
+tasks/<task_id>/
+  task.json
 ```
 
-TaskCard 是任务生命周期核心；不要把所有运行输出塞到 task 目录中。
+`task_id` 使用 `TASK-<UTC>-xxxx` 品牌格式，路径拼接前校验。M3 不创建 task.yaml、parked_state.yaml 或 task 内索引/锁。TaskCard 是任务生命周期核心；运行输出留在独立 run 目录。
 
 ## 3. Run 目录
 
 ```text
-runs/RUN-001/
-  run.yaml
-  input/
-  output/
-  logs/
-  metrics.yaml
-  artifacts.yaml
+runs/<run_id>/
+  run-job.json
+  run-record.json                 # 终态收集成功后发布
+  collect-error.json              # 收集生成失败时记录，成功后保留既有文件
+  input/<project>/               # 普通文件/目录的完整输入副本
+  output/<project>.out/           # 求解器产物
+  stdout.log
+  stderr.log
+  wrapper.pid
+  exit_code                      # 包装进程完成时原子发布
 ```
 
-每个 RunRecord 对应一个 run directory。参数扫描中每个参数集单独 run directory。
+这是 M2 已交付布局；可选/完成后文件并非提交时全部存在。active.json、completed.json、lock 与永久 .lock-guard 位于插件 stateDir，不在 run 目录。每个 RunRecord 对应一个运行目录，产物只记路径与元数据，M3 不增加 metrics.yaml 或 artifacts.yaml。
 
-## 4. Artifact 目录
+## 4. 领域对象与 Artifact 落点
 
-```text
-artifacts/
-  logs/
-  figures/
-  metrics/
-  reports/
-  patches/
-  repo_context/
-  toolcalls/
-  manifests/
-  manifest-sets/
-```
+| 对象 | M3 工作区路径 | 所有权 |
+|---|---|---|
+| TaskCard | `tasks/<task_id>/task.json` | records 文件层，经工具推进状态 |
+| StackLock | `stacks/<stack_id>.json` | 提交期确定性采集/复用，不覆盖既有 lock |
+| DataProvenance | `provenance/<data_id>.json` | 每次提交从输入副本生成 |
+| EvidenceReport | `reports/<report_id>.json` | 规范对象，含 decision_history |
+| Markdown 报告 | `reports/<report_id>.md` | 同名 JSON 的确定性投影，状态改变后重渲染 |
+| RunJob / RunRecord | `runs/<run_id>/{run-job,run-record}.json` | M2 注册表与收集器 |
 
-### 补充目录
+以上对象不经 ctx.storage，不另建 stateDir 对象索引；目录与目标文件拒绝符号链接/特殊文件，读入后校验 schema。records 包是 M3 规划文件层，不是 Cordis 服务行。报告不在 `artifacts/` 下保留第二份。
 
-```text
-snapshots/          — workspace/session/task 状态快照
-locks/              — 幂等锁和任务锁文件
-exports/            — 报告导出文件
-packages/           — 数据打包（evidence/debug/benchmark）
-notifications/      — 通知记录
-readiness/          — readiness gate 签核 YAML（Readiness_Checklist；2026-07-02 对齐审查 E-4 补录）
-```
+后续 M4/M5 的 figures、metrics、patches、repo_context、manifests 与数据打包路径由对应契约定义；不据此要求 M3 生成不存在的分析或导出产物。
 
 Artifact 文件名建议包含 task/run/report ID：
 
@@ -202,13 +181,14 @@ resolve path
 
 ## 9.1 Operational UX artifact paths
 
-### Report export
+### Report files
 
 ```text
-artifacts/reports/REPORT-001.md
-artifacts/reports/REPORT-001.standalone.html
-artifacts/reports/REPORT-001.export_manifest.yaml
+reports/<report_id>.json
+reports/<report_id>.md
 ```
+
+M3 只交付 Markdown 及规范 JSON；不生成 HTML。`export_manifest.yaml` 属于 M4 导出规划，不是 M3 报告必需产物。下面的通知/分析进度等 operational UX 目录仍是后续规划，不代表当前宿主已经生成这些文件。
 
 ### Notification records
 

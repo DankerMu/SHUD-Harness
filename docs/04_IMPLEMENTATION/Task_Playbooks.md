@@ -6,45 +6,58 @@ status: frozen
 
 > 交互面 = `dsh --profile shud` 自带聊天、审批卡片、作业卡片 + Markdown 报告文件（ADR-0004 K2/K7）；下列步骤中的工具与 seam 名以 [Phased_Plan v2](Phased_Plan.md) 为准。
 
-## 1. 工程任务：添加输出诊断
+M3 交付目标以 [m3-mvp-1 design](../../openspec/changes/m3-mvp-1/design.md) 为准；以下首任务流程中的报告工具与角色 preset 随该 change 后续切片交付，不表示当前均已挂载。已挂载工具用法见 [Repository Layout](Repository_Layout.md)。
+
+## M3 首任务：ccw 运行与报告
+
+1. Coordinator 调用 `task_create(type="science_assist", title, question_or_goal)`，记录落到会话工作区 `tasks/<task_id>/task.json`，不经 `ctx.storage`。
+2. Coordinator 通过 `subagent` 显式派发 `worker`，任务含 `task_id` 与输入副本路径；coordinator 不直接调用 `shud_run`。
+3. Worker 调用 `shud_run(task_id, input_dir)`。提交器确定性采集/复用 `stacks/<stack_id>.json` 并从运行输入副本生成 `provenance/<data_id>.json`；不是由模型编造版本或 hash。
+4. Worker 用当前 `dsh_job_id` 调 `job_output` 等待，再用持久 `run_id` 或 `job_id` 调 `shud_collect`，取得终态 RunRecord 后才返回。#426 实测子会话 SHUD 唤醒未送达，不能以唤醒或 job_output 单独代替收集证据；coordinator 保留自行 collect 的兜底。
+5. Coordinator 调用 `report_generate`，再 `report_validate`；报告对象为 `reports/<report_id>.json`，Markdown 为同名 `.md` 的确定性投影。缺失的 metrics/图表写入 limitations，M3 不生成这些科学指标。
+6. Coordinator 调用 `report_submit`，PI 经 Web 审批决定；未获放行保持 reviewed，后续 comment 与 `report_decide` 流程见 [PI 决策规范](../03_SPEC/PI_Decision_Comments_Spec.md) 及 [M3 policy-gate 契约](../../openspec/changes/m3-mvp-1/specs/policy-gate/spec.md)。工程检查不代替 PI 验收。
+
+下列工程、敏感性分析与运维画像属于后续里程碑；M3 `task_create` 仅接受 science_assist，不能把 engineering/ops 或 AnalysisPlan 示例当成当前工具能力。
+
+## 1. 工程任务：添加输出诊断（M4 规划）
 
 ```text
 PI 在对话框输入：添加 event_flux 诊断，但不能破坏旧 rSHUD reader。
 
 步骤：
-1. Coordinator 建 TaskCard (type=engineering)，记录经 `ctx.storage` 持久化
-2. Coordinator 生成 StackLock（SHUD/rSHUD/AutoSHUD 版本 + `git status` + llm 三字段）
-3. Coordinator 调用 `shud_run` 工具跑 baseline tiny，经 `ctx.jobs` 提交
+1. Coordinator 规划工程 TaskCard；工程类型工具入口在 M4 定义，领域记录使用工作区文件，不经 ctx.storage
+2. 运行提交路径负责 StackLock（SHUD/rSHUD/AutoSHUD 版本 + dirty_paths + llm 三字段）
+3. Coordinator 派 Worker 调用 shud_run 跑 baseline tiny，经 ctx.jobs 提交
    → dsh 作业卡片展示编译/运行日志
-4. Worker 修改 SHUD output (在 worktree 中)
-5. Worker 修改 rSHUD reader
-6. `shud_run` 跑 tiny；rSHUD roundtrip + old-output fixture 走 `scripts/` 确定性脚本；`shud_collect` 解析产物 → RunRecord
+4. Coder 修改 SHUD output（在可写工作副本中，不改只读 submodule）
+5. Coder 修改 rSHUD reader
+6. Worker 以 shud_run 跑 tiny；rSHUD roundtrip + old-output fixture 走 scripts/ 确定性脚本；shud_collect 收集产物元数据 → RunRecord
 7. 生成 ChangeRequest + patch bundle
 8. 生成 EvidenceReport（Markdown 文件写入 workspace `reports/`）→ 对话中给出路径与摘要
 9. 合入动作经 `tools/pre-execute` 返回 ask → dsh 审批卡片 → PI 批准或拒绝（修订意见在对话中回复）
 ```
 
-## 2. 科学辅助任务：洪峰偏低敏感性分析
+## 2. 科学辅助任务：洪峰偏低敏感性分析（M5 规划）
 
 ```text
 PI 在对话框输入：对 Cache Creek storm，检查 ksat 和 roughness 对洪峰的敏感性。
 
 步骤：
-1. Coordinator 建 TaskCard (type=science_assist)
-2. Coordinator 登记 DataProvenance
-3. Coordinator 创建 AnalysisPlan (mode=sensitivity)
-4. 调用 `shud_run` 跑 baseline，经 `ctx.jobs` 提交 → dsh 作业卡片展示日志
-5. 逐参数集调用 `shud_run`（6 组合），每组一个独立作业
-   → 长任务: agent park（空闲），作业完成通知自动唤醒新 turn
-6. `shud_collect` 汇总 metrics；tornado 图作为 figure artifact 写入 run 目录
-7. 生成 EvidenceReport Markdown → 对话中给出路径与摘要
+1. Coordinator 以 task_create 建 TaskCard（type=science_assist）
+2. 每次提交从输入副本确定性生成 DataProvenance
+3. Coordinator 创建 AnalysisPlan（mode=sensitivity，M5 能力）
+4. Coordinator 派 Worker 调用 shud_run 跑 baseline，经 ctx.jobs 提交
+5. Worker 逐参数集调用 shud_run（6 组合），每组一个独立作业
+   → Worker 等待并以 shud_collect 取得终态记录后返回，不假定子会话 SHUD 唤醒可用
+6. shud_collect 只返回 RunRecord；metrics/tornado 图由 M5 的独立确定性分析生产者生成，不冒充 M3 已有能力
+7. Coordinator 通过 report_generate/report_validate/report_submit 生成、校验并提交报告
 8. PI 在对话中选择下一步（涉及治理动作时经 `tools/pre-execute` 返回 ask → dsh 审批卡片）
 ```
 
 Agent 不得写："H2 is validated"。
 Agent 可以写："Within this event, peak timing is more sensitive to hillslope roughness multiplier than ksat multiplier."
 
-## 3. 运维任务：记录失败经验
+## 3. 运维任务：记录失败经验（后续画像，非 M3 工具入口）
 
 ```text
 Coordinator 自动记录一次兼容性失败：

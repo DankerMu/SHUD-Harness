@@ -20,7 +20,7 @@ status: frozen
 | dummy-batch | AnalysisPlan/AnalysisProgressPayload（Heatmap 出 MVP；最小 OAT 见 Phased_Plan M5） | 否 |
 | old-output fixture | rSHUD backward compatibility | 部分依赖 rSHUD |
 | ccw tiny | 真实 SHUD/rSHUD 闭环 | 是 |
-| report fixture | EvidenceReport/export/language guard | 否 |
+| report fixture | M3 EvidenceReport 渲染/校验/语言护栏；不含 M4 导出 | 否 |
 
 ---
 
@@ -174,19 +174,20 @@ metrics/figure 的具体里程碑、生产者、格式和落点未在本节确�
 ```text
 one succeeded RunRecord
 one failed RunRecord
-one metrics artifact
-one missing figure artifact
-one AnalysisPlan progress artifact
+matching TaskCard, StackLock and DataProvenance records with branded ids
+no metrics, figure or AnalysisPlan progress artifacts
 ```
+
+这是 [M3 EvidenceReport 契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 的确定性 fixture，不要求真实求解器或伪造科学分析。每个引用必须可解析；两份 RunRecord 分别展示成功与失败事实，不能用成功运行掩盖失败。
 
 ### 验收
 
-- report 包含 observations；
-- report 包含 limitations；
-- report 包含 pi_questions；
-- missing artifact 被标注，不崩溃；
-- forbidden language guard 生效；
-- Markdown 报告文件按状态带可见水印或 accepted 标记（Report_Generation_Spec §水印）。
+- report 包含 observations、limitations、pi_questions；
+- 事实表保留两次运行的状态、退出类别、来源与产物引用；
+- metrics/图表未生产的事实写入 limitations，不生成假数值或缺失文件引用；
+- 虚构或不可解析的引用明确拒绝，不静默忽略；
+- forbidden language guard 生效，四句治理不变式逐字出现；
+- Markdown 按七态规则带可见水印或 accepted 标记；规范对象位于 `reports/<report_id>.json`，投影为同名 `.md`。
 
 ---
 
