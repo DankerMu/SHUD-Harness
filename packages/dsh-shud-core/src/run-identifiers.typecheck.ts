@@ -2,6 +2,7 @@
 // Keep outside schemas/, whose modules are imported during schema generation.
 import {
   createBrandedId,
+  DataProvenanceSchema,
   generateRunIdentifiers,
   JobRecordIdSchema,
   RunIdSchema,
@@ -9,6 +10,7 @@ import {
   StackLockSchema,
   TaskCardSchema,
   type DataId,
+  type DataProvenance,
   type DecisionId,
   type JobRecordId,
   type RunId,
@@ -76,6 +78,11 @@ const parsedStackLockId: StackId = stackLock.stack_id;
 // @ts-expect-error Plain strings cannot be assigned to the public StackLock stack_id field.
 const plainStackLockId: StackLock["stack_id"] = "STACK-20261027T080000-3f9a";
 
+const dataProvenance = DataProvenanceSchema.parse(stored);
+const parsedDataProvenanceId: DataId = dataProvenance.data_id;
+// @ts-expect-error Plain strings cannot be assigned to the public DataProvenance data_id field.
+const plainDataProvenanceId: DataProvenance["data_id"] = "DATA-20261027T081000-7d2e";
+
 void [
   generatedJob,
   generatedRun,
@@ -111,4 +118,6 @@ void [
   nullData,
   parsedStackLockId,
   plainStackLockId,
+  parsedDataProvenanceId,
+  plainDataProvenanceId,
 ];

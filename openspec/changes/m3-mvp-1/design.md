@@ -42,6 +42,21 @@ Smoke: direct Node invocation against a disposable git repository yields a schem
 Non-goals: captureStackLock, records package, installer/jobs configuration, other object schema alignment, buffer-limit changes, extra git calls, dependencies or compatibility shims.
 Review focus: NUL/R/C completeness, code-point order, strict nested shapes, read-only guarantees, overflow classification, canonical serialization/exclusion precision and generated-example validity.
 
+## Issue #431 implementation boundary
+
+Change surface: DataProvenance schema and dedicated tests, corresponding old core-schemas cases, schema self-test, generated DataProvenance projections, Minimal_Schemas §3; approved registry example and existing compiler fixture.
+Must change: reuse DataIdSchema; strict sources `{ input_root, files: [{ path, sha256, size_bytes }] }`; required nullable event_window endpoints; required literal-null preprocess/uncertainty_notes; remove old terrain/mesh/forcing/observations/preprocess-params shapes.
+Schema/producer distinction: D3 and issue #431 require event_window endpoints to accept nonempty string or null; M3 generation in D6 emits both null because the producer is undefined until M5. Do not narrow the schema to literal null or invent timestamp parsing.
+Scalar contracts: basin and sha256 stay nonempty strings; size_bytes is a nonnegative integer, including zero. input_root is absolute using existing path-validation conventions; files[].path is a nonempty relative POSIX path, with parent traversal/NUL rejected and legal filename characters preserved. No filesystem reads, new digest syntax, minimum file count or array-order/uniqueness constraint in this schema slice; deterministic inventory ordering belongs to generation.
+Reuse existing primitives. A minimal extraction of StackLock's relative-POSIX scalar inside schemas may serve both schemas; preserve StackLock behavior and generated output exactly. Do not copy the predicate or change RunRecord's distinct cross-platform artifact-path policy.
+Must preserve: every unrelated schema/generator assertion, TaskCard unknown-key stripping, strict registry example round-trip, closed object traversal through arrays and nullable/union branches, all existing StackLock contracts.
+Open-record removal: delete intentionalOpenRecordBoundary and its bypass/helper/import; replace obsolete observations.station/params-empty assertions with the new file-array/null shape. Self-test must reject open records even at the former DataProvenance.preprocess.params identity/path, not merely stop exercising it.
+PI-approved cleanup boundary: removing the old params-rendering self-test leaves yamlLines used only inside scripts/schema/render.ts. Remove only that declaration's export keyword; preserve its implementation and generated output. This one-line boundary extension removes the dead export rather than adding an incidental test consumer or weakening knip.
+Public type evidence: parsed DataProvenance.data_id assigns to DataId; a plain string cannot assign to DataProvenance["data_id"], checked in the existing compiler-owned fixture, not runtime expectTypeOf.
+Required evidence: minimal branded/null record red before implementation; required/strict/legacy/nullable/path/size positive and negative cases; legacy UUID rejected; generated example parses; open-record bypass regression red then green; full default check and direct Node parse/rejection smoke.
+Non-goals: generateProvenance, input inventory/hash computation, persistence/submission/configuration, semantic source classification/window calculation, other schema field migrations, dependencies and compatibility shims.
+Review focus: strict nested fields and nullability, public brand, path-scalar reuse without sibling drift, removal rather than weakening of the open-record exception, valid generated examples and no false producer claims.
+
 ## Context
 
 动机见 proposal.md「Why」。约束均已在钉版 `dsh-v0.2.1-rc.2` 的 npm 包/文档核查（#420 证明 rc.4 对这些 seam 逐字节无变化）：

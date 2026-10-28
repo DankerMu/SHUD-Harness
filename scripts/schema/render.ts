@@ -328,7 +328,7 @@ export function buildExample(
   return "example";
 }
 
-export function yamlLines(value: unknown, indent = 0): string[] {
+function yamlLines(value: unknown, indent = 0): string[] {
   const prefix = " ".repeat(indent);
 
   if (Array.isArray(value)) {

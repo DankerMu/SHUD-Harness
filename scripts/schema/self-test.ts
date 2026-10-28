@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z, type ZodType } from "zod";
 
-import { DataProvenanceSchema } from "../../packages/dsh-shud-core/src/schemas/data-provenance.ts";
 import { TaskCardSchema } from "../../packages/dsh-shud-core/src/schemas/task.ts";
 import { recreateGeneratedDirectory } from "./generated-paths.ts";
 import {
@@ -19,16 +18,8 @@ import {
   buildMarkdown,
   flattenFields,
   nonNullSchema,
-  yamlLines,
   type JsonSchema,
 } from "./render.ts";
-
-const intentionalOpenRecordBoundary = {
-  name: "DataProvenance",
-  exportName: "DataProvenanceSchema",
-  schema: DataProvenanceSchema,
-  path: "DataProvenance.preprocess.params",
-} as const;
 
 function parseGeneratedYaml(lines: string[]): unknown {
   const tokens = lines.map((line, index) => {
@@ -338,19 +329,12 @@ function assertGeneratorSemanticContracts(): void {
     schemaDefinitions.find((definition) => definition.name === "DataProvenance")!,
   );
   const dataProvenanceFields = flattenFields(dataProvenanceSchema).map((field) => field.field);
-  if (!dataProvenanceFields.includes("sources.observations[].station")) {
-    failures.push("DataProvenance fields omit sources.observations[].station");
+  if (!dataProvenanceFields.includes("sources.files[].sha256")) {
+    failures.push("DataProvenance fields omit sources.files[].sha256");
   }
   const dataProvenanceDefinition = schemaDefinitions.find(
     (definition) => definition.name === "DataProvenance",
   )!;
-  if (
-    !yamlLines(
-      buildExample(dataProvenanceSchema, dataProvenanceDefinition.exampleOverrides),
-    ).includes("  params: {}")
-  ) {
-    failures.push("DataProvenance empty params record is not rendered as {}");
-  }
 
   const artifactManifestSchema = buildJsonSchema(
     schemaDefinitions.find((definition) => definition.name === "ArtifactManifest")!,
@@ -458,10 +442,26 @@ function assertGeneratorSemanticContracts(): void {
     assertStrictInputClosed(dataProvenanceSchema, dataProvenanceDefinition);
   } catch (error) {
     failures.push(
-      `intentional DataProvenance preprocess.params record was rejected: ${
+      `DataProvenance strict input was rejected: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
+  }
+
+  try {
+    const formerOpenRecordSchema = z.strictObject({
+      preprocess: z.strictObject({ params: z.record(z.string(), z.unknown()) }),
+    });
+    assertThrows(
+      () =>
+        assertStrictInputClosed(
+          z.toJSONSchema(formerOpenRecordSchema, { io: "input" }) as JsonSchema,
+          dataProvenanceDefinition,
+        ),
+      "DataProvenance.preprocess.params strict JSON Schema additionalProperties must be false",
+    );
+  } catch {
+    failures.push("strict closure accepts the former DataProvenance.preprocess.params open record");
   }
 
   if (failures.length > 0) {
@@ -569,9 +569,6 @@ function assertStrictInputClosed(
   const schemaWithoutNull = nonNullSchema(schema);
 
   if (schemaWithoutNull.type === "object") {
-    if (isIntentionalOpenRecordBoundary(schemaWithoutNull, definition, path)) {
-      return;
-    }
     if (schemaWithoutNull.additionalProperties !== false) {
       throw new Error(`${path} strict JSON Schema additionalProperties must be false`);
     }
@@ -595,21 +592,6 @@ function assertStrictInputClosed(
       assertStrictInputClosed(member, definition, `${path}.${label}[${index}]`);
     });
   }
-}
-
-function isIntentionalOpenRecordBoundary(
-  schema: JsonSchema,
-  definition: SchemaDefinition,
-  path: string,
-): boolean {
-  return (
-    definition.name === intentionalOpenRecordBoundary.name &&
-    definition.exportName === intentionalOpenRecordBoundary.exportName &&
-    definition.schema === intentionalOpenRecordBoundary.schema &&
-    path === intentionalOpenRecordBoundary.path &&
-    schema.properties === undefined &&
-    typeof schema.additionalProperties === "object"
-  );
 }
 
 function assertNoAdditionalPropertiesFalse(schema: JsonSchema, path: string): void {

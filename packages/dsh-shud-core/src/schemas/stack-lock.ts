@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { compareRepositoryPaths } from "../stack-lock/compare-paths.ts";
+import { isRelativePosixPath } from "./relative-posix-path.ts";
 import { StackIdSchema } from "./run-identifiers.ts";
 
 const RepositoryRevisionSchema = z
@@ -9,16 +10,9 @@ const RepositoryRevisionSchema = z
     dirty: z.boolean(),
     dirty_paths: z
       .array(
-        z
-          .string()
-          .min(1)
-          .refine(
-            (path) =>
-              !path.startsWith("/") && !path.includes("\0") && !/(?:^|\/)\.\.(?:\/|$)/u.test(path),
-            {
-              message: "Expected a relative POSIX repository path without parent traversal or NUL",
-            },
-          ),
+        z.string().min(1).refine(isRelativePosixPath, {
+          message: "Expected a relative POSIX repository path without parent traversal or NUL",
+        }),
       )
       .refine(
         (paths) =>

@@ -113,23 +113,24 @@ status stdout 先按原始字节确定完整 NUL 记录和 R/C 双路径边界�
 ## 3. DataProvenance
 
 ```yaml
-data_id: DATA-0001                    # 格式: DATA-NNNN
-basin: cache_creek
-event_window: { start: 2008-01-01, end: 2008-02-28 }
+data_id: DATA-20261027T081000-7d2e    # 品牌 DataId，UTC 秒 + 4 位小写 hex
+basin: ccw                         # 非空；生成时等于本次运行的 project
+event_window: { start: null, end: null }
 sources:
-  terrain:      { path: "data/raw/ccw/dem.tif",       sha256: "abc..." }
-  mesh:         { path: "repos/SHUD/input/ccw/ccw.sp.mesh", sha256: "def..." }
-  forcing:      { path: "data/raw/ccw/forcing/",      sha256: "ghi..." }
-  observations:
-    - { variable: discharge, station: "USGS-11451100", path: "data/raw/ccw/obs_q.csv", sha256: "jkl..." }
-preprocess:
-  script: "scripts/prep_ccw.R"
-  params: { interpolation: IDW, resolution: "200m" }
-  output_sha256: "mno..."
-uncertainty_notes: "降水空间插值可能低估高海拔降水量"
+  input_root: /workspace/input/ccw  # 原始 input_dir 的绝对路径
+  files:
+    - path: ccw.sp.mesh             # 相对于输入副本根的 POSIX 路径
+      sha256: "sha256:mesh"         # schema 只要求非空，不限制摘要语法
+      size_bytes: 1024              # 必填非负整数，允许 0
+preprocess: null
+uncertainty_notes: null
 ```
 
-**废弃字段**: `event_window` 作为顶层数组 `[start, end]`（改为对象 `{start, end}`）、`sources` 下无 sha256 的简写。
+**字段契约：** 上列字段全部必填，根对象、`event_window`、`sources` 与每个文件条目均严格拒绝未知键。`event_window.start` / `end` 各接受非空字符串或 `null`，不解析日期；M3 生成约定两端均为 `null`，不推算事件窗口。`preprocess`、`uncertainty_notes` 仅接受显式 `null`。
+
+**路径与文件：** `input_root` 按运行平台的绝对路径规则校验。`files[].path` 非空，拒绝 POSIX 绝对路径、`..` 路径段与 NUL，保留 Unicode、空白、反斜杠等合法文件名字符；这是词法检查，不访问文件系统。`files` 允许为空，schema 不要求排序或去重；确定性生成时的清单排序属于后续采集流程。
+
+**M3 对齐处置（#431）：** `data_id` 复用 `DataIdSchema`，拒绝旧 `DATA-NNNN`、`DATA-<UUID>` 与大写 hex。删除 `sources.terrain` / `mesh` / `forcing` / `observations` 分类，改为 `input_root` + `files`；删除 `preprocess` 对象及其开放 `params`，不保留兼容分支。旧 `event_window` 数组、无 sha256 的文件条目和已删除字段均拒绝。此刀仅交付 schema/type 与生成文档投影，不交付输入遍历、hash 计算、持久化或提交接线。
 
 ---
 

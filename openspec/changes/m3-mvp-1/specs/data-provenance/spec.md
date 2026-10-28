@@ -17,7 +17,7 @@
 - **THEN** schema 解析失败并指出 `data_id` 字段
 
 ### Requirement: DataProvenance record
-DataProvenance SHALL 含且只含：`data_id`（品牌 `DataId`）、`basin`（非空字符串，等于本次运行的 `project`）、`event_window`（`start` 与 `end`，M3 均 SHALL 为 `null`）、`sources`（`input_root` 为原始 `input_dir` 的绝对路径；`files` 为 `{path, sha256, size_bytes}` 列表，`path` 为相对于输入副本根的 POSIX 相对路径，`size_bytes` 为非负整数字节数）、`preprocess`（M3 SHALL 为 `null`）、`uncertainty_notes`（M3 SHALL 为 `null`）。原 `sources.terrain`、`sources.mesh`、`sources.forcing`、`sources.observations` 分类 SHALL NOT 出现；未知字段 SHALL 使解析失败。
+DataProvenance SHALL 含且只含：`data_id`（品牌 `DataId`）、`basin`（非空字符串，等于本次运行的 `project`）、`event_window`（`start` 与 `end` 的 schema 类型均为非空字符串或 null；M3 生成器按 design D6 均写 null，不推算窗口）、`sources`（`input_root` 为原始 `input_dir` 的绝对路径；`files` 为 `{path, sha256, size_bytes}` 列表，`path` 为相对于输入副本根的 POSIX 相对路径，`size_bytes` 为非负整数字节数）、`preprocess`（M3 SHALL 为 `null`）、`uncertainty_notes`（M3 SHALL 为 `null`）。原 `sources.terrain`、`sources.mesh`、`sources.forcing`、`sources.observations` 分类 SHALL NOT 出现；未知字段 SHALL 使解析失败。
 
 #### Scenario: valid minimal provenance
 - **WHEN** 解析 `basin: "ccw"`、`event_window: {start: null, end: null}`、`preprocess: null`、`uncertainty_notes: null`、`sources.files` 含 `{path: "ccw.sp.mesh", sha256: …, size_bytes: 1024}` 的 DataProvenance

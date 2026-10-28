@@ -1,41 +1,30 @@
+import { isAbsolute } from "node:path";
 import { z } from "zod";
-
-const DATA_ID_PATTERN =
-  /^DATA-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/u;
+import { ArtifactSchema } from "./artifact.ts";
+import { isRelativePosixPath } from "./relative-posix-path.ts";
+import { DataIdSchema } from "./run-identifiers.ts";
 
 const DataSourceSchema = z.strictObject({
-  path: z.string().min(1),
-  sha256: z.string().min(1),
-});
-
-const ObservationSourceSchema = z.strictObject({
-  variable: z.string().min(1),
-  station: z.string().min(1),
-  path: z.string().min(1),
-  sha256: z.string().min(1),
-});
-
-const DataPreprocessSchema = z.strictObject({
-  script: z.string().min(1),
-  params: z.record(z.string(), z.unknown()),
-  output_sha256: z.string().min(1),
+  path: z.string().min(1).refine(isRelativePosixPath, {
+    message: "Expected a relative POSIX input path without parent traversal or NUL",
+  }),
+  sha256: ArtifactSchema.shape.sha256.unwrap(),
+  size_bytes: ArtifactSchema.shape.size_bytes.unwrap(),
 });
 
 export const DataProvenanceSchema = z.strictObject({
-  data_id: z.string().regex(DATA_ID_PATTERN),
+  data_id: DataIdSchema,
   basin: z.string().min(1),
   event_window: z.strictObject({
-    start: z.string().min(1),
-    end: z.string().min(1),
+    start: z.string().min(1).nullable(),
+    end: z.string().min(1).nullable(),
   }),
   sources: z.strictObject({
-    terrain: DataSourceSchema,
-    mesh: DataSourceSchema,
-    forcing: DataSourceSchema,
-    observations: z.array(ObservationSourceSchema),
+    input_root: z.string().min(1).refine(isAbsolute, "Expected an absolute input directory"),
+    files: z.array(DataSourceSchema),
   }),
-  preprocess: DataPreprocessSchema.optional(),
-  uncertainty_notes: z.string().min(1).optional(),
+  preprocess: z.literal(null),
+  uncertainty_notes: z.literal(null),
 });
 
 export type DataProvenance = z.infer<typeof DataProvenanceSchema>;
