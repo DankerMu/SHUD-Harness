@@ -27,6 +27,11 @@ export {
   assertPolicyGateContextGuardClasses,
   snapshotPolicyGateContext,
 } from "./governance/policy-gate/evaluate.ts";
+export {
+  ROLE_TOOL_SURFACE_RULE_ID,
+  ROLE_TOOL_SURFACE_RULE,
+  DEFAULT_SHUD_POLICY_GATE_CONTEXT,
+} from "./governance/policy-gate/role-tool-surface.ts";
 export * from "./governance/role-tool-map.ts";
 export * from "./governance/wording.ts";
 export * from "./stack-lock/fingerprint.ts";

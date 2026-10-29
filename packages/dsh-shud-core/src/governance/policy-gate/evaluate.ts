@@ -6,6 +6,7 @@ import {
   policyGateDecisionValidationError,
   validatePolicyGateRemediation,
 } from "./parameter-schema.ts";
+import { ROLE_TOOL_SURFACE_RULE_ID } from "./role-tool-surface.ts";
 import type {
   PolicyGateContext,
   PolicyGateDecision,
@@ -18,6 +19,7 @@ import type {
 export const RESERVED_AUTHORITY_POLICY_RULE_IDS = Object.freeze([
   "raw-data-write",
   TOOL_PARAMETER_SCHEMA_RULE_ID,
+  ROLE_TOOL_SURFACE_RULE_ID,
 ] as const);
 
 type PolicyGuardClassAliasRead =
