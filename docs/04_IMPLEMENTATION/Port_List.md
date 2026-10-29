@@ -9,7 +9,7 @@ reset 时只有本表列出的代码资产可以从 `archive/zero-v0.8.3` 搬入
 | 资产 | 旧路径（tag archive/zero-v0.8.3） | 新落点 | 处置 | 理由 |
 |---|---|---|---|---|
 | 8 对象 Zod schema | `packages/core/src/domain/schemas/` | `packages/dsh-shud-core/src/schemas/` | 已移植；RunJob/RunRecord schema 与收集链已在 M2 交付 | `RunRecord.llm.response_model` 已存在；#430 已对齐 StackLock 三字段、最小 runtime/harness、品牌 id、仓库 dirty 路径/截断与排除响应模型的指纹；`captureStackLock` 持久化及提交集成仍归后续 M3，不在本刀交付 |
-| policy-gate-core 纯函数 + 单测 | `packages/core/src/tools/policy-gate-core.ts`（1.5K 行）+ `.test.ts` | `packages/dsh-shud-core/src/governance/` | ✅ 已移植；`DEFAULT_SHUD_POLICY_GATE_CONTEXT`（三条 spawn 规则的纯数据）从 registry 一并搬入；随 M3 棘轮（constraints.yaml baseline） | 直接挂 `tools/pre-execute`。两份文件 >1000 行，已在 `.large-file-guard.json` 显式排除并注明理由 |
+| policy-gate-core 纯函数 + 单测 | `packages/core/src/tools/policy-gate-core.ts`（1.5K 行）+ `.test.ts` | `packages/dsh-shud-core/src/governance/policy-gate/` | 已按规则族纯搬移拆分；`DEFAULT_SHUD_POLICY_GATE_CONTEXT` 保留三条 spawn 规则及原顺序 | 源与测试每文件 ≤1000 行；已移除 ESLint 文件大小/类型安全豁免、`.large-file-guard.json` 排除项及对应 baseline；别名与 knip duplicates warn baseline 保留至 #435 |
 | role→tool_id 映射与快照 | `packages/core/src/tools/role-tool-map*.ts` | `packages/dsh-shud-core/src/governance/`（与 policy-gate-core 互相引用类型，必须同包） | ✅ 已移植；M3 的 presets 包从 core 消费它生成 `ctx.tools.restrict()` 配置 | 角色工具面 |
 | 治理措辞规则 | spec 与 prompt 文本 | `packages/dsh-shud-core/src/governance/wording.ts` | M3 重写为常量 + 测试（消费者 EvidenceReport） | 校准 ≠ 验证等四条不变式 |
 | Zero 参照、策略门注册层 | `packages/core/src/zero-reference*.ts`、`policy-gate-registry.ts`（2.9K 行） | — | 不搬 | dsh waterfall 取代 |

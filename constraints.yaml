@@ -105,24 +105,8 @@ no_bypass: # scripts/guardrails/no-bypass.sh (wired in .claude/settings.json and
 
 # Q1.4b legacy disposition: freeze baseline + ratchet per milestone. Removal trigger is the target.
 baseline:
-  max_file_lines:
-    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.ts"
-      lines: 1482
-      target: "M3 ≤1000 (split by rule family, same batch as StackLock llm three fields)"
-    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.test.ts"
-      lines: 1675
-      target: "M3 follows the source split"
-  eslint_type_safety:
-    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.ts"
-      rules: ["@typescript-eslint/no-unsafe-assignment"]
-      findings: 2
-      target: "M3 split"
-    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.test.ts"
-      rules: ["@typescript-eslint/no-unsafe-return"]
-      findings: 2
-      target: "M3 split"
   knip_duplicates:
-    - path: "packages/dsh-shud-core/src/governance/policy-gate-core.ts"
+    - path: "packages/dsh-shud-core/src/governance/policy-gate/evaluate.ts"
       symbol: "isReservedAuthorityPolicyEvidenceId (alias of isReservedAuthorityPolicyErrorId)"
       rule_level: "warn"
       target: "M3: drop the alias, set knip rules.duplicates to error"

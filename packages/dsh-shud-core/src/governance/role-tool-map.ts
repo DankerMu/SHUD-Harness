@@ -1,4 +1,4 @@
-import type { HarnessRole } from "./policy-gate-core.ts";
+import type { HarnessRole } from "./policy-gate/types.ts";
 
 export const CANONICAL_HARNESS_ROLES = Object.freeze([
   "coordinator",

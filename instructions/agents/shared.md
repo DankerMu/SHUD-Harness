@@ -234,7 +234,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | 规则 | 位置 | 校验 | 级别 |
 |---|---|---|---|
 | 禁止并行版本后缀 | `.git-hooks/check-naming.sh`，`constraints.yaml` naming | pre-commit；CI `pnpm run naming:check` | block |
-| 文件 ≤1000 行（3 文件冻结基线，M2/M3 棘轮） | `eslint.config.mjs`，`constraints.yaml` baseline | pre-commit lint-staged；CI `pnpm run lint` | block |
+| 文件 ≤1000 行（policy-gate 拆分后无大小/类型安全豁免） | `eslint.config.mjs`，`.large-file-guard.json`，`constraints.yaml` baseline | pre-commit lint-staged / large-file-guard；CI `pnpm run lint` | block |
 | type-aware lint，禁 import dsh 内部路径 | `eslint.config.mjs`，`tsconfig.eslint.json` | pre-commit；CI `pnpm run lint` | block |
 | 交付文件格式；本地 `.workplans/` 不在发现范围 | `.prettierrc.json`，`.editorconfig`；`.gitignore` 的 `/.workplans/` 由 Git/Prettier 共用 | pre-commit；CI `pnpm run format:check` | block |
 | 类型 | `tsconfig.base.json` | CI `pnpm run typecheck` | block |
