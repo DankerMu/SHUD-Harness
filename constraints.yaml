@@ -103,14 +103,6 @@ no_bypass: # scripts/guardrails/no-bypass.sh (wired in .claude/settings.json and
   - "session-log-deepseek disabled: false"
   - "hand-edit AGENTS.md / CLAUDE.md / docs/generated/ / docs/adr/archived/"
 
-# Q1.4b legacy disposition: freeze baseline + ratchet per milestone. Removal trigger is the target.
-baseline:
-  knip_duplicates:
-    - path: "packages/dsh-shud-core/src/governance/policy-gate/evaluate.ts"
-      symbol: "isReservedAuthorityPolicyEvidenceId (alias of isReservedAuthorityPolicyErrorId)"
-      rule_level: "warn"
-      target: "M3: drop the alias, set knip rules.duplicates to error"
-
 review_only: # project invariants without mechanical enforcement yet; each has a trigger
   - rule: "docs change with code (Q6.11 ②)"
     trigger: "PR template checkbox + reviewer; user chose review-only"

@@ -240,7 +240,7 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | 类型 | `tsconfig.base.json` | CI `pnpm run typecheck` | block |
 | 测试 + 覆盖率 ≥80% | `vitest.config.ts` | CI `pnpm run test:coverage` | block |
 | 重复 ≤3% | `.jscpd.json` | CI `pnpm run dup` | block |
-| 死代码/未用依赖（duplicates 为 warn，M3 转 error） | `knip.json` | CI `pnpm run deadcode` | block |
+| 死代码/未用依赖（duplicates 为 error，无重复导出豁免） | `knip.json` | CI `pnpm run deadcode` | block |
 | Schema 生成物无漂移 | `scripts/schema/check.sh` | CI `pnpm run schema:check` | block |
 | 文档链接 + 路径声明 + 生成指令 + 决策记录 | `scripts/docs/`，`scripts/instructions/render.sh`，`scripts/adr/verify.sh` | CI `pnpm run docs:check` | block |
 | 密钥 | gitleaks | pre-commit；CI `pnpm run security:secrets` | block |
