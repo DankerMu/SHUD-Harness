@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #441 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream).
+Blast radius: records deterministic report validation and package-internal reuse of the canonical renderer's evidence/section provenance.
+Selected risk packs: Public API; Scientific governance; Secrets/error disclosure; File IO/path safety; Schema/identity; Determinism/ordering; Legacy compatibility; Documentation.
+Evidence floor: independent thirteen-check table, positive/negative controls for every non-vacuous clause, no-state/file-mutation evidence, actual fresh rendering with template-asset fault controls, authored-heading spoof controls, multi-section secret non-disclosure, existing renderer golden unchanged, built public API and real compiler consumers, default check/strict/profile and three-seat white-box review.
+Only task 4.4b is selected. No report-state transition, publication, approval, tool, core schema/wording, runtime configuration or dependency change. Minimal internal renderer reuse may expose template-owned section provenance without changing #440 output or its public API.
+
 ## Issue #440 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream).
