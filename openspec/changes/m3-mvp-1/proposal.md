@@ -1,5 +1,14 @@
 # Proposal
 
+## Issue #440 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream).
+Blast radius: records report rendering, workspace reference reads, deterministic facts, scientific governance watermarks and packaged template.
+Selected risk packs: Public API; File IO/path safety; Schema/identity provenance; Scientific governance/watermarks; Secrets/error diagnostics; Determinism/ordering; Packaging; Legacy compatibility; Documentation.
+Evidence floor: fixed successful/failed-run dirty-stack rendering snapshot, independent watermark table, fresh-read and missing/corrupt/unsafe-reference controls, literal governance text, exact aggregate facts, no log/artifact reads, stale-header controls, built temporary-workspace Markdown inspection, real packed-template consumer, compiler checks, default check/profile smoke and three-seat white-box review.
+Packed-consumer evidence retains the existing canonical harness-root manifest layout; it proves tarball template inclusion/use from unrelated cwd, not standalone package relocation support (design #440).
+Only task 4.4a is selected. Validator/state decisions/tools/approvals remain #441/#442/#446/#447; no core/jobs schema or configuration change.
+
 ## Issue #424 fixture
 
 Issue type: feature. Fixture level: expanded. Upstream suggested level: expanded (agree).
