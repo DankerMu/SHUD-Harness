@@ -1,9 +1,5 @@
 {
   "enabled": true,
   "maxLines": 1000,
-  "exclude": [
-    "packages/dsh-shud-core/src/governance/policy-gate-core.ts",
-    "packages/dsh-shud-core/src/governance/policy-gate-core.test.ts"
-  ],
-  "reason": "Ported verbatim from tag archive/zero-v0.8.3 at the Phase 4 reset (ADR-0004 K15). Port_List: policy-gate-core 体量重估 is an M1 task; the ratchet applies to everything else."
+  "exclude": []
 }
