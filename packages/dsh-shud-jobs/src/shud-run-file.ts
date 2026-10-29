@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import { realDirectory, verifyRun } from "./shud-input.ts";
 import type { IndexEntry } from "./state-indexes.ts";
-import { writeJsonSync } from "./state-files.ts";
+import { writeJsonSync } from "@shud-harness/dsh-shud-records";
 
 /** Messages crossing the collection persistence/log boundary contain controlled facts, never raw causes. */
 export class CollectFailure extends Error {

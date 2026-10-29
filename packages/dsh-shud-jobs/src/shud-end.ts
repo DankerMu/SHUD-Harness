@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { writeBytes } from "./state-files.ts";
+import { writeBytes } from "@shud-harness/dsh-shud-records";
 
 /** Match the solver's case-insensitive sscanf key/value parsing without reserializing the file. */
 export async function updateEnd(path: string, days: number): Promise<void> {

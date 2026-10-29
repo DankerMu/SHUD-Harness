@@ -1,7 +1,7 @@
 import { defineTool, ToolArgsError, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import { readCallerPresetId } from "@shud-harness/dsh-shud-core";
 import { strictTool } from "./strict-tool.ts";
-import { createTaskCard } from "./task-card-file.ts";
+import { createTaskCard } from "@shud-harness/dsh-shud-records";
 
 const parameters = {
   type: { type: "string", const: "science_assist", required: true },

@@ -1,0 +1,27 @@
+{
+  "name": "@shud-harness/dsh-shud-records",
+  "version": "0.9.0",
+  "description": "SHUD-Harness atomic file primitives and schema-validated workspace records",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@shud-harness/dsh-shud-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "vitest": "5.0.5",
+    "typescript": "5.9.3"
+  }
+}

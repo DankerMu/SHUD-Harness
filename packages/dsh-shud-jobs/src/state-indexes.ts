@@ -5,7 +5,7 @@ import {
   type JobRecordId,
   type RunId,
 } from "@shud-harness/dsh-shud-core";
-import { readJson, writeJson, writeJsonSync } from "./state-files.ts";
+import { readJson, writeJson, writeJsonSync } from "@shud-harness/dsh-shud-records";
 import { StateLock } from "./state-lock.ts";
 
 export interface IndexEntry {
