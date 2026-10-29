@@ -1,9 +1,11 @@
 // Checked by the normal package typecheck; excluded from emitting builds.
 import type {
   TaskCard,
+  TaskStatus,
   StackLock,
   DataProvenance,
   EvidenceReport,
+  PiGateDecision,
   RunJob,
   RunRecord,
   JobRecordId,
@@ -15,6 +17,11 @@ import {
   reconcileTaskCard,
   evaluateClosure,
   isReportMarkdownStale,
+  applyDecision,
+  markReportReviewed,
+  reportTaskStatus,
+  needsReportTaskRepair,
+  ReportStateError,
   renderReport,
   ReportRenderError,
   type ReportRenderStage,
@@ -194,4 +201,68 @@ void [
   leakingDetail,
   unknownSection,
   unvalidatedReference,
+];
+
+declare const decision: PiGateDecision;
+const reviewedReport: EvidenceReport = markReportReviewed(report);
+const decidedReport: EvidenceReport = applyDecision(report, decision);
+markReportReviewed(report, new Date());
+applyDecision(report, decision, new Date());
+// @ts-expect-error Report transitions consume canonical domain reports, not raw inputs.
+markReportReviewed(value);
+// @ts-expect-error Decisions are canonical PiGateDecision inputs, not raw unknown data.
+applyDecision(report, value);
+// @ts-expect-error A TaskCard cannot substitute for a report.
+applyDecision(task, decision);
+// @ts-expect-error The optional validation clock is a Date, not an ISO string.
+markReportReviewed(report, "2026-10-29T09:10:11.123Z");
+// @ts-expect-error The optional decision clock is a Date, not an ISO string.
+applyDecision(report, decision, "2026-10-29T09:10:11.123Z");
+// @ts-expect-error Report transitions are synchronous, not promises.
+const asynchronousDecision: Promise<EvidenceReport> = applyDecision(report, decision);
+// @ts-expect-error Successful validation returns a report, not the validator's check results.
+const validationTransition: ReportValidationResult = markReportReviewed(report);
+const reportStateError = new ReportStateError("invalid_decision");
+const reportStateReason:
+  | "invalid_decision"
+  | "invalid_transition"
+  | "report_id_mismatch"
+  | "inconsistent_decision_history"
+  | "unsupported_report_status"
+  | "task_id_mismatch" = reportStateError.reason;
+// @ts-expect-error State errors cannot carry arbitrary authored payloads as reason codes.
+new ReportStateError("private-model-payload");
+// @ts-expect-error State errors do not accept raw schema issues or causes.
+new ReportStateError("invalid_decision", value);
+void [reviewedReport, decidedReport, asynchronousDecision, validationTransition, reportStateReason];
+
+const projectedTaskStatus: TaskStatus = reportTaskStatus(report.status);
+const reportTaskRepair: boolean = needsReportTaskRepair(task, report);
+// @ts-expect-error Mapping consumes a report status, not a complete report.
+reportTaskStatus(report);
+// @ts-expect-error Arbitrary strings are outside the canonical report-status type.
+reportTaskStatus("private-model-payload");
+// @ts-expect-error Mapping is synchronous, not a promise.
+const asynchronousProjection: Promise<TaskStatus> = reportTaskStatus(report.status);
+// @ts-expect-error A projection is a task status, not a mutated TaskCard.
+const projectedTask: TaskCard = reportTaskStatus(report.status);
+// @ts-expect-error Repair requires a canonical TaskCard, not unknown file contents.
+needsReportTaskRepair(value, report);
+// @ts-expect-error Repair requires a canonical EvidenceReport, not unknown file contents.
+needsReportTaskRepair(task, value);
+// @ts-expect-error Report/card argument order is part of the public contract.
+needsReportTaskRepair(report, task);
+// @ts-expect-error The pure repair predicate takes no clock.
+needsReportTaskRepair(task, report, new Date());
+// @ts-expect-error Repair detection is synchronous, not a promise.
+const asynchronousRepair: Promise<boolean> = needsReportTaskRepair(task, report);
+// @ts-expect-error Repair detection returns a boolean, not a repaired TaskCard.
+const repairedTask: TaskCard = needsReportTaskRepair(task, report);
+void [
+  projectedTaskStatus,
+  reportTaskRepair,
+  asynchronousProjection,
+  projectedTask,
+  asynchronousRepair,
+  repairedTask,
 ];

@@ -8,7 +8,9 @@
  * Report rendering and thirteen-clause validation freshly read cited evidence without
  * publication. Validation returns controlled facts, not scientific or PI approval;
  * root errors omit paths and raw causes. The watermark stale predicate is pure.
- * Future tools own approval, status transitions and atomic writes.
+ * Pure report transitions record caller-established validation/allowed-once facts; they
+ * are not approval authority. Report status projection and last-link repair detection
+ * are pure; future tools own missing-link/status repair, prerequisites and atomic publication.
  */
 export { readJson, writeJsonSync, writeJson, writeBytes } from "./state-files.ts";
 export { createTaskCard } from "./task-card-file.ts";
@@ -21,6 +23,13 @@ export { reconcileTaskCard, TaskReconcileError } from "./task-reconcile.ts";
 export { evaluateClosure } from "./task-closure.ts";
 export type { ClosureRunJob, ClosureDraft, ClosureFailure, ClosureResult } from "./task-closure.ts";
 export { isReportMarkdownStale } from "./report-watermark.ts";
+export {
+  applyDecision,
+  markReportReviewed,
+  reportTaskStatus,
+  needsReportTaskRepair,
+  ReportStateError,
+} from "./report-state.ts";
 export { renderReport } from "./report-render.ts";
 export { ReportRenderError } from "./report-render-error.ts";
 export type { ReportRenderStage } from "./report-render-error.ts";
