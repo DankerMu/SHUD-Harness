@@ -256,6 +256,8 @@ test("late record failure awaits producer resource settlement before removing pa
     }
     const prepared = execution.prepared[0];
     expect(await io.readFile(join(prepared.run_dir, "stdout.log"), "utf8")).toBe("");
+    expect(await io.readdir(join(h.cwd, "provenance"))).toEqual([`${prepared.data_id}.json`]);
+    expect(await io.readdir(join(h.cwd, "stacks"))).toEqual([`${prepared.stack_id}.json`]);
     expect(registry.list().map((job) => job.id)).toContain(execution.handles[0].id);
     expect(registry.indexes.lookup(prepared.run_id)).toBeDefined();
     release.release();
@@ -263,6 +265,8 @@ test("late record failure awaits producer resource settlement before removing pa
     expect(registry.list()).toEqual([]);
     expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
     expect(await io.readdir(join(h.cwd, "runs"))).toEqual([]);
+    expect(await io.readdir(join(h.cwd, "provenance"))).toEqual([]);
+    expect(await io.readdir(join(h.cwd, "stacks"))).toEqual([`${prepared.stack_id}.json`]);
   } finally {
     release.release();
     await execution.finish();
@@ -403,6 +407,9 @@ test("producer cancellation failure preserves original failure and retains files
     const prepared = execution.prepared[0];
     expect(registry.indexes.lookup(prepared.run_id)?.run_dir).toBe(prepared.run_dir);
     expect(await io.readFile(join(prepared.run_dir, "stdout.log"), "utf8")).toBe("");
+    expect(registry.isSubmissionInFlight(prepared.run_id)).toBe(true);
+    expect(await io.readdir(join(h.cwd, "provenance"))).toEqual([`${prepared.data_id}.json`]);
+    expect(await io.readdir(join(h.cwd, "stacks"))).toEqual([`${prepared.stack_id}.json`]);
     execution.append("resource remains live\n");
     expect(await io.readFile(join(prepared.run_dir, "stdout.log"), "utf8")).toBe(
       "resource remains live\n",

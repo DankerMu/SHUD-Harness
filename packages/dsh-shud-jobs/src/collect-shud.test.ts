@@ -53,13 +53,15 @@ test.each(Object.entries(numericClasses))(
         return producer.completed.length === 1;
       }, "native producer completion before explicit result collection");
       const result = await h.registry.collectShud(job.run_id);
+      expect(job.stack_id).toMatch(/^STACK-\d{8}T\d{6}-[0-9a-f]{4}$/u);
+      expect(job.data_id).toMatch(/^DATA-\d{8}T\d{6}-[0-9a-f]{4}$/u);
       expect(RunRecordSchema.parse(result)).toEqual(result);
       expect(result).toMatchObject({
         run_id: job.run_id,
         job_id: job.job_id,
         task_id: null,
-        stack_id: null,
-        data_id: null,
+        stack_id: job.stack_id,
+        data_id: job.data_id,
         status: code === 0 ? "succeeded" : "failed",
         exit_code: code,
         exit_class: exitClass,

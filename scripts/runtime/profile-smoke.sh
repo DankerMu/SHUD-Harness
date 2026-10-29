@@ -14,8 +14,9 @@ unset ALL_PROXY
 node --input-type=module - "$ROOT" <<'NODE'
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { createServer } from "node:net";
 import { parseDocument } from "yaml";
 const root = process.argv[2];
@@ -122,14 +123,40 @@ function check(label, condition) { if (!condition) failures.push(label); }
 const installerPath = join(root, "scripts/runtime/profile-install.sh");
 const home = process.env.DSH_HOME;
 const scratch = join(home, "..");
+const bundleManifest = JSON.parse(readFileSync(join(root, "profile/shud/package.json"), "utf8"));
+const bundleRows = patchRows(readFileSync(join(root, "profile/shud/cordis.patch.yml"), "utf8"), "canonical bundle");
+const captureConfig = {
+  stackRepos: Object.fromEntries(["SHUD", "rSHUD", "AutoSHUD"].map((name) => [name, join(root, name)])),
+  hostVersion: bundleManifest.peerDependencies["@deepseek-ai/dsh"],
+  llm: {
+    base_url: bundleRows.find((row) => row.id === "llm-deepseek").config.baseURL,
+    request_alias: bundleRows.find((row) => row.id === "agent-default-model").config.model,
+  },
+};
+function desiredJobs(name, binary, sundials = process.env.SUNDIALS_ROOT) {
+  return {
+    shudBin: binary, stateDir: join(home, "profiles", name, "shud-jobs"),
+    ...captureConfig, ...(sundials === undefined ? {} : { sundialsRoot: sundials }),
+  };
+}
+function captureRowErrors(rows) {
+  const config = rows.find((row) => row.id === "shud-jobs")?.config;
+  const llm = rows.find((row) => row.id === "llm-deepseek")?.config;
+  const model = rows.find((row) => row.id === "agent-default-model")?.config;
+  const errors = [];
+  if (!config?.llm?.base_url || config.llm.base_url !== llm?.baseURL) errors.push("shud-jobs.llm.base_url does not match llm-deepseek.baseURL");
+  if (!config?.llm?.request_alias || config.llm.request_alias !== model?.model) errors.push("shud-jobs.llm.request_alias does not match agent-default-model.model");
+  return errors;
+}
 const shudBin = join(scratch, "shud executable");
 const alternateBin = join(scratch, "shud # quote' colon: back\\slash");
 for (const path of [shudBin, alternateBin]) {
   writeFileSync(path, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
 }
 process.env.SHUD_BIN = shudBin;
-async function install(label, name, binary, template = "web", acceptFailure = false) {
-  const env = { ...process.env, PROFILE_NAME: name, PROFILE_TEMPLATE: template };
+async function install(label, name, binary, template = "web", acceptFailure = false, environment = {}) {
+  const env = { ...process.env, ...environment, PROFILE_NAME: name, PROFILE_TEMPLATE: template };
+  if (env.SUNDIALS_ROOT === undefined) delete env.SUNDIALS_ROOT;
   if (binary === undefined) delete env.SHUD_BIN;
   else env.SHUD_BIN = binary;
   return await run(label, "sh", [installerPath], false, env, acceptFailure);
@@ -152,7 +179,7 @@ function patchRows(source, label) {
   check(`${label}: patch is a sequence`, Array.isArray(value));
   return Array.isArray(value) ? value : [];
 }
-function checkJobsPatch(name, binary, label) {
+function checkJobsPatch(name, binary, label, sundials = process.env.SUNDIALS_ROOT) {
   const paths = profilePaths(name);
   check(`${label}: patch exists`, existsSync(paths.patch));
   if (!existsSync(paths.patch)) return;
@@ -161,6 +188,7 @@ function checkJobsPatch(name, binary, label) {
   check(`${label}: unique semantic jobs item`, jobs.length === 1);
   check(`${label}: configured shudBin`, jobs[0]?.config?.shudBin === binary);
   check(`${label}: configured stateDir`, jobs[0]?.config?.stateDir === join(paths.directory, "shud-jobs"));
+  check(`${label}: exact capture configuration`, isDeepStrictEqual(jobs[0]?.config, desiredJobs(name, binary, sundials)));
 }
 async function preservedInstall(name, binary, label) {
   const paths = profilePaths(name);
@@ -199,10 +227,80 @@ function checkToolsSchema(schema, label) {
   check(`${label}: shud-tools import status ${tools[0]?.status ?? "missing"}`,
     tools.length === 1 && ["absent", "schema"].includes(tools[0].status));
 }
+async function checkCapturePreflight() {
+  const isolated = join(scratch, "isolated-harness");
+  for (const directory of ["scripts/runtime", "profile/shud", "node_modules", "SHUD", "rSHUD", "AutoSHUD"]) {
+    mkdirSync(join(isolated, directory), { recursive: true });
+  }
+  for (const file of [
+    "scripts/runtime/profile-install.sh", "scripts/runtime/profile-patch.ts", "scripts/runtime/dsh-root.sh",
+    "profile/shud/package.json", "profile/shud/cordis.patch.yml", "package.json",
+  ]) copyFileSync(join(root, file), join(isolated, file));
+  symlinkSync(realpathSync(join(root, "node_modules/yaml")), join(isolated, "node_modules/yaml"));
+  const isolatedHome = join(scratch, "isolated-home");
+  const env = { ...process.env, DSH_HOME: isolatedHome, SHUD_BIN: shudBin,
+    DSH_ROOT: join(scratch, "intentionally-no-host") };
+  delete env.SUNDIALS_ROOT;
+  const patcher = join(isolated, "scripts/runtime/profile-patch.ts");
+  const installer = join(isolated, "scripts/runtime/profile-install.sh");
+  const checkPath = join(isolatedHome, "profiles", "precheck", "cordis.patch.yml");
+  const state = join(dirname(checkPath), "shud-jobs");
+  await run("copied installer precheck accepts empty repository directories", process.execPath,
+    [patcher, "--check", checkPath, shudBin, state], false, env);
+  check("successful precheck does not create profile", !existsSync(dirname(checkPath)));
+  const fileRoot = join(scratch, "sundials-file");
+  writeFileSync(fileRoot, "not a directory\n");
+  const invalidRoots = [
+    ["empty", ""], ["relative", "relative/sundials"], ["missing", join(scratch, "missing-sundials")],
+    ["file", fileRoot],
+  ];
+  async function reject(label, key, environment, existing) {
+    const name = `${label}-${existing ? "existing" : "new"}`;
+    const directory = join(isolatedHome, "profiles", name);
+    const patch = join(directory, "cordis.patch.yml");
+    const manifest = join(directory, "package.json");
+    if (existing) {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(patch, "# raw bytes\r\n- id: shud-raw-guard\r\n  config: {rawDirs: ['/srv/private/raw']}\r\n", { mode: 0o640 });
+      writeFileSync(manifest, '{"private":true}\n');
+    }
+    const before = [hash(patch), hash(manifest)];
+    const stat = existing ? lstatSync(patch) : undefined;
+    const result = await run(label, "sh", [installer], false,
+      { ...environment, PROFILE_NAME: name }, true);
+    check(`${name}: rejected before installer effects`, result.status !== 0);
+    check(`${name}: exact source diagnostic`, `${result.stdout}\n${result.stderr}`.includes(key));
+    check(`${name}: profile creation unchanged`, existsSync(directory) === existing);
+    check(`${name}: raw and manifest bytes preserved`, hash(patch) === before[0] && hash(manifest) === before[1]);
+    if (stat) {
+      const after = lstatSync(patch);
+      check(`${name}: mode/inode/mtime preserved`,
+        after.mode === stat.mode && after.ino === stat.ino && after.mtimeMs === stat.mtimeMs);
+    }
+  }
+  for (const [kind, value] of invalidRoots) {
+    for (const existing of [false, true]) {
+      await reject(`invalid-sundials-${kind}`, "SUNDIALS_ROOT", { ...env, SUNDIALS_ROOT: value }, existing);
+    }
+  }
+  for (const name of ["SHUD", "rSHUD", "AutoSHUD"]) {
+    const directory = join(isolated, name);
+    renameSync(directory, `${directory}.held`);
+    try {
+      for (const existing of [false, true]) await reject(`missing-repo-${name}`, name, env, existing);
+    } finally {
+      renameSync(`${directory}.held`, directory);
+    }
+  }
+}
+
 async function checkInvalidBoot(bin, profile) {
   const overlay = join(scratch, "missing-shud-bin.patch.yml");
+  const installed = patchRows(readFileSync(profile.patch, "utf8"), "invalid boot installed config")
+    .find((row) => row.id === "shud-jobs")?.config;
+  check("invalid boot uses full installed capture config", isDeepStrictEqual(installed, desiredJobs("shud", shudBin)));
   writeFileSync(overlay, JSON.stringify([
-    { id: "shud-jobs", config: { stateDir: join(profile.directory, "shud-jobs"), shudBin: "" } },
+    { id: "shud-jobs", config: { ...installed, shudBin: "" } },
     // The production Web template stays unchanged; expose dependency waiting in this probe only.
     { id: "tool-jobs", disabled: false },
   ]));
@@ -374,6 +472,7 @@ try {
   for (const [kind, binary] of invalidBins) {
     await rejectedBinary(`invalid-${kind}`, binary, `new profile ${kind} SHUD_BIN`);
   }
+  await checkCapturePreflight();
   await run("profile installation", "sh", [join(root, "scripts/runtime/profile-install.sh")]);
   const web = profilePaths("shud");
   check("first Web install: exact bundle order", JSON.stringify(
@@ -427,6 +526,19 @@ try {
   const composedJobs = patchRows(dump, "composed profile").filter((entry) => entry?.id === "shud-jobs");
   check("composed shud-jobs binary", composedJobs[0]?.config?.shudBin === shudBin);
   check("composed shud-jobs state directory", composedJobs[0]?.config?.stateDir === join(web.directory, "shud-jobs"));
+  const composedRows = patchRows(dump, "capture cross-row config");
+  check("composed jobs full capture configuration", isDeepStrictEqual(composedJobs[0]?.config, desiredJobs("shud", shudBin)));
+  const captureErrors = captureRowErrors(composedRows);
+  check(`composed llm matches actual provider and model rows: ${captureErrors.join("; ")}`, captureErrors.length === 0);
+  for (const [id, field, expected] of [
+    ["agent-default-model", "model", "llm.request_alias"],
+    ["llm-deepseek", "baseURL", "llm.base_url"],
+  ]) {
+    const drifted = structuredClone(composedRows);
+    drifted.find((row) => row.id === id).config[field] = "deliberate-drift";
+    check(`actual cross-row assertion catches ${field}`, captureRowErrors(drifted)
+      .some((error) => error.includes(expected) && error.includes(`${id}.${field}`)));
+  }
   checkJobsSchema(schema, "Web import");
   checkToolsSchema(schema, "Web import");
 
@@ -503,6 +615,34 @@ try {
   const suffix = "# keep this suffix\r\n- id: agent-default-model\r\n  config: {model: deepseek-flash-guan} # unchanged";
   const oldJob = `- config: {shudBin: ${JSON.stringify(shudBin)}, stateDir: ${JSON.stringify(join(web.directory, "shud-jobs"))}}\r\n  id: 'shud-jobs'\r\n`;
   writeFileSync(web.patch, prefix + oldJob + suffix);
+  chmodSync(web.patch, 0o640);
+  await install("M2 install gains capture configuration", "shud", shudBin);
+  const upgraded = readFileSync(web.patch, "utf8");
+  check("M2 upgrade: prefix byte-identical", upgraded.startsWith(prefix));
+  check("M2 upgrade: suffix byte-identical", upgraded.endsWith(suffix));
+  check("M2 upgrade: mode preserved", (lstatSync(web.patch).mode & 0o777) === 0o640);
+  checkJobsPatch("shud", shudBin, "M2 capture upgrade");
+  await preservedInstall("shud", shudBin, "M2 capture upgrade repeated");
+  const sundials = join(scratch, "sundials fixture");
+  mkdirSync(sundials);
+  await install("SUNDIALS set", "shud", shudBin, "web", false, { SUNDIALS_ROOT: sundials });
+  checkJobsPatch("shud", shudBin, "SUNDIALS set", sundials);
+  const withSundials = readFileSync(web.patch, "utf8");
+  check("SUNDIALS set: unrelated bytes", withSundials.startsWith(prefix) && withSundials.endsWith(suffix));
+  const sundialsStat = lstatSync(web.patch);
+  await install("SUNDIALS repeat", "shud", shudBin, "web", false, { SUNDIALS_ROOT: sundials });
+  check("SUNDIALS repeat: bytes/inode/mtime", readFileSync(web.patch, "utf8") === withSundials &&
+    lstatSync(web.patch).ino === sundialsStat.ino && lstatSync(web.patch).mtimeMs === sundialsStat.mtimeMs);
+  await install("SUNDIALS unset", "shud", shudBin, "web", false, { SUNDIALS_ROOT: undefined });
+  const unsetRows = patchRows(readFileSync(web.patch, "utf8"), "SUNDIALS unset");
+  check("SUNDIALS unset removes key", !Object.hasOwn(unsetRows.find((row) => row.id === "shud-jobs").config, "sundialsRoot"));
+  const expectedUnset = desiredJobs("shud", shudBin);
+  delete expectedUnset.sundialsRoot;
+  check("SUNDIALS unset preserves all other capture keys",
+    isDeepStrictEqual(unsetRows.find((row) => row.id === "shud-jobs").config, expectedUnset));
+  check("SUNDIALS unset preserves unrelated bytes", readFileSync(web.patch, "utf8").startsWith(prefix) && readFileSync(web.patch, "utf8").endsWith(suffix));
+  check("SUNDIALS changes preserve mode", (lstatSync(web.patch).mode & 0o777) === 0o640);
+  writeFileSync(web.patch, prefix + oldJob + suffix);
   await install("alternate binary preserves unrelated bytes", "shud", alternateBin);
   const updated = readFileSync(web.patch, "utf8");
   check("alternate binary: prefix byte-identical", updated.startsWith(prefix));
@@ -537,7 +677,7 @@ try {
   checkJobsPatch("shud", shudBin, "flow sequence insertion");
   await preservedInstall("shud", shudBin, "flow insertion repeated");
 
-  const sharedDesired = `- &shared {id: shud-jobs, config: {shudBin: ${JSON.stringify(shudBin)}, stateDir: ${JSON.stringify(join(web.directory, "shud-jobs"))}}}\n- id: other\n  config: *shared\n`;
+  const sharedDesired = `- &shared ${JSON.stringify({ id: "shud-jobs", config: desiredJobs("shud", shudBin) })}\n- id: other\n  config: *shared\n`;
   writeFileSync(web.patch, sharedDesired);
   await preservedInstall("shud", shudBin, "shared target already desired");
   checkJobsPatch("shud", shudBin, "shared target already desired");

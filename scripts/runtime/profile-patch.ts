@@ -8,11 +8,14 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { fileURLToPath } from "node:url";
+import type { Config } from "../../packages/dsh-shud-jobs/src/registry.ts";
 import {
   isAlias,
   isMap,
@@ -37,6 +40,89 @@ type ParsedPatch = {
   root: YAMLSeq | null;
   targets: Target[];
 };
+type JobsPatch = { id: "shud-jobs"; config: Config };
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sourceText(value: unknown, key: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new PatchError(`profile:install ${key} must be a nonempty string`);
+  }
+  return value;
+}
+
+function existingDirectory(path: string, key: string): string {
+  if (isAbsolute(path)) {
+    try {
+      if (statSync(path).isDirectory()) return path;
+    } catch {
+      // Report the configured source, never an arbitrary filesystem error payload.
+    }
+  }
+  throw new PatchError(`profile:install ${key} must name an existing absolute directory`);
+}
+
+function modelValue(rows: unknown, id: string, key: string): string {
+  const matches = Array.isArray(rows)
+    ? rows.filter((row: unknown) => isObject(row) && row.id === id)
+    : [];
+  const row: unknown = matches[0];
+  if (matches.length !== 1 || !isObject(row) || !isObject(row.config)) {
+    throw new PatchError(`profile:install bundle ${id}.config is missing or ambiguous`);
+  }
+  return sourceText(row.config[key], `bundle ${id}.config.${key}`);
+}
+
+function installationConfig(shudBin: string, stateDir: string): Config {
+  const root = fileURLToPath(new URL("../../", import.meta.url));
+  const stackRepos = {
+    SHUD: join(root, "SHUD"),
+    rSHUD: join(root, "rSHUD"),
+    AutoSHUD: join(root, "AutoSHUD"),
+  };
+  for (const path of Object.values(stackRepos)) existingDirectory(path, path);
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(readFileSync(join(root, "profile/shud/package.json"), "utf8"));
+  } catch {
+    throw new PatchError("profile:install cannot read bundle package.json");
+  }
+  const peers =
+    isObject(manifest) && isObject(manifest.peerDependencies) ? manifest.peerDependencies : {};
+  const hostVersion = sourceText(peers["@deepseek-ai/dsh"], "bundle peer @deepseek-ai/dsh");
+  let rows: unknown;
+  try {
+    const document = parseDocument(
+      readFileSync(join(root, "profile/shud/cordis.patch.yml"), "utf8"),
+      {
+        prettyErrors: false,
+        merge: false,
+        schema: "core",
+      },
+    );
+    if (document.errors.length) throw new PatchError("invalid bundle YAML");
+    rows = document.toJS({ maxAliasCount: 100 });
+  } catch {
+    throw new PatchError("profile:install cannot read bundle cordis.patch.yml");
+  }
+  const llm = {
+    base_url: modelValue(rows, "llm-deepseek", "baseURL"),
+    request_alias: modelValue(rows, "agent-default-model", "model"),
+  };
+  const sundials = process.env.SUNDIALS_ROOT;
+  return {
+    shudBin,
+    stateDir,
+    stackRepos,
+    hostVersion,
+    llm,
+    ...(sundials === undefined
+      ? {}
+      : { sundialsRoot: existingDirectory(sundials, "SUNDIALS_ROOT") }),
+  };
+}
 
 function fail(file: string, lines: LineCounter, offset: number, reason: string): never {
   const line = Math.max(1, lines.linePos(offset).line);
@@ -104,9 +190,8 @@ function assertUnsharedTarget(file: string, parsed: ParsedPatch, target: Target)
   });
 }
 
-function updatePatch(file: string, source: string, shudBin: string, stateDir: string): string {
+function updatePatch(file: string, source: string, desired: JobsPatch): string {
   const parsed = parsePatch(file, source);
-  const desired = { id: "shud-jobs", config: { shudBin, stateDir } };
   const serialized = JSON.stringify(desired);
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   const target = parsed.targets[0];
@@ -188,12 +273,13 @@ try {
       "profile:install patch update requires a file and absolute shudBin/stateDir",
     );
   }
+  const desired: JobsPatch = { id: "shud-jobs", config: installationConfig(shudBin, stateDir) };
   const stats = lstatSync(file, { throwIfNoEntry: false });
   if (stats && !stats.isFile()) throw new PatchError(`${file}:1: expected a regular patch file`);
   const original = stats ? readFileSync(file) : Buffer.alloc(0);
   if (!isUtf8(original)) throw new PatchError(`${file}:1: invalid UTF-8 YAML`);
   const source = original.toString("utf8");
-  const rendered = updatePatch(file, source, shudBin, stateDir);
+  const rendered = updatePatch(file, source, desired);
   if (!checking && rendered !== source)
     replaceAtomically(file, rendered, stats ? stats.mode & 0o7777 : 0o600);
 } catch (error) {

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,14 +22,55 @@ export async function installScriptFixture(path: string, script: string): Promis
 export async function createHarness(
   parentDir = tmpdir(),
   sessionController: "available" | "absent" = "available",
+  repositories = true,
 ) {
   const root = await mkdtemp(join(parentDir, "shud-jobs-test-"));
   const stateDir = join(root, "state");
   const cwd = join(root, "workspace");
   const shudBin = join(root, "shud");
-  await mkdir(stateDir);
-  await mkdir(cwd);
-  await installScriptFixture(shudBin, "#!/bin/sh\nexit 0\n");
+  const stackRepos = {
+    SHUD: join(root, "repositories", "SHUD"),
+    rSHUD: join(root, "repositories", "rSHUD"),
+    AutoSHUD: join(root, "repositories", "AutoSHUD"),
+  };
+  const gitEnv = {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  try {
+    await mkdir(stateDir);
+    await mkdir(cwd);
+    await installScriptFixture(shudBin, "#!/bin/sh\nexit 0\n");
+    await mkdir(join(root, "repositories"));
+    for (const repository of Object.values(stackRepos)) {
+      await mkdir(repository);
+      if (!repositories) continue;
+      execFileSync("git", ["init", "--quiet", "--template=", repository], { env: gitEnv });
+      execFileSync(
+        "git",
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "-c",
+          "commit.gpgsign=false",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "--quiet",
+          "--allow-empty",
+          "-m",
+          "fixture",
+        ],
+        { cwd: repository, env: gitEnv },
+      );
+    }
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
   const ctx = new Context();
   const sessionEvents: Array<{ type: string; data: unknown }> = [];
   const flushes: SessionId[] = [];
@@ -124,7 +166,13 @@ export async function createHarness(
     mountSessionController,
     presetCtx: preset.ctx,
     otherCtx: otherScope.ctx,
-    config: { stateDir, shudBin },
+    config: {
+      stateDir,
+      shudBin,
+      stackRepos,
+      hostVersion: "0.2.1-rc.2",
+      llm: { base_url: "https://capture.example.invalid", request_alias: "fixture-alias" },
+    },
     async apply(registry: Plugin, config: unknown) {
       const fiber = ctx.plugin(registry, config);
       await fiber;

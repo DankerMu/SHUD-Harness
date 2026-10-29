@@ -1,12 +1,19 @@
 import { constants, lstatSync, readdirSync, realpathSync, type Stats } from "node:fs";
 import * as io from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import { containsPath, RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
+import {
+  containsPath,
+  RunJobSchema,
+  TaskIdSchema,
+  type RunJob,
+  type TaskId,
+} from "@shud-harness/dsh-shud-core";
 
 export interface SubmitShudRequest {
   cwd: string;
   input_dir: string;
   project: string;
+  task_id?: TaskId;
   end_days?: RunJob["end_days"];
   label?: RunJob["label"];
   owner_session: RunJob["owner_session"];
@@ -23,6 +30,7 @@ export interface PreparedInput {
   inputDir: string;
   runsDir: string;
   project: string;
+  taskId: TaskId | null;
   endDays: RunJob["end_days"];
   label: RunJob["label"];
   ownerSession: RunJob["owner_session"];
@@ -51,6 +59,9 @@ export function isProjectComponent(project: string): boolean {
 }
 
 export function prepareInput(request: SubmitShudRequest, stateDir: string): PreparedInput {
+  const task = request.task_id === undefined ? null : TaskIdSchema.safeParse(request.task_id);
+  if (task !== null && !task.success) throw new Error("task_id must be a valid TaskId");
+  const taskId = task === null ? null : task.data;
   const project = RunJobSchema.shape.project.parse(request.project);
   if (!isProjectComponent(project)) {
     throw new Error("project must be one contained path component");
@@ -99,7 +110,7 @@ export function prepareInput(request: SubmitShudRequest, stateDir: string): Prep
     }
   }
   visit("");
-  return { cwd, inputDir, runsDir, project, endDays, label, ownerSession, llm, items };
+  return { cwd, inputDir, runsDir, project, taskId, endDays, label, ownerSession, llm, items };
 }
 
 export async function copyInput(input: PreparedInput, runDir: string): Promise<number> {

@@ -136,14 +136,14 @@ uncertainty_notes: null
 
 ## 4. RunJob
 
-M2 的实现源为 `packages/dsh-shud-core/src/schemas/run-job.ts`；以下示例是可解析的 `submitted` 记录。所有列出的字段都必填，可空字段必须显式传 `null`。根对象与 `llm`、`notify` 均拒绝未知字段。
+实现源为 `packages/dsh-shud-core/src/schemas/run-job.ts`；以下示例是仍然有效的 M2 `submitted` 记录。所有列出的字段都必填，可空字段必须显式传 `null`。根对象与 `llm`、`notify` 均拒绝未知字段。
 
 ```yaml
 job_id: JOB-20261022T031500-a1b2
 run_id: RUN-20261022T031500-a1b2
-task_id: null                       # M2 允许 null；M3 绑定 TaskCard
-stack_id: null                      # M2 允许 null；非空引用由 job 携带，collect 不回猜
-data_id: null                       # M2 允许 null
+task_id: null                       # schema 保持可空；新提交取可选 TaskId，未提供为 null
+stack_id: null                      # M2 记录允许 null；M3 新提交为采集/复用的 StackId
+data_id: null                       # M2 记录允许 null；M3 新提交为本次生成的 DataId
 backend: local_job                 # M2 唯一后端
 status: submitted                  # 启动意图已持久化，尚未记录 pid
 project: ccw
@@ -175,6 +175,12 @@ notify:
 
 **ID 规范：** `JOB-YYYYMMDDTHHMMSS-xxxx` / `RUN-YYYYMMDDTHHMMSS-xxxx` 取代 `JOB-NNNN` / `RUN-NNNN`；时间为 UTC、精确到秒，`xxxx` 为 4 位小写十六进制。同一次 `generateRunIdentifiers()` 调用共享时间戳和随机段，分别返回品牌类型 `JobRecordId` / `RunId`。旧格式、大写随机段或将 dsh 登记 id 填入 `job_id` 均被拒绝。运行目录与索引的碰撞检查由提交层负责，不由 schema/id 生成函数访问文件系统。
 
+**M3 提交关联（#443）：** `shud_run` 使用的注册表 `submitShud` 请求可携带品牌 `task_id`，未提供时写 `null`，显式 `null` 或非法值在文件系统操作前拒绝；本刀不新增工具参数或回写 TaskCard。输入完整复制并完成可选 END 改写后，调用规范 `captureStackLock`，再等待 `generateProvenance` 对运行副本计算文件 hash/字节数；在首次 `created` RunJob 原子写之前，StackLock 与本次 DataProvenance 已持久化。该次写入同时包含 `task_id`、非空 `stack_id`、非空 `data_id`，后续 collect 原样继承；schema 仍允许三者为 `null`，M2 恢复与旧结果不迁移。
+
+采集来源由注册表必填配置 `stackRepos.{SHUD,rSHUD,AutoSHUD}`（绝对路径）、`hostVersion`、`llm.{base_url,request_alias}` 指定；可选 `sundialsRoot` 为绝对路径。apply 验证这些键与父类配置的严格并集，不采集 Git 或写工作区证据。安装器从自身所在仓库根派生三仓库路径，从 bundle peer 读取 hostVersion，从 bundle 模型行读取 llm；`SUNDIALS_ROOT` 未设置则省略，设置时须为已存在绝对目录。新 lock 的 response_model 与请求相同；指纹匹配时复用原 lock，保留其字节/mtime，不因响应模型变化改写。
+
+提交失败沿既有事务回滚：先证明执行已不能继续 I/O、完成登记清理，再移除自有索引/运行目录及本次返回的 provenance。删除前复核 provenance 普通文件及父目录身份，拒绝链接和外来替换；不扫描认领其它 provenance，从不删除任何 StackLock（包括本次新建或复用的 lock）。清理失败保留既有聚合错误、D7/预留 fail-closed 语义，不宣称全部删除；采集及回滚均纳入关闭前 drain。
+
 **状态机：**
 
 ```text
@@ -195,14 +201,14 @@ created → submitted → running → succeeded | failed | cancelled → collect
 
 ## 5. RunRecord
 
-M2 的实现源为 `packages/dsh-shud-core/src/schemas/run-record.ts`。RunRecord 是 collect 后的不可变结果记录；以下为可解析的成功记录。所有字段必填，未测量或未绑定的可空字段显式传 `null`；`numerical_health` 本身必须是对象。
+实现源为 `packages/dsh-shud-core/src/schemas/run-record.ts`。RunRecord 是 collect 后的不可变结果记录；以下为仍然有效的 M2 成功记录。所有字段必填，未测量或未绑定的可空字段显式传 `null`；`numerical_health` 本身必须是对象。
 
 ```yaml
 run_id: RUN-20261022T031500-a1b2
 job_id: JOB-20261022T031500-a1b2
-task_id: null                       # M2 可空，M3 收紧
-stack_id: null
-data_id: null
+task_id: null                       # schema 保持可空；collect 继承 RunJob 的同名值
+stack_id: null                      # M2 null 仍有效；M3 新提交的采集引用原样继承
+data_id: null                       # M2 null 仍有效；M3 新提交的 provenance 引用原样继承
 status: succeeded                  # succeeded | failed；仅 exit_class: ok 成功
 command: ["/usr/local/bin/shud", "-o", "output/ccw.out", "ccw"] # argv
 exit_code: 0                       # 整数或 null
@@ -227,6 +233,8 @@ llm:
   response_model_source: configured # response | configured
 collected_at: "2026-10-22T03:16:00Z" # ISO 8601 UTC
 ```
+
+**提交来源：** collect 不补采集、不猜测引用；`task_id`、`stack_id`、`data_id` 逐一取所属 RunJob 的值。M3 新提交的 stack/data 非空，task 可空；这不收紧 durable schema，也不改写已有 M2 null-id RunRecord。
 
 **退出类别：** `classifyRunExit(exitCode, missingOutcome?)` 为唯一映射：`0 → ok`、`10 → nan`、`12 → file_io`、`13 → input`、`19 → cvode`、`20 → consistency`，其它非零整数为 `other`（退出码事实见 [SHUD_IO_Facts](../01_CODEBASE/SHUD_IO_Facts.md#退出码)）。`exit_code: null` 必须明确提供 `cancelled`（取消且无退出码）或 `lost`（进程丢失/从未启动且无退出码），不猜测默认结果。数值退出证据优先于取消意图。schema 拒绝退出码与类别矛盾的记录，并要求 `ok` 对应 `succeeded`，其余八类对应 `failed`。
 

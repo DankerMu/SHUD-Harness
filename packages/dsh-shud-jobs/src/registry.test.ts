@@ -43,7 +43,7 @@ async function indexEntries(stateDir: string) {
 }
 
 async function operationTrace(registry: Plugin) {
-  const h = await createHarness();
+  const h = await createHarness(undefined, "available", false);
   try {
     const fiber = await h.apply(registry, { ...h.config, maxConcurrentJobsPerOwner: 2 });
     const scoped = await h.attachController(true);
@@ -163,7 +163,7 @@ async function operationTrace(registry: Plugin) {
 
 describe("registry parent behavior", () => {
   test("O5a: a preset controller cannot admit unowned work; an unscoped controller can", async () => {
-    const h = await createHarness();
+    const h = await createHarness(undefined, "available", false);
     try {
       await h.apply(LocalJobRegistry, {});
       await h.attachController(true);
@@ -196,7 +196,7 @@ describe("registry parent behavior", () => {
   });
 
   test("subclass installs no implicit global controller", async () => {
-    const h = await createHarness();
+    const h = await createHarness(undefined, "available", false);
     try {
       await h.apply(ShudJobRegistry, h.config);
       expect(() => h.ctx.jobs.start(producer().spec)).toThrow(
@@ -224,7 +224,7 @@ describe("registry apply configuration", () => {
     ["stateDir", "relative-state"],
     ["shudBin", "relative-shud"],
   ])("rejects invalid %s=%s before registering jobs", async (key, value) => {
-    const h = await createHarness();
+    const h = await createHarness(undefined, "available", false);
     try {
       const error = await applyError(() => h.apply(ShudJobRegistry, { ...h.config, [key]: value }));
       expect(error).toBeInstanceOf(Error);
@@ -236,7 +236,7 @@ describe("registry apply configuration", () => {
   });
 
   test("rejects unknown shudbin rather than silently passing it through", async () => {
-    const h = await createHarness();
+    const h = await createHarness(undefined, "available", false);
     try {
       const error = await applyError(() =>
         h.apply(ShudJobRegistry, { ...h.config, shudbin: h.shudBin }),
@@ -252,7 +252,7 @@ describe("registry apply configuration", () => {
   test.each(["maxConcurrentJobsPerOwner", "retainBytes", "settledRetainBytes", "pumpPollMs"])(
     "preserves parent rejection of invalid %s",
     async (key) => {
-      const h = await createHarness();
+      const h = await createHarness(undefined, "available", false);
       try {
         const error = await applyError(() => h.apply(ShudJobRegistry, { ...h.config, [key]: 0 }));
         expect(error).toBeInstanceOf(Error);
@@ -271,7 +271,7 @@ describe("registry apply configuration", () => {
   ])(
     "rejects direct construction with %s pumpPollMs before jobs or state ownership",
     async (_label, cadence) => {
-      const h = await createHarness();
+      const h = await createHarness(undefined, "available", false);
       let unexpected: ShudJobRegistry | undefined;
       try {
         const message = caughtError(() => {
@@ -301,7 +301,7 @@ describe("registry apply configuration", () => {
   test("preserves parent Config identity and resolved defaults", async () => {
     const original = LocalJobRegistry.Config;
     const parent = original["~standard"].validate({});
-    const h = await createHarness();
+    const h = await createHarness(undefined, "available", false);
     try {
       await h.apply(ShudJobRegistry, h.config);
       expect(LocalJobRegistry.Config).toBe(original);
@@ -327,7 +327,7 @@ describe("registry apply configuration", () => {
   });
 
   test("creates a missing stateDir with zero index entries and no runs", async () => {
-    const h = await createHarness();
+    const h = await createHarness(undefined, "available", false);
     const stateDir = join(h.root, "new", "state");
     try {
       await h.apply(ShudJobRegistry, { ...h.config, stateDir });
@@ -343,7 +343,7 @@ describe("registry apply configuration", () => {
   test.each(["state-file", "binary-missing", "binary-directory", "binary-not-executable"])(
     "rejects filesystem config %s before registering jobs",
     async (kind) => {
-      const h = await createHarness();
+      const h = await createHarness(undefined, "available", false);
       try {
         const target = join(h.root, "invalid");
         const key = kind === "state-file" ? "stateDir" : "shudBin";
@@ -365,7 +365,7 @@ describe("registry apply configuration", () => {
   );
 
   test("rejects a stateDir on an unwritable system volume under actual privileges", async () => {
-    const h = await createHarness();
+    const h = await createHarness(undefined, "available", false);
     const stateDir = process.platform === "darwin" ? "/System" : "/sys";
     try {
       expect(() => accessSync(stateDir, constants.W_OK)).toThrow();

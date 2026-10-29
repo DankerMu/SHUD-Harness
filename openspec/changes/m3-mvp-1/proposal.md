@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #443 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Path #4.
+Blast radius: jobs submission transaction/rollback, workspace evidence ownership, registry configuration and production profile installation.
+Selected risk packs: Public API/CLI; Config/project setup; File IO/path safety; Schema/identity; Secrets/diagnostics; Concurrency/ordering; Error handling/rollback; Legacy compatibility; Release/dependency compatibility; Documentation.
+Evidence floor: semantic RED before production edits; actual registry/config/submit/rollback/collect consumers, independent copied-input hashes and first-created ordering, installer byte/idempotence/negative controls, default check, strict validation, instructions check, profile smoke, real SHUD tiny and Web SIGTERM/SIGKILL restart, three-seat white-box review.
+Only task 5.1 is selected. Keep tools, records implementations, core schemas, bundle rows and profile-install.sh unchanged; the existing records dependency and installer precheck suffice. Task query/TaskCard writes/presets remain downstream issues.
+
 ## Issue #442 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream).

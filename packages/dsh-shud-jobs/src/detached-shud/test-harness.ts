@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { JobHandle, JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import * as jobs from "../index.ts";
-import type { SubmitShudRequest } from "../index.ts";
+import type { Config, SubmitShudRequest } from "../index.ts";
 import { createHarness, installScriptFixture } from "../test-harness.ts";
 import { actualRegistry, registrationResource } from "../submit-shud/test-harness.ts";
 import { captureCleanupFailure, cleanupDiagnostic } from "../cleanup-diagnostics.ts";
@@ -341,7 +341,7 @@ export interface WrapperHost {
 }
 
 export async function createWrapperHost(
-  config: { stateDir: string; shudBin: string },
+  config: Config,
   request: SubmitShudRequest,
 ): Promise<WrapperHost> {
   const child = fork(
@@ -435,7 +435,7 @@ export async function createWrapperHost(
 
 async function runWrapperHost() {
   const payload = JSON.parse(process.argv[3]) as {
-    config: { stateDir: string; shudBin: string };
+    config: Config;
     request: SubmitShudRequest;
   };
   const h = await createHarness(dirname(payload.config.stateDir));
