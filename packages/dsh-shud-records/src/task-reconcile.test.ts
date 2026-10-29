@@ -218,6 +218,144 @@ describe.each([false, true])("latest overall job with reversed order %s", (rever
   });
 });
 
+describe.each([false, true])("equal-rank latest references with reversed order %s", (reverse) => {
+  describe.each([
+    { first: "2026-10-27T08:00:05Z", second: "2026-10-27T08:00:05Z" },
+    { first: "2026-10-27T08:00:05.1Z", second: "2026-10-27T08:00:05.100Z" },
+    { first: null, second: null },
+  ])("submitted_at $first / $second", (time) => {
+    test.each([
+      { field: "stack_id", conflicting: STACK_SECOND },
+      { field: "stack_id", conflicting: null },
+      { field: "data_id", conflicting: DATA_SECOND },
+      { field: "data_id", conflicting: null },
+    ] as const)("rejects ambiguous $field evidence against $conflicting", (row) => {
+      const card = freezeTaskCard(makeTaskCard({ linked_jobs: [], stack_id: null, data_id: null }));
+      const jobs = [
+        freezeRunJob(makeRunJob(FIRST, { submitted_at: time.first })),
+        freezeRunJob(
+          makeRunJob(FIRST, { submitted_at: time.second, [row.field]: row.conflicting }),
+        ),
+      ];
+      if (reverse) jobs.reverse();
+      Object.freeze(jobs);
+      const before = structuredClone({ card, jobs });
+      const now = new Date(STAMP);
+      const clock = vi.spyOn(now, "toISOString");
+      let caught: unknown;
+      try {
+        reconcileTaskCard(card, jobs, now);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(TaskReconcileError);
+      expect(caught).toMatchObject({
+        reason: "ambiguous_job_reference",
+        job_id: FIRST,
+        field: row.field,
+      });
+      expect({ card, jobs }).toStrictEqual(before);
+      expect(clock).not.toHaveBeenCalled();
+      for (const reference of [STACK_FIRST, STACK_SECOND, DATA_FIRST, DATA_SECOND]) {
+        expect(inspect(caught, { depth: null })).not.toContain(reference);
+      }
+      expect(inspect(caught, { depth: null })).not.toContain("private-task-text-439");
+    });
+  });
+
+  test("identical latest references remain harmless despite unrelated job metadata differences", () => {
+    const card = makeTaskCard({ linked_jobs: [], stack_id: null, data_id: null });
+    const jobs = [
+      makeRunJob(FIRST, { submitted_at: "2026-10-27T08:00:05.1Z", label: "first metadata" }),
+      makeRunJob(FIRST, { submitted_at: "2026-10-27T08:00:05.100Z", label: "second metadata" }),
+    ];
+    if (reverse) jobs.reverse();
+    reconcileUnchangedInputs(card, jobs, {
+      ...card,
+      linked_jobs: [FIRST],
+      stack_id: STACK_FIRST,
+      data_id: DATA_FIRST,
+      updated_at: STAMP,
+    });
+  });
+
+  test("identical duplicates retain the original-card no-write signal when already reconciled", () => {
+    const card = makeTaskCard({
+      linked_jobs: [FIRST],
+      stack_id: STACK_FIRST,
+      data_id: DATA_FIRST,
+    });
+    const jobs = [makeRunJob(FIRST), makeRunJob(FIRST)];
+    if (reverse) jobs.reverse();
+    expect(reconcileUnchangedInputs(card, jobs, card)).toBe(card);
+  });
+});
+
+describe.each([
+  [0, 1, 2],
+  [0, 2, 1],
+  [1, 0, 2],
+  [1, 2, 0],
+  [2, 0, 1],
+  [2, 1, 0],
+])("lower-ranked conflicting references in order %j / %j / %j", (...order) => {
+  test.each(["later timestamp", "larger tied job id"] as const)(
+    "do not poison a unique winner selected by %s",
+    (ranking) => {
+      const card = makeTaskCard({ linked_jobs: [], stack_id: null, data_id: null });
+      const jobs = [
+        makeRunJob(FIRST, { submitted_at: "2026-10-27T08:00:05.1Z" }),
+        makeRunJob(FIRST, {
+          submitted_at: "2026-10-27T08:00:05.100Z",
+          stack_id: null,
+          data_id: DATA_SECOND,
+        }),
+        makeRunJob(SECOND, {
+          submitted_at:
+            ranking === "later timestamp" ? "2026-10-27T09:00:00Z" : "2026-10-27T08:00:05.1Z",
+          stack_id: STACK_SECOND,
+          data_id: DATA_SECOND,
+        }),
+      ];
+      reconcileUnchangedInputs(
+        card,
+        order.map((index) => jobs[index]),
+        {
+          ...card,
+          linked_jobs: [FIRST, SECOND],
+          stack_id: STACK_SECOND,
+          data_id: DATA_SECOND,
+          updated_at: STAMP,
+        },
+      );
+    },
+  );
+});
+
+test.each([false, true])(
+  "distinguishes many-significant-digit fractions with reversed order %s",
+  (reverse) => {
+    const card = makeTaskCard({ linked_jobs: [], stack_id: null, data_id: null });
+    const jobs = [
+      makeRunJob(FIRST, { submitted_at: "2026-10-27T08:00:05.12345678901234567891Z" }),
+      makeRunJob(SECOND, {
+        submitted_at: "2026-10-27T08:00:05.12345678901234567890Z",
+        stack_id: STACK_SECOND,
+        data_id: DATA_SECOND,
+      }),
+    ];
+    if (reverse) jobs.reverse();
+    reconcileUnchangedInputs(card, jobs, {
+      ...card,
+      linked_jobs: [FIRST, SECOND],
+      stack_id: STACK_FIRST,
+      data_id: DATA_FIRST,
+      updated_at: STAMP,
+    });
+  },
+);
+
 test.each([
   { stack_id: null, data_id: DATA_SECOND },
   { stack_id: STACK_SECOND, data_id: null },

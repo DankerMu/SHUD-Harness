@@ -9,13 +9,12 @@ import { transitionTask } from "./task-transition.ts";
 
 /** Only validated job identity and the controlled field name enter diagnostics. */
 export class TaskReconcileError extends Error {
-  readonly reason = "invalid_job_reference";
-
   constructor(
     readonly job_id: JobRecordId,
     readonly field: "stack_id" | "data_id",
+    readonly reason: "invalid_job_reference" | "ambiguous_job_reference" = "invalid_job_reference",
   ) {
-    super(`Task reconciliation failed: invalid_job_reference (${job_id}, ${field})`);
+    super(`Task reconciliation failed: ${reason} (${job_id}, ${field})`);
     this.name = "TaskReconcileError";
   }
 }
@@ -47,6 +46,9 @@ function compareSubmittedAt(left: string | null, right: string | null): number {
  * their no-write signal. Changes preserve unowned fields and refresh updated_at once.
  * Select one latest job overall (null time oldest, ties by largest ordinal job id),
  * validate only references actually filled, and never fall back to an older reference.
+ * Equal-rank latest entries may repeat identical references, regardless of unrelated
+ * metadata. Conflicting references fail closed before clock access (stack_id first if
+ * both conflict). A better-ranked winner discards lower-ranked reference ambiguity.
  */
 export function reconcileTaskCard(
   card: TaskCard,
@@ -55,6 +57,8 @@ export function reconcileTaskCard(
 ): TaskCard {
   const ids = new Set(card.linked_jobs);
   let latest: RunJob | undefined;
+  let stackConflict = false;
+  let dataConflict = false;
   let hasLiveJob = false;
   for (const job of runJobsForTask) {
     if (job.task_id !== card.task_id) continue;
@@ -66,7 +70,19 @@ export function reconcileTaskCard(
       latest === undefined ? 1 : compareSubmittedAt(job.submitted_at, latest.submitted_at);
     if (latest === undefined || order > 0 || (order === 0 && job.job_id > latest.job_id)) {
       latest = job;
+      stackConflict = false;
+      dataConflict = false;
+    } else if (order === 0 && job.job_id === latest.job_id) {
+      stackConflict ||= job.stack_id !== latest.stack_id;
+      dataConflict ||= job.data_id !== latest.data_id;
     }
+  }
+  if (latest !== undefined && (stackConflict || dataConflict)) {
+    throw new TaskReconcileError(
+      latest.job_id,
+      stackConflict ? "stack_id" : "data_id",
+      "ambiguous_job_reference",
+    );
   }
 
   const linkedJobs = [...ids].sort();
