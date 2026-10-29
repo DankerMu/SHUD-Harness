@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #442 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream).
+Blast radius: records pure report transitions/decision history, report-to-task status projection and repair predicate.
+Selected risk packs: Public API; State transitions/ordering; Schema/identity/time; Scientific governance/approval boundary; Controlled diagnostics; Legacy compatibility; Documentation.
+Evidence floor: independent seven-state transition/decision matrices, strict decision/comment/identity negatives, frozen inputs and clock ownership, complete status mapping and last-link repair controls, direct built lifecycle/predicate and real compiler consumers, default check/strict/profile and three-seat white-box review.
+Only task 4.4c is selected. No validator execution, report rendering, file publication, TaskCard mutation, approval seam, tool, core schema or configuration change.
+
 ## Issue #441 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream).
