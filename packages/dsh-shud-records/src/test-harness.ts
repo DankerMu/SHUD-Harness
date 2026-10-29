@@ -86,7 +86,7 @@ const dataCase = {
   },
 } as const;
 
-const reportCase = {
+export const reportCase = {
   kind: "report",
   id: "REPORT-20261027T080005-3f9c",
   directory: "reports",

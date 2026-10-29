@@ -5,6 +5,8 @@
  * Provenance inventories prepared input bytes before allocation. Task transition,
  * reconciliation and closure helpers are pure; callers own evidence reads, approval,
  * report augmentation and persistence. Reconciliation identity signals no write.
+ * Report rendering freshly reads cited evidence and returns Markdown without publication;
+ * the watermark stale predicate is pure. Future tools own approval, state and atomic writes.
  */
 export { readJson, writeJsonSync, writeJson, writeBytes } from "./state-files.ts";
 export { createTaskCard } from "./task-card-file.ts";
@@ -16,6 +18,10 @@ export type { TaskEvent } from "./task-transition.ts";
 export { reconcileTaskCard, TaskReconcileError } from "./task-reconcile.ts";
 export { evaluateClosure } from "./task-closure.ts";
 export type { ClosureRunJob, ClosureDraft, ClosureFailure, ClosureResult } from "./task-closure.ts";
+export { isReportMarkdownStale } from "./report-watermark.ts";
+export { renderReport } from "./report-render.ts";
+export { ReportRenderError } from "./report-render-error.ts";
+export type { ReportRenderStage } from "./report-render-error.ts";
 export {
   readWorkspaceRecord,
   writeWorkspaceRecord,

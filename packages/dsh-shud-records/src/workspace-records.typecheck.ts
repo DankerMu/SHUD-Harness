@@ -14,6 +14,10 @@ import {
   transitionTask,
   reconcileTaskCard,
   evaluateClosure,
+  isReportMarkdownStale,
+  renderReport,
+  ReportRenderError,
+  type ReportRenderStage,
   type ClosureRunJob,
   type ClosureDraft,
   type ClosureFailure,
@@ -101,3 +105,28 @@ void [
   unidentifiedFailure,
   unknownFailure,
 ];
+
+const stale: boolean = isReportMarkdownStale(report, undefined);
+isReportMarkdownStale(report, "# EvidenceReport\nDRAFT — not accepted by PI\n");
+// @ts-expect-error The predicate takes a validated report, not raw unknown data.
+isReportMarkdownStale(value, undefined);
+// @ts-expect-error Missing Markdown is undefined, not null.
+isReportMarkdownStale(report, null);
+// @ts-expect-error The projection is synchronous, not a promise.
+const asynchronousStale: Promise<boolean> = isReportMarkdownStale(report, undefined);
+const renderError = new ReportRenderError("decision_history");
+const renderStage: ReportRenderStage = renderError.stage;
+const renderPath: string | undefined = renderError.path;
+// @ts-expect-error Error stages are controlled, not authored payload.
+new ReportRenderError("private-model-payload");
+void [stale, asynchronousStale, renderStage, renderPath];
+
+// Rendering accepts an untrusted routing id for runtime validation, not report JSON.
+const markdown: string = renderReport(cwd, id);
+// @ts-expect-error The workspace root must be a string.
+renderReport(value, id);
+// @ts-expect-error Rendering returns complete Markdown synchronously, not a promise.
+const asynchronousMarkdown: Promise<string> = renderReport(cwd, report.report_id);
+// @ts-expect-error Rendering is a text projection, not an updated report object.
+const renderedReport: EvidenceReport = renderReport(cwd, report.report_id);
+void [markdown, asynchronousMarkdown, renderedReport];
