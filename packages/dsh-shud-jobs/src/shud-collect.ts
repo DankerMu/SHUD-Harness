@@ -12,7 +12,7 @@ import {
 } from "@shud-harness/dsh-shud-core";
 import { readExit } from "./shud-exit.ts";
 import { isProjectComponent } from "./shud-input.ts";
-import { writeJson } from "./state-files.ts";
+import { writeJson } from "@shud-harness/dsh-shud-records";
 import type { IndexEntry } from "./state-indexes.ts";
 import {
   CollectFailure,

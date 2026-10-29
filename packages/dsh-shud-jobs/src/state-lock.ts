@@ -1,7 +1,7 @@
 import * as childProcess from "node:child_process";
 import { closeSync, openSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { readJson, writeJsonSync } from "./state-files.ts";
+import { readJson, writeJsonSync } from "@shud-harness/dsh-shud-records";
 import { isStartStamp, processStart } from "./process-identity.ts";
 
 interface Owner {

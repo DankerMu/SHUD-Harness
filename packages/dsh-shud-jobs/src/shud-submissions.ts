@@ -12,7 +12,7 @@ import {
 } from "@shud-harness/dsh-shud-core";
 import type { Config } from "./registry.ts";
 import type { StateIndexStore } from "./state-indexes.ts";
-import { writeJson } from "./state-files.ts";
+import { writeJson } from "@shud-harness/dsh-shud-records";
 import { stdoutSource } from "./file-output.ts";
 import { updateEnd } from "./shud-end.ts";
 import {

@@ -17,7 +17,8 @@
   },
   "dependencies": {
     "@shud-harness/dsh-shud-core": "workspace:*",
-    "@shud-harness/dsh-shud-jobs": "workspace:*"
+    "@shud-harness/dsh-shud-jobs": "workspace:*",
+    "@shud-harness/dsh-shud-records": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.5",

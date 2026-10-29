@@ -81,6 +81,9 @@ importers:
       '@shud-harness/dsh-shud-core':
         specifier: workspace:*
         version: link:../dsh-shud-core
+      '@shud-harness/dsh-shud-records':
+        specifier: workspace:*
+        version: link:../dsh-shud-records
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.5
@@ -147,6 +150,22 @@ importers:
         specifier: 5.0.5
         version: 5.0.5(@types/node@24.19.2)(@vitest/coverage-v8@5.0.5)(vite@8.3.4(@types/node@24.19.2)(jiti@2.7.0)(yaml@2.9.1))
 
+  packages/dsh-shud-records:
+    dependencies:
+      '@shud-harness/dsh-shud-core':
+        specifier: workspace:*
+        version: link:../dsh-shud-core
+    devDependencies:
+      '@types/node':
+        specifier: 24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.0.5
+        version: 5.0.5(@types/node@24.19.2)(@vitest/coverage-v8@5.0.5)(vite@8.3.4(@types/node@24.19.2)(jiti@2.7.0)(yaml@2.9.1))
+
   packages/dsh-shud-tools:
     dependencies:
       '@shud-harness/dsh-shud-core':
@@ -155,6 +174,9 @@ importers:
       '@shud-harness/dsh-shud-jobs':
         specifier: workspace:*
         version: link:../dsh-shud-jobs
+      '@shud-harness/dsh-shud-records':
+        specifier: workspace:*
+        version: link:../dsh-shud-records
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.5
