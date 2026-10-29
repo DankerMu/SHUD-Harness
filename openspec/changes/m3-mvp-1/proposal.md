@@ -88,6 +88,14 @@ Selected risk packs: Public API; Config/input contract; File IO/path safety/over
 Evidence floor: real temporary Git repositories, fixed independent SHA-256 vectors, immutable reuse/mtime and collision/error controls, copied-versus-original input proof, direct built API smoke, full check and white-box review.
 Only task 4.2 is selected; code changes stay in records/src. Existing core collectors/fingerprint and records safety/allocation are reused. No jobs/profile/config installer wiring, new dependencies, report behavior or provenance deduplication.
 
+## Issue #439 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream; TaskCard state/closure governance, Critical Path #6 and controlled diagnostics).
+Blast radius: reachable TaskCard transitions, recovered job references, no-op write suppression contract and deterministic scientific-assist closure decisions.
+Selected risk packs: Public API; Schema/identity/time; State transitions/ordering; Scientific governance; Secrets/error diagnostics; Legacy compatibility; Error handling; Documentation.
+Evidence floor: independent complete state/event matrix, reconciliation order/null/reference/no-op cases, closure success and every blocking clause with job-specific diagnostics, mutation-free built API smoke, compiler/default gate and white-box review.
+Only task 4.3 is selected, records/src only. No filesystem/registry/tool/approval wiring, new schema/dependency, report rendering or LLM closure classifier. Later callers own persistence and verified approval/closure event prerequisites.
+
 ## Why
 
 M3 的用户可见步骤是"从任务卡到 Markdown 证据报告，含 PI 审批"（`docs/04_IMPLEMENTATION/Phased_Plan.md` §0 M3 行、§3）：首任务 "ccw 运行 → RunRecord → EvidenceReport" 端到端跑通，报告含 StackLock 三字段与响应 model，措辞过治理四条不变式。M2 已于 2026-10-27 通过 PI 验收（#318，ADR-0007），运行主链（`shud_run` → durable JobRegistry → RunRecord → 唤醒）就绪，但 M3 的四个对象（TaskCard、StackLock 三字段、DataProvenance、EvidenceReport）在代码里要么不存在、要么仍是 Zero 时代的旧字段（`docs/04_IMPLEMENTATION/Port_List.md`）；`policy-gate-core` 零消费者、profile 无 agent preset、`approval` seam 没有 PI comment 字段（ADR-0004 附录 ⑫）。M2→M3 边界升级评估（#420）确认钉版 rc.2 的 seam 事实在 rc.4 不变，设计据此冻结。
