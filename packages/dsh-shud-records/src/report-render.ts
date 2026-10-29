@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import {
   GOVERNANCE_INVARIANTS,
   ReportIdSchema,
+  type EvidenceReport,
   type DataProvenance,
   type RunRecord,
   type StackLock,
@@ -14,7 +15,7 @@ import { regularTarget } from "./workspace-paths.ts";
 
 type Metadata = string | number | bigint | boolean | null;
 const TEMPLATE_PATH = fileURLToPath(new URL("../templates/evidence_report.md", import.meta.url));
-const REPOSITORIES = ["SHUD", "rSHUD", "AutoSHUD"] as const;
+export const REPOSITORIES = ["SHUD", "rSHUD", "AutoSHUD"] as const;
 const ENTITIES: Readonly<Record<string, string>> = {
   "&": "&amp;",
   "<": "&lt;",
@@ -27,7 +28,7 @@ const ENTITIES: Readonly<Record<string, string>> = {
 };
 
 /** Encode only structured metadata, once; authored prose never passes through here. */
-function metadata(value: Metadata): string {
+export function metadata(value: Metadata): string {
   if (value === null) return "unknown (null)";
   return String(value).replace(/[&<>|`\\\r\n]/gu, (character) => ENTITIES[character] ?? character);
 }
@@ -164,6 +165,54 @@ function readTemplate(): string {
   throw new ReportRenderError("template", TEMPLATE_PATH);
 }
 
+export type ReportSectionId = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+
+/** Package-internal origins; offsets refer to the complete, unchanged public Markdown. */
+export interface ReportDocument {
+  readonly markdown: string;
+  readonly sections: readonly {
+    readonly id: ReportSectionId;
+    readonly start: number;
+    readonly end: number;
+  }[];
+}
+
+function projectTemplate(fields: Readonly<Record<string, string>>): ReportDocument {
+  const template = readTemplate();
+  // Capture trusted heading offsets before substitution. Authored headings never
+  // become section boundaries, including when they contain secret-shaped labels.
+  const sections = [{ id: 0 as ReportSectionId, start: 0, end: 0 }];
+  for (const match of template.matchAll(/^## (10|[1-9])\. /gmu)) {
+    sections.push({ id: Number(match[1]) as ReportSectionId, start: match.index, end: 0 });
+  }
+  let nextSection = 0;
+  let displacement = 0;
+  const advance = (offset: number): void => {
+    while (nextSection < sections.length) {
+      const section = sections[nextSection];
+      if (section === undefined || section.start > offset) break;
+      section.start += displacement;
+      nextSection += 1;
+    }
+  };
+  // Replace original asset tokens once, never token-like text inside inserted prose.
+  const markdown = template.replace(
+    /\{\{([a-z_]+)\}\}/gu,
+    (token: string, name: string, offset: number) => {
+      const value = Object.hasOwn(fields, name) ? fields[name] : undefined;
+      if (value === undefined) throw new ReportRenderError("template", TEMPLATE_PATH);
+      advance(offset);
+      displacement += value.length - token.length;
+      return value;
+    },
+  );
+  advance(template.length);
+  for (const [index, section] of sections.entries()) {
+    section.end = sections[index + 1]?.start ?? markdown.length;
+  }
+  return { markdown, sections };
+}
+
 /**
  * Synchronously project fresh, schema-validated same-workspace evidence into Markdown.
  * Routing and embedded identities are checked; arrays keep their declared order. Only
@@ -182,6 +231,17 @@ export function renderReport(cwd: string, reportId: unknown): string {
   const stacks = report.stack_ids.map((stackId) => readReportInput(cwd, "stack", stackId));
   const data = report.data_ids.map((dataId) => readReportInput(cwd, "data", dataId));
   const runs = report.linked_runs.map((runId) => readReportRun(cwd, runId));
+  return renderReportDocument(report, stacks, data, runs, watermark).markdown;
+}
+
+/** Canonical projection from already validated evidence; not a public injection API. */
+export function renderReportDocument(
+  report: EvidenceReport,
+  stacks: readonly StackLock[],
+  data: readonly DataProvenance[],
+  runs: readonly RunRecord[],
+  watermark = reportWatermark(report),
+): ReportDocument {
   const risks = runs
     .filter((run) => run.status !== "succeeded")
     .map((run) => `- ${metadata(run.run_id)}: ${metadata(run.exit_class)}`);
@@ -200,10 +260,5 @@ export function renderReport(cwd: string, reportId: unknown): string {
     appendix: runs.map(renderAppendix).join("\n\n"),
     footer: watermark.footer === null ? "" : `\n\n${watermark.footer}`,
   };
-  // Replace only tokens in the original asset, never token-like text inside inserted prose.
-  return readTemplate().replace(/\{\{([a-z_]+)\}\}/gu, (_token: string, name: string) => {
-    const value = Object.hasOwn(fields, name) ? fields[name] : undefined;
-    if (value === undefined) throw new ReportRenderError("template", TEMPLATE_PATH);
-    return value;
-  });
+  return projectTemplate(fields);
 }

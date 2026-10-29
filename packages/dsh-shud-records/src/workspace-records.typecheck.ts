@@ -18,6 +18,13 @@ import {
   renderReport,
   ReportRenderError,
   type ReportRenderStage,
+  validateReport,
+  ReportValidationError,
+  type ReportValidationStage,
+  type ReportValidationCheckId,
+  type ReportValidationCheck,
+  type ReportValidationDetail,
+  type ReportValidationResult,
   type ClosureRunJob,
   type ClosureDraft,
   type ClosureFailure,
@@ -130,3 +137,61 @@ const asynchronousMarkdown: Promise<string> = renderReport(cwd, report.report_id
 // @ts-expect-error Rendering is a text projection, not an updated report object.
 const renderedReport: EvidenceReport = renderReport(cwd, report.report_id);
 void [markdown, asynchronousMarkdown, renderedReport];
+
+// Validation consumes only routing, not caller-supplied Markdown or cached evidence.
+const validation: ReportValidationResult = validateReport(cwd, id);
+const validationOk: boolean = validation.ok;
+const validationCheck: ReportValidationCheck = validation.checks[0];
+const validationCheckId: ReportValidationCheckId = validationCheck.id;
+const firstValidationCheckId: 1 = validation.checks[0].id;
+const lastValidationCheckId: 13 = validation.checks[12].id;
+const validationDetails: readonly ReportValidationDetail[] = validationCheck.details;
+const validationError = new ReportValidationError("parse");
+const validationStage: ReportValidationStage = validationError.stage;
+// @ts-expect-error The workspace root must be a string.
+validateReport(value, id);
+// @ts-expect-error Validation is synchronous, not a promise.
+const asynchronousValidation: Promise<ReportValidationResult> = validateReport(cwd, id);
+// @ts-expect-error There is no Markdown override input.
+validateReport(cwd, id, markdown);
+// @ts-expect-error Exactly thirteen ordered checks are returned.
+void validation.checks[13];
+// @ts-expect-error Check ids form a closed numeric domain.
+const invalidValidationId: ReportValidationCheckId = 14;
+// @ts-expect-error No raw path accompanies root errors.
+void validationError.path;
+// @ts-expect-error Root error constructors cannot accept a path or cause.
+new ReportValidationError("read", cwd);
+// @ts-expect-error Error stages cannot carry arbitrary source text.
+new ReportValidationError("private-model-payload");
+const leakingDetail: ReportValidationDetail = {
+  code: "secret_detected",
+  section: 1,
+  // @ts-expect-error Secret diagnostics expose a numeric section, never the token.
+  token: "private",
+};
+const unknownSection: ReportValidationDetail = {
+  code: "secret_detected",
+  // @ts-expect-error Numeric sections are limited to header/unclassified and 1–10.
+  section: 11,
+};
+const unvalidatedReference: ReportValidationDetail = {
+  code: "reference_unavailable",
+  kind: "run",
+  // @ts-expect-error Reference identifiers are validated brands, not arbitrary strings.
+  id: "private",
+  stage: "read",
+};
+void [
+  validationOk,
+  validationCheckId,
+  firstValidationCheckId,
+  lastValidationCheckId,
+  validationDetails,
+  validationStage,
+  asynchronousValidation,
+  invalidValidationId,
+  leakingDetail,
+  unknownSection,
+  unvalidatedReference,
+];
