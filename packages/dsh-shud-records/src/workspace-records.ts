@@ -27,7 +27,7 @@ export interface WorkspaceRecordMap {
 export type WorkspaceRecordKind = keyof WorkspaceRecordMap;
 export type MutableWorkspaceRecordKind = Exclude<WorkspaceRecordKind, "stack">;
 export type WorkspaceRecordStage =
-  "id" | "directory" | "target" | "missing" | "read" | "parse" | "schema" | "write";
+  "kind" | "id" | "directory" | "target" | "missing" | "read" | "parse" | "schema" | "write";
 
 /** Model-facing diagnostics contain only a controlled stage and an already validated path. */
 export class WorkspaceRecordError extends Error {
@@ -119,6 +119,10 @@ export function readWorkspaceRecord<K extends WorkspaceRecordKind>(
   kind: K,
   id: unknown,
 ): WorkspaceRecordMap[K] {
+  // Exact primitive strings only: property-key coercion must never choose a schema or layout.
+  if (kind !== "task" && kind !== "stack" && kind !== "data" && kind !== "report") {
+    throw new WorkspaceRecordError("kind");
+  }
   const checkedId = validatedId(kind, id);
   const path = workspacePath(cwd, kind, checkedId);
   if (!checkedTarget(path)) throw new WorkspaceRecordError("missing", path);
@@ -151,6 +155,9 @@ export function writeWorkspaceRecord(
 export function writeWorkspaceRecord(cwd: string, kind: WorkspaceRecordKind, value: unknown): void {
   // Preserve immutability for JavaScript callers as well as typed consumers.
   if (kind === "stack") throw new WorkspaceRecordError("write");
+  if (kind !== "task" && kind !== "data" && kind !== "report") {
+    throw new WorkspaceRecordError("kind");
+  }
   const rawId: unknown =
     typeof value === "object" && value !== null
       ? Reflect.get(value, recordTypes[kind].field)

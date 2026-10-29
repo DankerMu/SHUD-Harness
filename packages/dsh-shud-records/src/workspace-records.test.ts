@@ -90,7 +90,7 @@ function failure(call: () => unknown, stage: string, target?: string): Error {
   return caught;
 }
 
-function expectNoPathOrIO(): void {
+function expectNoPathOrFileCalls(): void {
   expect(vi.mocked(path, true).join.mock.calls).toEqual([]);
   expect(vi.mocked(path, true).resolve.mock.calls).toEqual([]);
   expect(vi.mocked(path, true).normalize.mock.calls).toEqual([]);
@@ -116,6 +116,10 @@ function expectNoPathOrIO(): void {
     io.rename,
   ])
     expect(operation).not.toHaveBeenCalled();
+}
+
+function expectNoPathOrIO(): void {
+  expectNoPathOrFileCalls();
   expect(realFs.readdirSync(cwd)).toEqual([]);
 }
 
@@ -345,4 +349,83 @@ test("StackLocks cannot be replaced even through an untyped JavaScript call", ()
   expect(realFs.readFileSync(target, "utf8")).toBe(text);
   expect(identity(target)).toEqual(before);
   expect(realFs.readdirSync(realPath.dirname(target))).toEqual([realPath.basename(target)]);
+});
+
+describe.each(recordCases)("$kind rejects coercible record kinds", (fixture) => {
+  const representations = [
+    {
+      name: "JSON array",
+      wrap: (kind: string): unknown => JSON.parse(JSON.stringify([kind])),
+    },
+    {
+      name: "boxed string",
+      wrap: (kind: string): unknown => Reflect.construct(String, [kind]),
+    },
+  ];
+
+  test.each(representations)("read rejects a $name before path construction or IO", ({ wrap }) => {
+    const text = JSON.stringify(fixture.value);
+    const target = seed(fixture.relative, text);
+    const before = identity(target);
+    const untypedRead = readWorkspaceRecord as (cwd: string, kind: unknown, id: unknown) => unknown;
+    const kind = wrap(fixture.kind);
+    vi.clearAllMocks();
+
+    const error = failure(() => untypedRead(cwd, kind, fixture.id), "kind");
+
+    expect(error.cause).toBeUndefined();
+    expectNoPathOrFileCalls();
+    expect(realFs.readFileSync(target, "utf8")).toBe(text);
+    expect(identity(target)).toEqual(before);
+    expect(realFs.readdirSync(realPath.dirname(target))).toEqual([realPath.basename(target)]);
+  });
+
+  test.each(representations)(
+    "write rejects a $name without replacing existing evidence",
+    ({ wrap }) => {
+      const text = JSON.stringify(fixture.value);
+      const target = seed(fixture.relative, text);
+      const before = identity(target);
+      const untypedWrite = writeWorkspaceRecord as (
+        cwd: string,
+        kind: unknown,
+        value: unknown,
+      ) => void;
+      const replacement = {
+        ...fixture.value,
+        ...(fixture.kind === "stack" ? { created_at: "2026-10-29T08:00:05Z" } : {}),
+      };
+      const kind = wrap(fixture.kind);
+      vi.clearAllMocks();
+
+      const error = failure(() => untypedWrite(cwd, kind, replacement), "kind");
+
+      expect(error.cause).toBeUndefined();
+      expectNoPathOrFileCalls();
+      expect(realFs.readFileSync(target, "utf8")).toBe(text);
+      expect(identity(target)).toEqual(before);
+      expect(realFs.readdirSync(realPath.dirname(target))).toEqual([realPath.basename(target)]);
+    },
+  );
+});
+
+test.each([
+  { name: "null", kind: null },
+  { name: "undefined", kind: undefined },
+  { name: "number", kind: 437 },
+  { name: "boolean", kind: true },
+  { name: "unknown primitive string", kind: "unknown" },
+  { name: "toString prototype key", kind: "toString" },
+  { name: "constructor prototype key", kind: "constructor" },
+  { name: "__proto__ prototype key", kind: "__proto__" },
+])("$name is rejected at both record boundaries before path construction or IO", ({ kind }) => {
+  const untypedRead = readWorkspaceRecord as (cwd: string, kind: unknown, id: unknown) => unknown;
+  const untypedWrite = writeWorkspaceRecord as (cwd: string, kind: unknown, value: unknown) => void;
+
+  const readError = failure(() => untypedRead(cwd, kind, taskCase.id), "kind");
+  const writeError = failure(() => untypedWrite(cwd, kind, taskCase.value), "kind");
+
+  expect(readError.cause).toBeUndefined();
+  expect(writeError.cause).toBeUndefined();
+  expectNoPathOrIO();
 });
