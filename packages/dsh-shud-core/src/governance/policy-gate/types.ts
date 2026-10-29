@@ -11,8 +11,6 @@ export interface PolicyGateToolCall {
   role: HarnessRole | "unknown";
   input: unknown;
   workDir?: string;
-  spawnDepth?: number;
-  activeSubagentCount?: number;
 }
 
 export type PolicyRuleDecision =
@@ -59,14 +57,6 @@ export type PolicyGateDecisionInput =
       reason: string;
       remediation: PolicyGateRemediation;
     } & PolicyGateDenyGuardClassInput);
-
-export type PolicyGateInputNormalization =
-  | {
-      decision: "allow";
-      input: unknown;
-      changed: boolean;
-    }
-  | Extract<PolicyGateDecision, { decision: "deny" }>;
 
 type PolicyRuleGuardClassMetadata =
   | {

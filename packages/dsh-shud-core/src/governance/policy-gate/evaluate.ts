@@ -6,11 +6,6 @@ import {
   policyGateDecisionValidationError,
   validatePolicyGateRemediation,
 } from "./parameter-schema.ts";
-import {
-  SPAWN_PROFILE_SUBSET_RULE_ID,
-  SPAWN_DEPTH_LIMIT_RULE_ID,
-  SPAWN_CONCURRENCY_LIMIT_RULE_ID,
-} from "./spawn-rules.ts";
 import type {
   PolicyGateContext,
   PolicyGateDecision,
@@ -22,9 +17,6 @@ import type {
 
 export const RESERVED_AUTHORITY_POLICY_RULE_IDS = Object.freeze([
   "raw-data-write",
-  SPAWN_PROFILE_SUBSET_RULE_ID,
-  SPAWN_DEPTH_LIMIT_RULE_ID,
-  SPAWN_CONCURRENCY_LIMIT_RULE_ID,
   TOOL_PARAMETER_SCHEMA_RULE_ID,
 ] as const);
 
@@ -84,8 +76,6 @@ export function isReservedAuthorityPolicyRuleIdPrefixImpersonation(
     )
   );
 }
-
-export const isReservedAuthorityPolicyEvidenceId = isReservedAuthorityPolicyErrorId;
 
 export function evaluatePolicyGate(
   call: PolicyGateToolCall,

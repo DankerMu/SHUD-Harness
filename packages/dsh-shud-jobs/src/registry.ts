@@ -194,5 +194,3 @@ export class ShudJobRegistry extends ParentRegistry {
     return this.initialize();
   }
 }
-
-export default ShudJobRegistry;
