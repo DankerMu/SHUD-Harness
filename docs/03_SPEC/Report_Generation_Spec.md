@@ -56,6 +56,8 @@ coordinator 提供叙述参数
 
 校验结果为 `{ report_id, status, ok, checks }`，成功与检查失败都完整返回规范 13 项；检查失败保持 draft，而请求、前置条件与 IO 失败仍为工具错误。通过后仅提交 reviewed JSON 并更新 Markdown，不产生 PI 决定。raw-guard 在执行前保护生成的 reports 命名空间与本任务目标，以及校验的确切 JSON/Markdown 对和关联任务修复目标，写保护不提供审批绕过。
 
+规范 `renderReport` / `validateReport` 及工具的入口 Markdown 修复、最终渲染共用无创建副作用的引用读取：报告、StackLock、DataProvenance 的路径安全、schema 与文件内 id 绑定由共享 readonly 工作区读取负责。缺失的 `reports` / `stacks` / `provenance` 目录保持不存在，包括配置为 raw 的引用根；不通过扩大 raw 拒绝范围或工具侧重复解析来掩盖读取副作用。普通三参数 `readWorkspaceRecord` 的既有创建目录行为不变。
+
 ## 4. 报告模板
 
 ```markdown
