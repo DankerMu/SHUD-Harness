@@ -34,6 +34,8 @@ import {
   collectRun,
   matchesRunStart,
   readCollectCheckpoint,
+  readCollectedRecord,
+  type CollectShudOptions,
   type CollectCheckpoint,
   type RunStartObservation,
   type RunTerminalObservation,
@@ -212,13 +214,14 @@ export class ShudPoll {
     return Promise.all(operations).then(() => undefined);
   }
 
-  collectShud(id: RunId | JobRecordId): Promise<RunRecord> {
+  collectShud(id: RunId | JobRecordId, options: CollectShudOptions = {}): Promise<RunRecord> {
     try {
       if (!this.accepting) throw new CollectFailure("admission", "CLOSED");
       const entry = this.indexes.lookup(id);
       if (!entry) throw new CollectFailure("request", "UNKNOWN_ID");
       // D7 is an admission decision, even if submission completes while this read is queued.
       const submissionInFlight = this.inSubmission(entry.run_id);
+      const readonly = options.readonly === true;
       return this.enqueue(entry.run_id, async () => {
         const routed = await readRunFile(entry);
         if (submissionInFlight || !isTerminal(routed.status)) {
@@ -232,6 +235,7 @@ export class ShudPoll {
           failure.message += ` (status=${routed.status}, dsh_job_id=${currentId.data ?? "null"})`;
           throw failure;
         }
+        if (readonly) return readCollectedRecord(entry, routed);
         const receipt = this.receipts.get(entry.run_id);
         if (receipt) await this.complete(entry.run_id, receipt, receiptOutcome(routed, receipt));
         return this.collect(entry, routed, false);

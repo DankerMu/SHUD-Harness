@@ -52,3 +52,20 @@
 #### Scenario: task target identity and aliases remain bounded
 - **WHEN** session cwd、tasks 或任务目录使用符号链接/本机大小写别名，或 rawDirs 只覆盖另一任务/兄弟前缀；另以非法 task_id 调用
 - **THEN** 同一物理受保护任务目标仍拒绝，非重叠任务目标不误拒绝；非法 task_id 不参与任务路径拼接或查询，既有三个输出根与输入规则不变
+
+## ADDED Requirements
+
+### Requirement: Report generation and validation protect write targets
+report_generate 与 report_validate SHALL 在工具执行前经 raw-guard 保护其写入目标，使用既有 session cwd、canonical/最近存在祖先与 raw containment 判定，命中返回 raw-immutable deny，SHALL NOT 提供写审批路径。report_generate 的 id 尚未分配，SHALL 保护整个待分配 reports 命名空间与经 core TaskId 校验的确切 task.json；reports 命名空间与任一受保护路径重叠时拒绝。report_validate SHALL 保护合法 report_id 的 JSON/Markdown 对与由安全、无副作用、schema/id 绑定读取取得的关联 task.json，不因其它任务或其它报告被保护而误拒绝。非法 id 不拼接路径；无法安全确定目标时 fail closed。保护覆盖存在/缺失路径、受保护祖先与物理别名；判定不得创建目录或改写文件。此条不改变其它工具的既有行为。
+
+#### Scenario: report generation denies protected output before reconciliation
+- **WHEN** reports 待分配命名空间或本 task.json 位于 raw，分别覆盖存在与缺失路径
+- **THEN** 实际 ToolRuntime 不执行工具、不请求 approval、不发布 reconcile 或报告，工作区和 raw 快照不变
+
+#### Scenario: report validation protects repair targets
+- **WHEN** 报告 JSON/Markdown 或其关联 task.json 受 raw 保护，调用 report_validate
+- **THEN** 在入口修复前拒绝，受保护内容及全部工作区字节不变，零工具执行/审批
+
+#### Scenario: report target aliases and unrelated objects
+- **WHEN** 目标经 session/目录/文件别名指向 raw，或 raw 仅覆盖不相关任务/报告及兄弟前缀
+- **THEN** 同一受保护物理目标仍拒绝；report_validate 的不相关目标不误拒绝，合法 disjoint 调用继续到工具

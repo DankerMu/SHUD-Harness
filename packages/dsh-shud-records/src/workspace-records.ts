@@ -14,8 +14,9 @@ import {
   type StackLock,
   type DataProvenance,
   type EvidenceReport,
+  type ReportId,
 } from "@shud-harness/dsh-shud-core";
-import { writeJsonSync } from "./state-files.ts";
+import { writeBytes, writeJsonSync } from "./state-files.ts";
 import { ensureDirectory, regularTarget } from "./workspace-paths.ts";
 
 export interface WorkspaceRecordMap {
@@ -26,8 +27,21 @@ export interface WorkspaceRecordMap {
 }
 export type WorkspaceRecordKind = keyof WorkspaceRecordMap;
 export type MutableWorkspaceRecordKind = Exclude<WorkspaceRecordKind, "stack">;
+export interface WorkspaceReadOptions {
+  /** Reject missing/unsafe/mismatched objects without creating managed directories. */
+  readonly?: boolean;
+}
 export type WorkspaceRecordStage =
-  "kind" | "id" | "directory" | "target" | "missing" | "read" | "parse" | "schema" | "write";
+  | "kind"
+  | "id"
+  | "directory"
+  | "target"
+  | "missing"
+  | "read"
+  | "parse"
+  | "schema"
+  | "identity"
+  | "write";
 
 /** Model-facing diagnostics contain only a controlled stage and an already validated path. */
 export class WorkspaceRecordError extends Error {
@@ -76,9 +90,9 @@ function parseRecord<K extends WorkspaceRecordKind>(
   return result.data as WorkspaceRecordMap[K];
 }
 
-function managedDirectory(path: string): void {
+function managedDirectory(path: string, readonly = false): void {
   try {
-    ensureDirectory(path, "Workspace record");
+    ensureDirectory(path, "Workspace record", readonly);
   } catch {
     throw new WorkspaceRecordError("directory", path);
   }
@@ -92,12 +106,18 @@ function checkedTarget(path: string): boolean {
   }
 }
 
-function workspacePath(cwd: string, kind: WorkspaceRecordKind, id: string): string {
+function workspacePath(
+  cwd: string,
+  kind: WorkspaceRecordKind,
+  id: string,
+  readonly = false,
+  extension = "json",
+): string {
   const root = join(cwd, recordTypes[kind].directory);
-  managedDirectory(root);
-  if (kind !== "task") return join(root, `${id}.json`);
+  managedDirectory(root, readonly);
+  if (kind !== "task") return join(root, `${id}.${extension}`);
   const directory = join(root, id);
-  managedDirectory(directory);
+  managedDirectory(directory, readonly);
   return join(directory, "task.json");
 }
 
@@ -113,18 +133,20 @@ function publish(path: string, value: unknown): void {
  * Read one of the four fixed workspace layouts, synchronously and through its core schema.
  * Missing managed directories are created, but missing/corrupt objects are never repaired.
  * cwd is the trusted session root; managed descendants are lstat-checked, not canonicalized.
+ * Opt-in readonly reads also bind the embedded identity, and never create missing directories.
  */
 export function readWorkspaceRecord<K extends WorkspaceRecordKind>(
   cwd: string,
   kind: K,
   id: unknown,
+  options: WorkspaceReadOptions = {},
 ): WorkspaceRecordMap[K] {
   // Exact primitive strings only: property-key coercion must never choose a schema or layout.
   if (kind !== "task" && kind !== "stack" && kind !== "data" && kind !== "report") {
     throw new WorkspaceRecordError("kind");
   }
   const checkedId = validatedId(kind, id);
-  const path = workspacePath(cwd, kind, checkedId);
+  const path = workspacePath(cwd, kind, checkedId, options.readonly);
   if (!checkedTarget(path)) throw new WorkspaceRecordError("missing", path);
   let text: string;
   try {
@@ -139,7 +161,40 @@ export function readWorkspaceRecord<K extends WorkspaceRecordKind>(
   } catch {
     throw new WorkspaceRecordError("parse", path);
   }
-  return parseRecord(kind, value, path);
+  const record = parseRecord(kind, value, path);
+  if (options.readonly && Reflect.get(record, recordTypes[kind].field) !== checkedId) {
+    throw new WorkspaceRecordError("identity", path);
+  }
+  return record;
+}
+
+/** Safe, non-creating Markdown read. Only genuine absence returns undefined. */
+export function readReportMarkdown(cwd: string, reportId: ReportId): string | undefined {
+  const id = validatedId("report", reportId);
+  const path = workspacePath(cwd, "report", id, true, "md");
+  if (!checkedTarget(path)) return undefined;
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw new WorkspaceRecordError("read", path);
+  }
+}
+
+/** Publish canonical rendered Markdown through the existing atomic byte writer and path guards. */
+export async function writeReportMarkdown(
+  cwd: string,
+  reportId: ReportId,
+  markdown: string,
+): Promise<void> {
+  const id = validatedId("report", reportId);
+  const path = workspacePath(cwd, "report", id, false, "md");
+  checkedTarget(path);
+  try {
+    await writeBytes(path, markdown);
+  } catch {
+    throw new WorkspaceRecordError("write", path);
+  }
 }
 
 /**
@@ -181,7 +236,9 @@ function createFlatRecord<K extends "data" | "report">(
   managedDirectory(directory);
   for (;;) {
     const path = join(directory, `${id}.json`);
-    if (checkedTarget(path)) {
+    const jsonExists = checkedTarget(path);
+    const markdownExists = kind === "report" && checkedTarget(join(directory, `${id}.md`));
+    if (jsonExists || markdownExists) {
       // Only an existing regular object is a collision; unsafe targets already failed closed.
       id = createBrandedId(definition.prefix);
       record = { ...record, [definition.field]: id };
@@ -200,7 +257,7 @@ export function createDataProvenance(
   return createFlatRecord(cwd, "data", fields);
 }
 
-/** Allocate a report id and persist supplied JSON; Markdown rendering belongs to a later slice. */
+/** Allocate an unused JSON/Markdown report pair and publish JSON; callers render Markdown afterward. */
 export function createEvidenceReport(
   cwd: string,
   fields: Omit<EvidenceReport, "report_id">,

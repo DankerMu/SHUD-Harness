@@ -25,6 +25,11 @@ import {
   type RoutedRun,
 } from "./shud-run-file.ts";
 
+export interface CollectShudOptions {
+  /** Require an already-collected immutable record, without any collection side effects. */
+  readonly?: boolean;
+}
+
 /** Copied native start accepted by the original submitting instance; never persisted. */
 export interface RunStartObservation extends IndexEntry {
   pid: number;
@@ -86,6 +91,11 @@ async function readLedger(runDir: string): Promise<CollectLedger | undefined> {
   return { attempts: value.attempts, last_error: value.last_error, at: value.at };
 }
 
+/** Read retained attempt evidence independently of the committed-record checkpoint. */
+export async function readCollectErrorAttempts(runDir: string): Promise<number> {
+  return (await readLedger(runDir))?.attempts ?? 0;
+}
+
 async function existingRecord(entry: IndexEntry): Promise<RunRecord | undefined> {
   const path = join(entry.run_dir, "run-record.json");
   if (!(await regularFile(path, "run-record", true))) return undefined;
@@ -101,6 +111,20 @@ async function existingRecord(entry: IndexEntry): Promise<RunRecord | undefined>
     throw new CollectFailure("run-record identity", "MISMATCH");
   }
   return parsed.data;
+}
+
+/** Queue-owned readonly retrieval: never enter checkpoint generation or collected projection. */
+export async function readCollectedRecord(
+  entry: IndexEntry,
+  routed: RoutedRun,
+): Promise<RunRecord> {
+  verifyRunFile(entry, routed);
+  const job = fullJob(routed);
+  if (job.status !== "collected") throw new CollectFailure("request", "NOT_COLLECTED");
+  const record = await existingRecord(entry);
+  verifyRunFile(entry, routed);
+  if (!record) throw new CollectFailure("run-record", "MISSING");
+  return record;
 }
 
 export type CollectCheckpoint =

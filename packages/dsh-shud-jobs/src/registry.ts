@@ -5,6 +5,8 @@ import { LocalJobRegistry, type Config as ParentConfig } from "@deepseek-ai/dsh-
 import {
   RunJobSchema,
   TaskIdSchema,
+  RunIdSchema,
+  JobRecordIdSchema,
   type JobRecordId,
   type RunId,
   type RunJob,
@@ -19,6 +21,7 @@ import { ShudPoll, type CompletionReceipt } from "./shud-poll.ts";
 import { ShudCancellation } from "./shud-cancellation.ts";
 import { createRecoveryReporter } from "./shud-recovery-log.ts";
 import { collectFailure, readRunFile, validationFailure, verifyRunFile } from "./shud-run-file.ts";
+import { readCollectErrorAttempts, type CollectShudOptions } from "./shud-collect.ts";
 
 export interface Config extends ParentConfig, Omit<StackCaptureConfig, "cwd"> {
   /** Absolute writable directory for registry state; created when absent. */
@@ -30,6 +33,7 @@ export interface Config extends ParentConfig, Omit<StackCaptureConfig, "cwd"> {
 type StandardProps = (typeof LocalJobRegistry.Config)["~standard"];
 type ConfigIssue = { message: string; path: string[] };
 const ownConfigKeys = ["stateDir", "shudBin", "stackRepos", "hostVersion", "llm", "sundialsRoot"];
+const collectIdSchema = RunIdSchema.or(JobRecordIdSchema);
 
 function validateConfigText(
   value: unknown,
@@ -114,6 +118,28 @@ async function queryRunJobs(store: StateIndexStore, taskId: TaskId): Promise<Run
   );
 }
 
+/** Read only canonical retained ledger evidence from an owned, fully validated indexed run. */
+async function queryCollectErrorAttempts(
+  store: StateIndexStore,
+  id: RunId | JobRecordId,
+): Promise<number> {
+  const entry = store.lookup(id);
+  if (!entry) throw new Error(`SHUD collect attempts: unknown id ${id}`);
+  try {
+    const routed = await readRunFile(entry);
+    verifyRunFile(entry, routed);
+    const parsed = RunJobSchema.safeParse(routed.raw);
+    if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
+    const attempts = await readCollectErrorAttempts(entry.run_dir);
+    verifyRunFile(entry, routed);
+    return attempts;
+  } catch (error) {
+    const failure = collectFailure("collect-error ledger", error);
+    failure.message = `SHUD collect attempts ${entry.run_id}: ${failure.stage}: ${failure.code}`;
+    throw failure;
+  }
+}
+
 // Keep the exact parent constructor and instance API without inheriting its static schema type.
 const ParentRegistry: new (
   ...args: ConstructorParameters<typeof LocalJobRegistry>
@@ -125,8 +151,13 @@ export class ShudJobRegistry extends ParentRegistry {
   readonly submitShud: (request: SubmitShudRequest, producer: ShudProducer) => Promise<RunJob>;
   readonly isSubmissionInFlight: (id: RunId) => boolean;
   readonly pollOnce: () => Promise<void>;
-  readonly collectShud: (id: RunId | JobRecordId) => Promise<RunRecord>;
+  readonly collectShud: (
+    id: RunId | JobRecordId,
+    options?: CollectShudOptions,
+  ) => Promise<RunRecord>;
   readonly listRunJobsByTask: (task_id: TaskId) => Promise<RunJob[]>;
+  /** Read retained canonical attempts, including after cached success; never collect or mutate. */
+  readonly readCollectErrorAttempts: (id: RunId | JobRecordId) => Promise<number>;
   override readonly kill: LocalJobRegistry["kill"];
   private readonly initialize: () => Promise<void>;
 
@@ -244,6 +275,14 @@ export class ShudJobRegistry extends ParentRegistry {
       const requireReady = () => {
         if (!ready) throw new Error("SHUD startup reconciliation is not ready");
       };
+      const trackQuery = <T>(result: Promise<T>): Promise<T> => {
+        const finish = () => {
+          pendingQueries.delete(completion);
+        };
+        const completion = result.then(finish, finish);
+        pendingQueries.add(completion);
+        return result;
+      };
       this.submitShud = async (request, producer) => {
         requireReady();
         return submissions.submit(request, producer);
@@ -253,22 +292,24 @@ export class ShudJobRegistry extends ParentRegistry {
         requireReady();
         return dispatcher.pollOnce();
       };
-      this.collectShud = async (id) => {
+      this.collectShud = async (id, options) => {
         requireReady();
-        return dispatcher.collectShud(id);
+        return dispatcher.collectShud(id, options);
       };
       this.listRunJobsByTask = async (taskId) => {
         requireReady();
         if (!acceptingQueries) throw new Error("SHUD task query admission is CLOSED");
         const parsed = TaskIdSchema.safeParse(taskId);
         if (!parsed.success) throw new Error("Invalid task_id: expected a core TaskId");
-        const result = queryRunJobs(store, parsed.data);
-        const finish = () => {
-          pendingQueries.delete(completion);
-        };
-        const completion = result.then(finish, finish);
-        pendingQueries.add(completion);
-        return result;
+        return trackQuery(queryRunJobs(store, parsed.data));
+      };
+      this.readCollectErrorAttempts = async (id) => {
+        requireReady();
+        if (!acceptingQueries) throw new Error("SHUD collect attempts admission is CLOSED");
+        const parsed = collectIdSchema.safeParse(id);
+        if (!parsed.success)
+          throw new Error("Invalid collect id: expected a core RunId or JobRecordId");
+        return trackQuery(queryCollectErrorAttempts(store, parsed.data));
       };
       this.kill = (id, caller, reason) => {
         if (!cancellations.owns(id)) return super.kill(id, caller, reason);
