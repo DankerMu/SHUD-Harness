@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
-import type { ToolCallId } from "@deepseek-ai/dsh-llm";
 import type { ApprovalService } from "@deepseek-ai/dsh-user-approval";
 import * as rawGuard from "@shud-harness/dsh-shud-raw-guard";
 import { expect, test } from "vitest";
@@ -204,7 +203,7 @@ test.each(["other-task", "other-report", "sibling"])(
   },
 );
 
-test("generation disjoint task and report-prefix controls publish normally without terminal tool mounting", async () => {
+test("generation disjoint task and report-prefix controls publish normally", async () => {
   const h = await reportHarness();
   try {
     await seedEvidence(h);
@@ -214,22 +213,6 @@ test("generation disjoint task and report-prefix controls publish normally witho
     generated(h, await h.invoke("report_generate", DRAFT));
     expect(seen.executions).toBe(1);
     expect(seen.approvals).toEqual([]);
-    for (const name of ["report_submit", "report_decide"]) {
-      const result = await h.runtime.execute({
-        callId: "terminal-absence" as ToolCallId,
-        name,
-        arguments: { report_id: REPORT },
-        agent: h.agent,
-        signal: new AbortController().signal,
-      });
-      expect(result.isError).toBe(true);
-      if (result.isError) {
-        const info: unknown = result.error.info;
-        const code =
-          typeof info === "object" && info !== null && "code" in info ? info.code : undefined;
-        expect(code).toBe("UNKNOWN_TOOL");
-      }
-    }
   } finally {
     await h.dispose();
   }

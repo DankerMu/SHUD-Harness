@@ -315,3 +315,18 @@ EvidenceReport 与 PiGateDecision 的 Zod schema SHALL 位于 `packages/dsh-shud
 #### Scenario: projections registered
 - **WHEN** 执行 `pnpm run schema:generate`
 - **THEN** `docs/generated/` 下出现 EvidenceReport 与 PiGateDecision 的 Markdown 与 JSON Schema 投影
+
+### Requirement: Report tool publication ordering
+同一物理工作区与 report_id 的工具操作 SHALL 在单进程内保持完整入口修复—前置条件—JSON/TaskCard—Markdown 的顺序，SHALL NOT 让较早的异步 DRAFT Markdown 发布覆盖较新的终态水印。审批在工具 execute 之前完成，不占用报告操作边界；操作进入边界后重新读取并校验当前报告。report_generate 对新分配 id 的后续卡片/Markdown 发布与 report_validate、report_submit、report_decide SHALL 共用同一顺序所有者，不另建终态专用队列。不同 report_id 独立推进；失败必须向调用方传播且释放后续操作，完成的顺序记录不得永久保留。此规则不宣称跨进程锁或外部 namespace 替换防护。
+
+#### Scenario: competing approved decisions preserve one authoritative outcome
+- **WHEN** 同一 reviewed 报告的 Markdown 缺失/过期，两次已 allowed-once 的决定调用重叠，入口或最终 Markdown 发布被暂时阻塞
+- **THEN** 恰一条终态决定提交，后续调用读取新终态并拒绝；最终 Markdown 等于持久 JSON 的规范渲染，不残留晚到 DRAFT 水印
+
+#### Scenario: report publication is ordered across sibling tools
+- **WHEN** 新报告生成或 validation 的 Markdown 发布尚未完成，同 report_id 的已批准终态调用进入，含物理 cwd 别名
+- **THEN** 共用顺序边界，终态调用在已有发布完成后按新鲜状态处理；不存在旧发布覆盖已成功的终态水印
+
+#### Scenario: failed report operation does not block independent work
+- **WHEN** 一个报告操作等待 IO 或失败，另一个 report_id 被调用，随后原 report_id 发起修复
+- **THEN** 不同报告不被全局串行阻塞；原失败保留其错误与既有提交，后续同报告修复可继续且无遗留队列条目

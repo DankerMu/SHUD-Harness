@@ -69,3 +69,14 @@ report_generate 与 report_validate SHALL 在工具执行前经 raw-guard 保护
 #### Scenario: report target aliases and unrelated objects
 - **WHEN** 目标经 session/目录/文件别名指向 raw，或 raw 仅覆盖不相关任务/报告及兄弟前缀
 - **THEN** 同一受保护物理目标仍拒绝；report_validate 的不相关目标不误拒绝，合法 disjoint 调用继续到工具
+
+### Requirement: Report terminal tools protect write targets
+report_submit 与 report_decide SHALL 复用 report_validate 的确切报告 JSON/Markdown 与关联 TaskCard 目标保护，不建立第二套读取或路径规则。raw-guard 位于 policy-gate 之前：任一实际写入目标受 raw 保护时 SHALL raw-immutable deny，零工具执行、零 PI 审批；PI allowed-once 不得授权 raw 写入。合法且不重叠的目标继续到既有 policy ask。无法安全解析报告身份/关联任务时 fail closed；判断与引用读取不得创建目录或改写内容。此扩展由 PI issuecomment6525339104 批准，不改变其它工具。
+
+#### Scenario: terminal report write denial precedes approval
+- **WHEN** report_submit 或 report_decide 的报告 JSON、Markdown 或关联 task.json（含祖先/物理别名）受 raw 保护，approval 服务即使配置为 allowed-once
+- **THEN** raw-immutable 拒绝，approval 不被调用、execute 不运行，所有报告/卡片/raw 字节与修改时间不变
+
+#### Scenario: unrelated protected reports do not deny a decision
+- **WHEN** raw 仅保护另一报告或另一任务，本 report_id 的所有写目标不重叠
+- **THEN** 不误拒绝；既有 policy 仍 ask，只有 host allowed-once 才执行本次决定

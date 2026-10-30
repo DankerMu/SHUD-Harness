@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #447 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #2/#3/#6.
+Blast radius: PI-gated terminal report writes, decision provenance, TaskCard terminal projection, asynchronous Markdown publication and raw-first admission.
+Selected risk packs: Public API; File IO/path safety; Schema/identity; Auth/permissions/secrets; Concurrency/ordering; Error handling/partial outputs; Legacy compatibility; Documentation.
+Evidence floor: test-first actual ToolRuntime with mounted policy/raw and approval boundary doubles, both terminal tools and all non-allowed outcomes, exact callId history, partial commits/repair/concurrent publication, built ccw→report→PI-gated decision smoke, full check/strict/ADR/profile/raw probes and three-seat review.
+Only task 6.3 is selected. PI issuecomment6525339104 extends the original boundary only for raw-guard routing/tests/spec of these two tools. O5 issuecomment6463590574 fixes approval_ref to exec.callId. No policy-gate/records/jobs/core production changes, presets, host changes, #481 or centralized PI acceptance.
+
 ## Issue #446 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #2/#3/#4/#6.

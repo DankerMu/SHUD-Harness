@@ -153,6 +153,7 @@ test("raw guard first short-circuits policy while ordinary calls reach policy", 
     expect(h.stateOf).not.toHaveBeenCalled();
     expect(h.logs[1]).toEqual({ name: "shud-raw-guard", args: ["ask bash raw-read-provenance"] });
 
+    await writeReport(h.cwd);
     const report = await h.call("report_submit", { report_id: REPORT_ID });
     expect(report.isError).toBe(true);
     if (!report.isError) throw new Error("Rejected report unexpectedly executed");
