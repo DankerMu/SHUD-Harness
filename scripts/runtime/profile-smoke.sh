@@ -227,6 +227,66 @@ function checkToolsSchema(schema, label) {
   check(`${label}: shud-tools import status ${tools[0]?.status ?? "missing"}`,
     tools.length === 1 && ["absent", "schema"].includes(tools[0].status));
 }
+function policyGateErrors(rows, schema) {
+  const id = "shud-policy-gate";
+  const errors = [];
+  const isPolicy = (row) => row?.id === id || row?.name === "@shud-harness/dsh-shud-policy-gate";
+  const globals = rows.filter(isPolicy);
+  if (globals.length !== 1) errors.push(`${id}: expected one global row`);
+  if (globals[0]?.id !== id || globals[0]?.name !== "@shud-harness/dsh-shud-policy-gate") errors.push(`${id}: wrong id or package specifier`);
+  if (globals[0]?.disabled === true) errors.push(`${id}: disabled`);
+  let nested = false;
+  function visit(value) {
+    if (!value || typeof value !== "object") return;
+    if (isPolicy(value)) nested = true;
+    for (const child of Object.values(value)) visit(child);
+  }
+  for (const row of rows) {
+    if (row && typeof row === "object") {
+      for (const child of Object.values(row)) visit(child);
+    }
+  }
+  if (nested) errors.push(`${id}: nested row`);
+  const rawIndex = rows.findIndex((row) => row?.id === "shud-raw-guard");
+  const policyIndex = rows.findIndex((row) => row?.id === id);
+  if (rawIndex < 0 || policyIndex <= rawIndex) errors.push(`${id}: must follow raw-guard`);
+  if (schema !== undefined) {
+    const entries = (schema["x-cordis"]?.entries ?? []).filter((entry) => entry.id === id);
+    if (entries.length !== 1) errors.push(`${id}: expected one schema entry`);
+    if (!["absent", "schema"].includes(entries[0]?.status)) errors.push(`${id}: import status ${entries[0]?.status ?? "missing"}`);
+  }
+  return errors;
+}
+function checkPolicyGate(rows, schema, label) {
+  const errors = policyGateErrors(rows, schema);
+  check(`${label}: policy-gate composition${schema === undefined ? "" : " and import"}: ${errors.join("; ")}`, errors.length === 0);
+}
+function checkPolicyGateControls(rows, schema, label) {
+  // Mutate copies of actual host dumps, exercising the same assertions as positive profiles.
+  // These controls neither change the installed profile nor bootstrap shared node_modules.
+  const original = rows.find((row) => row?.id === "shud-policy-gate");
+  if (!original) return; // The positive assertion already records the missing-row failure.
+  const without = rows.filter((row) => row?.id !== "shud-policy-gate");
+  const disabled = structuredClone(rows);
+  disabled.find((row) => row?.id === "shud-policy-gate").disabled = true;
+  const nested = [...structuredClone(without), {
+    id: "policy-control-preset", config: { plugins: [structuredClone(original)] },
+  }];
+  const importError = structuredClone(schema);
+  const entry = importError["x-cordis"]?.entries?.find((row) => row.id === "shud-policy-gate");
+  if (entry) entry.status = "error";
+  for (const [kind, config, projection, expected] of [
+    ["missing", without, schema, "expected one global row"],
+    ["disabled", disabled, schema, "disabled"],
+    ["nested", nested, schema, "nested row"],
+    ["import-error", rows, importError, "import status error"],
+    ["duplicate", [...rows, structuredClone(original)], schema, "expected one global row"],
+    ["before-raw", [structuredClone(original), ...without], schema, "must follow raw-guard"],
+  ]) {
+    check(`${label}: actual policy-gate assertion rejects ${kind}`,
+      policyGateErrors(config, projection).some((error) => error.includes(expected)));
+  }
+}
 async function checkCapturePreflight() {
   const isolated = join(scratch, "isolated-harness");
   for (const directory of ["scripts/runtime", "profile/shud", "node_modules", "SHUD", "rSHUD", "AutoSHUD"]) {
@@ -463,6 +523,13 @@ writeFileSync(prefix + ".result", JSON.stringify({ failed, reason, elapsed: Date
   }
 }
 try {
+  const canonicalPlugins = bundleRows.flatMap((row) => Array.isArray(row?.insert) ? row.insert : [row]);
+  checkPolicyGate(canonicalPlugins, undefined, "canonical bundle");
+  check("canonical bundle: policy-gate immediately follows raw-guard",
+    canonicalPlugins.findIndex((row) => row?.id === "shud-policy-gate") ===
+      canonicalPlugins.findIndex((row) => row?.id === "shud-raw-guard") + 1);
+  check("canonical bundle: policy-gate workspace dependency",
+    bundleManifest.dependencies?.["@shud-harness/dsh-shud-policy-gate"] === "workspace:*");
   const notExecutable = join(scratch, "not-executable");
   writeFileSync(notExecutable, "not executable\n", { mode: 0o600 });
   const invalidBins = [
@@ -541,6 +608,8 @@ try {
   }
   checkJobsSchema(schema, "Web import");
   checkToolsSchema(schema, "Web import");
+  checkPolicyGate(composedRows, schema, "Web import");
+  checkPolicyGateControls(composedRows, schema, "Web controls");
 
   const rawOnly = "# existing deployment bytes\r\n- id: 'shud-raw-guard'\r\n  config: { rawDirs: ['/srv/data_root/raw'] }\r\n# preserve missing final newline";
   writeFileSync(web.patch, rawOnly, { mode: 0o640 });
@@ -719,6 +788,11 @@ try {
     [bin, "--profile", "shud-probe", "--dump-config-schema"], true)).stdout);
   checkJobsSchema(headlessSchema, "headless import");
   checkToolsSchema(headlessSchema, "headless import");
+  const headlessDump = (await run("headless dump-config", process.execPath,
+    [bin, "--profile", "shud-probe", "--dump-config"])).stdout;
+  const headlessRows = patchRows(headlessDump, "composed headless profile");
+  checkPolicyGate(headlessRows, headlessSchema, "headless import");
+  checkPolicyGateControls(headlessRows, headlessSchema, "headless controls");
   const headlessGuards = (headlessSchema["x-cordis"]?.entries ?? []).filter((entry) => entry.id === "shud-raw-guard");
   check("headless raw-guard imports", headlessGuards.length === 1 && ["absent", "schema"].includes(headlessGuards[0].status));
   await checkInvalidBoot(bin, web);
@@ -728,4 +802,4 @@ try {
   process.exitCode = 1;
 }
 NODE
-printf 'profile:smoke: OK (dsh %s, model deepseek-flash-guan via DMXAPI, raw-guard mounted, shud-jobs mounted, shud-tools mounted, session-log-deepseek disabled)\n' "$DSH_VERSION_LABEL"
+printf 'profile:smoke: OK (dsh %s, model deepseek-flash-guan via DMXAPI, raw-guard mounted, policy-gate globally mounted, shud-jobs mounted, shud-tools mounted, session-log-deepseek disabled)\n' "$DSH_VERSION_LABEL"

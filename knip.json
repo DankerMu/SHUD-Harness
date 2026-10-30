@@ -25,6 +25,10 @@
       "entry": ["src/**/*.test.ts"],
       "project": ["src/**/*.ts"]
     },
+    "packages/dsh-shud-policy-gate": {
+      "entry": ["src/**/*.test.ts"],
+      "project": ["src/**/*.ts"]
+    },
     "packages/dsh-shud-raw-guard": {
       "entry": ["src/**/*.test.ts"],
       "project": ["src/**/*.ts"]

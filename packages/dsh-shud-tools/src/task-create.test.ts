@@ -4,6 +4,7 @@ import * as io from "node:fs/promises";
 import { join } from "node:path";
 import type * as NodeCrypto from "node:crypto";
 import type * as NodeFs from "node:fs";
+import type { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import type { ToolCallId } from "@deepseek-ai/dsh-llm";
 import type { ToolRuntime } from "@deepseek-ai/dsh-tools";
@@ -50,6 +51,9 @@ let h: {
   cwd: string;
   dispose(): Promise<void>;
 };
+let projectedPresets: Map<object, unknown>;
+let originalAgentContext: Context;
+let disposeProjectionService: () => Promise<void>;
 const call = (input: unknown = args, agent: typeof h.agent | null = h.agent) =>
   h.runtime.execute({
     callId: "task-create-consumer-tracer" as ToolCallId,
@@ -67,6 +71,33 @@ beforeEach(async () => {
   vi.setSystemTime(new Date("2026-10-27T08:00:05.987Z"));
   entropy.suffixes = ["3f9c"];
   Object.assign(h.agent.session.header, { agentPreset: "coordinator" });
+  projectedPresets = new Map([[h.agent.session, "coordinator"]]);
+  originalAgentContext = h.agent.ctx;
+  const provider = originalAgentContext.plugin((services: Context) => {
+    services.provide("sessionProjections", {
+      stateOf(session: object, key: string) {
+        return key === "agentPreset" ? projectedPresets.get(session) : undefined;
+      },
+    });
+  });
+  await provider;
+  disposeProjectionService = async () => {
+    await provider.dispose();
+    Object.assign(h.agent, { ctx: originalAgentContext });
+  };
+  // Give the actual calling context legal access for both property and get() readers.
+  await originalAgentContext.plugin({
+    inject: ["sessionProjections"],
+    apply(consumer: Context) {
+      Object.assign(h.agent, { ctx: consumer });
+    },
+  });
+  const projections: unknown = Reflect.get(h.agent.ctx, "sessionProjections");
+  if (!projections || typeof projections !== "object") {
+    throw new Error("Projection service is unavailable in the calling context");
+  }
+  const stateOf: unknown = Reflect.get(projections, "stateOf");
+  expect(stateOf).toBeTypeOf("function");
 });
 afterEach(async () => {
   vi.useRealTimers();
@@ -175,15 +206,60 @@ test.each(["agent", "session", "header", "cwd", "empty cwd"])(
   },
 );
 
-test.each([undefined, "", null, 7, " custom-preset "])(
-  "preset %s preserves the original nonempty identity or uses unknown",
-  async (preset) => {
-    Object.assign(h.agent.session.header, { agentPreset: preset });
+test.each([
+  { preset: undefined, expected: "unknown" },
+  { preset: "", expected: "unknown" },
+  { preset: null, expected: "unknown" },
+  { preset: 7, expected: "unknown" },
+  { preset: false, expected: "unknown" },
+  { preset: {}, expected: "unknown" },
+  { preset: "custom-preset", expected: "custom-preset" },
+  { preset: " custom-preset ", expected: " custom-preset " },
+  { preset: " ", expected: " " },
+])(
+  "current preset $preset preserves nonempty identity or uses unknown without header fallback",
+  async ({ preset, expected }) => {
+    projectedPresets.set(h.agent.session, preset);
     expect(await call()).toMatchObject({ isError: false });
-    const expected = preset === " custom-preset " ? preset : "unknown";
     expect(await readCard()).toMatchObject({ created_by: expected, current_owner: expected });
   },
 );
+
+test.each([
+  { header: "coordinator", current: "worker", switched: "coordinator" },
+  { header: "worker", current: "coordinator", switched: "worker" },
+])(
+  "task attribution follows current $current and its switch despite frozen $header header",
+  async ({ header, current, switched }) => {
+    Object.assign(h.agent.session.header, { agentPreset: header });
+    projectedPresets.set(h.agent.session, current);
+    entropy.suffixes = ["3f9c", "abcd"];
+    expect(await call()).toMatchObject({ isError: false, value: { task_id: firstId } });
+    expect(await readCard()).toMatchObject({ created_by: current, current_owner: current });
+
+    projectedPresets.set(h.agent.session, switched);
+    expect(await call()).toMatchObject({ isError: false, value: { task_id: secondId } });
+    expect(await readCard(secondId)).toMatchObject({
+      created_by: switched,
+      current_owner: switched,
+    });
+    expect(await readCard()).toMatchObject({ created_by: current, current_owner: current });
+    expect(h.agent.session.header).toMatchObject({ agentPreset: header });
+  },
+);
+
+test("missing projection uses unknown task attribution despite a coordinator header", async () => {
+  projectedPresets.delete(h.agent.session);
+  expect(await call()).toMatchObject({ isError: false });
+  expect(await readCard()).toMatchObject({ created_by: "unknown", current_owner: "unknown" });
+});
+
+test("missing projection service uses unknown task attribution despite a coordinator header", async () => {
+  await disposeProjectionService();
+  expect(h.agent.ctx.get("sessionProjections")).toBeUndefined();
+  expect(await call()).toMatchObject({ isError: false });
+  expect(await readCard()).toMatchObject({ created_by: "unknown", current_owner: "unknown" });
+});
 
 test.each(
   ["tasks", "allocated", "target"].flatMap((level) =>
