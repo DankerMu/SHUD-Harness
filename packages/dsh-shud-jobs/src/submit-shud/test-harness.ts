@@ -1,5 +1,5 @@
 import { closeSync, constants, openSync, readFileSync, writeSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import type { JobHandle, JobOutcome } from "@deepseek-ai/dsh-jobs";
@@ -26,6 +26,28 @@ export async function writeInputTree(
   await mkdir(join(inputDir, "nested", "empty"), { recursive: true });
   for (const [name, bytes] of Object.entries(files)) await writeFile(join(inputDir, name), bytes);
   return files;
+}
+
+export type TreeSnapshot = Record<string, { kind: "directory" } | { kind: "file"; bytes: Buffer }>;
+
+export async function snapshotTree(root: string): Promise<TreeSnapshot> {
+  const snapshot: TreeSnapshot = {};
+  async function visit(relative: string): Promise<void> {
+    const entries = await readdir(join(root, relative), { withFileTypes: true });
+    for (const entry of entries) {
+      const name = relative ? join(relative, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        snapshot[name] = { kind: "directory" };
+        await visit(name);
+      } else if (entry.isFile()) {
+        snapshot[name] = { kind: "file", bytes: await readFile(join(root, name)) };
+      } else {
+        throw new Error(`Unexpected snapshot entry type: ${name}`);
+      }
+    }
+  }
+  await visit("");
+  return snapshot;
 }
 
 export async function submissionFixture(

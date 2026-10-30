@@ -2,11 +2,11 @@
 
 ## Issue #443 fixture
 
-Issue type: feature. Fixture level: expanded (agree with upstream); Critical Path #4.
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #2/#4 after the PI-approved review amendment.
 Blast radius: jobs submission transaction/rollback, workspace evidence ownership, registry configuration and production profile installation.
-Selected risk packs: Public API/CLI; Config/project setup; File IO/path safety; Schema/identity; Secrets/diagnostics; Concurrency/ordering; Error handling/rollback; Legacy compatibility; Release/dependency compatibility; Documentation.
+Selected risk packs: Public API/CLI; Config/project setup; File IO/path safety; Schema/identity; Auth/permissions and Secrets/diagnostics; Concurrency/ordering; Error handling/rollback; Legacy compatibility; Release/dependency compatibility; Documentation.
 Evidence floor: semantic RED before production edits; actual registry/config/submit/rollback/collect consumers, independent copied-input hashes and first-created ordering, installer byte/idempotence/negative controls, default check, strict validation, instructions check, profile smoke, real SHUD tiny and Web SIGTERM/SIGKILL restart, three-seat white-box review.
-Only task 5.1 is selected. Keep tools, records implementations, core schemas, bundle rows and profile-install.sh unchanged; the existing records dependency and installer precheck suffice. Task query/TaskCard writes/presets remain downstream issues.
+Only task 5.1 is selected. Keep records implementations, core schemas, bundle rows and profile-install.sh unchanged; the existing records dependency and installer precheck suffice. Task query/TaskCard writes/presets remain downstream issues. After executable confirmation of raw-write bypass and original-input overlap, PI selected “扩展 #443 边界” in this conversation: additionally allow raw-guard's shud_run decision/tests and the actual guarded-tool regression test, with a raw-data-guard delta. No tools production change or duplicated jobs-side raw policy.
 
 ## Issue #442 fixture
 
@@ -157,6 +157,7 @@ M3 的用户可见步骤是"从任务卡到 Markdown 证据报告，含 PI 审�
 
 ### Modified Capabilities
 
+- `raw-data-guard`: PI-approved #443 review repair extends the existing shud_run output-root check from runs to runs/stacks/provenance, preserving raw-input approval and denial precedence.
 - `stack-lock`: `llm` 三字段、`repos.<name>.dirty_paths`、指纹排除 `response_model`、最小 `runtime`、品牌 `stack_id`、确定性采集入口与工作区持久化。
 - `run-records`: RunJob/RunRecord 的 `task_id`/`stack_id`/`data_id` 在提交时写入（保持 nullable）；Minimal_Schemas 处置更新。
 - `shud-run-tools`: `shud_run` 新增可选 `task_id`；提交时复用或采集 StackLock、生成 DataProvenance，并回写 TaskCard 链接。

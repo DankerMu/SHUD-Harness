@@ -92,6 +92,16 @@ export function prepareInput(request: SubmitShudRequest, stateDir: string): Prep
   if (containsPath(inputDir, realpathSync.native(stateDir))) {
     throw new Error(`stateDir is inside input directory: ${inputDir}`);
   }
+  for (const name of ["stacks", "provenance"]) {
+    let destination = join(cwd, name);
+    if (existingPath(destination)) {
+      realDirectory(destination);
+      destination = realpathSync.native(destination);
+    }
+    if (containsPath(inputDir, destination)) {
+      throw new Error(`${name} root is inside input directory: ${inputDir}`);
+    }
+  }
   const parameter = join(inputDir, `${project}.cfg.para`);
   const para = existingPath(parameter);
   if (!para?.isFile() || para.isSymbolicLink())
