@@ -12,7 +12,7 @@ import {
 } from "@shud-harness/dsh-shud-core";
 import type { Config } from "./registry.ts";
 import type { StateIndexStore } from "./state-indexes.ts";
-import { writeJson } from "@shud-harness/dsh-shud-records";
+import { captureStackLock, generateProvenance, writeJson } from "@shud-harness/dsh-shud-records";
 import { stdoutSource } from "./file-output.ts";
 import { updateEnd } from "./shud-end.ts";
 import {
@@ -43,6 +43,30 @@ interface Reservation {
   run_id: RunId;
   job_id: JobRecordId;
   runDir: string;
+}
+
+interface OwnedProvenance {
+  directory: string;
+  path: string;
+  parent?: Stats;
+  file?: Stats;
+}
+
+async function removeProvenance(owned: OwnedProvenance): Promise<void> {
+  const parent = realDirectory(owned.directory);
+  const file = existingPath(owned.path);
+  if (
+    !owned.parent ||
+    !owned.file ||
+    !file?.isFile() ||
+    parent.dev !== owned.parent.dev ||
+    parent.ino !== owned.parent.ino ||
+    file.dev !== owned.file.dev ||
+    file.ino !== owned.file.ino
+  ) {
+    throw new Error(`Provenance ownership changed: ${owned.path}`);
+  }
+  await io.rm(owned.path);
 }
 
 export class ShudSubmissions {
@@ -137,6 +161,7 @@ export class ShudSubmissions {
     let owned: Stats | undefined;
     let created = false;
     let indexed = false;
+    let provenance: OwnedProvenance | undefined;
     const execution: {
       value?: ShudExecution;
       startup?: Promise<{ identity: ShudProcessIdentity } | { error: unknown }>;
@@ -176,12 +201,26 @@ export class ShudSubmissions {
       await io.writeFile(join(reservation.runDir, "stdout.log"), "", { flag: "wx" });
       await io.writeFile(join(reservation.runDir, "stderr.log"), "", { flag: "wx" });
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
+      const stack = captureStackLock({ ...this.config, cwd: input.cwd }, input.llm);
+      const data = await generateProvenance(reservation.runDir, input.project, input.inputDir);
+      // Record the returned path before ownership checks: inability to prove ownership
+      // must fail closed during rollback, never authorize deletion of a replacement.
+      provenance = {
+        directory: join(input.cwd, "provenance"),
+        path: join(input.cwd, "provenance", `${data.data_id}.json`),
+      };
+      provenance.parent = realDirectory(provenance.directory);
+      provenance.file = existingPath(provenance.path);
+      if (!provenance.file?.isFile()) {
+        throw new Error(`Expected a regular provenance file: ${provenance.path}`);
+      }
+      verifyRun(input.runsDir, parent, reservation.runDir, owned);
       let record = RunJobSchema.parse({
         run_id: reservation.run_id,
         job_id: reservation.job_id,
-        task_id: null,
-        stack_id: null,
-        data_id: null,
+        task_id: input.taskId,
+        stack_id: stack.stack_id,
+        data_id: data.data_id,
         backend: "local_job",
         status: "created",
         project: input.project,
@@ -292,6 +331,7 @@ export class ShudSubmissions {
           verifyRun(input.runsDir, parent, reservation.runDir, owned);
           await io.rm(reservation.runDir, { recursive: true });
         }
+        if (provenance) await removeProvenance(provenance);
         this.cancellations.release(reservation.run_id);
         this.inFlight.delete(reservation.run_id);
       } catch (cleanup) {

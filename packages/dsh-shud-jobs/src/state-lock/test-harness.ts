@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { ShudJobRegistry } from "../registry.ts";
+import { ShudJobRegistry, type Config } from "../registry.ts";
 import { createHarness } from "../test-harness.ts";
 
 const CHILD_ARGUMENT = "--state-lock-registry-child";
@@ -39,7 +39,7 @@ export interface RegistryChild {
 // Node 24 runs this TypeScript entry directly, like the repository's script entries.
 // Deferred apply provides a real IPC barrier before initial/stale ownership races.
 export async function createRegistryChild(
-  config: { stateDir: string; shudBin: string },
+  config: Config,
   deferred = false,
 ): Promise<RegistryChild> {
   const child = fork(fileURLToPath(import.meta.url), [CHILD_ARGUMENT, JSON.stringify(config)], {

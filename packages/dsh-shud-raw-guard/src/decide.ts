@@ -238,14 +238,17 @@ export function caseInsensitiveRoot(root: string): boolean {
 export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
   if (call.name === "shud_run") {
     const cwd = call.cwd ?? process.cwd();
-    const output = canonical("runs", cwd);
-    if (options.rawDirs.some((raw) => containsPath(canonical(raw, cwd), output))) return DENY;
+    const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
+    for (const name of ["runs", "stacks", "provenance"]) {
+      const output = canonical(name, cwd);
+      if (rawRoots.some((raw) => containsPath(raw, output))) return DENY;
+    }
     const args = call.arguments;
     if (!args || typeof args !== "object" || Array.isArray(args)) return NEXT;
     const inputDir = (args as Record<string, unknown>).input_dir;
     if (typeof inputDir !== "string") return NEXT;
     const input = canonical(inputDir, cwd);
-    return options.rawDirs.some((raw) => containsPath(canonical(raw, cwd), input)) ? ASK : NEXT;
+    return rawRoots.some((raw) => containsPath(raw, input)) ? ASK : NEXT;
   }
   const args = call.arguments;
   if (!args || typeof args !== "object" || Array.isArray(args)) return NEXT;

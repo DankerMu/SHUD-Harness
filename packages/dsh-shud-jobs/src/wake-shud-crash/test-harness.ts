@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
-import { ShudJobRegistry, type SubmitShudRequest } from "../index.ts";
+import { ShudJobRegistry, type Config, type SubmitShudRequest } from "../index.ts";
 import { readInvocation } from "../detached-shud/test-harness.ts";
 import { settlingProducer } from "../poll-shud/test-harness.ts";
 import { actualRegistry } from "../submit-shud/test-harness.ts";
@@ -16,7 +16,7 @@ const HOST_ARGUMENT = "--wake-crash-host";
 const WAIT_MS = 5000;
 type CrashScenario = "flush-window" | "running" | "terminal-window" | "projection-window";
 interface CrashHostInput {
-  config: { stateDir: string; shudBin: string; pumpPollMs: number };
+  config: Config & { pumpPollMs: number };
   request: SubmitShudRequest;
   directory: string;
   phase: "submit" | "recover";

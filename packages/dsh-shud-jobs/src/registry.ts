@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { Service, type Context } from "@deepseek-ai/cordis";
 import { LocalJobRegistry, type Config as ParentConfig } from "@deepseek-ai/dsh-jobs-local";
 import type { JobRecordId, RunId, RunJob, RunRecord } from "@shud-harness/dsh-shud-core";
+import type { StackCaptureConfig } from "@shud-harness/dsh-shud-records";
 import type { SubmitShudRequest } from "./shud-input.ts";
 import { ShudSubmissions, type ShudProducer } from "./shud-submissions.ts";
 import { StateIndexStore } from "./state-indexes.ts";
@@ -10,7 +11,7 @@ import { ShudPoll, type CompletionReceipt } from "./shud-poll.ts";
 import { ShudCancellation } from "./shud-cancellation.ts";
 import { createRecoveryReporter } from "./shud-recovery-log.ts";
 
-export interface Config extends ParentConfig {
+export interface Config extends ParentConfig, Omit<StackCaptureConfig, "cwd"> {
   /** Absolute writable directory for registry state; created when absent. */
   stateDir: string;
   /** Absolute path to an executable regular SHUD binary. */
@@ -18,6 +19,22 @@ export interface Config extends ParentConfig {
 }
 
 type StandardProps = (typeof LocalJobRegistry.Config)["~standard"];
+type ConfigIssue = { message: string; path: string[] };
+const ownConfigKeys = ["stateDir", "shudBin", "stackRepos", "hostVersion", "llm", "sundialsRoot"];
+
+function validateConfigText(
+  value: unknown,
+  path: string[],
+  absolute: boolean,
+  issues: ConfigIssue[],
+): void {
+  if (typeof value !== "string" || value.length === 0 || (absolute && !isAbsolute(value))) {
+    issues.push({
+      message: `${path.join(".")} must be a nonempty ${absolute ? "absolute path" : "string"}`,
+      path,
+    });
+  }
+}
 
 function isConfigObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -69,27 +86,60 @@ export class ShudJobRegistry extends ParentRegistry {
         if (parentDict === undefined) {
           throw new TypeError("LocalJobRegistry.Config must expose its configuration dictionary");
         }
-        const issues: Array<{ message: string; path: string[] }> = [];
+        const issues: ConfigIssue[] = [];
         for (const key of Object.keys(input)) {
-          if (key !== "stateDir" && key !== "shudBin" && !Object.hasOwn(parentDict, key)) {
+          if (!ownConfigKeys.includes(key) && !Object.hasOwn(parentDict, key)) {
             issues.push({ message: `Unknown configuration key ${key}`, path: [key] });
           }
         }
         for (const key of ["stateDir", "shudBin"] as const) {
-          const path = input[key];
-          if (typeof path !== "string" || path.length === 0 || !isAbsolute(path)) {
-            issues.push({ message: `${key} must be a nonempty absolute path`, path: [key] });
+          validateConfigText(input[key], [key], true, issues);
+        }
+        validateConfigText(input.hostVersion, ["hostVersion"], false, issues);
+        if (input.sundialsRoot !== undefined) {
+          validateConfigText(input.sundialsRoot, ["sundialsRoot"], true, issues);
+        }
+        for (const [key, fields, absolute] of [
+          ["stackRepos", ["SHUD", "rSHUD", "AutoSHUD"], true],
+          ["llm", ["base_url", "request_alias"], false],
+        ] as const) {
+          const nested = input[key];
+          if (!isConfigObject(nested)) {
+            issues.push({ message: `${key} must be a configuration object`, path: [key] });
+            continue;
+          }
+          for (const field of Object.keys(nested)) {
+            if (!(fields as readonly string[]).includes(field)) {
+              issues.push({
+                message: `Unknown configuration key ${key}.${field}`,
+                path: [key, field],
+              });
+            }
+          }
+          for (const field of fields) {
+            validateConfigText(nested[field], [key, field], absolute, issues);
           }
         }
         if (issues.length > 0) return { issues };
-        const { stateDir, shudBin, ...parentInput } = input;
+        const { stateDir, shudBin, stackRepos, hostVersion, llm, sundialsRoot, ...parentInput } =
+          input;
         const result = LocalJobRegistry.Config["~standard"].validate(parentInput);
         // Preserve parent failures and let Cordis reject an unsupported async parent validator.
         if (!("value" in result)) return result;
         if (!isConfigObject(result.value)) {
           throw new TypeError("LocalJobRegistry.Config validation must return an object");
         }
-        return { value: { ...result.value, stateDir, shudBin } };
+        return {
+          value: {
+            ...result.value,
+            stateDir,
+            shudBin,
+            stackRepos,
+            hostVersion,
+            llm,
+            ...(sundialsRoot === undefined ? {} : { sundialsRoot }),
+          },
+        };
       },
     },
   };

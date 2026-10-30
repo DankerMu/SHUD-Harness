@@ -5,6 +5,7 @@ import type * as NodeIo from "node:fs/promises";
 import { ShudJobRegistry } from "./index.ts";
 import {
   actualRegistry,
+  snapshotTree,
   submissionFixture,
   submissionProducer,
   writeInputTree,
@@ -15,28 +16,6 @@ vi.mock("node:fs/promises", async (original) => {
   const actual = await original<typeof NodeIo>();
   return { ...actual, mkdir: vi.fn(actual.mkdir), rename: vi.fn(actual.rename) };
 });
-
-type TreeSnapshot = Record<string, { kind: "directory" } | { kind: "file"; bytes: Buffer }>;
-
-async function snapshotTree(root: string): Promise<TreeSnapshot> {
-  const snapshot: TreeSnapshot = {};
-  async function visit(relative: string): Promise<void> {
-    const entries = await io.readdir(join(root, relative), { withFileTypes: true });
-    for (const entry of entries) {
-      const name = relative ? join(relative, entry.name) : entry.name;
-      if (entry.isDirectory()) {
-        snapshot[name] = { kind: "directory" };
-        await visit(name);
-      } else if (entry.isFile()) {
-        snapshot[name] = { kind: "file", bytes: await io.readFile(join(root, name)) };
-      } else {
-        throw new Error(`Unexpected snapshot entry type: ${name}`);
-      }
-    }
-  }
-  await visit("");
-  return snapshot;
-}
 
 async function existingRunsAlias(cwd: string): Promise<string | undefined> {
   try {
@@ -128,3 +107,65 @@ test("existing Runs with disjoint input records the physical run path and preser
     await h.dispose();
   }
 });
+
+for (const [destination, spelling] of [
+  ["stacks", "Stacks"],
+  ["provenance", "Provenance"],
+]) {
+  for (const aliased of [false, true]) {
+    test(`existing ${spelling} input rejects its ${destination} case alias before effects; input alias=${aliased}`, async ({
+      skip,
+    }) => {
+      const h = await submissionFixture();
+      const execution = submissionProducer();
+      try {
+        const input = join(h.cwd, spelling);
+        await writeInputTree(input);
+        const physicalInput = await io.realpath(input);
+        const output = await io.realpath(join(h.cwd, destination)).catch((error: unknown) => {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT")
+            return undefined;
+          throw error;
+        });
+        if (output === undefined) {
+          skip(`filesystem treats ${spelling} and ${destination} as distinct directories`);
+          return;
+        }
+        expect(output).toBe(physicalInput);
+        const alias = join(h.root, "capture-input-alias");
+        if (aliased) await io.symlink(input, alias);
+        await h.apply(ShudJobRegistry, h.config);
+        const registry = actualRegistry(h.ctx);
+        const inputBefore = await snapshotTree(input);
+        const workspaceBefore = await snapshotTree(h.cwd);
+        const stateBefore = await snapshotTree(h.stateDir);
+        const indexesBefore = registry.indexes.read();
+        vi.mocked(io.mkdir).mockClear();
+        vi.mocked(io.rename).mockClear();
+
+        await expect(
+          registry.submitShud(
+            {
+              ...h.request,
+              project: "tiny",
+              input_dir: aliased ? alias : input,
+            },
+            execution.start,
+          ),
+        ).rejects.toThrow(/input/u);
+
+        expect(await snapshotTree(input)).toEqual(inputBefore);
+        expect(await snapshotTree(h.cwd)).toEqual(workspaceBefore);
+        expect(await snapshotTree(h.stateDir)).toEqual(stateBefore);
+        expect(registry.indexes.read()).toEqual(indexesBefore);
+        expect(registry.list()).toEqual([]);
+        expect(execution.handles).toEqual([]);
+        expect(io.mkdir).not.toHaveBeenCalled();
+        expect(io.rename).not.toHaveBeenCalled();
+      } finally {
+        await execution.finish();
+        await h.dispose();
+      }
+    });
+  }
+}

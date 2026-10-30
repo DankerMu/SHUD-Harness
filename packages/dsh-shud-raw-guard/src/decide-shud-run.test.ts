@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
@@ -323,3 +331,133 @@ test("real Cordis uses session cwd, preserves downstream results and audits only
     await stop();
   }
 });
+
+for (const destination of ["stacks", "provenance"]) {
+  test.each([false, true])(
+    `shud_run denies protected ${destination}; root exists=%s`,
+    (present) => {
+      const root = mkdtempSync(join(tmpdir(), "shud-guard-capture-"));
+      try {
+        if (present) mkdirSync(join(root, destination));
+        const before = readdirSync(root);
+        for (const configured of [destination, `./${destination}/`, join(root, destination)]) {
+          const decision = run(
+            { input_dir: "ordinary-input", project: "tiny" },
+            [configured],
+            root,
+          );
+          expect(decision.kind).toBe("deny");
+          expect(decision.code).toBe("raw-immutable");
+          expect(decision.reason).toMatch(/immutable/u);
+        }
+        expect(readdirSync(root)).toEqual(before);
+        expect(existsSync(join(root, destination))).toBe(present);
+        expect(run({ input_dir: "ordinary-input" }, [`${destination}-input`], root)).toEqual({
+          kind: "next",
+          code: "unrelated",
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each([
+    "output-link-equal",
+    "output-link-inside",
+    "raw-link",
+    "raw-link-parent",
+    "session-link-absent",
+    "session-link-present",
+    "input-link",
+  ])(`protected ${destination} retains canonical containment through %s`, (kind) => {
+    const root = mkdtempSync(join(tmpdir(), "shud-guard-capture-alias-"));
+    try {
+      const workspace = join(root, "workspace");
+      const protectedRoot = join(root, "protected");
+      mkdirSync(workspace);
+      mkdirSync(join(protectedRoot, "input"), { recursive: true });
+      let session = workspace;
+      let input = join(root, "ordinary-input");
+      let roots = [join(workspace, destination)];
+      if (kind.startsWith("output-link")) {
+        const target = kind === "output-link-equal" ? protectedRoot : join(protectedRoot, "output");
+        if (kind === "output-link-inside") mkdirSync(target);
+        symlinkSync(target, join(workspace, destination));
+        roots = [protectedRoot];
+      } else if (kind.startsWith("raw-link")) {
+        mkdirSync(join(workspace, destination, "child"), { recursive: true });
+        const target =
+          kind === "raw-link"
+            ? join(workspace, destination)
+            : join(workspace, destination, "child");
+        symlinkSync(target, join(root, "raw-alias"));
+        roots = [kind === "raw-link" ? join(root, "raw-alias") : `${root}/raw-alias/..`];
+      } else if (kind.startsWith("session-link")) {
+        if (kind === "session-link-present") mkdirSync(join(workspace, destination));
+        symlinkSync(workspace, join(root, "session-alias"));
+        session = join(root, "session-alias");
+        roots = [join(realpathSync.native(workspace), destination)];
+      } else {
+        symlinkSync(join(protectedRoot, "input"), join(root, "input-alias"));
+        input = join(root, "input-alias");
+        roots = [protectedRoot, join(workspace, destination)];
+        expect(run({ input_dir: input }, [protectedRoot], session).reason).toBe(
+          RAW_READ_PROVENANCE_REASON,
+        );
+      }
+      const before = readdirSync(workspace);
+      const decision = run({ input_dir: input, project: "tiny" }, roots, session);
+      expect(decision.kind).toBe("deny");
+      expect(decision.code).toBe("raw-immutable");
+      expect(decision.reason).toMatch(/immutable/u);
+      expect(readdirSync(workspace)).toEqual(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test(`protected ${destination} uses existing physical case spelling`, ({ skip }) => {
+    const root = mkdtempSync(join(tmpdir(), "shud-guard-capture-case-"));
+    try {
+      const spelling = destination[0].toUpperCase() + destination.slice(1);
+      mkdirSync(join(root, spelling));
+      if (!existsSync(join(root, destination))) {
+        skip("filesystem distinguishes the capture root case spellings");
+        return;
+      }
+      const decision = run({ input_dir: "ordinary-input" }, [join(root, spelling)], root);
+      expect(decision.kind).toBe("deny");
+      expect(decision.code).toBe("raw-immutable");
+      expect(decision.reason).toMatch(/immutable/u);
+      expect(readdirSync(root)).toEqual([spelling]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["protected input", { input_dir: "prot/ccw", project: "tiny" }],
+    ["missing arguments", undefined],
+    ["null arguments", null],
+    ["array arguments", []],
+    ["string arguments", "prot/ccw"],
+    ["numeric arguments", 1],
+    ["boolean arguments", false],
+    ["missing input", {}],
+    ["null input", { input_dir: null }],
+    ["numeric input", { input_dir: 1 }],
+    ["array input", { input_dir: ["prot/ccw"] }],
+    ["object input", { input_dir: { path: "prot/ccw" } }],
+  ])(`${destination} write denial precedes %s regardless of raw-root order`, (_label, args) => {
+    for (const roots of [
+      ["prot", destination],
+      [destination, "prot"],
+    ]) {
+      const decision = run(args, roots);
+      expect(decision.kind).toBe("deny");
+      expect(decision.code).toBe("raw-immutable");
+      expect(decision.reason).toMatch(/immutable/u);
+    }
+  });
+}

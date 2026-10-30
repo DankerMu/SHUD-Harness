@@ -37,8 +37,6 @@ describe("SHUD execution transaction through the actual registry", () => {
         owner_session: h.ownerId,
         llm: h.request.llm,
         task_id: null,
-        stack_id: null,
-        data_id: null,
         pid: identity.pid,
         pid_started_at: identity.pid_started_at,
         started_at: identity.pid_started_at,
@@ -47,6 +45,8 @@ describe("SHUD execution transaction through the actual registry", () => {
         exit_code: null,
         notify: { status: "pending", attempts: 0, at: null, detail: null },
       });
+      expect(record.stack_id).toMatch(/^STACK-\d{8}T\d{6}-[0-9a-f]{4}$/u);
+      expect(record.data_id).toMatch(/^DATA-\d{8}T\d{6}-[0-9a-f]{4}$/u);
       expect(record.submitted_at).toEqual(expect.any(String));
       expect(record.dsh_job_id).toMatch(/^shud-[0-9a-f]{16}$/u);
       expect(record.dsh_job_ids).toEqual([record.dsh_job_id]);
