@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #445 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #2/#3/#4.
+Blast radius: optional model-tool task linkage, synchronous TaskCard reconciliation/write-back around durable submission, and raw admission for the new task target.
+Selected risk packs: Public API; File IO/path safety; Schema/identity; Auth/raw protection; Concurrency/ordering; Error handling/partial outputs; Legacy compatibility; Documentation.
+Evidence floor: test-first actual ToolRuntime task linkage/failed-write durability/recovery/concurrency, raw-task target semantic RED/GREEN and no-task controls, canonical helper reuse, preserved old oracles, independent built tool with real ccw copied inputs, full check/strict/profile and raw-guard probes.
+Only task 6.1b is selected. PI approved raw-guard decision/tests/spec expansion (issuecomment6519539604) and clarified non-runnable rejection before reconciliation plus retention of committed reconciliation after new-submit failure (issuecomment6519965712). No jobs/records/core production, dependency/profile/preset changes or #481 task_create protection.
+
 ## Issue #444 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #1/#3/#5.

@@ -121,7 +121,7 @@ TaskCard 状态 SHALL 只按下表转换；每次转换 SHALL 同时写入表中
 - **THEN** 工具返回错误结果并指出缺失或未知的参数，不创建任何文件
 
 ### Requirement: TaskCard links
-以某 `task_id` 成功提交的 `shud_run` SHALL 把本次 `job_id` 加入该 TaskCard 的 `linked_jobs`，并把本次提交解析得到的 `stack_id` 与 `data_id` 写入 TaskCard。`report_generate` 成功 SHALL 把新报告的 `report_id` 追加到 `linked_reports`。已有条目 SHALL NOT 被删除或改写。未成功的提交或报告生成 SHALL NOT 改动 `linked_jobs`/`linked_reports`。`shud_run(task_id)` 的卡片回写顺序 SHALL 为：(1) 执行「TaskCard reconcile」后读取并校验 TaskCard（品牌 id、`planned` 或 `running`）；(2) M2 作业提交（durable，RunJob 携带 `task_id`、`stack_id`、`data_id`）；(3) 重新读取 TaskCard、校验、按转换表转换并以 `writeJsonSync` 原子写入，读取与写入之间 SHALL NOT 有 await（沿 M2 RunJob 同步校验/转换/发布边界）。第 (3) 步失败（含卡片在 (1) 与 (3) 之间已离开 `planned|running`）时 `shud_run` SHALL 返回含本次 `run_id` 与"运行已 durable、任务卡回写失败"的工具错误，运行 SHALL NOT 回滚；缺失的链接由后续以该 `task_id` 调用 `shud_run` 或 `report_generate` 时的「TaskCard reconcile」补齐。
+以某 `task_id` 成功提交的 `shud_run` SHALL 把本次 `job_id` 加入该 TaskCard 的 `linked_jobs`，并把本次提交解析得到的 `stack_id` 与 `data_id` 写入 TaskCard。`report_generate` 成功 SHALL 把新报告的 `report_id` 追加到 `linked_reports`。已有条目 SHALL NOT 被删除或改写。未成功的新提交或报告生成 SHALL NOT 追加该次操作的新链接；已成功发布的旧作业对账是独立提交点，SHALL NOT 因后续新提交失败而撤销。`shud_run(task_id)` 的卡片回写顺序 SHALL 为：(1) 校验品牌 id，取得关联 RunJob 列表后，在同步读取—校验—转换—发布边界内读取 TaskCard、校验请求 id 与文件内 id 一致，并先确认状态为 `planned` 或 `running`；其它状态直接拒绝，SHALL NOT 对账或改写卡片。可运行卡再执行「TaskCard reconcile」，仅有变化时原子写回；(2) M2 作业提交（durable，RunJob 携带 `task_id`、`stack_id`、`data_id`）；(3) 重新读取 TaskCard、校验身份与可运行状态、按转换表转换并以 `writeJsonSync` 原子写入，读取与写入之间 SHALL NOT 有 await（沿 M2 RunJob 同步校验/转换/发布边界）。第 (3) 步失败（含卡片在 (1) 与 (3) 之间已离开 `planned|running`）时 `shud_run` SHALL 返回含本次 `run_id` 与"运行已 durable、任务卡回写失败"的工具错误，运行 SHALL NOT 回滚；缺失的链接由后续以该 `task_id` 调用 `shud_run` 或 `report_generate` 时的「TaskCard reconcile」补齐。上述状态检查顺序与独立对账提交点由 #445 的 PI 契约澄清明确，records 纯函数本身不改变。
 
 #### Scenario: card write-back failure keeps the run
 - **WHEN** 以 `task_id` 调用 `shud_run`，作业已提交而第 (3) 步写 `task.json` 失败
@@ -132,11 +132,11 @@ TaskCard 状态 SHALL 只按下表转换；每次转换 SHALL 同时写入表中
 - **THEN** `task.json` 的 `linked_jobs` 含该 `job_id`，`stack_id`/`data_id` 为该次 RunJob 中的值，`linked_reports` 含该 `report_id`
 
 #### Scenario: failed submission leaves links unchanged
-- **WHEN** 以 `task_id` 调用 `shud_run` 而提交失败（例如 `input_dir` 缺少 `<project>.cfg.para`）
-- **THEN** 该 TaskCard 的 `linked_jobs`、`stack_id`、`data_id` 与 `status` 不变
+- **WHEN** 以 `task_id` 调用 `shud_run`，初始对账已完成或为 no-op，而新提交失败（例如 `input_dir` 缺少 `<project>.cfg.para`）
+- **THEN** 相对于初始对账完成后的卡片，该次失败提交不改变 `linked_jobs`、`stack_id`、`data_id` 与 `status`，不撤销已成功发布的旧作业修复
 
 ### Requirement: TaskCard reconcile
-records 包 SHALL 提供纯函数 `reconcileTaskCard(card, runJobsForTask)`，它是卡片与作业之间唯一的对账规则：`runJobsForTask` 为 shud-run-jobs「Run jobs by task query」以该 `task_id` 返回的 RunJob 列表；结果卡片的 `linked_jobs` SHALL 为原 `linked_jobs` 与这些 RunJob 的 `job_id` 的并集，按码点升序排列；`stack_id` 或 `data_id` 为 `null` 时 SHALL 以这些 RunJob 中 `submitted_at` 最新者（相同时取 `job_id` 码点序最大者）的非 `null` 值填补，非 `null` 的既有值 SHALL NOT 被改写；卡片为 `planned` 且任一关联 RunJob 的 `status` 不在 `succeeded|failed|cancelled|collected` 中时，SHALL 按转换表转为 `running`。结果与原卡片相同时 SHALL NOT 写文件；不同时 SHALL 以与第 (3) 步相同的同步读取—校验—转换—`writeJsonSync` 边界写回并刷新 `updated_at`，写回失败使调用它的工具返回说明原因的错误。`shud_run(task_id)` 与 `report_generate` SHALL 在各自开头调用它；其它工具 SHALL NOT 对账卡片与作业。M3 为单进程、同步边界写入，同一卡片的两次写入不会交错。
+records 包 SHALL 提供纯函数 `reconcileTaskCard(card, runJobsForTask)`，它是卡片与作业之间唯一的对账规则：`runJobsForTask` 为 shud-run-jobs「Run jobs by task query」以该 `task_id` 返回的 RunJob 列表；结果卡片的 `linked_jobs` SHALL 为原 `linked_jobs` 与这些 RunJob 的 `job_id` 的并集，按码点升序排列；`stack_id` 或 `data_id` 为 `null` 时 SHALL 以这些 RunJob 中 `submitted_at` 最新者（相同时取 `job_id` 码点序最大者）的非 `null` 值填补，非 `null` 的既有值 SHALL NOT 被改写；卡片为 `planned` 且任一关联 RunJob 的 `status` 不在 `succeeded|failed|cancelled|collected` 中时，SHALL 按转换表转为 `running`。结果与原卡片相同时 SHALL NOT 写文件；不同时 SHALL 以与第 (3) 步相同的同步读取—校验—转换—`writeJsonSync` 边界写回并刷新 `updated_at`，写回失败使调用它的工具返回说明原因的错误。`shud_run(task_id)` 与 `report_generate` SHALL 在各自开头调用它；其中 `shud_run` 在同一新鲜卡片边界内先确认 `planned|running`，不可运行卡不发布对账，其它工具 SHALL NOT 对账卡片与作业。成功的初始对账独立提交，后续新提交失败不得基于旧快照撤销它。M3 为单进程、同步边界写入，同一卡片的两次写入不会交错。
 
 #### Scenario: reconcile restores a missing job link
 - **WHEN** 某次 `shud_run(task_id)` 的卡片回写失败后（卡片 `linked_jobs` 不含该 `job_id`、`stack_id` 为 `null`），对该卡调用 `report_generate`
@@ -153,6 +153,15 @@ records 包 SHALL 提供纯函数 `reconcileTaskCard(card, runJobsForTask)`，�
 #### Scenario: existing references are not overwritten
 - **WHEN** 卡片 `stack_id` 已为非 `null` 值，而最新关联 RunJob 的 `stack_id` 不同
 - **THEN** reconcile 保留卡片原 `stack_id`
+
+#### Scenario: non-runnable stale card is rejected without repair
+- **WHEN** TaskCard 为 reporting 或 done，注册表存在该任务的旧 RunJob 但卡片尚未链接，以该 task_id 调用 shud_run
+- **THEN** 工具在发布对账或提交新运行前拒绝，卡片字节与修改时间不变，不补链接或引用
+
+#### Scenario: failed new submission preserves committed reconciliation
+- **WHEN** planned 卡片缺少一个旧 running 作业链接，shud_run 开头成功发布对账，随后新的模型提交失败
+- **THEN** 卡片保留已修复的旧链接、引用及 running/submitted_job，不新增失败提交的链接，也不回滚初始对账
+
 
 ### Requirement: science_assist closure predicate
 `science_assist` TaskCard 的 closure 谓词 SHALL 在 `report_generate` 中、「TaskCard reconcile」之后、写任何报告文件之前求值，且仅当以下各条全部成立时成立：`linked_jobs` 非空；`linked_jobs` 中每个作业的 RunJob 处于 `collected` 且有 RunRecord；每个关联 RunRecord 的 `stack_id` 与 `data_id` 非 `null`；本次 `report_generate` 参数提供的 `observations`、`limitations`、`pi_questions` 各至少一条（`limitations` 按模型传入的条目计数，自动追加的说明不计入）；每个 metric_fact 有 evidence_refs——M3 报告不含 metric_fact，该子句恒真，且报告的 `limitations` SHALL 自动追加一条含"无指标 artifact"的说明。关联 RunJob 处于 `failed` 或 `cancelled`、其 RunRecord 的 `status` 为 `failed`（含 `exit_class` 为 `cancelled` 或 `lost`），或其收集已耗尽（运行目录存在 `collect-error.json` 且 `attempts` ≥ core `MAX_COLLECT_ATTEMPTS`）时，谓词 SHALL 不成立，错误子句 SHALL 点名该 `job_id` 与原因；卡片保持原状态（通常为 `running`）。M3 没有 TaskCard 取消工具：PI 可对仍在运行的作业使用 `job_kill`，或保留该卡。谓词不成立时 `report_generate` SHALL 返回指出未满足子句的工具错误，SHALL NOT 写报告文件，SHALL NOT 改变 TaskCard（reconcile 的回写除外）。系统 SHALL NOT 以 LLM 判断作为 closure 依据。

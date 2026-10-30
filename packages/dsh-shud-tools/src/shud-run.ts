@@ -1,6 +1,19 @@
 import { basename } from "node:path";
 import { defineTool, type ToolDefinition } from "@deepseek-ai/dsh-tools";
+import {
+  DataIdSchema,
+  JobRecordIdSchema,
+  StackIdSchema,
+  TaskIdSchema,
+  type TaskId,
+} from "@shud-harness/dsh-shud-core";
 import { produceDetachedShud, type ShudJobRegistry } from "@shud-harness/dsh-shud-jobs";
+import {
+  readWorkspaceRecord,
+  reconcileTaskCard,
+  transitionTask,
+  writeWorkspaceRecord,
+} from "@shud-harness/dsh-shud-records";
 import { strictTool } from "./strict-tool.ts";
 
 const parameters = {
@@ -18,7 +31,22 @@ const parameters = {
     description: "Positive END day override in the copied input.",
   },
   label: { type: "string", description: "Optional one-line description of this run." },
+  task_id: {
+    type: "string",
+    description: "Optional TASK-YYYYMMDDTHHMMSS-xxxx id of a planned or running workspace task.",
+  },
 } as const;
+
+function readRunnableTask(cwd: string, taskId: TaskId) {
+  const card = readWorkspaceRecord(cwd, "task", taskId);
+  if (card.task_id !== taskId) {
+    throw new Error(`shud_run task_id identity mismatch: ${taskId}`);
+  }
+  if (card.status !== "planned" && card.status !== "running") {
+    throw new Error(`shud_run task_id ${taskId} is not runnable: ${card.status}`);
+  }
+  return card;
+}
 
 export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
   const tool = defineTool({
@@ -53,6 +81,12 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
       },
     },
     async execute(args, exec) {
+      let taskId: TaskId | undefined;
+      if (args.task_id !== undefined) {
+        const parsed = TaskIdSchema.safeParse(args.task_id);
+        if (!parsed.success) throw new Error("shud_run requires a valid task_id");
+        taskId = parsed.data;
+      }
       const session = exec.agent?.session;
       const cwd = session?.header.cwd;
       const owner = session?.id;
@@ -73,6 +107,13 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
       if (args.project === undefined && (project === "" || project === "." || project === "..")) {
         throw new Error("shud_run requires an explicit project for this input_dir");
       }
+      if (taskId !== undefined) {
+        const taskJobs = await jobs.listRunJobsByTask(taskId);
+        // Read only after the query: this synchronous boundary publishes an independent repair.
+        const card = readRunnableTask(cwd, taskId);
+        const reconciled = reconcileTaskCard(card, taskJobs);
+        if (reconciled !== card) writeWorkspaceRecord(cwd, "task", reconciled);
+      }
       const record = await jobs.submitShud(
         {
           cwd,
@@ -80,6 +121,7 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
           project,
           ...(args.end_days === undefined ? {} : { end_days: args.end_days }),
           ...(args.label === undefined ? {} : { label: args.label }),
+          ...(taskId === undefined ? {} : { task_id: taskId }),
           owner_session: owner,
           llm: { response_model: model, response_model_source: "configured" },
         },
@@ -87,6 +129,24 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
       );
       if (record.status !== "running" || record.dsh_job_id === null) {
         throw new Error("SHUD submission did not return a running registered job");
+      }
+      if (taskId !== undefined) {
+        try {
+          // No await from fresh read through atomic publication; never reuse the pre-submit card.
+          const card = readRunnableTask(cwd, taskId);
+          const jobId = JobRecordIdSchema.parse(record.job_id);
+          const stackId = StackIdSchema.parse(record.stack_id);
+          const dataId = DataIdSchema.parse(record.data_id);
+          writeWorkspaceRecord(cwd, "task", {
+            ...transitionTask(card, { type: "shud_run" }),
+            linked_jobs: [...new Set([...card.linked_jobs, jobId])].sort(),
+            stack_id: stackId,
+            data_id: dataId,
+          });
+        } catch {
+          // The durable run is authoritative; a later task invocation can reconcile its link.
+          throw new Error(`shud_run ${record.run_id}: 运行已 durable、任务卡回写失败`);
+        }
       }
       return {
         status: "running" as const,
