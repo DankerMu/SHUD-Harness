@@ -95,6 +95,8 @@
 ### Requirement: Run jobs by task query
 注册表 SHALL 公开后端 API `listRunJobsByTask(task_id: TaskId): Promise<RunJob[]>`，供 `shud-tools` 的 task-cards「TaskCard reconcile」使用：入参 SHALL 先经 `TaskId` 品牌 schema 校验，未通过即拒绝且不读盘；随后遍历活动索引与完成索引的全部条目，按与 `collectShud` 相同的运行路径与身份校验读取每个条目的 `run-job.json` 并经 core RunJob schema 校验，返回其中 `task_id` 等于入参的 RunJob，按 `job_id` 码点升序排列；没有匹配时返回空数组。任一条目的运行路径或身份校验失败、`run-job.json` 不可读或未通过 schema 校验时，SHALL 以指出该 `run_id` 的错误拒绝（fail-closed），SHALL NOT 跳过该条目或改写任何文件。它只读、不经逐条目队列写入、不改变索引；与 `collectShud` 相同，在启动对账完成并就绪之前及关闭准入之后 SHALL 明确拒绝。会话 cwd 不参与查找，未进入索引的磁盘记录不被返回。
 
+查询 SHALL 保持现有 drain-before-unlock 生命周期：已接纳的异步只读查询在 stateDir 所有权释放前结束或失败，关闭后的新查询立即拒绝；查询失败 SHALL NOT 使清理跳过释放步骤。completed 先发布、active 尚未移除的合法窗口内，同一运行身份可能同时存在两份索引快照中；查询 SHALL 按 active 优先处理同一身份并仅返回一次，不改变索引迁移顺序或掩盖不一致身份。
+
 #### Scenario: jobs of one task are listed from both indexes
 - **WHEN** 同一 `task_id` 有一个已 `collected`（完成索引）与一个 `running`（活动索引）的作业，另有一个 `task_id: null` 的作业
 - **THEN** `listRunJobsByTask(task_id)` 恰返回前两个 RunJob，按 `job_id` 码点升序
@@ -114,3 +116,15 @@
 #### Scenario: not ready before startup reconciliation
 - **WHEN** 注册表的启动对账尚未完成时调用
 - **THEN** 调用被明确拒绝，与此时的 `collectShud` 相同
+
+#### Scenario: duplicate index migration returns one run
+- **WHEN** 同一运行的 completed 条目已发布、active 移除尚在等待，查询该任务
+- **THEN** 同一 run_id/job_id/run_dir 只返回一份经校验的 RunJob，查询不修改任一索引
+
+#### Scenario: corrupt unrelated run also rejects
+- **WHEN** 已索引的其它任务记录损坏，目标任务本身有有效记录或没有匹配记录
+- **THEN** 查询整体拒绝并指出损坏条目的 run_id，不返回部分结果或跳过该条目，原文件不变
+
+#### Scenario: accepted readonly query drains before unlock
+- **WHEN** 已接纳查询停在记录读取，注册表开始关闭，且该读取稍后成功或失败
+- **THEN** 新查询立即拒绝，stateDir 所有权保持至已接纳读取结束；读取失败不阻止正常清理释放，查询不加入逐条目写队列

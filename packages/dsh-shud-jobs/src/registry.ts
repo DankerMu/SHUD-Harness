@@ -2,14 +2,23 @@ import { accessSync, constants, mkdirSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { Service, type Context } from "@deepseek-ai/cordis";
 import { LocalJobRegistry, type Config as ParentConfig } from "@deepseek-ai/dsh-jobs-local";
-import type { JobRecordId, RunId, RunJob, RunRecord } from "@shud-harness/dsh-shud-core";
+import {
+  RunJobSchema,
+  TaskIdSchema,
+  type JobRecordId,
+  type RunId,
+  type RunJob,
+  type RunRecord,
+  type TaskId,
+} from "@shud-harness/dsh-shud-core";
 import type { StackCaptureConfig } from "@shud-harness/dsh-shud-records";
 import type { SubmitShudRequest } from "./shud-input.ts";
 import { ShudSubmissions, type ShudProducer } from "./shud-submissions.ts";
-import { StateIndexStore } from "./state-indexes.ts";
+import { StateIndexStore, type IndexEntry } from "./state-indexes.ts";
 import { ShudPoll, type CompletionReceipt } from "./shud-poll.ts";
 import { ShudCancellation } from "./shud-cancellation.ts";
 import { createRecoveryReporter } from "./shud-recovery-log.ts";
+import { collectFailure, readRunFile, validationFailure, verifyRunFile } from "./shud-run-file.ts";
 
 export interface Config extends ParentConfig, Omit<StackCaptureConfig, "cwd"> {
   /** Absolute writable directory for registry state; created when absent. */
@@ -61,6 +70,50 @@ function assertExecutableFile(path: string): void {
   }
 }
 
+/** Query one owned index snapshot without entering the mutation/collection queues. */
+async function queryRunJobs(store: StateIndexStore, taskId: TaskId): Promise<RunJob[]> {
+  const snapshot = store.read();
+  const runs = new Map<RunId, IndexEntry>();
+  const jobs = new Map<JobRecordId, IndexEntry>();
+  const matches: RunJob[] = [];
+  for (const entries of [snapshot.active, snapshot.completed]) {
+    for (const entry of entries) {
+      const priorRun = runs.get(entry.run_id);
+      const priorJob = jobs.get(entry.job_id);
+      if (priorRun || priorJob) {
+        // completeActive publishes completed before removing active. Only the exact identity
+        // may be deduplicated, with active precedence; conflicting identities remain errors.
+        if (
+          priorRun &&
+          priorJob?.run_id === entry.run_id &&
+          priorRun.job_id === entry.job_id &&
+          priorRun.run_dir === entry.run_dir
+        )
+          continue;
+        throw new Error(`SHUD task query ${entry.run_id}: conflicting index identity`);
+      }
+      runs.set(entry.run_id, entry);
+      jobs.set(entry.job_id, entry);
+      try {
+        const routed = await readRunFile(entry);
+        verifyRunFile(entry, routed);
+        const parsed = RunJobSchema.safeParse(routed.raw);
+        if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
+        // Every indexed record is validated, including null/other-task records. A later
+        // failure rejects the whole request rather than exposing these accumulated matches.
+        if (parsed.data.task_id === taskId) matches.push(parsed.data);
+      } catch (error) {
+        const failure = collectFailure("run metadata", error);
+        failure.message = `SHUD task query ${entry.run_id}: ${failure.stage}: ${failure.code}`;
+        throw failure;
+      }
+    }
+  }
+  return matches.sort((left, right) =>
+    left.job_id < right.job_id ? -1 : left.job_id > right.job_id ? 1 : 0,
+  );
+}
+
 // Keep the exact parent constructor and instance API without inheriting its static schema type.
 const ParentRegistry: new (
   ...args: ConstructorParameters<typeof LocalJobRegistry>
@@ -73,6 +126,7 @@ export class ShudJobRegistry extends ParentRegistry {
   readonly isSubmissionInFlight: (id: RunId) => boolean;
   readonly pollOnce: () => Promise<void>;
   readonly collectShud: (id: RunId | JobRecordId) => Promise<RunRecord>;
+  readonly listRunJobsByTask: (task_id: TaskId) => Promise<RunJob[]>;
   override readonly kill: LocalJobRegistry["kill"];
   private readonly initialize: () => Promise<void>;
 
@@ -185,6 +239,8 @@ export class ShudJobRegistry extends ParentRegistry {
         dispatcher.enableDelivery(services.sessionController, services.sessions),
       );
       let ready = false;
+      let acceptingQueries = true;
+      const pendingQueries = new Set<Promise<void>>();
       const requireReady = () => {
         if (!ready) throw new Error("SHUD startup reconciliation is not ready");
       };
@@ -201,6 +257,19 @@ export class ShudJobRegistry extends ParentRegistry {
         requireReady();
         return dispatcher.collectShud(id);
       };
+      this.listRunJobsByTask = async (taskId) => {
+        requireReady();
+        if (!acceptingQueries) throw new Error("SHUD task query admission is CLOSED");
+        const parsed = TaskIdSchema.safeParse(taskId);
+        if (!parsed.success) throw new Error("Invalid task_id: expected a core TaskId");
+        const result = queryRunJobs(store, parsed.data);
+        const finish = () => {
+          pendingQueries.delete(completion);
+        };
+        const completion = result.then(finish, finish);
+        pendingQueries.add(completion);
+        return result;
+      };
       this.kill = (id, caller, reason) => {
         if (!cancellations.owns(id)) return super.kill(id, caller, reason);
         // Public parent preflight preserves access and already-finished behavior before any write.
@@ -215,10 +284,15 @@ export class ShudJobRegistry extends ParentRegistry {
       let closing: Promise<void> | undefined;
       // Cordis disposes sibling effects concurrently; all SHUD ownership ordering lives here.
       ctx.effect(() => () => {
+        acceptingQueries = false;
         cancellations.stopAdmission();
         dispatcher.stopAdmission();
         submissions.stopAdmission();
-        return (closing ??= Promise.all([dispatcher.drain(), submissions.drain()]).then(() => {
+        return (closing ??= Promise.all([
+          dispatcher.drain(),
+          submissions.drain(),
+          ...pendingQueries,
+        ]).then(() => {
           receipts.clear();
           // Retain managed classification while the concurrent parent disposer may still call cancel.
           // Normally completed/rolled-back runs release their entries; closed leftovers die with this instance.
