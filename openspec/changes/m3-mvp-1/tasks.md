@@ -2,6 +2,14 @@
 
 合入顺序按依赖而非组号，见 design.md「Migration Plan」：3.1a → 6.1a → 1.1 → 2.1a → 2.1b → 2.1c → 3.1b–d、3.2、3.3a → 3.3b → 3.3c → 4.1 → 4.2、4.3 → 4.4a → 4.4b、4.4c → 5.1 → 7.1 → 6.1b → 6.2 → 6.3（6.1b/6.2 与 7.1 可并行，只有 6.3 须在 7.1 之后）→ 8.1a → 8.1b → 9.1 → 9.2 → 10.1（design 第 7 步所写"6.1"即本文件的 6.1b；6.1a 已作为 spike 前置先行）。各任务写明的"依赖"是硬前置；组内未写依赖的切片只受上述合入顺序约束。fixture level 词表以 `subagent-workflow` 的 `issue-risk-contract.md` 为准。需求名一律引用 `specs/*/spec.md` 的 `### Requirement:` 原文。
 
+### Issue #444 risk/evidence map
+
+Selected task: 7.1 only. The issue's #426 comment authorizes the unique caller reader cutover plus task_create attribution test migration; other core policy behavior and all raw-guard/records/jobs production code stay unchanged.
+Selected packs: Public API (reader/mapping public compiler and runtime consumers); Config/setup (global Web/headless row plus missing/disabled/nested/schema-error smoke controls); File IO/path safety (canonical report reader, invalid-id no IO, symlink/special/corrupt/mismatched/missing report still ask, immutable snapshots); Schema/identity (ReportId and full report binding, no schema changes); Auth/permissions/secrets (current projection, deny-before-ask, host allowed-once only, safe reason and logger); Concurrency/ordering (one listener, raw first-hit, next exactly once, per-instance disposal counts); Legacy compatibility (task_create attribution migrates but cwd/write contract and existing consumers remain); Error handling (evaluator fixed deny versus report-reader unavailable ask, no raw cause/partial writes); Release/dependencies (pinned workspace package resolution/build/knip/coverage and bundle import); Documentation (this fixture/usage contracts, docs gate).
+Resource limits/discovery not selected: no scanning, retries, cache or background work; comment is deliberately shown in full by contract, no new size/truncation policy.
+Required parent proof: focused test-first behavior controls, built public Cordis/ToolRuntime smoke with real report files/current projection, external typed consumer, `pnpm run check`, strict OpenSpec, actual `pnpm run profile:smoke`, separate installed headless dump/schema and negative smoke controls. Pure/fake-tool tests do not claim real report writes, Web PI acceptance or scientific outcome.
+Three read-only white-box seats cover correctness, test-evidence/spec and security/integration; every candidate adjudicated before fixes. Preserve old policy/records/jobs/raw tests; only approved caller attribution fixtures migrate.
+
 ### Issue #424 risk/evidence map
 
 The PI-approved scope correction in design.md permits only fixture migration in `core-schemas.test.ts` and `scripts/schema/self-test.ts`: branded task id and explicit null stack/data references; all assertions, including unknown-key stripping and JOB/RUN cases, remain unchanged.

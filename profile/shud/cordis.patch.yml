@@ -31,6 +31,8 @@
       name: "@shud-harness/dsh-shud-raw-guard"
       config:
         rawDirs: ["data/raw"]
+    - id: shud-policy-gate
+      name: "@shud-harness/dsh-shud-policy-gate"
     - id: shud-jobs
       name: "@shud-harness/dsh-shud-jobs"
     - id: shud-tools

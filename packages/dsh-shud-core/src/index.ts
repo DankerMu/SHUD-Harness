@@ -37,4 +37,4 @@ export * from "./governance/wording.ts";
 export * from "./stack-lock/fingerprint.ts";
 export * from "./stack-lock/repository-revision.ts";
 export { containsPath } from "./path-containment.ts";
-export { readCallerPresetId } from "./caller-preset.ts";
+export { readCallerPresetId, presetIdToRole } from "./caller-preset.ts";

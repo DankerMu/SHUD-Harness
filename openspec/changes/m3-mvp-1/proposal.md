@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #444 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #1/#3/#5.
+Blast radius: global tool authorization/approval waterfall, current preset attribution, report approval presentation and redacted diagnostics, production bundle importability.
+Selected risk packs: Public API; Config/project setup; File IO/path safety; Schema/identity; Auth/permissions/secrets; Concurrency/ordering; Legacy compatibility; Error handling; Release/dependency compatibility; Documentation.
+Evidence floor: test-first current-projection cutover and real Cordis/ToolRuntime deny/ask/delegation controls; canonical report-reader path negatives; host approval fail-closed outcomes; raw-guard composition attribution; logger redaction/counts; built public plugin smoke, Web/headless profile installation/import plus smoke negative controls; full check/strict and three-seat review.
+Only task 7.1 is selected. New policy package, core unique caller reader/mapping and exports/tests, task_create attribution tests per issue comment6463590022, bundle/dependency/knip/lock and profile-smoke. No core policy-table/raw-guard/records/jobs production changes, actual report tools, presets/restrict, new logging outlet or PI acceptance.
+
 ## Issue #453 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream); Critical Path #4.
