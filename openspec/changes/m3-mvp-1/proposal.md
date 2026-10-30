@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #446 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #2/#3/#4/#6.
+Blast radius: model-visible report generation/validation, report/card/Markdown commit order and repair, safe workspace IO, retained collection-failure evidence and raw-target admission.
+Selected risk packs: Public API; File IO/path safety; Schema/identity; Auth/raw protection/secrets; Concurrency/ordering; Error handling/partial outputs; Legacy compatibility; Release/dependency compatibility; Documentation.
+Evidence floor: test-first actual ToolRuntime report lifecycle and failure/repair controls, retained exhausted ledger with successful cached RunRecord, no-side-effect citation checks, raw-target deny before execution, built real ccw→report→validate proof, full check/strict/profile/raw probes and three-seat review.
+Only task 6.2 is selected. PI issuecomment6522484479 authorizes minimal records/jobs/raw-guard seams, state/citation rejection before reconcile, independently committed entry repairs, and rejection of illegal TaskCard repair transitions. PI issuecomment6523542892 additionally authorizes explicit collectShud readonly mode so report evidence retrieval cannot generate or journal files. Terminal report tools, presets, task_create raw protection and PI functional acceptance remain separate issues.
+
 ## Issue #445 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #2/#3/#4.

@@ -128,3 +128,37 @@
 #### Scenario: accepted readonly query drains before unlock
 - **WHEN** 已接纳查询停在记录读取，注册表开始关闭，且该读取稍后成功或失败
 - **THEN** 新查询立即拒绝，stateDir 所有权保持至已接纳读取结束；读取失败不阻止正常清理释放，查询不加入逐条目写队列
+
+### Requirement: Readonly collection attempt evidence
+注册表 SHALL 提供以 core RunId 或 JobRecordId 为参数的只读收集失败次数入口。品牌校验先于 IO；经当前拥有的 active-first/completed 索引查找，并校验运行路径、完整 RunJob 与条目身份。入口 SHALL 复用既有严格 collect-error.json 解析器，返回 attempts；只有文件真正不存在为0，损坏、额外字段、非法次数/时间、链接/特殊文件或不可读均受控失败，SHALL NOT 泄露 last_error 原文。已有有效 RunRecord 不得短路这次 ledger 读取。SHALL NOT collect、重试、改写记录/索引、清除 ledger 或扫描未索引目录。
+
+此入口 SHALL 与任务查询共用就绪/关闭准入及已接纳读操作 drain-before-unlock 生命周期，不新增调度器或持久状态；接纳的读取成功或失败均排空后才释放所有权。
+
+#### Scenario: successful record retains exhausted evidence
+- **WHEN** 已 collected 作业有有效 succeeded RunRecord，保留的 collect-error.json attempts 为 MAX_COLLECT_ATTEMPTS
+- **THEN** 只读入口仍返回该次数，报告 closure 拒绝耗尽；记录、ledger 与索引字节和修改时间不变
+
+#### Scenario: absent and corrupt ledgers differ
+- **WHEN** 分别读取 ledger 缺失、损坏或符号链接的已索引作业
+- **THEN** 只有真正缺失返回0，其余受控拒绝且不改写文件，不降级为0或泄露 ledger 内容
+
+#### Scenario: attempt reader drains before ownership release
+- **WHEN** 已接纳读取阻塞在 IO 后注册表开始关闭
+- **THEN** 新读取拒绝，旧读取结束或失败后才释放 stateDir 锁，失败不跳过清理
+
+### Requirement: Readonly collected record access
+collectShud SHALL 接受可选只读模式 `{readonly:true}`，供报告生成取得已有已收集记录。未指定或 readonly 为 false 的原调用语义不变。只读模式 SHALL 沿原有就绪/关闭准入、持久品牌 id 的活动优先索引查找、D7 接纳时捕获及逐条目排他队列执行；读取前验证 RunJob 的 collected 状态、完整 schema 与路径/身份，再复用规范已有 RunRecord 解析及运行身份校验。只有已存在的有效记录可返回；未 collected、缺失/损坏/链接/特殊/不可读或身份不符记录 SHALL 受控拒绝。
+
+只读模式 SHALL NOT 生成或改写任何 RunRecord、RunJob、ledger 或索引，不调用正常完成回执、收集失败记账、投影/通知或重试。它不替代报告 closure 的独立 retained-ledger 次数判断；默认收集成功缓存优先规则不变。已接纳只读操作 SHALL 由现有逐条目队列排空后才释放 stateDir 所有权，不新增队列或调度器。
+
+#### Scenario: readonly returns the canonical immutable collected record
+- **WHEN** 以 run_id 或 job_id 对活动/完成索引中的 collected 作业调用 collectShud(id, {readonly:true})
+- **THEN** 返回规范 RunRecord，运行记录/ledger/索引字节和修改时间不变
+
+#### Scenario: readonly cached-record failure never journals or regenerates
+- **WHEN** collected 作业的 RunRecord 缺失、损坏、身份不符或不安全
+- **THEN** 只读调用受控拒绝，缺失文件不被补建，损坏字节保留，不创建或增加 collect-error.json，不改 RunJob 或索引
+
+#### Scenario: readonly keeps admission and drain boundaries
+- **WHEN** 在未就绪/已关闭/D7 在途时调用只读模式，或关闭时已有只读请求停在记录 IO
+- **THEN** 未接纳请求按规范拒绝；D7 接纳时事实不被排队期间完成覆盖；已接纳读取完成或失败后才释放所有权

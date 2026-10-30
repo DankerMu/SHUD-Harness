@@ -9,7 +9,7 @@ canonical_for: [language-guard, reviewer-checklist]
 **适用范围：** EvidenceReport、Markdown 投影、确定性 validator 与 PI 审阅；Reviewer preset 与完整 evidence lineage 属于后续里程碑。
 **目标：** 将 deterministic evidence 与 LLM 叙述分离，避免 Agent 过度解释模型结果。
 
-M3 目标契约以 [m3-mvp-1 design D7/D8](../../openspec/changes/m3-mvp-1/design.md#d7-evidencereport-生成模板与水印) 与 [evidence-reports](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 为准，随对应实现切片交付；本文不表示报告工具已经挂载。
+M3 目标契约以 [m3-mvp-1 design D7/D8](../../openspec/changes/m3-mvp-1/design.md#d7-evidencereport-生成模板与水印) 与 [evidence-reports](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 为准。`dsh-shud-tools` 已挂载 `report_generate` 与 `report_validate`；PI 终态工具 `report_submit` / `report_decide` 属于独立后继切片，不由本两工具代行。
 
 ## 1. 报告定位
 
@@ -33,8 +33,10 @@ M3 没有 metrics/图表/AnalysisPlan 生产者，不把这些作为生成前提
 
 ```text
 coordinator 提供叙述参数
-→ reconcile TaskCard / closure 检查 / 读取 RunRecord
-→ 品牌 id 引用存在性校验
+→ 无副作用读取 TaskCard / 状态与 authored 品牌引用校验
+→ 查询作业 / 新鲜同步 TaskCard reconcile（变化时独立提交）
+→ 只读取已 collected 作业的规范 RunRecord / 保留 ledger 次数
+→ 新鲜 TaskCard closure 检查
 → 确定性事实表与模板填充
 → 写 reports/<report_id>.json（draft）
 → TaskCard reporting / linked_reports 回写
@@ -47,6 +49,14 @@ coordinator 提供叙述参数
 工具不另调 LLM、不自行计算科学指标。引用参数中的 `TASK-/STACK-/DATA-/RUN-/JOB-/REPORT-` 品牌 id 逐一解析；缺失引用返回工具错误，不写 draft、不自动重试，由 coordinator 修正后重新生成。没有额外的 M3 artifact registry/hash 校验或 Reviewer preset 前置门。
 
 报告 JSON 是提交点，其后 TaskCard/Markdown 失败不回滚已提交对象；下一次针对同报告的工具调用按 [写入与修复契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 修复。重新生成总是新 report_id，保留旧报告字节与决定历史，不把旧终态改回 draft。
+
+`report_generate` 经 `collectShud(id, { readonly: true })` 只读取已 collected 作业的既有规范 RunRecord：缺失、损坏、不安全或身份不符均直接失败，不生成结果、不写失败 ledger、不投影作业状态、不完成登记回执、不通知。普通 `collectShud(id)` 与 `shud_collect` 仍保留原采集行为。保留的收集失败次数另经 `readCollectErrorAttempts(id)` 读取，即使已有成功 RunRecord 也参与 closure；耗尽或损坏 ledger 不会因缓存成功而被绕过。异步证据读取后新出现的作业链接使 closure 拒绝，不重试、不丢弃链接。JSON 提交后的失败明确返回 `report_id` 与 `task_card` / `render` 阶段。
+
+`report_validate` 先执行卡片与 Markdown 首部修复，再检查新鲜报告是否为 draft。修复独立提交，后续前置条件或 validator 失败不撤销修复、也不改报告 JSON。卡片修复只使用既有合法转换，不重开 done/cancelled，不以较早已链接报告移动卡片；未链接终态报告先在内存中完成全部转换，再一次发布最终卡片。正确水印下的正文差异不触发修复。
+
+校验结果为 `{ report_id, status, ok, checks }`，成功与检查失败都完整返回规范 13 项；检查失败保持 draft，而请求、前置条件与 IO 失败仍为工具错误。通过后仅提交 reviewed JSON 并更新 Markdown，不产生 PI 决定。raw-guard 在执行前保护生成的 reports 命名空间与本任务目标，以及校验的确切 JSON/Markdown 对和关联任务修复目标，写保护不提供审批绕过。
+
+规范 `renderReport` / `validateReport` 及工具的入口 Markdown 修复、最终渲染共用无创建副作用的引用读取：报告、StackLock、DataProvenance 的路径安全、schema 与文件内 id 绑定由共享 readonly 工作区读取负责。缺失的 `reports` / `stacks` / `provenance` 目录保持不存在，包括配置为 raw 的引用根；不通过扩大 raw 拒绝范围或工具侧重复解析来掩盖读取副作用。普通三参数 `readWorkspaceRecord` 的既有创建目录行为不变。
 
 ## 4. 报告模板
 

@@ -221,6 +221,9 @@ importers:
       '@shud-harness/dsh-shud-core':
         specifier: workspace:*
         version: link:../dsh-shud-core
+      '@shud-harness/dsh-shud-records':
+        specifier: workspace:*
+        version: link:../dsh-shud-records
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.5

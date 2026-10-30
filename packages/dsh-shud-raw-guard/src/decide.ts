@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { containsPath, TaskIdSchema } from "@shud-harness/dsh-shud-core";
+import { containsPath, ReportIdSchema, TaskIdSchema } from "@shud-harness/dsh-shud-core";
+import { readWorkspaceRecord } from "@shud-harness/dsh-shud-records";
 
 type RawGuardCall = { name: string; arguments: unknown; cwd?: string };
 type RawGuardDecision = {
@@ -185,6 +186,44 @@ function canonical(target: string, cwd: string): string {
   }
 }
 
+/** Report generation has an unallocated namespace; validation has an exact repair target set. */
+function decideReportAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
+  try {
+    const cwd = call.cwd ?? process.cwd();
+    const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
+    const args = call.arguments;
+    const fields =
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {};
+    if (call.name === "report_generate") {
+      const reports = canonical("reports", cwd);
+      if (rawRoots.some((raw) => containsPath(raw, reports) || containsPath(reports, raw))) {
+        return DENY;
+      }
+      const taskId = TaskIdSchema.safeParse(fields.task_id);
+      if (!taskId.success) return NEXT;
+      const target = canonical(`tasks/${taskId.data}/task.json`, cwd);
+      return rawRoots.some((raw) => containsPath(raw, target)) ? DENY : NEXT;
+    }
+    const reportId = ReportIdSchema.safeParse(fields.report_id);
+    if (!reportId.success) return NEXT;
+    for (const extension of ["json", "md"]) {
+      const target = canonical(`reports/${reportId.data}.${extension}`, cwd);
+      if (rawRoots.some((raw) => containsPath(raw, target))) return DENY;
+    }
+    const report = readWorkspaceRecord(cwd, "report", reportId.data, { readonly: true });
+    const target = canonical(`tasks/${report.task_id}/task.json`, cwd);
+    return rawRoots.some((raw) => containsPath(raw, target)) ? DENY : NEXT;
+  } catch {
+    return {
+      kind: "deny",
+      code: "raw-target-unavailable",
+      reason: "Report write targets cannot be safely resolved; execution denied.",
+    };
+  }
+}
+
 // Equivalent spellings: repeated separators collapse and a `/.` path segment
 // (followed by /, end or a command boundary) drops. `./x` and `..` stay as written.
 function normalizeCommandPaths(text: string): string {
@@ -236,6 +275,9 @@ export function caseInsensitiveRoot(root: string): boolean {
 }
 
 export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
+  if (call.name === "report_generate" || call.name === "report_validate") {
+    return decideReportAccess(call, options);
+  }
   if (call.name === "shud_run") {
     const cwd = call.cwd ?? process.cwd();
     const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));

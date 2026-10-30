@@ -199,7 +199,7 @@ function secretDetails(document: ReportDocument): ReportValidationDetail[] {
  * thirteen ordered checks even if references or the canonical projection fail. Only
  * 4/10/11 are M3-vacuous. Existing Markdown, logs, artifacts and credentials are not read.
  * This is enumerated evidence/wording lint, not closure or PI semantic approval.
- * Existing readers may create ordinary managed directories, never missing run records.
+ * All report/reference reads are non-creating; missing managed directories remain absent.
  */
 export function validateReport(cwd: string, reportId: unknown): ReportValidationResult {
   const id = ReportIdSchema.safeParse(reportId);

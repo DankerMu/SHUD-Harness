@@ -11,15 +11,14 @@ import { ReportRenderError } from "./report-render-error.ts";
 
 type ReportInputKind = "report" | "stack" | "data";
 
-/** Reuse workspace safety/schema rules, then bind the cited identity to its file. */
+/** Reuse non-creating workspace reads, including schema, path safety and cited identity binding. */
 export function readReportInput<K extends ReportInputKind>(
   cwd: string,
   kind: K,
   id: string,
 ): WorkspaceRecordMap[K] {
-  let record: WorkspaceRecordMap[K];
   try {
-    record = readWorkspaceRecord(cwd, kind, id);
+    return readWorkspaceRecord(cwd, kind, id, { readonly: true });
   } catch (error) {
     if (
       error instanceof WorkspaceRecordError &&
@@ -30,17 +29,6 @@ export function readReportInput<K extends ReportInputKind>(
     }
     throw new ReportRenderError("read");
   }
-  const embeddedId =
-    "report_id" in record
-      ? record.report_id
-      : "stack_id" in record
-        ? record.stack_id
-        : record.data_id;
-  if (embeddedId !== id) {
-    const directory = kind === "report" ? "reports" : kind === "stack" ? "stacks" : "provenance";
-    throw new ReportRenderError("identity", join(cwd, directory, `${id}.json`));
-  }
-  return record;
 }
 
 function requireRunDirectory(path: string): void {

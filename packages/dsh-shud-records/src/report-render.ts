@@ -218,10 +218,9 @@ function projectTemplate(fields: Readonly<Record<string, string>>): ReportDocume
  * Routing and embedded identities are checked; arrays keep their declared order. Only
  * report/stack/provenance/run JSON and the module-relative packaged template are read.
  * No TaskCard, logs, artifacts, raw inputs, clock, model calls or Markdown reads occur.
- * Source records/status/timestamps are unchanged. Existing workspace readers may create
- * standard managed directories; missing run directories are never created or discovered.
- * This function returns text only: future tools own the JSON/TaskCard commit sequence
- * and subsequent atomic writeBytes publication. It is not the report wording validator.
+ * Source records/status/timestamps are unchanged; missing managed directories are never
+ * created or discovered. This function returns text only: tools own the JSON/TaskCard
+ * commit sequence and subsequent safe Markdown publication. It is not the wording validator.
  */
 export function renderReport(cwd: string, reportId: unknown): string {
   const id = ReportIdSchema.safeParse(reportId);

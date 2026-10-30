@@ -63,7 +63,7 @@ PiGateDecision SHALL 为严格对象，恰含 decision_id（DecisionId）、repo
 
 #### Scenario: wrong precondition rejected
 - **WHEN** 对 `status: draft` 的报告调用 `report_submit` 并获放行，或对 `status: reviewed` 的报告再次调用 `report_validate`
-- **THEN** 工具返回错误结果，`reports/<report_id>.json` 与 `.md` 的字节不变
+- **THEN** 工具返回错误结果，报告 `.json` 字节不变；已按「Report write order and repair」成功完成的入口修复保留，前置条件拒绝之后不再改写 `.md` 或卡片
 
 ### Requirement: Report workspace files
 EvidenceReport SHALL 持久化为会话 cwd 下的 `reports/<report_id>.json`（报告对象，含 `decision_history`）与 `reports/<report_id>.md`（确定性渲染的 Markdown），两者均以同目录临时文件加 rename 原子写入，SHALL NOT 经 `ctx.storage` 或 stateDir 索引；目录与文件的路径安全遵循 task-cards「TaskCard workspace file」的工作区文件安全规则。`.md` 的渲染输入 SHALL 恰为报告 `.json` 与其引用的 StackLock（`stacks/<stack_id>.json`）、DataProvenance（`provenance/<data_id>.json`）与 RunRecord 文件；每次渲染（含重渲染）SHALL 重新读取这些文件，任一引用文件缺失或未通过 schema 校验时渲染 SHALL 失败并返回指出该文件的错误，报告 `.json` SHALL 保持不变。每次状态变化（生成、validate 通过、accepted、rejected、revision_requested）SHALL 刷新 `updated_at` 并重新渲染 `.md`；相同的渲染输入 SHALL 渲染出相同的 `.md`。读取 SHALL 经 core schema 校验，损坏文件 SHALL 报错且 SHALL NOT 被改写。
@@ -85,7 +85,21 @@ EvidenceReport SHALL 持久化为会话 cwd 下的 `reports/<report_id>.json`（
 - **THEN** 工具返回错误结果，链接目标内不新增文件，TaskCard 不变
 
 ### Requirement: Report write order and repair
-`report_generate`、`report_validate`、`report_submit`、`report_decide` SHALL 共用同一写入顺序：(1) 原子写报告 `.json`——这是提交点，报告的 `status` 与 `decision_history` 以它为准；(2) TaskCard 转换（task-cards 状态机，读取—校验—转换—写入之间不 await 的同步边界；`report_validate` 不改 TaskCard，跳过此步）；(3) 渲染并原子写 `.md`。`report_generate` SHALL 只在 closure 谓词与引用存在性校验都通过之后执行第 (1) 步。第 (1) 步之前的失败 SHALL NOT 写任何文件；第 (1) 步之后任一步失败时，工具 SHALL 返回指出失败步骤（`task_card` 或 `render`）与 `report_id` 的工具错误，SHALL NOT 回滚已写的 `.json` 或卡片。报告工具 SHALL 恰有两种修复，且只在下一次以该 `report_id` 调用四个报告工具中任一个时、于该调用自身的前置条件检查之前执行：(a) 卡片尚未取得报告状态所蕴含的转换时补做该转换——`draft`/`reviewed` 蕴含 `reporting` 且 `linked_reports` 含该 `report_id`，`accepted` 蕴含 `done`，`revision_requested` 蕴含 `planned`，`rejected` 蕴含 `cancelled`；"尚未取得"指该 `report_id` 不在 `linked_reports` 中（补做为追加该 id 并转为 `reporting`），或它是 `linked_reports` 的最后一项而卡片 `status` 不等于蕴含状态；对 `linked_reports` 中较早的报告 SHALL NOT 改动卡片；(b) `.md` 缺失，或其标题下第一行与报告 `status` 应有的水印行不符时，重渲染 `.md`。除此之外报告工具 SHALL NOT 有其它对账行为；卡片与作业之间的对账只由 task-cards「TaskCard reconcile」承担。
+`report_generate`、`report_validate`、`report_submit`、`report_decide` SHALL 共用同一正常写入顺序：(1) 原子写报告 `.json`——这是报告状态提交点，`status` 与 `decision_history` 以它为准；(2) TaskCard 转换（task-cards 状态机，读取—校验—转换—写入之间不 await；`report_validate` 正常路径跳过此步）；(3) 渲染并原子写 `.md`。`report_generate` SHALL 只在 closure 与引用校验通过后执行第 (1) 步。除下述独立提交的初始 TaskCard reconcile/入口修复外，第 (1) 步之前的失败 SHALL NOT 写文件；第 (1) 步之后失败 SHALL 返回失败步骤（`task_card` 或 `render`）与 `report_id`，SHALL NOT 回滚已写内容或自动重试。
+
+报告工具 SHALL 恰有两种入口修复，只在下一次以同一 `report_id` 调用工具时、该调用自身的状态前置条件与 validator 之前执行；不接受 report_id 的 `report_generate` 不发现或修复旧报告。(a) 复用规范 repair predicate/mapping：报告未链接，或它是最后一项且卡片状态与报告映射状态不符时，补做链接与转换；已链接的较早报告 SHALL NOT 移动卡片。`draft`/`reviewed` 映射 `reporting`，`accepted` 映射 `done`，`revision_requested` 映射 `planned`，`rejected` 映射 `cancelled`。未链接报告先在内存中补做 reporting 转换，再按已持久化的报告状态补做后续合法转换，最后一次同步发布，SHALL NOT 写出中间态。
+
+修复 SHALL 只复用既有合法 TaskCard 转换；任一所需转换非法时 SHALL 返回 `task_card` 与 `report_id` 的受控错误，卡片字节不变且不继续 Markdown 修复。SHALL NOT 直接赋状态、增加绕过事件或重开 done/cancelled 卡片。`awaiting_pi`/`archived` 不支持工具侧状态投影，SHALL 在写入前拒绝。修复不产生新的 PiGateDecision 或覆盖报告 JSON。
+
+(b) `.md` 真正不存在，或标题下第一行与规范水印不符时，复用规范渲染器重新渲染并安全原子写入；仅 ENOENT 表示不存在，链接/特殊文件/不可读文件 SHALL fail closed。SHALL NOT 以正文差异新增修复规则。修复(a)先于(b)；任何修复失败 SHALL 返回其步骤与 report_id，保留先前成功提交。已成功的入口修复独立提交，后续前置条件或13项检查失败 SHALL NOT 撤销；本 spec 的失败“文件不变”以成功入口修复之后为基准，报告 JSON 在这些失败中始终不变。卡片与作业之间的对账仍只由「TaskCard reconcile」承担。以上顺序由 PI issuecomment6522484479 明确。
+
+#### Scenario: repair survives a rejected validation
+- **WHEN** reviewed 报告的 Markdown 缺失，引用齐全，对它调用 report_validate
+- **THEN** 入口补写规范 Markdown，随后因非 draft 拒绝；报告 JSON 字节不变，已补写 Markdown 保留
+
+#### Scenario: old unlinked draft cannot reopen a terminal task
+- **WHEN** draft 报告尚未链接，而其任务已 done 或 cancelled，对它调用 report_validate
+- **THEN** 返回含 task_card 与 report_id 的错误，卡片与报告文件字节不变，不追加链接、不重新打开任务、不继续 Markdown 修复
 
 #### Scenario: card write failure after the commit point
 - **WHEN** `report_submit` 获放行执行，`.json` 已写为 `accepted`，而 TaskCard 写入失败
@@ -115,7 +129,19 @@ EvidenceReport SHALL 持久化为会话 cwd 下的 `reports/<report_id>.json`（
 - **THEN** 新报告以 `draft` 生成，卡片由 `planned` 变为 `reporting`，先前报告文件不变
 
 ### Requirement: report_generate
-`report_generate` SHALL 接受参数：`task_id`、`summary`（非空字符串）、`observations`、`limitations`、`pi_questions`（字符串数组）；未知参数 SHALL 使调用失败。调用 SHALL 读取 TaskCard，先执行 task-cards「TaskCard reconcile」，再求 task-cards 的 closure 谓词，并经与 `shud_collect` 相同的后端收集接口读取每个关联作业的 RunRecord。卡片前态 SHALL 为 `running`、`planned` 或 `reporting`。成功时 SHALL 按「Report write order and repair」的顺序写入 `status: draft` 的新报告：`reports/<report_id>.json`，随后 TaskCard 变为 `reporting` 且 `linked_reports` 追加该 `report_id`，最后渲染 `.md`；`linked_runs` 为关联 RunRecord 的 `run_id`，`stack_ids`、`data_ids`、`llm_response_models` 为从这些 RunRecord 去重解析的值，`limitations` 在参数之后追加含"无指标 artifact"的说明，工具结果返回 `report_id` 与 `status: draft`。closure 谓词不成立、TaskCard 不存在或不可读、或卡片处于上述三态之外时 SHALL 返回工具错误，SHALL NOT 写报告文件，SHALL NOT 改变 TaskCard（reconcile 的回写除外，见 task-cards）。
+`report_generate` SHALL 接受 `task_id`、非空 `summary`、`observations`、`limitations`、`pi_questions` 字符串数组，未知参数使调用失败。首先 SHALL 无副作用读取并校验 TaskCard 身份及 `running|planned|reporting` 状态，再完成所有 authored 字段的品牌引用存在性校验；这些拒绝 SHALL NOT 创建目录、修改卡片或发起收集。随后取得 listRunJobsByTask，并在新鲜同步卡片读取/身份/状态校验边界内执行唯一 reconcile，仅有变化时发布；成功对账独立提交，后续失败 SHALL NOT 撤销。
+
+closure SHALL 在 reconcile 后求值。仅已 collected 的关联作业经 collectShud(id, {readonly:true}) 显式只读模式取得已有 RunRecord；其它状态直接作为未收集失败，SHALL NOT 隐式发起收集。只读模式复用规范索引、身份与记录校验，缺失/损坏/不安全/身份不符时拒绝，SHALL NOT 生成记录、失败记账、投影状态、完成回执或通知；原 collectShud 默认行为不变（PI issuecomment6523542892）。收集失败次数 SHALL 另经 jobs 拥有的只读入口复用规范 collect-error.json 解析，即使存在有效成功 RunRecord 仍读取保留的 ledger；真正缺失为0，损坏/不安全/不可读记录明确失败，耗尽次数仍阻断 closure，不重置或绕过。异步证据取得后 SHALL 重读卡片并据其新鲜 linked_jobs 求 closure，缺乏新链接证据时拒绝而非丢弃链接、自动重试或使用旧卡片。
+
+成功时 SHALL 写新 draft JSON，随后同步重读/校验/转换 TaskCard 为 reporting 并追加 report_id，最后安全渲染发布 Markdown。linked_runs 按卡片 linked_jobs 顺序来自规范 RunRecord；stack_ids、data_ids、llm_response_models 按首次出现去重；模型文本保持原样，limitations 末尾追加规范“无指标 artifact”说明。结果返回 report_id 与 status draft。closure 或后续生成失败不写新报告链接，不回滚已提交的初始对账；已有报告 JSON/Markdown（包括只有 Markdown 的 id 碰撞）SHALL NOT 被新分配覆盖。
+
+#### Scenario: rejected citation precedes stale-card reconciliation
+- **WHEN** 卡片缺少已索引作业链接，而 summary 含无法解析的品牌引用
+- **THEN** 返回该引用错误，卡片字节/mtime 与目录清单不变，不先修复旧作业链接
+
+#### Scenario: later closure failure retains reconciliation
+- **WHEN** 初始对账恢复旧作业链接成功，但该作业尚未 collected 或已耗尽收集
+- **THEN** 不生成报告，保留已提交的对账，不自动 collect 未收集作业、不撤销链接
 
 #### Scenario: draft generated
 - **WHEN** 对 `running`、唯一关联作业已 `collected` 的 TaskCard 调用 `report_generate`，提供 summary 及 observations、limitations、pi_questions 各一条
@@ -130,7 +156,7 @@ EvidenceReport SHALL 持久化为会话 cwd 下的 `reports/<report_id>.json`（
 - **THEN** 工具返回指出卡片当前状态的错误，`reports/` 下不新增文件，`task.json` 字节不变
 
 ### Requirement: Citation existence check
-`report_generate` SHALL 在写任何文件之前，扫描 `summary`、`observations`、`limitations`、`pi_questions` 中每个形如 `TASK-`、`STACK-`、`DATA-`、`RUN-`、`JOB-`、`REPORT-` 前缀加 `YYYYMMDDTHHMMSS-xxxx` 的品牌 id 令牌，并要求其解析到会话 cwd 下已有的对象文件（`tasks/<id>/task.json`、`stacks/<id>.json`、`provenance/<id>.json`、`reports/<id>.json`）或 shud-jobs 活动/完成索引中的条目（`RUN-`/`JOB-`）。任一令牌无法解析时 SHALL 返回指出该令牌的工具错误，SHALL NOT 写 draft，SHALL NOT 改变 TaskCard，SHALL NOT 自动重试。
+`report_generate` SHALL 在任何文件或目录写入及 TaskCard reconcile 之前，扫描 summary、observations、limitations、pi_questions 中独立的 TASK-/STACK-/DATA-/RUN-/JOB-/REPORT- 加 YYYYMMDDTHHMMSS-xxxx 品牌令牌，并经 core schema 验证捕获的 id。TASK/STACK/DATA/REPORT SHALL 解析到会话 cwd 下已有、安全、schema 合法且文件内 id 匹配的对应对象；RUN/JOB SHALL 解析到 shud-jobs 活动/完成索引条目。重复令牌可复用本次读取，不解析 DEC 或嵌在更长标识符中的子串。读取 SHALL NOT 创建缺失目录；任一令牌无法解析则返回指出该令牌的工具错误，不写 draft、不改卡片、不自动重试。
 
 #### Scenario: resolvable citations accepted
 - **WHEN** `observations` 引用本任务已 collect 的 `run_id` 与已有的 `stack_id`
@@ -223,7 +249,7 @@ EvidenceReport SHALL 持久化为会话 cwd 下的 `reports/<report_id>.json`（
 
 #### Scenario: forbidden phrase keeps draft
 - **WHEN** 报告 `limitations` 含"校准证明结构正确"时调用 `report_validate`
-- **THEN** 工具结果中第 (7) 项失败并列出 `校准证明结构正确` 与 `limitations`，报告保持 `draft`，`.json` 与 `.md` 字节不变
+- **THEN** 工具结果中第 (7) 项失败并列出 `校准证明结构正确` 与 `limitations`，报告保持 draft 且 JSON 字节不变；相对于成功入口修复后的基准不再写 Markdown 或卡片
 
 #### Scenario: missing provenance keeps draft
 - **WHEN** 报告 `data_ids` 中某个 id 的 `provenance/<data_id>.json` 已不存在时调用 `report_validate`
