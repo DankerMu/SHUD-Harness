@@ -120,3 +120,66 @@ test("actual runtime never dispatches a report tool after evaluator failure", as
     await h.dispose();
   }
 });
+
+const auditSeparators = [
+  { label: "LF", value: "\n" },
+  { label: "CR", value: "\r" },
+  { label: "CRLF", value: "\r\n" },
+  { label: "VT", value: "\v" },
+  { label: "FF", value: "\f" },
+  { label: "FS", value: "\u001c" },
+  { label: "GS", value: "\u001d" },
+  { label: "RS", value: "\u001e" },
+  { label: "NEL", value: "\u0085" },
+  { label: "LS", value: "\u2028" },
+  { label: "PS", value: "\u2029" },
+];
+
+test.each(auditSeparators)(
+  "runtime evaluator failure for a name containing $label emits one logical audit line",
+  async ({ value }) => {
+    const h = await createPolicyHarness({ preset: "worker" });
+    try {
+      const name = `bad${value}AUDIT_SPLIT`;
+      const observedNames: string[] = [];
+      h.ctx.on("tools/result", (execution) => {
+        observedNames.push(execution.name);
+      });
+      expect(h.tools.schemas(h.agent).map((schema) => schema.name)).not.toContain(name);
+      vi.mocked(evaluatePolicyGate).mockImplementationOnce(() => {
+        throw new Error("secret-detail-audit-evaluator");
+      });
+      const result = await h.call(name, { private: "private-audit-argument" });
+      expect(result.isError).toBe(true);
+      if (!result.isError) throw new Error("Tool executed after evaluator failure");
+      expect(result.error.message).toBe(POLICY_EVALUATION_FAILURE_REASON);
+      expect(observedNames).toEqual([name]);
+      expect(evaluatePolicyGate).toHaveBeenCalledTimes(1);
+      const [call, context] = vi.mocked(evaluatePolicyGate).mock.calls[0];
+      expect(call.toolId).toBe(name);
+      expect(call.role).toBe("worker");
+      expect(call.input).toEqual({ private: "private-audit-argument" });
+      expect(context).toBe(DEFAULT_SHUD_POLICY_GATE_CONTEXT);
+      expect(h.request).not.toHaveBeenCalled();
+      expect(h.executions).toEqual([]);
+
+      const records = h.policyLogs();
+      expect(records).toHaveLength(1);
+      expect(records[0]).toHaveLength(1);
+      const line = records[0][0];
+      expect(typeof line).toBe("string");
+      if (typeof line !== "string") throw new Error("Policy audit must be a string");
+      expect(line.startsWith("deny bad")).toBe(true);
+      expect(line.endsWith("AUDIT_SPLIT policy-evaluation-failed")).toBe(true);
+      expect(line).not.toContain("secret-detail-audit-evaluator");
+      expect(line).not.toContain("private-audit-argument");
+      for (const separator of auditSeparators) expect(line).not.toContain(separator.value);
+
+      await h.policyFiber.dispose();
+      await h.policyFiber.dispose();
+      expect(h.policyLogs()).toEqual([[line], ["deny=1 ask=0"]]);
+    } finally {
+      await h.dispose();
+    }
+  },
+);
