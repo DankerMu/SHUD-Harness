@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { createToolHarness } from "./test-harness.ts";
 
-test("shud_run advertises a closed four-parameter model contract", async () => {
+test("shud_run advertises a closed model contract with optional task identity", async () => {
   const h = await createToolHarness();
   try {
     const schema = h.runtime.schemas(h.agent).find((tool) => tool.name === "shud_run");
@@ -17,7 +17,9 @@ test("shud_run advertises a closed four-parameter model contract", async () => {
       "input_dir",
       "label",
       "project",
+      "task_id",
     ]);
+    expect(schema?.parameters?.properties?.task_id).toMatchObject({ type: "string" });
   } finally {
     await h.dispose();
   }

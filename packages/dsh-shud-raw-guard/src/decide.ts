@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { containsPath } from "@shud-harness/dsh-shud-core";
+import { containsPath, TaskIdSchema } from "@shud-harness/dsh-shud-core";
 
 type RawGuardCall = { name: string; arguments: unknown; cwd?: string };
 type RawGuardDecision = {
@@ -245,7 +245,15 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
     }
     const args = call.arguments;
     if (!args || typeof args !== "object" || Array.isArray(args)) return NEXT;
-    const inputDir = (args as Record<string, unknown>).input_dir;
+    const fields = args as Record<string, unknown>;
+    if (fields.task_id !== undefined) {
+      const taskId = TaskIdSchema.safeParse(fields.task_id);
+      if (taskId.success) {
+        const target = canonical(`tasks/${taskId.data}/task.json`, cwd);
+        if (rawRoots.some((raw) => containsPath(raw, target))) return DENY;
+      }
+    }
+    const inputDir = fields.input_dir;
     if (typeof inputDir !== "string") return NEXT;
     const input = canonical(inputDir, cwd);
     return rawRoots.some((raw) => containsPath(raw, input)) ? ASK : NEXT;
