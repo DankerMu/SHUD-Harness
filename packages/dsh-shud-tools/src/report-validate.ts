@@ -10,6 +10,7 @@ import {
   readReport,
   repairReportEntry,
   reportCwd,
+  withReportOperation,
 } from "./report-workflow.ts";
 import { strictTool } from "./strict-tool.ts";
 
@@ -34,30 +35,32 @@ export function createReportValidateTool(): ToolDefinition {
         return [{ type: "text", text: JSON.stringify(value) }];
       },
     },
-    async execute(args, exec) {
+    execute(args, exec) {
       const id = ReportIdSchema.safeParse(args.report_id);
       if (!id.success) throw new ToolArgsError(["Invalid report_id"]);
       const cwd = reportCwd(exec.agent?.session?.header?.cwd);
-      await repairReportEntry(cwd, readReport(cwd, id.data));
-      // Repairs are independent commits. After their awaits, the authoritative report is fresh.
-      const report = readReport(cwd, id.data);
-      if (report.status !== "draft") {
-        throw new Error(`report_validate ${id.data}: requires draft, found ${report.status}`);
-      }
-      const result = validateReport(cwd, id.data);
-      // The host's JsonValue contract is mutable; preserve every canonical check/detail
-      // while adapting the validator's readonly containers at this output boundary.
-      const checks = result.checks.map((check) => ({
-        ...check,
-        details: check.details.map((detail) => ({ ...detail })),
-      }));
-      if (!result.ok) {
-        return { report_id: id.data, status: "draft" as const, ok: false, checks };
-      }
-      const reviewed = markReportReviewed(report);
-      writeWorkspaceRecord(cwd, "report", reviewed);
-      await publishReportMarkdown(cwd, id.data);
-      return { report_id: id.data, status: "reviewed" as const, ok: true, checks };
+      return withReportOperation(cwd, id.data, async () => {
+        await repairReportEntry(cwd, readReport(cwd, id.data));
+        // Repairs are independent commits. After their awaits, the authoritative report is fresh.
+        const report = readReport(cwd, id.data);
+        if (report.status !== "draft") {
+          throw new Error(`report_validate ${id.data}: requires draft, found ${report.status}`);
+        }
+        const result = validateReport(cwd, id.data);
+        // The host's JsonValue contract is mutable; preserve every canonical check/detail
+        // while adapting the validator's readonly containers at this output boundary.
+        const checks = result.checks.map((check) => ({
+          ...check,
+          details: check.details.map((detail) => ({ ...detail })),
+        }));
+        if (!result.ok) {
+          return { report_id: id.data, status: "draft" as const, ok: false, checks };
+        }
+        const reviewed = markReportReviewed(report);
+        writeWorkspaceRecord(cwd, "report", reviewed);
+        await publishReportMarkdown(cwd, id.data);
+        return { report_id: id.data, status: "reviewed" as const, ok: true, checks };
+      });
     },
   });
   return strictTool(tool, parameters);

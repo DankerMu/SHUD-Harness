@@ -53,6 +53,8 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 
 14. **科学措辞枚举护栏**：core 导出的十条 `FORBIDDEN_REPORT_PHRASES`、四句 `GOVERNANCE_INVARIANTS` 与无状态 `REPORT_SECRET_PATTERN` 由 `packages/dsh-shud-core/src/governance/wording.test.ts` 钉住，无 profile 覆写，纳入默认测试闸。`scanForbiddenPhrases` 只扫描模型撰写的 `summary/observations/limitations/pi_questions`，按字段和清单顺序返回命中短语，不拼接数组条目、不回显原文；模板拥有的四句不变式不作为扫描输入，也不构成模型文本白名单。完整报告校验器另行交付；枚举 lint 通过 ≠ 语义合规，PI 审阅仍是最终防线。
 
+15. **报告终态只在审批卡 `allowed-once` 分支写入**：已安装的 raw→policy→host 链先保护确切报告/TaskCard 目标、判定当前角色，再由宿主审批准入；`report_submit`/`report_decide` 不自行审批。拒绝、取消、不可用、缺服务/Agent 均不得执行终态写入；`approval_ref` 精确取本次 `exec.callId`，被拒 submit 卡不产生领域决定。报告 JSON 是权威提交点，卡片/Markdown 后续失败保留已提交决定，下一次调用修复但不重复决定；四个报告工具共用物理 cwd/report_id 的单进程发布顺序，不能让迟到 DRAFT 覆盖终态水印。伴生断言：`packages/dsh-shud-tools/src/report-decisions.test.ts`（真实 ToolRuntime + policy + approval 边界 double）、`report-decision-contract.test.ts`、`report-decision-publication.test.ts`、`report-decision-ordering.test.ts`、`report-decision-raw.test.ts`；对话转述与二次确认选择见 [ADR-0011（proposed）](docs/adr/proposed/0011-pi-comment-conversation-carrier.md)。这些工程测试不等于真实 Web/session-log 持久化证据或 PI 功能验收。
+
 ## Forbidden Logic
 
 - Agent 陈述科学结论；"单流域指标提升 = 模型改进"；"校准结果 = 结构验证"；"模型机制已验证"；"普遍改进"。

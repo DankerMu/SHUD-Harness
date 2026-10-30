@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import type { EvidenceReport, ReportId, TaskCard, TaskId } from "@shud-harness/dsh-shud-core";
 import {
   isReportMarkdownStale,
@@ -17,6 +18,37 @@ export function reportCwd(cwd: unknown): string {
     throw new Error("Report tools require the calling session's cwd");
   }
   return cwd;
+}
+
+const reportOperations = new Map<string, Promise<void>>();
+
+/**
+ * One single-process publication lane for a physical workspace/report pair.
+ * Register synchronously (including immediately after generation's JSON commit);
+ * approval is already resolved by the host before any caller reaches this boundary.
+ */
+export function withReportOperation<T>(
+  cwd: string,
+  reportId: ReportId,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let physicalCwd: string;
+  try {
+    physicalCwd = realpathSync.native(cwd);
+  } catch {
+    throw new Error(`Report ${reportId}: workspace cwd cannot be resolved`);
+  }
+  const key = `${physicalCwd}\0${reportId}`;
+  const result = (reportOperations.get(key) ?? Promise.resolve()).then(operation);
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  reportOperations.set(key, tail);
+  void tail.then(() => {
+    if (reportOperations.get(key) === tail) reportOperations.delete(key);
+  });
+  return result;
 }
 
 function readReportTask(cwd: string, taskId: TaskId): TaskCard {
@@ -74,6 +106,26 @@ function repairReportTask(cwd: string, report: EvidenceReport): void {
         ? [...repaired.linked_reports, report.report_id]
         : repaired.linked_reports,
     });
+  } catch {
+    throw reportStepError("task_card", report.report_id);
+  }
+}
+
+/** Normal approved projection is explicit, even for a linked older report. */
+export function publishReportDecisionTask(
+  cwd: string,
+  report: EvidenceReport,
+  outcome: "accepted" | "rejected" | "revision_requested",
+): void {
+  try {
+    const card = readReportTask(cwd, report.task_id);
+    const transitioned = transitionTask(
+      card,
+      outcome === "accepted"
+        ? { type: "report_submit" }
+        : { type: "report_decide", disposition: outcome },
+    );
+    writeWorkspaceRecord(cwd, "task", transitioned);
   } catch {
     throw reportStepError("task_card", report.report_id);
   }

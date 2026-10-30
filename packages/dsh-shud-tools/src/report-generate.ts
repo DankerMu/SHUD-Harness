@@ -21,6 +21,7 @@ import {
   readGeneratableTask,
   reportCwd,
   reportStepError,
+  withReportOperation,
 } from "./report-workflow.ts";
 import { strictTool } from "./strict-tool.ts";
 
@@ -97,17 +98,20 @@ async function generateReport(
     created_at: now,
     updated_at: now,
   });
-  try {
-    const current = readGeneratableTask(cwd, taskId);
-    writeWorkspaceRecord(cwd, "task", {
-      ...transitionTask(current, { type: "report_generate" }),
-      linked_reports: [...current.linked_reports, report.report_id],
-    });
-  } catch {
-    throw reportStepError("task_card", report.report_id);
-  }
-  await publishReportMarkdown(cwd, report.report_id);
-  return { report_id: report.report_id, status: "draft" as const };
+  // Register the new id's publication before yielding; all report tools share this lane.
+  return withReportOperation(cwd, report.report_id, async () => {
+    try {
+      const current = readGeneratableTask(cwd, taskId);
+      writeWorkspaceRecord(cwd, "task", {
+        ...transitionTask(current, { type: "report_generate" }),
+        linked_reports: [...current.linked_reports, report.report_id],
+      });
+    } catch {
+      throw reportStepError("task_card", report.report_id);
+    }
+    await publishReportMarkdown(cwd, report.report_id);
+    return { report_id: report.report_id, status: "draft" as const };
+  });
 }
 
 export function createReportGenerateTool(jobs: ShudJobRegistry): ToolDefinition {

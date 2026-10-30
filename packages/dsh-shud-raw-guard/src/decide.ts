@@ -275,7 +275,12 @@ export function caseInsensitiveRoot(root: string): boolean {
 }
 
 export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
-  if (call.name === "report_generate" || call.name === "report_validate") {
+  if (
+    call.name === "report_generate" ||
+    call.name === "report_validate" ||
+    call.name === "report_submit" ||
+    call.name === "report_decide"
+  ) {
     return decideReportAccess(call, options);
   }
   if (call.name === "shud_run") {
