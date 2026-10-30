@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #453 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Path #4.
+Blast radius: readonly indexed RunJob query, full-record validation and registry admission/drain lifetime.
+Selected risk packs: Public API; File IO/path safety; Schema/identity; Concurrency/shared state/ordering; Error handling/controlled disclosure; Legacy compatibility; Documentation.
+Evidence floor: real registry API test-first RED/GREEN, both-index filtering/sorting, invalid-id no-read, unrelated corrupt-entry fail-closed, duplicate migration window, startup/closing/accepted-read lifetime controls, immutable file snapshots, built public query and compiler consumers, check/strict/instructions/profile smoke.
+Only task 5.2 is selected. Jobs source/tests and shared Runtime Lifecycle/generated instructions; no tools/records/core/installer/profile/raw-guard/dependency changes or new model tool.
+
 ## Issue #443 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #2/#4 after the PI-approved review amendment.
