@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # Renders the generated root instruction files from instructions/agents/ sources:
 #   AGENTS.md = header + shared.md + codex.md     CLAUDE.md = header + shared.md + claude.md
-# `--check` verifies the committed files equal the render (CI doc gate). Never hand-edit AGENTS.md/CLAUDE.md.
+# `--check` verifies both projections and the configured AGENTS.md budget (CI doc gate).
+# Never hand-edit AGENTS.md/CLAUDE.md.
 # Usage: render.sh [--check] [--root <dir>]
 set -eu
 MODE=render
@@ -40,4 +41,8 @@ for pair in "codex.md:AGENTS.md" "claude.md:CLAUDE.md"; do
     fi
   fi
 done
+if [ "$MODE" = check ]; then
+  SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  python3 "$SCRIPT_DIR/check-line-budget.py" --root "$ROOT" || status=1
+fi
 exit $status
