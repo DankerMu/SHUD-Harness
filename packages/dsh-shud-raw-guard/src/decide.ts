@@ -1,5 +1,5 @@
-import { realpathSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { lstatSync, opendirSync, realpathSync, type BigIntStats, type Dir } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { containsPath, ReportIdSchema, TaskIdSchema } from "@shud-harness/dsh-shud-core";
 import { readWorkspaceRecord } from "@shud-harness/dsh-shud-records";
 
@@ -169,13 +169,21 @@ export function normalizeRawDirs(config: unknown = {}): RawGuardOptions {
   };
 }
 
-function canonical(target: string, cwd: string): string {
+type RawPath = { text: string; anchor: string; foldedParents: boolean };
+class PathUnavailable extends Error {}
+
+function canonical(target: string, cwd: string): RawPath {
   let candidate = isAbsolute(target) ? target : `${cwd}/${target}`;
   const missing: string[] = [];
   for (;;) {
     try {
       // Native realpath preserves physical symlink/.. traversal, like the host.
-      return resolve(realpathSync.native(candidate), ...missing.reverse());
+      const anchor = realpathSync.native(candidate);
+      return {
+        text: resolve(anchor, ...missing.reverse()),
+        anchor,
+        foldedParents: missing.includes(".."),
+      };
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
       const split = candidate.lastIndexOf("/");
@@ -184,6 +192,135 @@ function canonical(target: string, cwd: string): string {
       candidate = candidate.slice(0, split) || "/";
     }
   }
+}
+
+function asciiFold(text: string): string {
+  return text.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
+function unchanged(before: BigIntStats, after: BigIntStats): boolean {
+  return (
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.mode === after.mode &&
+    before.nlink === after.nlink &&
+    before.mtimeNs === after.mtimeNs &&
+    before.ctimeNs === after.ctimeNs
+  );
+}
+
+// Evidence concerns entries INSIDE this namespace, not its name in its parent:
+// a sensitive mount can itself have a case-insensitive mountpoint spelling.
+// Bound metadata work and never create probes or retain evidence between calls.
+function namespaceCase(anchor: string): "sensitive" | "insensitive" | "unknown" {
+  let directory: Dir | undefined;
+  let result: "sensitive" | "insensitive" | "unknown" = "unknown";
+  try {
+    const before = lstatSync(anchor, { bigint: true });
+    if (!before.isDirectory()) return "unknown";
+    directory = opendirSync(anchor);
+    for (let count = 0; count < 64; count++) {
+      const entry = directory.readSync();
+      if (!entry) break;
+      const upper = entry.name.replace(/[a-z]/g, (letter) => letter.toUpperCase());
+      const alternate = upper !== entry.name ? upper : asciiFold(entry.name);
+      if (alternate === entry.name) continue;
+      const originalPath = join(anchor, entry.name);
+      const alternatePath = join(anchor, alternate);
+      const original = lstatSync(originalPath, { bigint: true });
+      if (
+        (!original.isFile() && !original.isDirectory()) ||
+        (original.isFile() && original.nlink !== 1n)
+      )
+        continue;
+      const other = lstatSync(alternatePath, { bigint: true, throwIfNoEntry: false });
+      if (!other) {
+        result = "sensitive";
+      } else if (
+        !other.isSymbolicLink() &&
+        (other.isFile() || other.isDirectory()) &&
+        !(other.isFile() && other.nlink !== 1n)
+      ) {
+        if (original.dev !== other.dev || original.ino !== other.ino) {
+          result = "sensitive";
+        } else if (
+          realpathSync.native(originalPath) === originalPath &&
+          realpathSync.native(alternatePath) === originalPath
+        ) {
+          // Inode equality alone also describes separate hardlinks. Native
+          // spelling must prove the alias; retained-case realpath is unknown.
+          result = "insensitive";
+        }
+      }
+      const current = lstatSync(originalPath, { bigint: true });
+      const currentOther = lstatSync(alternatePath, { bigint: true, throwIfNoEntry: false });
+      if (
+        !unchanged(original, current) ||
+        (other ? !currentOther || !unchanged(other, currentOther) : currentOther !== undefined)
+      )
+        result = "unknown";
+      break;
+    }
+    if (!unchanged(before, lstatSync(anchor, { bigint: true }))) result = "unknown";
+  } catch {
+    result = "unknown";
+  } finally {
+    if (directory) {
+      try {
+        directory.closeSync();
+      } catch {
+        result = "unknown";
+      }
+    }
+  }
+  return result;
+}
+
+function containsRawPath(root: RawPath, target: RawPath): boolean {
+  if (containsPath(root.text, target.text)) return true;
+  if (!containsPath(asciiFold(root.text), asciiFold(target.text))) return false;
+  // Folding a missing x/.. can expose an existing child namespace (including
+  // a mount). Reuse native canonical resolution for identity, not shell text.
+  if (root.foldedParents || target.foldedParents) {
+    return containsRawPath(
+      root.foldedParents ? canonical(root.text, "/") : root,
+      target.foldedParents ? canonical(target.text, "/") : target,
+    );
+  }
+  // Existing native paths keep their established identity. Only a missing
+  // suffix can require additional evidence, under a shared physical anchor.
+  if (root.text === root.anchor && target.text === target.anchor) return false;
+  let anchor = containsPath(root.anchor, target.anchor)
+    ? root.anchor
+    : containsPath(target.anchor, root.anchor)
+      ? target.anchor
+      : undefined;
+  if (anchor === undefined) {
+    const shorter = root.anchor.length <= target.anchor.length ? root.anchor : target.anchor;
+    const longer = shorter === root.anchor ? target.anchor : root.anchor;
+    if (!containsPath(asciiFold(shorter), asciiFold(longer))) return false;
+    // Some native realpath implementations retain case for existing aliases.
+    // Directory identity can establish the common anchor, never its case policy.
+    try {
+      const left = lstatSync(shorter, { bigint: true });
+      const right = lstatSync(longer.slice(0, shorter.length), { bigint: true });
+      if (!left.isDirectory() || !right.isDirectory()) throw new PathUnavailable();
+      if (left.dev !== right.dev || left.ino !== right.ino) return false;
+    } catch {
+      throw new PathUnavailable();
+    }
+    if (
+      containsPath(
+        `${shorter}${root.text.slice(shorter.length)}`,
+        `${shorter}${target.text.slice(shorter.length)}`,
+      )
+    )
+      return true;
+    anchor = shorter;
+  }
+  const sensitivity = namespaceCase(anchor);
+  if (sensitivity === "unknown") throw new PathUnavailable();
+  return sensitivity === "insensitive";
 }
 
 /** Report generation has an unallocated namespace; validation has an exact repair target set. */
@@ -198,24 +335,25 @@ function decideReportAccess(call: RawGuardCall, options: RawGuardOptions): RawGu
         : {};
     if (call.name === "report_generate") {
       const reports = canonical("reports", cwd);
-      if (rawRoots.some((raw) => containsPath(raw, reports) || containsPath(reports, raw))) {
+      if (rawRoots.some((raw) => containsRawPath(raw, reports) || containsRawPath(reports, raw))) {
         return DENY;
       }
       const taskId = TaskIdSchema.safeParse(fields.task_id);
       if (!taskId.success) return NEXT;
       const target = canonical(`tasks/${taskId.data}/task.json`, cwd);
-      return rawRoots.some((raw) => containsPath(raw, target)) ? DENY : NEXT;
+      return rawRoots.some((raw) => containsRawPath(raw, target)) ? DENY : NEXT;
     }
     const reportId = ReportIdSchema.safeParse(fields.report_id);
     if (!reportId.success) return NEXT;
     for (const extension of ["json", "md"]) {
       const target = canonical(`reports/${reportId.data}.${extension}`, cwd);
-      if (rawRoots.some((raw) => containsPath(raw, target))) return DENY;
+      if (rawRoots.some((raw) => containsRawPath(raw, target))) return DENY;
     }
     const report = readWorkspaceRecord(cwd, "report", reportId.data, { readonly: true });
     const target = canonical(`tasks/${report.task_id}/task.json`, cwd);
-    return rawRoots.some((raw) => containsPath(raw, target)) ? DENY : NEXT;
-  } catch {
+    return rawRoots.some((raw) => containsRawPath(raw, target)) ? DENY : NEXT;
+  } catch (error) {
+    if (error instanceof PathUnavailable) throw error;
     return {
       kind: "deny",
       code: "raw-target-unavailable",
@@ -275,10 +413,23 @@ export function caseInsensitiveRoot(root: string): boolean {
 }
 
 export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
+  try {
+    return decideKnownRawAccess(call, options);
+  } catch (error) {
+    if (!(error instanceof PathUnavailable)) throw error;
+    return {
+      kind: "deny",
+      code: "raw-path-unavailable",
+      reason: "Raw path identity is unavailable; execution denied.",
+    };
+  }
+}
+
+function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
   if (call.name === "task_create") {
     const cwd = call.cwd ?? process.cwd();
     const tasks = canonical("tasks", cwd);
-    return options.rawDirs.some((raw) => containsPath(canonical(raw, cwd), tasks)) ? DENY : NEXT;
+    return options.rawDirs.some((raw) => containsRawPath(canonical(raw, cwd), tasks)) ? DENY : NEXT;
   }
   if (
     call.name === "report_generate" ||
@@ -293,7 +444,7 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
     const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
     for (const name of ["runs", "stacks", "provenance"]) {
       const output = canonical(name, cwd);
-      if (rawRoots.some((raw) => containsPath(raw, output))) return DENY;
+      if (rawRoots.some((raw) => containsRawPath(raw, output))) return DENY;
     }
     const args = call.arguments;
     if (!args || typeof args !== "object" || Array.isArray(args)) return NEXT;
@@ -302,13 +453,13 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
       const taskId = TaskIdSchema.safeParse(fields.task_id);
       if (taskId.success) {
         const target = canonical(`tasks/${taskId.data}/task.json`, cwd);
-        if (rawRoots.some((raw) => containsPath(raw, target))) return DENY;
+        if (rawRoots.some((raw) => containsRawPath(raw, target))) return DENY;
       }
     }
     const inputDir = fields.input_dir;
     if (typeof inputDir !== "string") return NEXT;
     const input = canonical(inputDir, cwd);
-    return rawRoots.some((raw) => containsPath(raw, input)) ? ASK : NEXT;
+    return rawRoots.some((raw) => containsRawPath(raw, input)) ? ASK : NEXT;
   }
   const args = call.arguments;
   if (!args || typeof args !== "object" || Array.isArray(args)) return NEXT;
@@ -322,7 +473,7 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         : undefined;
   if (
     typeof target === "string" &&
-    options.rawDirs.some((raw) => containsPath(canonical(raw, cwd), canonical(target, cwd)))
+    options.rawDirs.some((raw) => containsRawPath(canonical(raw, cwd), canonical(target, cwd)))
   )
     return DENY;
   if ((call.name === "bash" || call.name === "pwsh") && typeof fields.command === "string") {
@@ -339,7 +490,8 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         return [text, normalized, foldParentSegments(normalized)];
       });
     for (const raw of options.rawDirs) {
-      const root = canonical(raw, cwd);
+      const rawPath = canonical(raw, cwd);
+      const root = rawPath.text;
       const flags = caseInsensitiveRoot(root) ? "i" : "";
       const mentioned = [raw, normalizeCommandPaths(raw), root].some((text) => {
         const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -347,7 +499,7 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
         const pattern = new RegExp(`${escaped}(?![A-Za-z0-9._-])`, flags);
         return texts.some((candidate) => pattern.test(candidate));
       });
-      if (!mentioned && !containsPath(root, workdir)) continue;
+      if (!mentioned && !containsRawPath(rawPath, workdir)) continue;
       const writes = [command, unquote(command)].some((text) => {
         const checked = text.replace(DISCARD_REDIRECT, " ");
         return WRITE_VERBS.test(checked) || tarExtracts(checked);
@@ -355,8 +507,8 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
       const archives = new Set([command, unquote(command)].flatMap(tarArchives));
       const roots = archives.size > 0 ? options.rawDirs.map((dir) => canonical(dir, cwd)) : [];
       const writesArchive = [...archives].some((archive) => {
-        const target = canonical(archive, workdir);
-        return roots.some((other) => containsPath(other, target));
+        const target = canonical(archive, workdir.text);
+        return roots.some((other) => containsRawPath(other, target));
       });
       return writes || writesArchive || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
     }
@@ -369,7 +521,7 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
     ) {
       const unchdired = texts.map((text) => text.replace(CHDIR_OPERAND, "$1"));
       for (const raw of options.rawDirs) {
-        const root = canonical(raw, cwd);
+        const root = canonical(raw, cwd).text;
         const flags = caseInsensitiveRoot(root) ? "i" : "";
         const spelled = normalizeCommandPaths(raw);
         const ancestors = new Set([
