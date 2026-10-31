@@ -10,7 +10,7 @@ import {
   type StackId,
   type StackLock,
 } from "@shud-harness/dsh-shud-core";
-import manifest from "../../../package.json" with { type: "json" };
+import manifest from "../lib/harness-version.json" with { type: "json" };
 import { ensureDirectory, regularTarget } from "./workspace-paths.ts";
 import { readWorkspaceRecord } from "./workspace-records.ts";
 
