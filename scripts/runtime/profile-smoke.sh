@@ -956,14 +956,19 @@ try {
     check(`${label}: actual presets disabled`, presetIds.every((id) => actual.filter((row) => row.id === id).length === 1 && actual.find((row) => row.id === id).disabled === true));
   }
   const validTargets = `- ${JSON.stringify({ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) })}\n- {id: preset-coordinator, disabled: false}\n`;
-  for (const [kind, invalid] of [
+  for (const [kind, invalid, prefix = validTargets, targetDiagnostic] of [
     ["duplicate worker", "- {id: preset-worker}\n- {id: preset-worker}\n"],
     ["shared worker anchor", "- &worker {id: preset-worker, disabled: false}\n- {id: other, config: *worker}\n"],
     ["aliased worker target", "- id: other\n  config: &worker {id: preset-worker, disabled: false}\n- *worker\n"],
     ["invalid worker YAML", "- id: preset-worker\n  config: [DO_NOT_ECHO_USER_PATCH\n"],
     ["invalid UTF-8", Buffer.from([0xff])],
+    ...["shud-jobs", ...presetIds].flatMap((id) => {
+      const desired = id === "shud-jobs" ? { id, config: desiredJobs("shud-probe", alternateBin) } : { id, disabled: true };
+      const others = [{ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) }, ...presetIds.map((id) => ({ id, disabled: false }))].filter((row) => row.id !== id).map((row) => `- ${JSON.stringify(row)}\n`).join("");
+      return ["shared", "aliased"].map((kind) => [`already-desired ${kind} ${id}`, others + (kind === "shared" ? `- &owned ${JSON.stringify(desired)}\n- {id: other, config: *owned}\n` : `- id: other\n  config: &owned ${JSON.stringify(desired)}\n- *owned\n`), "", `${kind} ${id}`]);
+    }),
   ]) {
-    writeFileSync(headless.patch, Buffer.concat([Buffer.from(validTargets), Buffer.isBuffer(invalid) ? invalid : Buffer.from(invalid)]));
+    writeFileSync(headless.patch, Buffer.concat([Buffer.from(prefix), Buffer.isBuffer(invalid) ? invalid : Buffer.from(invalid)]));
     const before = [hash(headless.patch), hash(headless.manifest)], stat = lstatSync(headless.patch);
     const env = { ...process.env, PROFILE_TEMPLATE: "headless" };
     for (const stage of ["precheck", "writer", "installer"]) {
@@ -972,7 +977,7 @@ try {
         await run(label, process.execPath, [join(root, "scripts/runtime/profile-patch.ts"), ...(stage === "precheck" ? ["--check"] : []), ...args], false, env, true);
       const diagnostic = `${result.stdout}\n${result.stderr}`, after = lstatSync(headless.patch);
       check(`${label}: rejected`, result.status !== 0);
-      check(`${label}: controlled file diagnostic`, diagnostic.includes(`${headless.patch}:`) && !diagnostic.includes("DO_NOT_ECHO_USER_PATCH"));
+      check(`${label}: controlled file/target diagnostic`, diagnostic.includes(`${headless.patch}:`) && !diagnostic.includes("DO_NOT_ECHO_USER_PATCH") && (!targetDiagnostic || diagnostic.includes(targetDiagnostic)));
       check(`${label}: no partial jobs/preset/manifest write`, hash(headless.patch) === before[0] && hash(headless.manifest) === before[1]);
       check(`${label}: mode/inode/mtime unchanged`, after.mode === stat.mode && after.ino === stat.ino && after.mtimeMs === stat.mtimeMs);
     }

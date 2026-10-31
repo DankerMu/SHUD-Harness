@@ -349,6 +349,21 @@ try {
   if (!isUtf8(original)) throw new PatchError(`${file}:1: invalid UTF-8 YAML`);
   const source = original.toString("utf8");
   const ids = desired.map((item) => item.id);
+  if (desired.length > 1) {
+    // Headless ownership requires safe targets even when their values already match.
+    const parsed = parsePatch(file, source, ids);
+    for (const target of parsed.targets) {
+      if (isAlias(target.node)) {
+        fail(
+          file,
+          parsed.lines,
+          target.node.range?.[0] ?? 0,
+          `cannot rewrite an aliased ${target.id} target`,
+        );
+      }
+      assertUnsharedTarget(file, parsed, target);
+    }
+  }
   // Validate every target and complete all range edits in memory before the one publication.
   const rendered = desired.reduce((source, item) => updatePatch(file, source, item, ids), source);
   if (!checking && rendered !== source)
