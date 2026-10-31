@@ -8,7 +8,7 @@
 ## 2. Integration and delivery
 
 - [x] 2.1 Parent ran built public-entry real-git smoke (space/LF clean, dirty, descendant rejection and index bytes all PASS), full pnpm run check (145 files, 4870 PASS, 2 SKIP) and strict OpenSpec validation; evidence and limits published in PR.
-- [ ] 2.2 Complete expanded reviews, exact-head CI and merge; independently archive this change after merge, without closing/archiving M3 PI work.
+- [x] 2.2 Expanded three-seat review CLEAN on aa86833a, CI 41225771118 all green, PR #499 merged as f162a614; independent archive synced one additive stack-lock requirement, without closing/archiving M3 PI work.
 
 ## Risk pack mapping
 
