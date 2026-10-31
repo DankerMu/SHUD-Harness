@@ -413,7 +413,16 @@ test.each([
     kind: "deny",
     code: "raw-immutable",
   });
-  expect(native.lstatSync(join(cwd, output), { bigint: true })).toEqual(before);
+  // Read-only directory enumeration may advance atime on Linux.
+  expect(native.lstatSync(join(cwd, output), { bigint: true })).toMatchObject({
+    dev: before.dev,
+    ino: before.ino,
+    mode: before.mode,
+    nlink: before.nlink,
+    size: before.size,
+    mtimeNs: before.mtimeNs,
+    ctimeNs: before.ctimeNs,
+  });
   expect(fs.opendirSync).not.toHaveBeenCalled();
 });
 
