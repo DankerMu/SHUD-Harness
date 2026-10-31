@@ -30,6 +30,8 @@ headless 模板没有 agent-preset-registry；安装器 SHALL 禁用两 preset �
 ### Requirement: Idempotent profile installation
 系统 SHALL 提供 `pnpm run profile:install`（`scripts/runtime/profile-install.sh`）在给定 `DSH_HOME` 下建立 profile：参数 `PROFILE_NAME`（默认 `shud`）与 `PROFILE_TEMPLATE`（默认 `web`），以及必填环境变量 `SHUD_BIN`（SHUD 可执行文件的绝对路径）。`SHUD_BIN` 缺失、不是绝对路径或不可执行时 SHALL 在建档前以非 0 退出并指明 `SHUD_BIN`，SHALL NOT 回退任何默认路径。profile 目录不存在时以 `dsh --profile <name> --from-default-profile <template> --dump-config` 创建，然后把本仓库的 bundle 以 `link:` 方式安装进 profile，再由 `scripts/runtime/profile-patch.ts`（`profile-install.sh` 调用它）在用户的 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 中写入或替换唯一一条 `- id: shud-jobs` 行（按 id 配置 bundle 插入的行，与 `shud-raw-guard` 的用户覆写同一机制），其 `config` SHALL 为注册表的完整必填配置：`shudBin: $SHUD_BIN`、`stateDir: $DSH_HOME/profiles/<name>/shud-jobs`、`stackRepos.SHUD`/`stackRepos.rSHUD`/`stackRepos.AutoSHUD` 为本仓库根下 `SHUD`、`rSHUD`、`AutoSHUD` 的绝对路径、`hostVersion` 为 bundle `package.json` 中 `@deepseek-ai/dsh` peer 的钉版版本（`0.2.1-rc.2`）、`llm.base_url` 为 bundle patch `llm-deepseek` 行的 `config.baseURL`、`llm.request_alias` 为 bundle patch `agent-default-model` 行的 `config.model`；环境变量 `SUNDIALS_ROOT` 已设置时 SHALL 写入 `sundialsRoot: $SUNDIALS_ROOT`（须为已存在目录，否则在建档前以非 0 退出并指明 `SUNDIALS_ROOT`），未设置时 SHALL NOT 写该键（StackLock 的 `runtime.sundials_version` 因而为 `null`）。这些值 SHALL 从上述来源读取，SHALL NOT 在安装器中另行硬编码。安装器整体拥有该 `shud-jobs` 行：每次安装 SHALL 以当次环境与仓库重新生成该行的完整 `config`，用户手工加入该行的键不保留。三个 `stackRepos` 路径任一不是已存在目录时 SHALL 在建档前以非 0 退出并指明该路径（目录是否为已初始化的 git 仓库在 `shud_run` 采集时检查，见 stack-lock）。建档 SHALL 先于 bundle 安装；该文件中 `- id: shud-jobs` 行之外的内容 SHALL 逐字节保留；以相同 `SHUD_BIN`、相同 `SUNDIALS_ROOT`（或同样未设置）、同一仓库根与未变的 bundle 重复执行 SHALL 不改变结果且以 0 退出；已有 `- id: shud-jobs` 行只含 `shudBin`/`stateDir`（M2 安装）时 SHALL 在同一行补齐上述键。
 
+headless 安装另外拥有唯一 `preset-coordinator` 与 `preset-worker` 用户 patch 项的 `disabled` 字段，并将其设为 true；这两项目标内其它既有属性保留，目标范围之外字节不变。三个目标先在内存中全部验证再经同一原子发布写入，任一目标重复、共享 anchor 或无法安全更新时整个用户文件不变。web 安装不主动清除用户的 preset disabled 覆写，不承担同名 profile 的模板转换。
+
 #### Scenario: first install
 - **WHEN** `DSH_HOME` 为空目录且以可执行的 `SHUD_BIN` 执行 `pnpm run profile:install`
 - **THEN** `$DSH_HOME/profiles/shud/package.json` 的 `dsh.profile.bundles` 精确为 `["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@shud-harness/dsh-profile-shud"]`，`profiles/shud/cordis.patch.yml` 含唯一 `- id: shud-jobs` 行且其 `shudBin` 等于 `SHUD_BIN`、`stateDir` 为 `$DSH_HOME/profiles/shud/shud-jobs`、`stackRepos.SHUD` 为 `<本仓库根>/SHUD`（另两键同理）、`hostVersion` 为 `0.2.1-rc.2`、`llm.base_url` 为 `https://www.dmxapi.cn`、`llm.request_alias` 为 `deepseek-flash-guan`，退出码 0
@@ -49,6 +51,14 @@ headless 模板没有 agent-preset-registry；安装器 SHALL 禁用两 preset �
 #### Scenario: headless-template profile for probes
 - **WHEN** `PROFILE_NAME=shud-probe PROFILE_TEMPLATE=headless` 且设置 `SHUD_BIN` 执行 `pnpm run profile:install`
 - **THEN** `$DSH_HOME/profiles/shud-probe/package.json` 的 `dsh.profile.bundles` 以 `@shud-harness/dsh-profile-shud` 结尾且不含 `@deepseek-ai/dsh-web-app`，`stateDir` 为 `$DSH_HOME/profiles/shud-probe/shud-jobs`，`dsh --profile shud-probe --dump-config-schema` 中 `shud-raw-guard`、`shud-policy-gate` 与 `shud-jobs` 行 `status` 不是 `error`，`dsh --profile shud-probe --dump-config` 中没有启用的 `preset-coordinator` 或 `preset-worker` 行
+
+#### Scenario: headless preset overrides are idempotent and atomic
+- **WHEN** headless 用户 patch 含两 preset 的既有属性、独立 raw 覆写与注释，重复安装同一配置
+- **THEN** 两 preset disabled 为 true、其它属性保留、目标范围外字节不变；第二次不改字节、inode、mtime 与文件 mode
+
+#### Scenario: unsafe headless target rejects the entire update
+- **WHEN** 第二个 preset 目标重复或含被其它项引用的共享 anchor，且本次 jobs 配置也应更新
+- **THEN** precheck 失败并给出受控目标诊断，用户 patch 与 profile manifest 均不变，不先提交 jobs 或第一个 preset 修改
 
 #### Scenario: M2 install gains capture configuration
 - **WHEN** 用户 patch 的 `- id: shud-jobs` 行只有 M2 安装器写入的 `shudBin` 与 `stateDir`，另有 `shud-raw-guard` 覆写行，以相同 `SHUD_BIN` 执行 `pnpm run profile:install`

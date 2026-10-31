@@ -26,6 +26,11 @@
 - id: jobs
   disabled: true
 
+# Web uses the preset id, not the declaring row id. Headless has no registry to patch.
+- id: agent-preset-registry
+  config:
+    default: coordinator
+
 - insert:
     - id: shud-raw-guard
       name: "@shud-harness/dsh-shud-raw-guard"
@@ -37,3 +42,53 @@
       name: "@shud-harness/dsh-shud-jobs"
     - id: shud-tools
       name: "@shud-harness/dsh-shud-tools"
+    - id: shud-role-restrict
+      name: "@shud-harness/dsh-shud-presets"
+    - id: preset-coordinator
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: coordinator
+        order: 1
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: !!js >-
+                process.getBuiltinModule('node:fs').readFileSync(
+                process.getBuiltinModule('node:module').createRequire(baseUrl)
+                .resolve('@shud-harness/dsh-shud-presets/prompts/coordinator.md'), 'utf8')
+          - id: agent-instructions
+            name: "@deepseek-ai/dsh-agent-instructions"
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: "@deepseek-ai/dsh-time-context"
+          - id: tool-jobs
+            name: "@deepseek-ai/dsh-tool-jobs"
+          - id: tool-subagent
+            name: "@deepseek-ai/dsh-tool-subagent"
+            config:
+              provider: spawn
+              toolName: subagent
+              agentPreset: worker
+              modelSelectionSettings: false
+    - id: preset-worker
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: worker
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: !!js >-
+                process.getBuiltinModule('node:fs').readFileSync(
+                process.getBuiltinModule('node:module').createRequire(baseUrl)
+                .resolve('@shud-harness/dsh-shud-presets/prompts/worker.md'), 'utf8')
+          - id: agent-instructions
+            name: "@deepseek-ai/dsh-agent-instructions"
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: "@deepseek-ai/dsh-time-context"
+          - id: tool-jobs
+            name: "@deepseek-ai/dsh-tool-jobs"

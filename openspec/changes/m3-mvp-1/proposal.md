@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #449 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Path #1.
+Blast radius: installed Web/headless profile composition, model-visible role tools and prompt assets, installer-owned YAML targets and preserved user configuration.
+Selected risk packs: Public API/script entry; Config/project setup; File IO/path safety/overwrite; Auth/permissions/secrets; Concurrency/ordering; Error handling/partial outputs; Legacy compatibility; Release/packaging/dependency compatibility; Documentation.
+Evidence floor: test-first actual installation/dump assertions and negative controls, byte/mtime-preserving installer cases, full check/strict/instructions/profile gates, real Web session-log/request-tool evidence for both roles and committed switches, headless unknown-role control, three-seat white-box review.
+Only task 8.1b is selected. Issuecomment6463591965 supersedes original preset-local fixed-role restrict examples: one global no-role plugin, exact D11 subtrees, worker explicitly selected, host registries/providers once globally. No packages, host, core policy or first-task acceptance-script changes; centralized PI functional acceptance and shared archive remain #452.
+
 ## Issue #448 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream); Critical Path #1.
