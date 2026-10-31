@@ -171,7 +171,7 @@ test("readonly D7 admission remains rejected after submission finishes while its
       }
       return native.readFile(...args);
     });
-    const { pending } = h.start();
+    const { producer, pending } = h.start();
     await enteredBeforeCompletion(published.waiting, pending);
     if (!checkpoint) throw new Error("Submission omitted the D7 checkpoint");
     expect(h.registry.isSubmissionInFlight(checkpoint.run_id)).toBe(true);
@@ -182,6 +182,12 @@ test("readonly D7 admission remains rejected after submission finishes while its
     finishSubmission.release();
     await pending;
     expect(h.registry.isSubmissionInFlight(checkpoint.run_id)).toBe(false);
+    // Submission completion does not quiesce the native fixture's output writes.
+    // Finish and reap that execution while the readonly operation remains held.
+    await releaseRun(checkpoint);
+    const execution = producer.executions[0];
+    if (!execution) throw new Error("Submission omitted its native execution");
+    await execution.waitForExit();
     const before = await snapshotQueryTree(checkpoint.run_dir);
     finishRead.release();
     await expect(operation).rejects.toMatchObject({ code: "SUBMISSION_IN_FLIGHT" });

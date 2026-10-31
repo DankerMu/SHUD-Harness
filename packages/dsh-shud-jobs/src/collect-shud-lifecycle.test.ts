@@ -189,7 +189,12 @@ test("RunRecord publication is the commit boundary and a failed collected projec
 test.each(["record-publication", "error-ledger", "failure-status"] as const)(
   "%s write failure preserves evidence and reports the actual incomplete boundary",
   async (phase) => {
-    const h = await pollFixture();
+    // Keep the explicit poll as the only writer while observing its failed publication.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const h = await pollFixture().catch((error: unknown) => {
+      vi.useRealTimers();
+      throw error;
+    });
     let targetRun = "";
     try {
       vi.mocked(io.rename).mockImplementation(async (source, target) => {
@@ -242,9 +247,13 @@ test.each(["record-publication", "error-ledger", "failure-status"] as const)(
       expect(h.errors.join("\n")).not.toContain("PRIVATE_WRITE_FAILURE_PAYLOAD_308");
       expect(h.errors.join("\n")).not.toContain("PRIVATE_STATUS_FAILURE_PAYLOAD_308");
     } finally {
-      vi.mocked(io.rename).mockImplementation(actualIo.rename);
-      vi.mocked(fs.renameSync).mockImplementation(actualFs.renameSync);
-      await h.close();
+      try {
+        vi.mocked(io.rename).mockImplementation(actualIo.rename);
+        vi.mocked(fs.renameSync).mockImplementation(actualFs.renameSync);
+        await h.close();
+      } finally {
+        vi.useRealTimers();
+      }
     }
   },
 );

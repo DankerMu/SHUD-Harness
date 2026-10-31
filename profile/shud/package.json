@@ -14,6 +14,7 @@
   "dependencies": {
     "@shud-harness/dsh-shud-jobs": "workspace:*",
     "@shud-harness/dsh-shud-policy-gate": "workspace:*",
+    "@shud-harness/dsh-shud-presets": "workspace:*",
     "@shud-harness/dsh-shud-raw-guard": "workspace:*",
     "@shud-harness/dsh-shud-tools": "workspace:*"
   },
