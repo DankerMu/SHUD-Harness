@@ -211,3 +211,45 @@ ccw fixture 按入口验收（完整布局见 [matrix §4](Test_Fixtures_And_Com
 - [ ] dsh 重启后作业对账有自动测试（SIGTERM / SIGKILL 各一次）。
 - [ ] 报告 language guard 有负例测试。
 - [ ] Sandbox path policy 有越界测试。
+
+## Enforcement Index
+
+本索引是根指令要求实施、审查、提交前必须阅读并遵守的完整规则清单；以下路径均相对仓库根目录。
+
+生成指令由 `pnpm run instructions:render` 更新；`pnpm run instructions:check`（默认 `docs:check` / CI docs-gate 的一部分）同时核对两份生成物字节，并从 `constraints.yaml` 的 `thresholds.agents_md_max_lines` 读取 AGENTS.md 行数上限，当前为 320。按 LF 计物理行，末尾未换行的非空行也计一行；配置缺失、非正整数或重复时失败，不使用默认值。CLAUDE.md 仅核对生成一致性，不施加该上限。
+
+边界自证：`python3 scripts/instructions/test-render-line-budget.py` 以临时根目录实际渲染后检查，覆盖 320 通过 / 321 拒绝、配置阈值、CLAUDE 独立超限、缺失/非法/重复配置、末尾未换行与两份生成物漂移；CI docs-gate 与 `pnpm run test-guardrails` 均执行，Python 标准库即可，无须安装 Node 依赖。
+
+| 规则 | 位置 | 校验 | 级别 |
+|---|---|---|---|
+| 禁止并行版本后缀 | `.git-hooks/check-naming.sh`，`constraints.yaml` naming | pre-commit；CI `pnpm run naming:check` | block |
+| 文件 ≤1000 行（policy-gate 拆分后无大小/类型安全豁免） | `eslint.config.mjs`，`.large-file-guard.json`，`constraints.yaml` baseline | pre-commit lint-staged / large-file-guard；CI `pnpm run lint` | block |
+| type-aware lint，禁 import dsh 内部路径 | `eslint.config.mjs`，`tsconfig.eslint.json` | pre-commit；CI `pnpm run lint` | block |
+| 交付文件格式；本地 `.workplans/` 不在发现范围 | `.prettierrc.json`，`.editorconfig`；`.gitignore` 的 `/.workplans/` 由 Git/Prettier 共用 | pre-commit；CI `pnpm run format:check` | block |
+| 类型 | `tsconfig.base.json` | CI `pnpm run typecheck` | block |
+| 测试 + 覆盖率 ≥80% | `vitest.config.ts` | CI `pnpm run test:coverage` | block |
+| 重复 ≤3% | `.jscpd.json` | CI `pnpm run dup` | block |
+| 死代码/未用依赖（duplicates 为 error，无重复导出豁免） | `knip.json` | CI `pnpm run deadcode` | block |
+| Schema 生成物无漂移 | `scripts/schema/check.sh` | CI `pnpm run schema:check` | block |
+| 文档链接 + 路径声明 + 生成指令 + 决策记录 | `scripts/docs/`，`scripts/instructions/render.sh`，`scripts/adr/verify.sh` | CI `pnpm run docs:check` | block |
+| 密钥 | gitleaks | pre-commit；CI `pnpm run security:secrets` | block |
+| SAST | semgrep | CI `pnpm run security:sast` | block |
+| PR ≤400 行（label `size-exempt` 记录；标签增删完整 CI 重评） | `scripts/guardrails/pr-size.sh` | CI `pnpm run pr:size` | block |
+| Conventional commits | `commitlint.config.mjs` | commit-msg | block |
+| 锁文件干净、不拉 dsh | `pnpm-workspace.yaml` | CI lint/test jobs install with frozen lockfile | block |
+| 单一必需检查（依赖 job 非 success 均失败） | `.github/workflows/ci.yml` all-checks-passed / `scripts/guardrails/aggregate-checks.sh` | GitHub rulesets；`pnpm run test-guardrails` 正反例 | block |
+| 越界动作（no-verify、force-push、dsh/raw 写、生成物手编） | `scripts/guardrails/no-bypass.sh`（`.claude/settings.json` 与 `.codex/hooks.json` 共用） | pre-commit 等价：agent PreToolUse hook | block |
+| 本次触碰 >1000 行文件 | `.claude/hooks/large-file-guard/large-file-guard.sh` | pre-commit 等价：agent hook on git commit | block |
+| 闸自证 | `scripts/guardrails/test-guardrails.sh` | 本机 `pnpm run test-guardrails` | block |
+| dsh profile 路由 / 出站关闭 | `scripts/runtime/profile-smoke.sh` | 本机 + CI `pnpm run profile:smoke` | block |
+| raw-guard 五探针 / raw 字节不变 | `scripts/runtime/raw-guard-probes.sh` | 本机 `pnpm run raw-guard:probes`（需 `DMXAPI_KEY`；exit 2 = 模型偏离须重跑） | block |
+| ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
+| ccw 重启恢复 / 五条作业不变量 | `scripts/runtime/shud-restart.sh` | 本机 `pnpm run shud:restart`（需 SHUD 与 `DMXAPI_KEY`；SIGTERM / SIGKILL 两用例，通知必须 delivered） | block（本机） |
+| 首任务调用链 / 报告审批与文件联合判据 | `scripts/runtime/shud-first-task.sh` | 本机 `pnpm run shud:first-task <scratch-workspace>`（需 SHUD 与 `DMXAPI_KEY`；独立 Web profile，审计与文件同时通过；CI 不运行，自动 Allow once 不代替 PI 验收） | block（本机） |
+| 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
+| PI 功能验收（Epic #210 / M3 Epic #423 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 亲自操作与明确验收记录；工程门禁及运行时审批权限不变 | gate |
+| 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
+| docs 随代码改 | PR 模板 | review-only | review-only |
+| 科学措辞规则（测试常量与枚举短语 lint） | `packages/dsh-shud-core/src/governance/wording.ts` 及其测试 | `pnpm run test`（纳入默认 `check`）；报告门禁的机器边界为四句不变式逐字出现且模型撰写字段无禁止短语，完整报告校验器另行交付；guard 通过 ≠ 语义合规，仍由 PI 审阅 | block |
+| 运行时不变量伴生（M2 作业持久化） | `CONTEXT.md` 第 13 条及其 `packages/dsh-shud-jobs/src/` 集成测试路径 | 本机 + CI `pnpm run test:coverage`（纳入 `pnpm run check`）；本机独立 `pnpm run shud:restart` | block |
+| dsh 升级只走 issue | 流程 | review-only | review-only |

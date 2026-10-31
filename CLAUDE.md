@@ -251,53 +251,15 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 
 ## Enforcement Index
 
-| 规则 | 位置 | 校验 | 级别 |
-|---|---|---|---|
-| 禁止并行版本后缀 | `.git-hooks/check-naming.sh`，`constraints.yaml` naming | pre-commit；CI `pnpm run naming:check` | block |
-| 文件 ≤1000 行（policy-gate 拆分后无大小/类型安全豁免） | `eslint.config.mjs`，`.large-file-guard.json`，`constraints.yaml` baseline | pre-commit lint-staged / large-file-guard；CI `pnpm run lint` | block |
-| type-aware lint，禁 import dsh 内部路径 | `eslint.config.mjs`，`tsconfig.eslint.json` | pre-commit；CI `pnpm run lint` | block |
-| 交付文件格式；本地 `.workplans/` 不在发现范围 | `.prettierrc.json`，`.editorconfig`；`.gitignore` 的 `/.workplans/` 由 Git/Prettier 共用 | pre-commit；CI `pnpm run format:check` | block |
-| 类型 | `tsconfig.base.json` | CI `pnpm run typecheck` | block |
-| 测试 + 覆盖率 ≥80% | `vitest.config.ts` | CI `pnpm run test:coverage` | block |
-| 重复 ≤3% | `.jscpd.json` | CI `pnpm run dup` | block |
-| 死代码/未用依赖（duplicates 为 error，无重复导出豁免） | `knip.json` | CI `pnpm run deadcode` | block |
-| Schema 生成物无漂移 | `scripts/schema/check.sh` | CI `pnpm run schema:check` | block |
-| 文档链接 + 路径声明 + 生成指令 + 决策记录 | `scripts/docs/`，`scripts/instructions/render.sh`，`scripts/adr/verify.sh` | CI `pnpm run docs:check` | block |
-| 密钥 | gitleaks | pre-commit；CI `pnpm run security:secrets` | block |
-| SAST | semgrep | CI `pnpm run security:sast` | block |
-| PR ≤400 行（label `size-exempt` 记录；标签增删完整 CI 重评） | `scripts/guardrails/pr-size.sh` | CI `pnpm run pr:size` | block |
-| Conventional commits | `commitlint.config.mjs` | commit-msg | block |
-| 锁文件干净、不拉 dsh | `pnpm-workspace.yaml` | CI lint/test jobs install with frozen lockfile | block |
-| 单一必需检查（依赖 job 非 success 均失败） | `.github/workflows/ci.yml` all-checks-passed / `scripts/guardrails/aggregate-checks.sh` | GitHub rulesets；`pnpm run test-guardrails` 正反例 | block |
-| 越界动作（no-verify、force-push、dsh/raw 写、生成物手编） | `scripts/guardrails/no-bypass.sh`（`.claude/settings.json` 与 `.codex/hooks.json` 共用） | pre-commit 等价：agent PreToolUse hook | block |
-| 本次触碰 >1000 行文件 | `.claude/hooks/large-file-guard/large-file-guard.sh` | pre-commit 等价：agent hook on git commit | block |
-| 闸自证 | `scripts/guardrails/test-guardrails.sh` | 本机 `pnpm run test-guardrails` | block |
-| dsh profile 路由 / 出站关闭 | `scripts/runtime/profile-smoke.sh` | 本机 + CI `pnpm run profile:smoke` | block |
-| raw-guard 五探针 / raw 字节不变 | `scripts/runtime/raw-guard-probes.sh` | 本机 `pnpm run raw-guard:probes`（需 `DMXAPI_KEY`；exit 2 = 模型偏离须重跑） | block |
-| ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
-| ccw 重启恢复 / 五条作业不变量 | `scripts/runtime/shud-restart.sh` | 本机 `pnpm run shud:restart`（需 SHUD 与 `DMXAPI_KEY`；SIGTERM / SIGKILL 两用例，通知必须 delivered） | block（本机） |
-| 首任务调用链 / 报告审批与文件联合判据 | `scripts/runtime/shud-first-task.sh` | 本机 `pnpm run shud:first-task <scratch-workspace>`（需 SHUD 与 `DMXAPI_KEY`；独立 Web profile，审计与文件同时通过；CI 不运行，自动 Allow once 不代替 PI 验收） | block（本机） |
-| 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
-| PI 功能验收（Epic #210 / M3 Epic #423 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 亲自操作与明确验收记录；工程门禁及运行时审批权限不变 | gate |
-| 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
-| docs 随代码改 | PR 模板 | review-only | review-only |
-| 科学措辞规则（测试常量与枚举短语 lint） | `packages/dsh-shud-core/src/governance/wording.ts` 及其测试 | `pnpm run test`（纳入默认 `check`）；报告门禁的机器边界为四句不变式逐字出现且模型撰写字段无禁止短语，完整报告校验器另行交付；guard 通过 ≠ 语义合规，仍由 PI 审阅 | block |
-| 运行时不变量伴生（M2 作业持久化） | `CONTEXT.md` 第 13 条及其 `packages/dsh-shud-jobs/src/` 集成测试路径 | 本机 + CI `pnpm run test:coverage`（纳入 `pnpm run check`）；本机独立 `pnpm run shud:restart` | block |
-| dsh 升级只走 issue | 流程 | review-only | review-only |
+实施、审查、提交前，必须阅读并遵守 [Testing Strategy 的 Enforcement Index](docs/04_IMPLEMENTATION/Testing_Strategy.md#enforcement-index) 全部规则；该索引仍具强制效力，不因移出根指令而降级。
 
 ## Agent Roles
 
 Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundaries.md` §0):
 `coordinator | repo_explorer | worker | coder | reviewer`
 
-| 角色 | 职责 | 科学决策权 |
-|------|------|-----------|
-| PI/研究者 | 在 Web 界面提问、审批、判断证据 | ✅ |
-| Coordinator | 建 TaskCard、执行计划、监控消耗、生成报告 | ❌ |
-| Repo Explorer | 只读探索仓库、定位入口/调用链/影响面 | ❌ |
-| Worker | 跑模型、解析日志、写脚本、生成图表 | ❌ |
-| Coder | 在 worktree 改代码、生成 patch/ChangeRequest | ❌ |
-| Reviewer | 检查工程完整性和兼容性 (不判断科学结论) | ❌ |
+- 必须遵守上述唯一权威源 §0/§1 的角色职责与权限边界；具体职责按该文档各角色章节执行。
+- 科学判断与 PI gate 审批仅由 PI/研究者作出；所有 Agent 均无科学决策权，Reviewer 只检查工程完整性和兼容性，不判断科学结论。
 
 ## Governance Rules
 

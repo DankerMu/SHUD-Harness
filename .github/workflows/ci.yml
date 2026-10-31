@@ -73,6 +73,8 @@ jobs:
           node-version: 24
       - name: Link checker self-test
         run: scripts/docs/self_test.sh
+      - name: Instruction budget self-test
+        run: python3 scripts/instructions/test-render-line-budget.py
       - run: pnpm run docs:check
 
   secrets:

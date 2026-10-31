@@ -227,10 +227,12 @@ printf 'see `package.json` and `scripts/adr/verify.sh`\n' > "$TMP/good.md"
 expect_pass "docs:paths" sh scripts/docs/check_paths.sh --root "$ROOT" "$TMP/good.md"
 
 # 9 generated instructions drift
-mkdir -p "$TMP/instr"; cp -R instructions "$TMP/instr/"; sh scripts/instructions/render.sh --root "$TMP/instr" >/dev/null
+mkdir -p "$TMP/instr"; cp -R instructions "$TMP/instr/"; cp constraints.yaml "$TMP/instr/"
+sh scripts/instructions/render.sh --root "$TMP/instr" >/dev/null
 expect_pass "instructions:check" sh scripts/instructions/render.sh --check --root "$TMP/instr"
 echo "hand edit" >> "$TMP/instr/AGENTS.md"
 expect_fail "instructions:check" sh scripts/instructions/render.sh --check --root "$TMP/instr"
+expect_pass "instruction line budget self-test" python3 scripts/instructions/test-render-line-budget.py
 
 # 10 no-bypass agent hook (the forbidden flag is assembled at runtime so this file never contains it verbatim)
 nb() { printf '%s' "$1" | sh scripts/guardrails/no-bypass.sh; }
