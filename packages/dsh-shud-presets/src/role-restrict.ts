@@ -11,15 +11,22 @@ interface Restriction {
   release: () => void;
 }
 
-export function apply(ctx: Context): void {
-  // An undefined value still tracks a live, currently unrestricted Agent.
-  const agents = new Map<Agent, Restriction | undefined>();
+interface AgentBinding {
+  revision: number;
+  restriction: Restriction | undefined;
+}
 
-  function bind(agent: Agent): void {
-    const previous = agents.get(agent);
+export function apply(ctx: Context): void {
+  const agents = new Map<Agent, AgentBinding>();
+  let active = true;
+
+  function bind(agent: Agent, binding: AgentBinding): void {
+    // Even a same-role event invalidates a bind interrupted by tools/change.
+    const revision = ++binding.revision;
+    const previous = binding.restriction;
     const role = presetIdToRole(readCallerPresetId(agent));
     if (role === "unknown") {
-      agents.set(agent, undefined);
+      binding.restriction = undefined;
       previous?.release();
       return;
     }
@@ -36,28 +43,69 @@ export function apply(ctx: Context): void {
         cause,
       });
     }
+    if (!active || agents.get(agent) !== binding || binding.revision !== revision) {
+      // A nested selection or disposal owns the latest state, not this pending mask.
+      release();
+      return;
+    }
     // Keep the prior mask and role until the replacement is actually installed.
-    agents.set(agent, { role, release });
+    binding.restriction = { role, release };
     previous?.release();
   }
 
-  ctx.on("agent/created", ({ agent }) => {
-    if (!agents.has(agent)) agents.set(agent, undefined);
-    bind(agent);
-    return undefined;
-  });
-  ctx.on("agent-preset/selected", (sessionId) => {
-    for (const agent of agents.keys()) {
-      if (agent.session.id === sessionId) bind(agent);
-    }
-  });
-  ctx.on("agent/disposed", ({ agent }) => {
-    const restriction = agents.get(agent);
-    agents.delete(agent);
-    restriction?.release();
-  });
+  const stopListening = [
+    ctx.on("agent/created", ({ agent }) => {
+      if (!active) return undefined;
+      let binding = agents.get(agent);
+      if (!binding) {
+        binding = { revision: 0, restriction: undefined };
+        agents.set(agent, binding);
+      }
+      bind(agent, binding);
+      return undefined;
+    }),
+    ctx.on("agent-preset/selected", (sessionId) => {
+      if (!active) return;
+      for (const [agent, binding] of agents) {
+        if (agent.session.id === sessionId) bind(agent, binding);
+      }
+    }),
+    ctx.on("agent/disposed", ({ agent }) => {
+      const binding = agents.get(agent);
+      if (!binding) return;
+      agents.delete(agent);
+      binding.revision++;
+      const restriction = binding.restriction;
+      binding.restriction = undefined;
+      restriction?.release();
+    }),
+  ];
   ctx.effect(() => () => {
-    for (const restriction of agents.values()) restriction?.release();
+    active = false;
+    const errors: unknown[] = [];
+    for (const stop of stopListening) {
+      try {
+        stop();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    const restrictions: Restriction[] = [];
+    for (const binding of agents.values()) {
+      binding.revision++;
+      if (binding.restriction) restrictions.push(binding.restriction);
+      binding.restriction = undefined;
+    }
     agents.clear();
+    for (const restriction of restrictions) {
+      try {
+        restriction.release();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length) {
+      throw new AggregateError(errors, `${name}: lifecycle cleanup failed`);
+    }
   });
 }

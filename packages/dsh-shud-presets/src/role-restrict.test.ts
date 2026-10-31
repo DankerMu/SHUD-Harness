@@ -213,4 +213,117 @@ describe("shud-role-restrict public lifecycle", () => {
     expect(first.surface()).toContain("bash");
     expect(second.surface()).toContain("write");
   });
+
+  it("releases every owned mask when a tools-change observer throws during plugin disposal", async () => {
+    const harness = await setup();
+    const first = harness.prepareAgent("coordinator");
+    const second = harness.prepareAgent("worker");
+    first.agent.ctx.tools.restrict({ deny: ["bash", "job_kill"] });
+    second.agent.ctx.tools.restrict({ deny: ["write", "job_list"] });
+    const firstForeign = first.surface();
+    const secondForeign = second.surface();
+    await first.announce();
+    await second.announce();
+    expect(first.surface()).toEqual(COORDINATOR_TOOLS.filter((name) => name !== "job_kill"));
+    expect(second.surface()).toEqual(WORKER_TOOLS.filter((name) => name !== "job_list"));
+    const observer = vi.fn(() => {
+      throw new Error("controlled tools-change cleanup observer failure");
+    });
+    const stopFault = harness.ctx.on("tools/change", observer);
+    try {
+      // Cordis captures effect-disposal errors; this boundary does not reject.
+      await expect(Promise.resolve(harness.plugin.dispose())).resolves.toBeUndefined();
+      expect(observer).toHaveBeenCalled();
+    } finally {
+      stopFault();
+    }
+    expect(first.surface()).toEqual(firstForeign);
+    expect(second.surface()).toEqual(secondForeign);
+    first.setProjection("worker");
+    second.setProjection("coordinator");
+    first.selected("worker");
+    second.selected("coordinator");
+    await first.announce();
+    await second.announce();
+    expect(first.surface()).toEqual(firstForeign);
+    expect(second.surface()).toEqual(secondForeign);
+  });
+
+  it.each([
+    ["worker", "coordinator", WORKER_TOOLS],
+    ["coordinator", "worker", COORDINATOR_TOOLS],
+  ] as const)(
+    "keeps the latest %s projection when a %s bind emits a reentrant committed selection",
+    async (initial, outer, expected) => {
+      const harness = await setup();
+      const caller = harness.prepareAgent(initial);
+      await caller.announce();
+      caller.setProjection(outer);
+      let reentered = false;
+      const stopReentry = harness.ctx.on("tools/change", () => {
+        stopReentry();
+        reentered = true;
+        caller.setProjection(initial);
+        caller.selected(initial);
+      });
+      try {
+        caller.selected(outer);
+        expect(reentered).toBe(true);
+        expect(caller.surface()).toEqual(expected);
+      } finally {
+        stopReentry();
+      }
+    },
+  );
+
+  it("releases an interrupted bind on reentrant unknown selection and can later bind again", async () => {
+    const harness = await setup();
+    const caller = harness.prepareAgent("worker");
+    caller.agent.ctx.tools.restrict({ deny: ["bash"] });
+    const foreignOnly = caller.surface();
+    await caller.announce();
+    caller.setProjection("coordinator");
+    let reentered = false;
+    const stopReentry = harness.ctx.on("tools/change", () => {
+      stopReentry();
+      reentered = true;
+      caller.setProjection("standard");
+      caller.selected("standard");
+    });
+    try {
+      caller.selected("coordinator");
+      expect(reentered).toBe(true);
+      expect(caller.surface()).toEqual(foreignOnly);
+      caller.setProjection("worker");
+      caller.selected("worker");
+      expect(caller.surface()).toEqual(WORKER_TOOLS);
+    } finally {
+      stopReentry();
+    }
+  });
+
+  it("does not retain an interrupted bind or registration after reentrant Agent disposal", async () => {
+    const harness = await setup();
+    const caller = harness.prepareAgent("worker");
+    caller.agent.ctx.tools.restrict({ deny: ["bash"] });
+    const foreignOnly = caller.surface();
+    await caller.announce();
+    caller.setProjection("coordinator");
+    let reentered = false;
+    const stopReentry = harness.ctx.on("tools/change", () => {
+      stopReentry();
+      reentered = true;
+      caller.announceDisposed();
+    });
+    try {
+      caller.selected("coordinator");
+      expect(reentered).toBe(true);
+      expect(caller.surface()).toEqual(foreignOnly);
+      caller.setProjection("worker");
+      caller.selected("worker");
+      expect(caller.surface()).toEqual(foreignOnly);
+    } finally {
+      stopReentry();
+    }
+  });
 });
