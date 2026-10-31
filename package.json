@@ -38,6 +38,7 @@
     "profile:install": "sh scripts/runtime/profile-install.sh",
     "profile:smoke": "sh scripts/runtime/profile-smoke.sh",
     "raw-guard:probes": "sh scripts/runtime/raw-guard-probes.sh",
+    "shud:first-task": "sh scripts/runtime/shud-first-task.sh",
     "shud:restart": "sh scripts/runtime/shud-restart.sh",
     "shud:tiny": "sh scripts/runtime/shud-tiny.sh",
     "test-guardrails": "sh scripts/guardrails/test-guardrails.sh",
@@ -48,6 +49,7 @@
     "@commitlint/config-conventional": "21.2.4",
     "@eslint/js": "10.0.1",
     "@types/node": "24.19.2",
+    "@types/ws": "8.18.2",
     "@vitest/coverage-v8": "5.0.5",
     "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
@@ -59,6 +61,7 @@
     "typescript-eslint": "8.71.2",
     "vite": "8.3.4",
     "vitest": "5.0.5",
+    "ws": "8.22.0",
     "yaml": "2.9.1",
     "zod": "4.6.7"
   }

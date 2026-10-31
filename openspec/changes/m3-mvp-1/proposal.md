@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #450 fixture (including #490)
+
+Issue type: feature plus approved caller compatibility fix. Fixture level: expanded (override upstream compact: public executable, shared process/HTTP lifecycle, approval credentials and cross-session evidence require expanded); Critical Paths #3/#4/#5/#6.
+Blast radius: local first-task gate verdict, owned host/solver cleanup, approval authorization/audit joins, reused M2 restart driver and explicit worker root caller.
+Selected risk packs: Public CLI; Config/setup; File IO/path safety; Schema/identity; Auth/secrets; Concurrency/ordering; Resource limits; Error handling/partial outputs; Legacy compatibility; Release/dependencies; Documentation.
+Evidence floor: preimplementation CLI/oracle RED, real Web/SHUD first-task PASS under TMPDIR and disabled-policy negative FAIL, missing-input no-session controls, deterministic audit/file mutation negatives, unchanged M2 evidence oracle and real SIGTERM/SIGKILL restart PASS, full check/strict/profile and three-seat review.
+Only task9.1 plus #490 caller fix are selected. PI comments6539772892/6539773178 approve typed first-task/shared Web helper, migration of restart, knip entry and explicit ws/@types/ws pins/lock; restart root selects worker without changing owner_session or its five predicates. No packages/host/control-plane matrix changes. Script-engineering allowed-once is not #452 PI acceptance.
+
 ## Issue #449 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream); Critical Path #1.
