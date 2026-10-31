@@ -8,7 +8,7 @@
 ## 2. Integration and delivery
 
 - [x] 2.1 Parent verified clean/repeated build and isolated canonical version refresh with the unchanged generator bytes; final scripts/records placement passed full check (146 files, 4871 PASS, 2 SKIP), strict validation, external public-entry capture/readback/reuse smoke and profile smoke.
-- [ ] 2.2 Complete expanded review, exact-head CI and merge; independently archive without M3 PI/ADR/Epic changes.
+- [x] 2.2 Expanded three-seat review CLEAN on a4606175, CI 41235587328 all green, PR #504 merged as db600533; independent archive synced one additive stack-lock requirement without M3 PI/ADR/Epic changes.
 
 ## Risk pack mapping
 
