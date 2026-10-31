@@ -67,7 +67,7 @@ SHUD-Harness/
 - 日常：`pnpm run check` 是唯一默认闸（typecheck → lint → format → coverage → dup → deadcode → naming → schema drift → docs gate）。改 Zod 后 `pnpm run schema:generate`；改 `instructions/agents/*.md` 后 `pnpm run instructions:render`；两者产物都由 CI 比对。
 - 运行时：`pnpm run profile:smoke`（dsh 启动 + 路由断言）、`pnpm run shud:tiny`（ccw 30 天）本机运行；CI 有 npm 版 dsh（`profile-smoke` job），无 SHUD。
 - 环境：`DMXAPI_KEY` 只经环境变量；本机跑 dsh/gh 前 `unset ALL_PROXY`；`DSH_HOME` 指向临时目录避免污染真实会话。
-- 流程：一个 issue 一个分支/worktree，走 `subagent-workflow`；PR ≤400 行（CI 阻断，`size-exempt` label 记录例外）；提交信息 conventional（commit-msg 钩子）；通常 merge 需 CI `all-checks-passed` + PI 功能验收。**Epic #210 例外**：子 PR 完成规定工程验证与审查后可 merge、关闭实现 issue；PI 在整个 Epic 结束时统一功能验收，Epic 关闭与 OpenSpec 归档仍等 PI 明确通过（[ADR-0005](docs/adr/implemented/0005-epic-210-acceptance.md)）。
+- 流程：一个 issue 一个分支/worktree，走 `subagent-workflow`；PR ≤400 行（CI 阻断，`size-exempt` label 记录例外）；提交信息 conventional（commit-msg 钩子）；通常 merge 需 CI `all-checks-passed` + PI 功能验收。**Epic #210 例外**见 [ADR-0005](docs/adr/implemented/0005-epic-210-acceptance.md)。**M3 Epic #423** 按既定 OpenSpec 安排在 Epic 收口统一 PI 功能验收（[ADR-0010 草案](docs/adr/proposed/0010-m3-epic-acceptance.md)）：子 PR 完成规定工程验证与审查后可 merge、关闭实现 issue；Epic 关闭、ADR 转 implemented 与 OpenSpec 归档仍等 PI 明确通过，自动工程审批不替代 PI 操作。
 - PR 标签增删（包括非 `size-exempt` 标签）触发完整 CI，接受其 runner 成本；同一 PR 的新事件会取消仍在途的旧 run。`size-exempt` 授予/撤销无需空提交或 close/reopen，豁免仍须在 PR 写明理由；`all-checks-passed` 仍要求所有依赖 job success，failed/cancelled/skipped 均失败，不改分支保护。
 - 本地证据：所有写入者（含 issue、PR 审查、design/stage-pipeline）先读当前 [project profile](openspec/project-profile.md) 的本地证据契约；`.workplans/` 不交付、不强制入库，禁止为格式闸重写已消费的 oracle/证据字节。
 
@@ -94,6 +94,7 @@ SHUD-Harness/
 | Web 审批卡往返 | 手工：读 raw → Allow once；写 raw → deny | session log 读审批 allowed-once 后成功；写 immutable 且无新审批；raw md5 不变 | manual |
 | SHUD ccw tiny（本机） | `pnpm run shud:tiny` | exit 0 + `.dat` 产出，<2 min | block（本机） |
 | SHUD ccw 重启恢复（本机，需 SHUD 与 `DMXAPI_KEY`） | `pnpm run shud:restart` | SIGTERM / SIGKILL 两用例 PASS；SHUD 连续存活、五条恢复断言成立，通知必须 `delivered`（`unreachable` 判 FAIL）；RunRecord 含退出码与非空产物清单，证据取 session log / 运行目录 / 索引 | block（本机） |
+| 首任务 ccw → EvidenceReport（本机，需 SHUD 与 `DMXAPI_KEY`） | `pnpm run shud:first-task <scratch-workspace>` | Web/HTTP 单提示主链 exit 0；worker 等待并成功收集；同提交的 `approval/asked` 与 `approval/decided: allowed-once`、done TaskCard、Accepted by PI Markdown、StackLock llm 三字段与三 submodule 修订、四句不变式均成立；显式工作区可在 TMPDIR，脚本自动 Allow once 仅为工程证据，不是 PI 验收 | block（本机，CI 不运行） |
 | 闸自证 | `pnpm run test-guardrails` | 每闸拒违规、收干净输入 | block |
 
 ## Runtime Lifecycle
@@ -269,8 +270,9 @@ headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 
 | raw-guard 五探针 / raw 字节不变 | `scripts/runtime/raw-guard-probes.sh` | 本机 `pnpm run raw-guard:probes`（需 `DMXAPI_KEY`；exit 2 = 模型偏离须重跑） | block |
 | ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
 | ccw 重启恢复 / 五条作业不变量 | `scripts/runtime/shud-restart.sh` | 本机 `pnpm run shud:restart`（需 SHUD 与 `DMXAPI_KEY`；SIGTERM / SIGKILL 两用例，通知必须 delivered） | block（本机） |
+| 首任务调用链 / 报告审批与文件联合判据 | `scripts/runtime/shud-first-task.sh` | 本机 `pnpm run shud:first-task <scratch-workspace>`（需 SHUD 与 `DMXAPI_KEY`；独立 Web profile，审计与文件同时通过；CI 不运行，自动 Allow once 不代替 PI 验收） | block（本机） |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
-| PI 功能验收（Epic #210 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 验收记录；工程门禁不变 | gate |
+| PI 功能验收（Epic #210 / M3 Epic #423 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 亲自操作与明确验收记录；工程门禁及运行时审批权限不变 | gate |
 | 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
 | docs 随代码改 | PR 模板 | review-only | review-only |
 | 科学措辞规则（测试常量与枚举短语 lint） | `packages/dsh-shud-core/src/governance/wording.ts` 及其测试 | `pnpm run test`（纳入默认 `check`）；报告门禁的机器边界为四句不变式逐字出现且模型撰写字段无禁止短语，完整报告校验器另行交付；guard 通过 ≠ 语义合规，仍由 PI 审阅 | block |
