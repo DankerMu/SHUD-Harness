@@ -109,54 +109,168 @@ test("D7 excludes both submitted and already-renamed running bytes until startup
 }, 15000);
 
 test("overlapping manual and timer ticks single-flight one held entry while another settles", async () => {
-  const h = await pollFixture();
-  const held = barrier();
-  const release = barrier();
+  // Control admission only; native identity, exit publication and timeout deadlines stay real.
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const h = await pollFixture().catch((error: unknown) => {
+    vi.useRealTimers();
+    throw new Error("Poll barrier fixture setup failed", { cause: error });
+  });
+  let record: RunJob | undefined;
+  const initial = barrier();
+  const releaseInitial = barrier();
+  const publication = barrier();
+  const releasePublication = barrier();
   const ticks: Promise<void>[] = [];
+  const failures: unknown[] = [];
+  let phase = "setup";
+  let metadataReads = 0;
+  let activeMetadataReads = 0;
+  let maximumActiveMetadataReads = 0;
+  let initialReleased = false;
+  let publicationReleased = false;
+  let terminalAttempts = 0;
   let terminalWrites = 0;
   try {
     const first = h.start();
-    const second = h.start();
-    const [record, healthy] = await Promise.all([first.pending, second.pending]);
-    let heldOnce = false;
+    record = await first.pending;
+    const path = join(record.run_dir, "run-job.json");
     vi.mocked(io.lstat).mockImplementation(async (...args) => {
-      if (
-        args[0] === join(record.run_dir, "run-job.json") &&
-        !heldOnce &&
-        actualFs.existsSync(join(record.run_dir, "exit_code"))
-      ) {
-        heldOnce = true;
-        held.release();
-        await release.waiting;
+      if (args[0] !== path) return actualIo.lstat(...args);
+      metadataReads++;
+      activeMetadataReads++;
+      maximumActiveMetadataReads = Math.max(maximumActiveMetadataReads, activeMetadataReads);
+      try {
+        // No pre-exit step was admitted: these are the initial and publication reads
+        // of the same held step, not metadata reads from an older timer operation.
+        if (metadataReads === 1) {
+          initial.release();
+          await releaseInitial.waiting;
+        } else if (metadataReads === 2) {
+          publication.release();
+          await releasePublication.waiting;
+        }
+        return await actualIo.lstat(...args);
+      } finally {
+        activeMetadataReads--;
       }
-      return actualIo.lstat(...args);
     });
     vi.mocked(fs.renameSync).mockImplementation((source, target) => {
-      if (target === join(record.run_dir, "run-job.json")) {
+      let terminal = false;
+      if (target === path) {
         const candidate = RunJobSchema.parse(JSON.parse(actualFs.readFileSync(source, "utf8")));
-        if (candidate.status === "succeeded") terminalWrites++;
+        terminal =
+          candidate.status === "succeeded" ||
+          candidate.status === "failed" ||
+          candidate.status === "cancelled";
+        if (terminal) terminalAttempts++;
       }
       actualFs.renameSync(source, target);
+      if (terminal) terminalWrites++;
     });
     await releaseRun(record);
+    phase = "initial metadata";
+    vi.advanceTimersByTime(7);
     ticks.push(tick(h.registry));
-    await enteredBeforeCompletion(held.waiting, ticks[0]);
+    await completedWithinWindow(enteredBeforeCompletion(initial.waiting, ticks[0]));
+
+    // Submit only once the first step is held, so the healthy run has no old live tail.
+    phase = "healthy progress";
+    const second = h.start();
+    const healthy = await second.pending;
     await releaseRun(healthy);
+    vi.advanceTimersByTime(7);
     ticks.push(tick(h.registry), tick(h.registry));
-    await expect.poll(() => second.producer.completed.length).toBe(1);
+    await completedWithinWindow(second.producer.executions[0].hooks.done);
+    expect(second.producer.completed).toHaveLength(1);
     expect(second.producer.durableAtSettle[0].status).toBe("succeeded");
     expect(first.producer.completed).toEqual([]);
     expect((await readRecord(record.run_dir)).status).toBe("running");
+    expect(metadataReads).toBe(1);
+    expect(activeMetadataReads).toBe(1);
+    expect(maximumActiveMetadataReads).toBe(1);
+    expect(terminalAttempts).toBe(0);
     expect(terminalWrites).toBe(0);
-    release.release();
-    await Promise.all(ticks);
-    await expect.poll(() => first.producer.completed.length).toBe(1);
+    expect(h.errors).toEqual([]);
+
+    phase = "publication metadata";
+    initialReleased = true;
+    releaseInitial.release();
+    await completedWithinWindow(enteredBeforeCompletion(publication.waiting, ticks[0]));
+    vi.advanceTimersByTime(7);
+    ticks.push(tick(h.registry), tick(h.registry));
+    expect((await readRecord(record.run_dir)).status).toBe("running");
+    expect(metadataReads).toBe(2);
+    expect(activeMetadataReads).toBe(1);
+    expect(maximumActiveMetadataReads).toBe(1);
+    expect(first.producer.completed).toEqual([]);
+    expect(terminalAttempts).toBe(0);
+    expect(terminalWrites).toBe(0);
+    expect(h.errors).toEqual([]);
+
+    phase = "terminal completion";
+    publicationReleased = true;
+    releasePublication.release();
+    await completedWithinWindow(Promise.all(ticks));
+    expect(first.producer.completed).toHaveLength(1);
+    expect(first.producer.durableAtSettle[0].status).toBe("succeeded");
+    expect(metadataReads).toBe(2);
+    expect(activeMetadataReads).toBe(0);
+    expect(maximumActiveMetadataReads).toBe(1);
+    expect(terminalAttempts).toBe(1);
     expect(terminalWrites).toBe(1);
+    expect(h.errors).toEqual([]);
+  } catch (error) {
+    // Capture only bounded fixture facts before cleanup can settle or remove either run.
+    let durableStatus = "unavailable";
+    try {
+      if (record) {
+        durableStatus = RunJobSchema.parse(
+          JSON.parse(actualFs.readFileSync(join(record.run_dir, "run-job.json"), "utf8")),
+        ).status;
+      }
+    } catch {
+      // Failed evidence capture must not replace the original failure or prevent cleanup.
+    }
+    const evidence = {
+      phase,
+      metadataReads,
+      activeMetadataReads,
+      maximumActiveMetadataReads,
+      initialReleased,
+      publicationReleased,
+      terminalAttempts,
+      terminalWrites,
+      durableStatus,
+      completions: h.producers.slice(0, 2).map((producer) => producer.completed.length),
+      errorCount: h.errors.length,
+      errors: h.errors.slice(0, 4).map((message) => ({
+        poll: message.includes("Cannot poll SHUD run"),
+        metadata: message.includes("run metadata"),
+        publication: message.includes("run-job publication"),
+        codes: message.match(/\b(?:ENOENT|EIO|EACCES|EPERM|MISMATCH)\b/gu)?.slice(0, 4),
+      })),
+    };
+    failures.push(new Error(`Poll barrier failure: ${JSON.stringify(evidence)}`, { cause: error }));
   } finally {
-    release.release();
-    await Promise.allSettled(ticks);
-    await h.close();
+    releaseInitial.release();
+    releasePublication.release();
+    try {
+      await completedWithinWindow(Promise.allSettled(ticks));
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      try {
+        await h.close();
+      } catch (error) {
+        failures.push(error);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
   }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1)
+    throw new AggregateError(failures, "Poll barrier and cleanup failed", { cause: failures[0] });
 }, 15000);
 
 test("failed terminal persistence preserves done and retries successfully without blocking another run", async () => {
