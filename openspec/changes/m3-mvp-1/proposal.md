@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #481 fixture
+
+Issue type: bounded bug fix. Fixture level: expanded because the change protects raw writes through the pre-execute seam (Critical Path #2), despite its small implementation.
+Scope: raw-guard task_create fixed tasks output-root routing, focused decision and real registered ToolRuntime regressions, canonical/delta raw-data-guard specifications. No tools/records/jobs production changes or blanket workspace-writer policy.
+Selected packs: Public API/seam, File IO/path safety, Auth/permissions, Ordering/error boundaries, Legacy compatibility, Documentation. Config/setup, Schema evolution, Resource/discovery and Release/dependencies are not selected: no new config/schema/dependency/traversal/lifecycle.
+Must preserve existing shud_run capture-root/task-target/input behavior, report guards, read/pass-through behavior, raw configuration support and task_create's closed arguments/ordinary planned-card output.
+Evidence: actual mounted ToolRuntime RED before fix for relative rawDirs tasks, absent/existing roots and protected ancestor; zero execute/approval/writes on deny, disjoint successful planned card; alias/prefix decision controls, built real-tool smoke, full check/strict/profile/raw five-probes and three-seat review. No PI acceptance claim.
+
 ## Issue #450 fixture (including #490)
 
 Issue type: feature plus approved caller compatibility fix. Fixture level: expanded (override upstream compact: public executable, shared process/HTTP lifecycle, approval credentials and cross-session evidence require expanded); Critical Paths #3/#4/#5/#6.

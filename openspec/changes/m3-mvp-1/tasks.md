@@ -2,6 +2,15 @@
 
 合入顺序按依赖而非组号，见 design.md「Migration Plan」：3.1a → 6.1a → 1.1 → 2.1a → 2.1b → 2.1c → 3.1b–d、3.2、3.3a → 3.3b → 3.3c → 4.1 → 4.2、4.3 → 4.4a → 4.4b、4.4c → 5.1 → 7.1 → 6.1b → 6.2 → 6.3（6.1b/6.2 与 7.1 可并行，只有 6.3 须在 7.1 之后）→ 8.1a → 8.1b → 9.1 → 9.2 → 10.1（design 第 7 步所写"6.1"即本文件的 6.1b；6.1a 已作为 spike 前置先行）。各任务写明的"依赖"是硬前置；组内未写依赖的切片只受上述合入顺序约束。fixture level 词表以 `subagent-workflow` 的 `issue-risk-contract.md` 为准。需求名一律引用 `specs/*/spec.md` 的 `### Requirement:` 原文。
 
+### Issue #481 risk/evidence map
+
+- [x] #481 Guard task_create's fixed tasks output root in raw-guard; update canonical/delta guarded-tool and pass-through contracts.
+- [x] #481 Prove actual registered ToolRuntime deny before execute/approval/file writes for relative tasks (existing/absent) and protected ancestors; preserve disjoint planned-card success and raw bytes.
+- [x] #481 Run alias/prefix/nearest-existing decision regressions, built-tool smoke and full check/strict/profile/raw five probes without weakening prior shud_run tests. The expanded white-box review below remains a separate mandatory merge gate.
+
+Selected packs: Public API/seam → actual ToolRuntime result and unchanged closed arguments; File IO/path safety → root/ancestor/alias/no-write snapshots; Auth/ordering/error → raw-immutable before execute, zero approval, existing plugin failure boundary; Legacy → frozen shud_run/report/generic tests plus full suite and real raw probes; Documentation → canonical/delta pass-through consistency and strict validation.
+Not selected: Config/setup, schema evolution, resource/discovery, release/dependencies (no new config/schema/limits/dependencies/lifecycle). Scope excludes other workspace writers and all tools/records/jobs production changes. Fixture expanded for Critical Path #2; three seats correctness, test-evidence/spec and security/invariant. No PI acceptance or shared-change archive.
+
 ### Issue #447 risk/evidence map
 
 Selected task: 6.3 only. PI issuecomment6525339104 allows raw routing/tests/spec; O5 comment6463590574 fixes callId provenance. ADR-0011 and CONTEXT companion are required. No records/jobs/policy/core production or #481 changes.

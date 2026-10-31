@@ -296,8 +296,23 @@ tar 写归档 SHALL 按以下规则判为写：同一命令段内（分段与命
 - **WHEN** 调用 `bash`，`command` 为 `ls -la data/raw`
 - **THEN** 决策 `kind` 为 `ask`
 
+### Requirement: Task creation protects its fixed output root
+`task_create` SHALL 以调用 session cwd 下固定的 `tasks` 输出根进行 raw 判定，复用既有 realpath/最近存在祖先和路径包含规则；若任一 raw 根包含该输出根，SHALL 在工具执行前返回 `raw-immutable` deny，SHALL NOT 请求审批或创建目录/TaskCard。该判定不依赖 title 或 question_or_goal 中出现路径。输出根不存在时也必须保护；策略只由 raw-guard 拥有，不复制到工具或记录 writer。
+
+#### Scenario: configured tasks root is immutable before allocation
+- **WHEN** rawDirs 为相对 `tasks`，分别在 tasks 已存在与不存在时经真实注册 ToolRuntime 调用合法 science_assist task_create，参数不含 raw 路径
+- **THEN** 返回 immutable 拒绝，工具 execute 与 approval 均不发生，工作区快照不变，不分配或发布新 TaskCard
+
+#### Scenario: protected ancestors and physical aliases retain containment
+- **WHEN** raw 根包含 tasks 的祖先，或 session cwd、tasks、raw 根使用指向同一物理保护位置的别名
+- **THEN** 使用同一 canonical 包含关系拒绝，不创建目标；不将仅有共同字符串前缀的兄弟目录当作保护祖先
+
+#### Scenario: disjoint task creation still succeeds
+- **WHEN** rawDirs 为非重叠的 data/raw，使用同一合法参数调用 task_create
+- **THEN** 正常创建 schema 有效的 planned TaskCard，保留调用参数，raw 内容不变，不新增审批
+
 ### Requirement: Other tools pass through
-对不在守护列表内的工具（如 `read`、`run_code`、`present`），策略门 SHALL 不做判定并委托下一个监听器；SHALL NOT 返回 `{kind: 'allow'}`（它会终止瀑布）；SHALL NOT 因参数缺失或类型不符而抛错，缺失即视为不触及 raw。`read` 工具读 raw 不需审批是有意为之（provenance 由 M3 DataProvenance 承担）。
+对不在守护列表内的工具（如 `read`、`run_code`、`present`），策略门 SHALL 不做判定并委托下一个监听器；SHALL NOT 返回 `{kind: 'allow'}`（它会终止瀑布）；SHALL NOT 因参数缺失或类型不符而抛错，缺失即视为不触及 raw。`task_create` 属于受守护的固定输出 writer，按「Task creation protects its fixed output root」判定，不适用通用 pass-through。`read` 工具读 raw 不需审批是有意为之（provenance 由 M3 DataProvenance 承担）。
 
 #### Scenario: read tool
 - **WHEN** 调用 `read`，`file_path` 位于 raw 目录

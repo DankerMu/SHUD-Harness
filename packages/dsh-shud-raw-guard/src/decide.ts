@@ -275,6 +275,11 @@ export function caseInsensitiveRoot(root: string): boolean {
 }
 
 export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
+  if (call.name === "task_create") {
+    const cwd = call.cwd ?? process.cwd();
+    const tasks = canonical("tasks", cwd);
+    return options.rawDirs.some((raw) => containsPath(canonical(raw, cwd), tasks)) ? DENY : NEXT;
+  }
   if (
     call.name === "report_generate" ||
     call.name === "report_validate" ||
