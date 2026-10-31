@@ -156,6 +156,7 @@ export async function openReportApprovals(host: WebHost, sessionId: string, work
     requests.abort();
     await chain;
     requireFact(!timedOut, "First-task approval request drain deadline");
+    if (failure) throw failure;
   }
   try {
     const deadline = Date.now() + HTTP_MS;

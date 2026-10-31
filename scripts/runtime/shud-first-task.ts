@@ -23,9 +23,11 @@ import {
   cleanupOwnedRuns,
   command,
   cwdOf,
+  directoryNames,
   hashes,
   native,
   ownRunGroup,
+  readFileBounded,
   readPrivateJob,
   save,
   screen,
@@ -41,6 +43,9 @@ interface Config {
   patch?: string;
   source: string;
   hashes: Record<string, string>;
+}
+interface StoredLog extends FirstTaskLog {
+  byteLength: number;
 }
 function regular(path: string, label: string): void {
   requireFact(
@@ -120,6 +125,11 @@ function preflight(argv: string[]): Config {
     } catch {
       throw new Error("Missing readable regular --patch overlay");
     }
+    try {
+      configurationRows(readFileBounded(patch).bytes.toString("utf8"), "patch overlay");
+    } catch {
+      throw new Error("Invalid --patch overlay: bounded YAML sequence of mapping entries required");
+    }
   }
   const source = join(ROOT, "SHUD/input/ccw");
   let original: Record<string, string>;
@@ -140,23 +150,20 @@ function preflight(argv: string[]): Config {
   for (const path of [workspace, source, shudBin, dshBin, ...(patch ? [patch] : [])]) screen(path);
   return { workspace, shudBin, dshBin, patch, source, hashes: original };
 }
-function readLog(home: string, id: string): FirstTaskLog {
+function readLog(home: string, id: string, limit = BUFFER_LIMIT): StoredLog {
   const path = canonicalLog(home, id);
   regular(path, "canonical log");
-  requireFact(
-    fs.statSync(path).size <= BUFFER_LIMIT,
-    "Compressed canonical log exceeds byte budget",
-  );
-  const input = fs.readFileSync(path);
+  const input = readFileBounded(path, limit).bytes;
   let bytes: Buffer;
   if (path.endsWith(".zstd")) {
     const chunks: Buffer[] = [];
     let offset = 0;
     let total = 0;
     while (offset < input.length) {
+      requireFact(total < limit, "Canonical log exceeds byte budget");
       const decoded: unknown = zstdDecompressSync(input.subarray(offset), {
         info: true,
-        maxOutputLength: BUFFER_LIMIT - total,
+        maxOutputLength: limit - total,
       });
       const value = object(decoded);
       const chunk = value.buffer;
@@ -169,7 +176,7 @@ function readLog(home: string, id: string): FirstTaskLog {
         "Malformed canonical compression frame",
       );
       total += chunk.length;
-      requireFact(total <= BUFFER_LIMIT, "Canonical log exceeds byte budget");
+      requireFact(total <= limit, "Canonical log exceeds byte budget");
       chunks.push(chunk);
       offset += consumed;
     }
@@ -198,34 +205,43 @@ function readLog(home: string, id: string): FirstTaskLog {
   });
   const prefix = { events, asOfSeq: events.length - 1 };
   extendPrefix({ asOfSeq: -1, events: [] }, prefix);
-  return { ...prefix, header, canonicalLog: path, flushedThroughSeq: -1 };
+  return { ...prefix, header, canonicalLog: path, flushedThroughSeq: -1, byteLength: bytes.length };
 }
-async function storedLog(host: WebHost, home: string, id: string): Promise<FirstTaskLog> {
+async function storedLog(
+  host: WebHost,
+  home: string,
+  id: string,
+  limit = BUFFER_LIMIT,
+): Promise<StoredLog> {
   // Export accepts the actual bare child UUID and flushes that live session directly.
   // HEAD of the root with descendants=true alone does NOT flush child logs.
   await host.flush(id);
-  const log = readLog(home, id);
+  const log = readLog(home, id, limit);
   log.flushedThroughSeq = log.asOfSeq;
   return log;
 }
 function childIds(root: FirstTaskLog): string[] {
-  return [
-    ...new Set(
-      root.events
-        .filter((event) => event.type === "subagent/catalog")
-        .map((event) => text(object(event.data).childId)),
-    ),
-  ];
+  let child: string | undefined;
+  for (const event of root.events) {
+    if (event.type !== "subagent/catalog") continue;
+    const id = text(object(event.data).childId);
+    requireFact(
+      child === undefined || child === id,
+      "First-task has unexpected additional worker children",
+    );
+    child = id;
+  }
+  return child === undefined ? [] : [child];
 }
 function snapshotFiles(workspace: string): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  let total = 0;
+  const budget = { remaining: BUFFER_LIMIT };
   function read(relative: string): void {
     const path = join(workspace, relative);
     regular(path, "workspace evidence");
-    total += fs.statSync(path).size;
-    requireFact(total <= BUFFER_LIMIT, "Workspace evidence exceeds byte budget");
-    const source = fs.readFileSync(path, "utf8");
+    const file = readFileBounded(path, budget.remaining);
+    budget.remaining -= file.bytes.length;
+    const source = file.bytes.toString("utf8");
     screen(source);
     result[relative] = relative.endsWith(".md") ? source : (JSON.parse(source) as unknown);
   }
@@ -236,7 +252,7 @@ function snapshotFiles(workspace: string): Record<string, unknown> {
       fs.realpathSync(path) === path && fs.lstatSync(path).isDirectory(),
       "Unsafe workspace evidence directory",
     );
-    for (const name of fs.readdirSync(path).sort()) {
+    for (const name of directoryNames(path, budget)) {
       requireFact(
         /^(?:TASK|RUN|REPORT|STACK|DATA)-\d{8}T\d{6}-[0-9a-f]{4}(?:\.(?:json|md))?$/u.test(name),
         "Unexpected workspace evidence entry",
@@ -258,17 +274,27 @@ function captureCommits(): FirstTaskEvidence["actualStack"]["commits"] {
   }
   return result;
 }
+function configurationRows(source: string, label: string): Record<string, unknown>[] {
+  try {
+    const document = parseDocument(source, {
+      prettyErrors: false,
+      merge: false,
+      schema: "core",
+      customTags: [{ tag: "tag:yaml.org,2002:js", resolve: (value: string) => value }],
+    });
+    requireFact(
+      document.errors.length === 0 && document.warnings.length === 0,
+      `Invalid ${label} YAML`,
+    );
+    const value: unknown = document.toJS({ maxAliasCount: 100 });
+    requireFact(Array.isArray(value), `${label} must be a sequence`);
+    return value.map(object);
+  } catch {
+    throw new Error(`Invalid ${label} YAML or mapping entry shape`);
+  }
+}
 function effectiveConfig(source: string) {
-  const document = parseDocument(source, {
-    prettyErrors: false,
-    merge: false,
-    schema: "core",
-    customTags: [{ tag: "tag:yaml.org,2002:js", resolve: (value: string) => value }],
-  });
-  requireFact(document.errors.length === 0, "Invalid effective profile configuration");
-  const value: unknown = document.toJS({ maxAliasCount: 100 });
-  requireFact(Array.isArray(value), "Effective profile must be a sequence");
-  const rows = value.map(object);
+  const rows = configurationRows(source, "effective profile");
   function row(id: string) {
     const found = rows.filter((entry) => entry.id === id && entry.disabled !== true);
     requireFact(found.length === 1, "Missing or ambiguous required effective profile row");
@@ -347,24 +373,37 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
   let host: WebHost | undefined;
   let approvals: { healthy(): void; close(): Promise<void> } | undefined;
   let rootId: string | undefined;
-  let root: FirstTaskLog | undefined;
-  const children = new Map<string, FirstTaskLog>();
+  let root: StoredLog | undefined;
+  const children = new Map<string, StoredLog>();
   let outcome: unknown;
   let failure: unknown;
   let stage = "input-copy";
   const cleanupErrors: string[] = [];
-  function discoverRuns(): void {
+  function singleRun(): string | undefined {
     const runs = join(workspace, "runs");
-    if (!fs.existsSync(runs)) return;
+    if (!fs.existsSync(runs)) return undefined;
     requireFact(fs.realpathSync(runs) === runs, "Unsafe private run root");
-    for (const name of fs.readdirSync(runs)) {
-      const path = join(runs, name, "run-job.json");
-      if (!fs.existsSync(path)) continue;
-      const job = readPrivateJob(workspace, join(runs, name));
-      requireFact(job.run_dir === join(runs, name), "Private run path ownership mismatch");
-      if (job.pid && job.pid_started_at && job.owner_session && owners.has(job.owner_session))
-        ownRunGroup(job, config.shudBin, owners, groups);
+    let selected: string | undefined;
+    for (const name of directoryNames(runs)) {
+      requireFact(selected === undefined, "First-task has unexpected additional runs");
+      selected = name;
     }
+    return selected;
+  }
+  function discoverRun(name: string | undefined): void {
+    if (name === undefined) return;
+    const run = join(workspace, "runs", name);
+    if (!fs.existsSync(join(run, "run-job.json"))) return;
+    const job = readPrivateJob(workspace, run);
+    requireFact(job.run_dir === run, "Private run path ownership mismatch");
+    if (job.pid && job.pid_started_at && job.owner_session && owners.has(job.owner_session))
+      ownRunGroup(job, config.shudBin, owners, groups);
+  }
+  function logBudget(replacing: string): number {
+    let remaining = BUFFER_LIMIT;
+    if (root && root.header.id !== replacing) remaining -= root.byteLength;
+    for (const [id, child] of children) if (id !== replacing) remaining -= child.byteLength;
+    return remaining;
   }
   try {
     fs.mkdirSync(join(workspace, "input"), { recursive: true, mode: 0o700 });
@@ -439,11 +478,13 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
     let terminal = false;
     while (Date.now() < deadline) {
       approvals.healthy();
-      const current = await storedLog(host, home, rootId);
+      const current = await storedLog(host, home, rootId, logBudget(rootId));
       extendPrefix(root, current);
       root = current;
-      for (const id of childIds(root)) {
-        const child = await storedLog(host, home, id);
+      const ids = childIds(root);
+      const runName = singleRun();
+      for (const id of ids) {
+        const child = await storedLog(host, home, id, logBudget(id));
         const previous = children.get(id);
         if (previous) extendPrefix(previous, child);
         requireFact(
@@ -455,7 +496,7 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
         children.set(id, child);
         owners.add(id);
       }
-      discoverRuns();
+      discoverRun(runName);
       const submitCalls = root.events.filter(
         (event) => event.type === "tool/call" && object(event.data).name === "report_submit",
       );
@@ -484,13 +525,14 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
     requireFact(terminal, "First-task chain deadline");
     approvals.healthy();
     stage = "evidence-verdict";
-    const finalRoot = await storedLog(host, home, rootId);
+    const finalRoot = await storedLog(host, home, rootId, logBudget(rootId));
     extendPrefix(root, finalRoot);
     root = finalRoot;
     const finalChildren = childIds(root);
     requireFact(finalChildren.length === 1, "First-task requires one catalog-bound worker");
+    singleRun();
     for (const id of finalChildren) {
-      const child = await storedLog(host, home, id);
+      const child = await storedLog(host, home, id, logBudget(id));
       const previous = children.get(id);
       if (previous) extendPrefix(previous, child);
       requireFact(
@@ -559,18 +601,24 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
     // authorize a signal, but a real child header can recover its owner association.
     if (rootId) {
       try {
-        root = readLog(home, rootId);
+        root = readLog(home, rootId, logBudget(rootId));
         const ids = new Set(childIds(root));
         const sessions = join(home, "sessions");
-        for (const project of fs.readdirSync(sessions)) {
+        const discovery = { remaining: BUFFER_LIMIT };
+        for (const project of directoryNames(sessions, discovery)) {
           const directory = join(sessions, project);
           if (!fs.lstatSync(directory).isDirectory()) continue;
-          for (const id of fs.readdirSync(directory)) {
-            if (/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(id)) ids.add(id);
+          for (const id of directoryNames(directory, discovery)) {
+            if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u.test(id) || ids.has(id)) continue;
+            requireFact(
+              ids.size === 0,
+              "Unsafe additional worker directories; ownership remains unproved",
+            );
+            ids.add(id);
           }
         }
         for (const id of ids) {
-          const child = readLog(home, id);
+          const child = readLog(home, id, logBudget(id));
           if (
             child.header.parentSession === rootId &&
             child.header.origin === "subagent" &&
@@ -581,7 +629,9 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
           }
         }
       } catch {
-        cleanupErrors.push("Canonical failure evidence could not be fully retained");
+        cleanupErrors.push(
+          "Unsafe canonical discovery: additional or unavailable worker evidence; unknown work remains unproved",
+        );
       }
     }
     cleanupErrors.push(

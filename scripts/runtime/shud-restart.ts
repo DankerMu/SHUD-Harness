@@ -37,6 +37,7 @@ import {
   hashes,
   load,
   native,
+  readFileBounded,
   readPrivateJob,
   save,
   screen,
@@ -172,9 +173,8 @@ function sampleProcesses(
 }
 
 function wrapperFile(runDir: string): WrapperFile {
-  const path = join(runDir, "wrapper.pid");
-  const stat = fs.statSync(path);
-  return { text: fs.readFileSync(path, "utf8"), ino: stat.ino, mtimeMs: stat.mtimeMs };
+  const { bytes, stat } = readFileBounded(join(runDir, "wrapper.pid"));
+  return { text: bytes.toString("utf8"), ino: stat.ino, mtimeMs: stat.mtimeMs };
 }
 
 async function runCase(

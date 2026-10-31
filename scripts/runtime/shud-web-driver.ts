@@ -44,9 +44,62 @@ export function save(path: string, value: unknown): void {
   screen(bytes);
   fs.writeFileSync(path, bytes, { mode: 0o600 });
 }
-export function load(path: string): unknown {
-  requireFact(fs.statSync(path).size <= BUFFER_LIMIT, "Evidence file exceeds byte budget");
-  const bytes = fs.readFileSync(path, "utf8");
+/** One descriptor proves type, size and wrapper metadata; never block opening a FIFO. */
+export function readFileBounded(path: string, limit = BUFFER_LIMIT) {
+  requireFact(
+    Number.isSafeInteger(limit) && limit >= 0 && limit <= BUFFER_LIMIT,
+    "Invalid evidence byte budget",
+  );
+  const fd = fs.openSync(
+    path,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+  );
+  try {
+    const stat = fs.fstatSync(fd);
+    requireFact(stat.isFile(), "Evidence source is not a regular file");
+    requireFact(
+      Number.isSafeInteger(stat.size) && stat.size <= limit,
+      "Evidence file exceeds byte budget",
+    );
+    // Snapshot the observed length; a concurrent log append cannot expand this read.
+    const buffer = Buffer.allocUnsafe(stat.size);
+    let length = 0;
+    while (length < buffer.length) {
+      const count = fs.readSync(fd, buffer, length, buffer.length - length, length);
+      if (count === 0) break;
+      length += count;
+      requireFact(length <= limit, "Evidence read exceeds byte budget");
+    }
+    requireFact(length === stat.size, "Evidence file changed during bounded read");
+    return { bytes: buffer, stat };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Streaming discovery keeps directory fanout out of unbounded readdir arrays. */
+export function* directoryNames(
+  path: string,
+  budget = { remaining: BUFFER_LIMIT },
+): Generator<string> {
+  const directory = fs.opendirSync(path, { bufferSize: 1 });
+  try {
+    for (;;) {
+      const entry = directory.readSync();
+      if (!entry) return;
+      budget.remaining -= Buffer.byteLength(entry.name) + 1;
+      requireFact(budget.remaining >= 0, "Directory discovery exceeds byte budget");
+      yield entry.name;
+    }
+  } finally {
+    directory.closeSync();
+  }
+}
+
+export function load(path: string, budget?: { remaining: number }): unknown {
+  const file = readFileBounded(path, budget?.remaining ?? BUFFER_LIMIT);
+  if (budget) budget.remaining -= file.bytes.length;
+  const bytes = file.bytes.toString("utf8");
   screen(bytes);
   return JSON.parse(bytes) as unknown;
 }
@@ -217,6 +270,11 @@ export class WebHost {
   async rpc(method: string, request: unknown, signal?: AbortSignal): Promise<unknown> {
     this.healthy();
     const rpcId = randomUUID();
+    const abort = AbortSignal.any([
+      this.abort,
+      ...(signal ? [signal] : []),
+      AbortSignal.timeout(HTTP_MS),
+    ]);
     const response = await fetch(new URL(`/api/${method}`, this.origin), {
       method: "POST",
       redirect: "error",
@@ -227,19 +285,38 @@ export class WebHost {
         method,
         payload: { args: method === "$events/result" ? request : { request } },
       }),
-      signal: AbortSignal.any([
-        this.abort,
-        ...(signal ? [signal] : []),
-        AbortSignal.timeout(HTTP_MS),
-      ]),
+      signal: abort,
     });
-    requireFact(response.status === 200 && response.body, `Public ${method} HTTP failure`);
+    if (response.status !== 200 || !response.body) {
+      let cleanupFailed = false;
+      try {
+        await response.body?.cancel();
+      } catch {
+        cleanupFailed = true;
+      }
+      throw new Error(
+        `Public ${method} HTTP failure${cleanupFailed ? "; response cleanup failed" : ""}`,
+      );
+    }
     const chunks: Uint8Array[] = [];
     let size = 0;
     const reader = response.body.getReader();
+    let cancellation: Promise<void> | undefined;
+    let failed = false;
+    let failure: unknown;
+    let cleanupFailed = false;
+    const cancelRead = () => {
+      cancellation ??= reader.cancel(abort.reason);
+      // The promise is also awaited below; an abort callback must not leak a rejection.
+      void cancellation.catch(() => undefined);
+    };
+    abort.addEventListener("abort", cancelRead, { once: true });
+    if (abort.aborted) cancelRead();
     try {
       while (true) {
+        abort.throwIfAborted();
         const next = await reader.read();
+        abort.throwIfAborted();
         if (next.done) break;
         const chunk: unknown = next.value;
         requireFact(chunk instanceof Uint8Array, "Public RPC returned a non-byte chunk");
@@ -247,9 +324,25 @@ export class WebHost {
         requireFact(size <= BUFFER_LIMIT, "Public RPC exceeds byte budget");
         chunks.push(chunk);
       }
+    } catch (error) {
+      failed = true;
+      failure = abort.aborted ? abort.reason : error;
     } finally {
-      await reader.cancel();
+      abort.removeEventListener("abort", cancelRead);
+      try {
+        await (cancellation ?? reader.cancel());
+      } catch {
+        cleanupFailed = true;
+      }
+      try {
+        reader.releaseLock();
+      } catch {
+        cleanupFailed = true;
+      }
     }
+    if (failed) throw failure;
+    requireFact(!cleanupFailed, `Public ${method} response cleanup failed`);
+    abort.throwIfAborted();
     const bytes = Buffer.concat(chunks).toString("utf8");
     screen(bytes);
     const envelope = object(JSON.parse(bytes) as unknown);
@@ -393,23 +486,28 @@ export function canonicalLog(home: string, sessionId: string): string {
     "Invalid canonical session identity",
   );
   const root = join(home, "sessions");
-  const directories = fs
-    .readdirSync(root)
-    .map((project) => join(root, project, sessionId))
-    .filter((path) => fs.existsSync(path));
-  requireFact(directories.length === 1, "Missing or ambiguous canonical session directory");
-  const files = fs
-    .readdirSync(directories[0])
-    .flatMap((name) => {
-      const match = /^session(?:\.v(\d+))?\.jsonl(?:\.zstd)?$/u.exec(name);
-      return match ? [{ name, version: Number(match[1] ?? 0) }] : [];
-    })
-    .sort((a, b) => b.version - a.version);
-  requireFact(
-    files.length > 0 && (!files[1] || files[1].version !== files[0].version),
-    "Missing or ambiguous canonical log generation",
-  );
-  return join(directories[0], files[0].name);
+  const budget = { remaining: BUFFER_LIMIT };
+  let directory: string | undefined;
+  for (const project of directoryNames(root, budget)) {
+    const candidate = join(root, project, sessionId);
+    if (!fs.existsSync(candidate)) continue;
+    requireFact(directory === undefined, "Missing or ambiguous canonical session directory");
+    directory = candidate;
+  }
+  requireFact(directory, "Missing or ambiguous canonical session directory");
+  let selected: { name: string; version: number } | undefined;
+  let ambiguous = false;
+  for (const name of directoryNames(directory, budget)) {
+    const match = /^session(?:\.v(\d+))?\.jsonl(?:\.zstd)?$/u.exec(name);
+    if (!match) continue;
+    const version = Number(match[1] ?? 0);
+    if (!selected || version > selected.version) {
+      selected = { name, version };
+      ambiguous = false;
+    } else if (version === selected.version) ambiguous = true;
+  }
+  requireFact(selected && !ambiguous, "Missing or ambiguous canonical log generation");
+  return join(directory, selected.name);
 }
 async function stopGroup(group: ShudProcessGroup): Promise<void> {
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
@@ -488,12 +586,16 @@ export async function command(
   return stdout;
 }
 
-export function readPrivateJob(workspace: string, runDir: string): RunJob {
+export function readPrivateJob(
+  workspace: string,
+  runDir: string,
+  budget?: { remaining: number },
+): RunJob {
   requireFact(
     fs.realpathSync(runDir) === runDir && within(join(workspace, "runs"), runDir),
     "Run directory is not private",
   );
-  const parsed = RunJobSchema.safeParse(load(join(runDir, "run-job.json")));
+  const parsed = RunJobSchema.safeParse(load(join(runDir, "run-job.json"), budget));
   requireFact(parsed.success, "Malformed canonical RunJob");
   return parsed.data;
 }
@@ -504,6 +606,7 @@ export function ownRunGroup(
   shudBin: string,
   owners: ReadonlySet<string>,
   groups: Map<number, ShudProcessGroup>,
+  budget?: { remaining: number },
 ): boolean {
   requireFact(
     job.owner_session &&
@@ -516,9 +619,14 @@ export function ownRunGroup(
   if (groups.has(job.pid)) return true;
   const state = processExecutionState(job.pid);
   if (!state || state.state.startsWith("Z")) return false;
+  requireFact(cwdOf(job.pid) === job.run_dir, "Cleanup wrapper cwd/pid mismatch");
+  const wrapper = readFileBounded(
+    join(job.run_dir, "wrapper.pid"),
+    budget?.remaining ?? BUFFER_LIMIT,
+  );
+  if (budget) budget.remaining -= wrapper.bytes.length;
   requireFact(
-    cwdOf(job.pid) === job.run_dir &&
-      fs.readFileSync(join(job.run_dir, "wrapper.pid"), "utf8").trim() === String(job.pid),
+    wrapper.bytes.toString("utf8").trim() === String(job.pid),
     "Cleanup wrapper cwd/pid mismatch",
   );
   groups.set(job.pid, recoverProcessGroup({ pid: job.pid, pid_started_at: job.pid_started_at }));
@@ -540,15 +648,30 @@ export async function cleanupOwnedRuns(
   if (owners.size && fs.existsSync(runs)) {
     try {
       requireFact(fs.realpathSync(runs) === runs, "Cleanup run root is not private");
-      const entries = fs.readdirSync(runs);
-      if (entries.length !== 1)
-        errors.push("Private workspace contains unexpected additional or missing runs");
+      // Restart retains its existing per-run inspection/sampling contract. The
+      // first-task caller has no historical-group sampler and admits one run.
+      const entries: string[] = assertStopped ? fs.readdirSync(runs) : [];
+      const budget = assertStopped ? undefined : { remaining: BUFFER_LIMIT };
+      if (assertStopped) {
+        if (entries.length !== 1)
+          errors.push("Private workspace contains unexpected additional or missing runs");
+      } else {
+        for (const name of directoryNames(runs, budget)) {
+          if (entries.length) {
+            errors.push("Unsafe additional private runs: undiscovered ownership remains unproved");
+            break;
+          }
+          entries.push(name);
+        }
+        if (!entries.length)
+          errors.push("Private workspace contains unexpected additional or missing runs");
+      }
       for (const name of entries) {
         try {
-          const job = readPrivateJob(workspace, join(runs, name));
+          const job = readPrivateJob(workspace, join(runs, name), budget);
           if (!assertStopped)
             requireFact(job.run_dir === join(runs, name), "Cleanup run path ownership mismatch");
-          if (!ownRunGroup(job, shudBin, owners, groups)) {
+          if (!ownRunGroup(job, shudBin, owners, groups, budget)) {
             requireFact(
               assertStopped,
               "Historical group quiescence unproved; descendants may remain live",

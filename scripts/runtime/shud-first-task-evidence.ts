@@ -335,7 +335,8 @@ function assertSnapshot(e: FirstTaskEvidence) {
   const generations = calls(root, "report_generate");
   for (const generation of generations) {
     fact(
-      taskResult.seq < generation.seq && settled.some((notice) => notice.seq < generation.seq),
+      taskResult.seq < generation.seq &&
+        settled.some((notice) => delegatedResult.seq < notice.seq && notice.seq < generation.seq),
       "ORDER",
     );
   }
