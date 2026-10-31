@@ -7,9 +7,9 @@
 
 ## 2. Hosted diagnosis and delivery
 
-- [ ] 2.1 In an isolated PR, record same-head opened/labeled overlap with actual actions, run attempts, all seven results, suite/aggregate IDs, raw/required checks and merge state. Preserve original PR477 baseline and controls; distinguish any manual cancellation injection. Obtain a discriminating BLOCKED/required-PASS observation or report a real blocker rather than invent cause.
-- [ ] 2.2 Recover by rerunning the affected suite's entire graph without changing SHA/policy; publish evidence-backed diagnosis and upstream report where service-side behavior is observed, with auditable recovery/limits in existing documentation. Verify all seven jobs and aggregate pass, required state matches and ordinary merge succeeds.
-- [ ] 2.3 Complete expanded review and exact-head CI, ordinary merge/issue closure and independent archive; no M3 PI/ADR/Epic closure.
+- [x] 2.1 Isolated PR508 recorded actual opened/labeled actions and all attempts/jobs/suites/checks at ebffe27b. Explicit manual cancellation of the newer labeled suite followed by older-suite all-success reproduced required PASS / BLOCKED; historical PR477/496 and natural PR506 CLEAN control preserved in public PR/issue/upstream evidence.
+- [x] 2.2 Full affected-suite rerun 41242595025 attempt2 passed all seven jobs and aggregate124661508217, restoring CLEAN with unchanged source/test-merge SHAs and authority. Ordinary exact-head non-admin merge succeeded at 2026-10-31T21:30:30Z, commit bb48052f3a9a9f96f2564e3db2b4788a33f9747d; public receipt is PR508 comment6549391046. Upstream211754 comments19322065/19322171 preserve reproduction/merge evidence; its template bot auto-closed API submission, so no active upstream investigation or internal-algorithm fix is claimed.
+- [x] 2.3 Expanded three-seat Round1 CLEAN, zero findings/fix passes; exact-head CI and ordinary PR508 merge closed issue479. Independently archived with one additive engineering-gates requirement; M3 PI/ADR/Epic state unchanged.
 
 ## Risk pack mapping
 
