@@ -70,6 +70,14 @@ bundle patch（`profile/shud/cordis.patch.yml`）SHALL 插入两行 `@deepseek-a
 - **WHEN** 已限制的 Agent 切换到 standard 或插件释放
 - **THEN** 本插件旧限制与登记被释放，不移除其它来源的工具限制
 
+#### Scenario: failed replacement preserves the owned prior mask
+- **WHEN** 已限制的 Agent 切换到已知角色，但新 inherited 列表含未挂载工具，真实 restrict 拒绝
+- **THEN** 绑定处理器抛出含插件名与角色/工具名的错误，旧限制尚未释放；不记录新角色已成功绑定，不删除失败项重试，不影响其它来源限制。原始 Cordis emit 可传播该错误；真实会话提交路径的外层 observer 会捕获并记日志，不宣称会话选择被回滚或错误保证可见
+
+#### Scenario: repeated events and separate Agent lifetimes do not leak masks
+- **WHEN** 两个 live Agent 分别收到重复同角色事件，随后其中一个释放，再释放插件
+- **THEN** 重复事件不叠加本插件限制；第一个 Agent 的清理不改变第二个 Agent 或外部限制；插件释放移除剩余自有登记/限制，后续生命周期事件不再安装本插件限制
+
 ### Requirement: Role tool map uses mounted names
 `packages/dsh-shud-core/src/governance/role-tool-map.ts` SHALL 为每个角色保留一个条目，含 `{ inherited, local }` 两份实际工具名集合。`inherited` 是 Agent 从全局及 preset 祖先作用域继承、可被 restrict 过滤的工具；`local` 是宿主按 Agent 注册的自有工具。`getRoleToolIds(role)` SHALL 返回这两份集合；`isRoleToolIdAllowed(role, toolId)` SHALL 检查其并集。该条目是 restrict（只取 inherited）与 policy-gate（取并集）的唯一来源。
 - coordinator：`inherited` = `task_create`、`report_generate`、`report_validate`、`report_submit`、`report_decide`、`shud_collect`、`job_output`、`job_list`、`job_kill`；`local` = `subagent`。

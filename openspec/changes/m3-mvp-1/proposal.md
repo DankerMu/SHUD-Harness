@@ -1,5 +1,13 @@
 # Proposal
 
+## Issue #448 fixture
+
+Issue type: feature. Fixture level: expanded (agree with upstream); Critical Path #1.
+Blast radius: Agent-scoped inherited tool visibility, committed preset-switch ordering and restriction ownership; packaged coordinator/worker governance instructions.
+Selected risk packs: Public API; Config/project setup; Auth/permissions; Concurrency/shared state/ordering; Error handling/partial outputs; Legacy compatibility; Release/packaging/dependency compatibility; Documentation.
+Evidence floor: test-first real Cordis scopes and ToolRuntime registrations, exact inherited/local surfaces, current-projection switches and cleanup/failure controls; prompt drift negative controls; independent built-plugin lifecycle and packed-prompt consumer smoke; full check/strict/profile and three-seat white-box review.
+Only task 8.1a is selected. Issuecomment6463591334 supersedes the original fixed-role/global/preset examples. New presets package plus bundle dependency/knip/lock only; no cordis.patch.yml, ESLint whitelist expansion, core map/reader or policy execution change. Actual installed preset/Web behavior belongs to #449; first-task orchestration and centralized PI acceptance remain #450/#452.
+
 ## Issue #447 fixture
 
 Issue type: feature. Fixture level: expanded (agree with upstream); Critical Paths #2/#3/#6.
