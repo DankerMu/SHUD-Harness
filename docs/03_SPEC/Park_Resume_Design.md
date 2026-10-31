@@ -305,6 +305,8 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 暂时性恢复、追加或 flush 失败按原失败时间记账，间隔至少 10 秒、上限 3 次；第三次失败与 `unreachable` 原子发布，不进行第四次传输。失败记账写入失败时先重试该次发布，保留原时间/原因，不让 pump cadence 无控制地重发或凭空增加持久次数；若写入实际已提交，服务缺席产生的规范等待提示不能使该记账失效，在运行/owner 身份及次数、时间、状态仍匹配时识别原失败提示或规范等待提示，不重写、不重复计数，也不接受任意变更的提示。确认的追加及成功 flush 回执按 live Session 和完整运行身份保存在进程内：普通注册表重载可继续 flush 或仅补写 delivered，不重复确认过的步骤；实际进程崩溃丢失这些回执，追加与 durable 标记之间的窗口允许重放。这是至少一次语义，不保证 exactly-once；没有新增持久 outbox 或 schema。
 
+钉版 `dsh-v0.2.1-rc.2` 的真实 Web worker 子会话（`origin: subagent`）不能经当前 `SessionController.resolveAgent(owner_session)` seam 接管：公开 API 按 subagent 所有权返回 `session/agent-busy`，本路径按上述预算最终记为 unreachable。真实等待/收集仍成功，操作上保持 worker `job_output(wait:true)` → `shud_collect`，不依赖 child wake；版本、canonical session 与独立回执见 [#457 实测边界](../Migration_Plan_dsh.md#web-worker-通知恢复边界2026-10-31457)。这不推广到其它会话/API，不放宽 `shud:restart` 必须 delivered、unreachable 判 FAIL 的门禁。
+
 协议与验收边界以 [M2 fixture design](../../openspec/changes/archive/2026-10-27-m2-run-chain/design.md)、[tasks](../../openspec/changes/archive/2026-10-27-m2-run-chain/tasks.md) 为准；实现入口为 [shud-poll.ts](../../packages/dsh-shud-jobs/src/shud-poll.ts)，历史收集诊断的受控校验归 [shud-run-file.ts](../../packages/dsh-shud-jobs/src/shud-run-file.ts) 所有。当前后端验证包含真实原生执行/宿主崩溃与公开会话服务 doubles，工具入口 #314–315 已挂载并经 built/installed 实测；built 完成索引跨工作区读取与 installed headless 活动索引读取的证据分别成立，不等同完整 Web 恢复。真实 Web SIGTERM/SIGKILL 重启闸 #316 已交付；PI 已于2026-10-27通过 #318 手工验收，实际日志与 RunRecord 见 [M2 手工验收记录](../Migration_Plan_dsh.md#m2-手工-web-重启唤醒验收2026-10-27318)，不以这些后端测试替代 PI 结论。
 
 ## 10. 用户体验

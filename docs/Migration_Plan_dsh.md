@@ -308,4 +308,24 @@ env -u ALL_PROXY node ../dsh-spike/runs/m3-issue426/run-remaining.mjs remaining-
 
 边界与清理：remaining-a/b 因 Web interactions=none 无模型/求解器运行；修正为 answer。remaining-c 驱动误将 coordinator 首轮结束当完成而过早关宿主，`limits.json` 明确作废其 K13/O1 verdict，不计成功；其求解器自然退出0。remaining-d 才是完整闭环。remaining-e 的直接未注入服务访问失败，remaining-f 用公开 agent.ctx 服务验证。所有自有宿主与 wrapper 的指定 PID 检查均已退出，两次实际求解器都有 exit_code=0；没有广域 kill。O3 原停止记录保留于 issue comment 6462425572，重开是 PI 明确授权，不追认原失败为通过。后续必须按受影响 OpenSpec requirement 实现并复审；本次没有验证报告工具、产品角色切换清理或完整 M3 首任务。
 
-子会话通知恢复失败的独立诊断已登记 [#457](https://github.com/DankerMu/SHUD-Harness/issues/457)，不阻塞本次已验证的等待/收集路径，不放宽 `shud:restart` 的 delivered 判据。
+子会话通知恢复失败由 [#457](https://github.com/DankerMu/SHUD-Harness/issues/457) 完成下述有界诊断，不阻塞已验证的等待/收集路径，不放宽 `shud:restart` 的 delivered 判据。
+
+### Web worker 通知恢复边界（2026-10-31，#457）
+
+验证版本为只读 `dsh-v0.2.1-rc.2`（CLI `0.2.1-rc.2`）。该版本的公开 `SessionController.resolveAgent` 不接管 `origin: subagent` 会话：宿主 `packages/api/session-controller/src/agent.ts:110–131` 的 `hasApiSessionSubagentOwner` 对该 header 无条件返回 true，并构造 `session/agent-busy`；已附着会话检查在 219–221，磁盘恢复检查在 431–433、先于 agent composition。因此这不是仅等待 worker 空闲就能消除的 busy 条件，也不是 bare UUID 格式错误。SHUD 当前投递路径在 `packages/dsh-shud-jobs/src/shud-poll.ts:784–800` 用持久 owner 调用此公开 seam，非 `session/not-found` 错误统一记为受控 restoration failure。
+
+真实 Web coordinator 派生 worker、执行 ccw 30 天并完成首任务链。沿用未修改的 `scripts/runtime/shud-first-task.ts`，仅在内存中附加有界通知观察；独立临时 overlay 在原通知已终结后，对同一 owner 调用一次公开 `resolveAgent`，不包装服务、不发送消息、不替换原重试。凭据只经环境变量；探针只保存安全错误类别、身份与时间，不保存任意 error message、配置或 Agent 对象。
+
+| 证据 | 观察结果 |
+|---|---|
+| root / child | `session-1a3d7305-b23b-4e29-951c-a8d004075d0c` / `8e536233-a078-4480-9f91-5d23459af2bd`；child header 为 `origin=subagent`、`agentPreset=worker`，parent 精确匹配 root |
+| 持久运行 | `RUN-20261031T171248-6094` / `JOB-20261031T171248-6094`；`owner_session` 精确等于 child，RunJob 为 collected，RunRecord succeeded / exit_code=0 / exit_class=ok |
+| 等待与收集 | child seq26/27：`job_output(job_id, wait:true)`；seq31/32：`shud_collect(run_id)` 成功。此前 seq21/22 错用 `dsh_job_id` 参数被拒绝，worker 改正后继续，没有再次提交 |
+| 通知与收件日志 | 原通知依次 pending/0、pending/1、pending/2、unreachable/3；终结时间 `2026-10-31T17:13:14.281Z`。显式 flush 后的 root、child canonical log 均无 `source.kind: shud-jobs` 消息 |
+| 独立 seam 回执 | 原终结之后 `.484Z` 发起，`.485Z` 返回 `RemoteError` / `session/agent-busy`；不把这个单次回执追认成原三次尝试各自的错误码 |
+| 原工程 oracle 与附加诊断 | 原首任务十项判据全部 PASS；附加 child-delivery 判据以 `FIRST_TASK_CHILD_WAKE_DIAGNOSTIC` 失败，不能称为 child wake 成功或默认首任务闸失败 |
+| 输入与清理 | 45 个 source/copy SHA256 一致；宿主已停止，cleanupErrors 为空 |
+
+本地证据（不入库）：workspace `/private/tmp/shud-issue457-child-a` 的 `runs/RUN-20261031T171248-6094/{run-job,run-record}.json`；DSH_HOME `/private/tmp/shud-first-task-bgsEdk` 下 `first-task-evidence/{child-wake-diagnostic,resolve-agent-probe,engineering-before-wake,verdict}.json`。该 home 的 `sessions/--private-tmp-shud-issue457-child-a--/<上述会话 id>/session.v4.jsonl.zstd` 是收件与工具事件的 canonical 来源。一次性驱动与探针位于本地 `.workplans/issue-457/`，不成为产品命令或长期测试。
+
+结论仅覆盖上述钉版、真实 Web worker 类型与 `resolveAgent` seam；原受控 detail 仍不能还原每次历史失败的底层原因，不推断其它宿主版本、root 会话或其它投递 API。按 #457 验收分支 (b) 记录此限制；操作路径保持 #426 的 worker `job_output(wait:true)` → `shud_collect`，不能依赖异步 SHUD wake。未改宿主、polling/fallback 或 M3 门禁；`pnpm run shud:restart` 仍必须 delivered，unreachable 仍 FAIL。本次没有重启验证，也不构成 #452 PI 验收，M3 Epic / ADR / OpenSpec 收口状态不变。
