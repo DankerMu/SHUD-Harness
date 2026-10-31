@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { makeEvidenceReport } from "../../dsh-shud-records/src/report-render-test-harness.ts";
 import { decideRawAccess, normalizeRawDirs, RAW_READ_PROVENANCE_REASON } from "./decide.ts";
 
 vi.mock("node:fs", async (original) => {
@@ -380,4 +381,317 @@ test("a separate alternate-case symlink is not filesystem folding evidence", () 
   } finally {
     native.rmSync(outside, { recursive: true, force: true });
   }
+});
+
+// One explicit OS entry mapping, not a case-folding filesystem model: native
+// lookup still validates the real entry before returning the caller's spelling.
+function retainExistingEntry(spelling: string, entry: string) {
+  const configured = join(cwd, spelling);
+  const physical = join(cwd, entry);
+  const stat = native.lstatSync(physical);
+  expect(stat.isFile() || stat.isDirectory()).toBe(true);
+  expect(stat.isSymbolicLink()).toBe(false);
+  vi.mocked(fs.realpathSync.native).mockImplementation((path) => {
+    const matched = String(path) === configured;
+    const resolved = native.realpathSync.native(matched ? physical : path);
+    return matched ? configured : resolved;
+  });
+  vi.mocked(fs.lstatSync).mockImplementation((path: fs.PathLike, options?: fs.StatOptions) =>
+    native.lstatSync(String(path) === configured ? physical : path, options),
+  );
+}
+
+test.each([
+  ["RUNS", "runs"],
+  ["STACKS", "stacks"],
+  ["PROVENANCE", "provenance"],
+])("fully existing retained-case %s/%s still denies its fixed output", (raw, output) => {
+  native.mkdirSync(join(cwd, output));
+  retainExistingEntry(raw, output);
+  const before = native.lstatSync(join(cwd, output), { bigint: true });
+  expect(decide("shud_run", { input_dir: "ordinary-input" }, [raw])).toMatchObject({
+    kind: "deny",
+    code: "raw-immutable",
+  });
+  expect(native.lstatSync(join(cwd, output), { bigint: true })).toEqual(before);
+  expect(fs.opendirSync).not.toHaveBeenCalled();
+});
+
+test.each([
+  ["write", { file_path: "observations.csv" }],
+  ["edit", { file_path: "observations.csv" }],
+  ["str_replace_editor", { command: "str_replace", path: "observations.csv" }],
+] as const)("fully existing retained-case file preserves %s immutability", (name, args) => {
+  const path = join(cwd, "observations.csv");
+  const bytes = "original observations\n";
+  native.writeFileSync(path, bytes);
+  expect(native.lstatSync(path).nlink).toBe(1);
+  retainExistingEntry("OBSERVATIONS.CSV", "observations.csv");
+  expect(decide(name, args, ["OBSERVATIONS.CSV"])).toMatchObject({
+    kind: "deny",
+    code: "raw-immutable",
+  });
+  expect(native.readFileSync(path, "utf8")).toBe(bytes);
+});
+
+test.each([
+  ["task_create", {}, "TASKS", "tasks"],
+  ["report_generate", { task_id: task }, "REPORTS", "reports"],
+] as const)("fully existing retained-case namespace protects %s", (name, args, raw, output) => {
+  native.mkdirSync(join(cwd, output));
+  retainExistingEntry(raw, output);
+  expect(decide(name, args, [raw])).toMatchObject({ kind: "deny", code: "raw-immutable" });
+});
+
+test.each(["shud_run", "report_generate"])(
+  "fully existing retained-case task file remains protected for %s",
+  (name) => {
+    const directory = join(cwd, "tasks", task);
+    native.mkdirSync(directory, { recursive: true });
+    const bytes = "original task bytes; denial precedes task consumption\n";
+    native.writeFileSync(join(directory, "task.json"), bytes);
+    const raw = `tasks/${task}/TASK.JSON`;
+    retainExistingEntry(raw, `tasks/${task}/task.json`);
+    expect(decide(name, { task_id: task, input_dir: "ordinary-input" }, [raw])).toMatchObject({
+      kind: "deny",
+      code: "raw-immutable",
+    });
+    expect(native.readFileSync(join(directory, "task.json"), "utf8")).toBe(bytes);
+  },
+);
+
+test.each(["report_validate", "report_submit", "report_decide"])(
+  "fully existing retained-case report file remains protected for %s",
+  (name) => {
+    const evidence = makeEvidenceReport();
+    native.mkdirSync(join(cwd, "reports"));
+    const actual = `reports/${evidence.report_id}.json`;
+    const raw = `reports/${evidence.report_id}.JSON`;
+    const bytes = JSON.stringify(evidence);
+    native.writeFileSync(join(cwd, actual), bytes);
+    retainExistingEntry(raw, actual);
+    expect(decide(name, { report_id: evidence.report_id }, [raw])).toMatchObject({
+      kind: "deny",
+      code: "raw-immutable",
+    });
+    expect(native.readFileSync(join(cwd, actual), "utf8")).toBe(bytes);
+  },
+);
+
+test.each(["data", "data/input"])(
+  "fully existing retained-case raw input %s requires provenance approval",
+  (input_dir) => {
+    native.mkdirSync(join(cwd, "data", "input"), { recursive: true });
+    retainExistingEntry("DATA", "data");
+    expect(decide("shud_run", { input_dir }, ["DATA"])).toMatchObject({
+      kind: "ask",
+      code: "raw-read-provenance",
+      reason: RAW_READ_PROVENANCE_REASON,
+    });
+  },
+);
+
+test.each(["bash", "pwsh"])(
+  "fully existing retained-case workdir keeps %s provenance policy",
+  (name) => {
+    native.mkdirSync(join(cwd, "data"));
+    retainExistingEntry("DATA", "data");
+    expect(decide(name, { command: "pwd", workdir: "data" }, ["DATA"])).toMatchObject({
+      kind: "ask",
+      code: "raw-read-provenance",
+      reason: RAW_READ_PROVENANCE_REASON,
+    });
+  },
+);
+
+test("fully existing retained-case archive target remains immutable", () => {
+  const bytes = "original archive bytes\n";
+  native.writeFileSync(join(cwd, "archive.tar"), bytes);
+  native.mkdirSync(join(cwd, "source"));
+  retainExistingEntry("ARCHIVE.TAR", "archive.tar");
+  expect(
+    decide("bash", { command: "tar -cf archive.tar source" }, ["ARCHIVE.TAR", "source"]),
+  ).toMatchObject({ kind: "deny", code: "raw-immutable" });
+  expect(native.readFileSync(join(cwd, "archive.tar"), "utf8")).toBe(bytes);
+});
+
+test.each(["directory", "file"])(
+  "retained-case existing %s with distinct physical identities remains unrelated",
+  (kind) => {
+    if (kind === "directory") {
+      native.mkdirSync(join(cwd, "raw"));
+      native.mkdirSync(join(cwd, "distinct"));
+    } else {
+      native.writeFileSync(join(cwd, "raw"), "ordinary target\n");
+      native.writeFileSync(join(cwd, "distinct"), "separate protected entry\n");
+    }
+    const target = native.lstatSync(join(cwd, "raw"));
+    const protectedEntry = native.lstatSync(join(cwd, "distinct"));
+    expect([target.dev, target.ino]).not.toEqual([protectedEntry.dev, protectedEntry.ino]);
+    retainExistingEntry("RAW", "distinct");
+    expect(decide("write", { file_path: "raw" })).toEqual({ kind: "next", code: "unrelated" });
+  },
+);
+
+test("ordinary existing containment and disjoint siblings retain native policy", () => {
+  native.mkdirSync(join(cwd, "raw"));
+  native.mkdirSync(join(cwd, "rawx"));
+  expect(decide("write", { file_path: "raw" }, ["raw"])).toMatchObject({
+    kind: "deny",
+    code: "raw-immutable",
+  });
+  expect(decide("write", { file_path: "rawx" }, ["raw"])).toEqual({
+    kind: "next",
+    code: "unrelated",
+  });
+});
+
+test("changed anchor metadata invalidates stable insensitive entry evidence and closes the handle", () => {
+  namespace("insensitive");
+  const marker = join(cwd, "marker");
+  const before = native.lstatSync(marker, { bigint: true });
+  const lookup = vi.mocked(fs.lstatSync).getMockImplementation()!;
+  let anchorObservations = 0;
+  vi.mocked(fs.lstatSync).mockImplementation((path: fs.PathLike, options?: fs.StatOptions) => {
+    if (String(path) === cwd) {
+      const stat = native.lstatSync(path, { bigint: true });
+      if (++anchorObservations > 1) stat.ctimeNs += 1n;
+      return stat;
+    }
+    return lookup(path, options);
+  });
+  expect(decide("write", { file_path: "raw/new" })).toMatchObject({
+    kind: "deny",
+    code: "raw-path-unavailable",
+  });
+  expect(anchorObservations).toBeGreaterThan(1);
+  expect(native.lstatSync(marker, { bigint: true })).toEqual(before);
+  expect(reads).toBeGreaterThan(0);
+  expect(open.size).toBe(0);
+});
+
+test.each(["report_validate", "report_submit", "report_decide"])(
+  "fully existing retained-case linked task file remains protected for %s",
+  (name) => {
+    const evidence = makeEvidenceReport();
+    native.mkdirSync(join(cwd, "reports"));
+    native.writeFileSync(
+      join(cwd, "reports", `${evidence.report_id}.json`),
+      JSON.stringify(evidence),
+    );
+    const directory = `tasks/${evidence.task_id}`;
+    native.mkdirSync(join(cwd, directory), { recursive: true });
+    const bytes = "original linked task bytes\n";
+    native.writeFileSync(join(cwd, directory, "task.json"), bytes);
+    const raw = `${directory}/TASK.JSON`;
+    retainExistingEntry(raw, `${directory}/task.json`);
+    expect(decide(name, { report_id: evidence.report_id }, [raw])).toMatchObject({
+      kind: "deny",
+      code: "raw-immutable",
+    });
+    expect(native.readFileSync(join(cwd, directory, "task.json"), "utf8")).toBe(bytes);
+  },
+);
+
+test.each(["directory", "file"])(
+  "native existing %s spellings follow actual same-object or distinct-object identity",
+  (kind) => {
+    const lower = join(cwd, "raw");
+    const upper = join(cwd, "RAW");
+    if (kind === "directory") native.mkdirSync(lower);
+    else native.writeFileSync(lower, "lower entry\n", { flag: "wx" });
+    try {
+      if (kind === "directory") native.mkdirSync(upper);
+      else native.writeFileSync(upper, "upper entry\n", { flag: "wx" });
+    } catch (error) {
+      expect(error).toMatchObject({ code: "EEXIST" });
+    }
+    const left = native.lstatSync(lower);
+    const right = native.lstatSync(upper);
+    const sameObject = left.dev === right.dev && left.ino === right.ino;
+    expect(decide("write", { file_path: "raw" })).toEqual(
+      sameObject
+        ? expect.objectContaining({ kind: "deny", code: "raw-immutable" })
+        : { kind: "next", code: "unrelated" },
+    );
+  },
+);
+
+test("fully existing multiply linked file evidence denies without claiming a case alias", () => {
+  native.writeFileSync(join(cwd, "raw"), "protected bytes\n");
+  native.linkSync(join(cwd, "raw"), join(cwd, "other-name"));
+  retainExistingEntry("RAW", "raw");
+  expect(decide("write", { file_path: "raw" })).toMatchObject({
+    kind: "deny",
+    code: "raw-path-unavailable",
+  });
+  expect(fs.opendirSync).not.toHaveBeenCalled();
+});
+
+test("fully existing alias identity lookup failure is controlled rather than unrelated", () => {
+  native.mkdirSync(join(cwd, "raw"));
+  retainExistingEntry("RAW", "raw");
+  const lookup = vi.mocked(fs.lstatSync).getMockImplementation()!;
+  vi.mocked(fs.lstatSync).mockImplementation((path: fs.PathLike, options?: fs.StatOptions) => {
+    if (String(path) === join(cwd, "RAW")) {
+      throw Object.assign(new Error("PRIVATE_EXISTING_IDENTITY_FAILURE"), { code: "EACCES" });
+    }
+    return lookup(path, options);
+  });
+  const decision = decide("write", { file_path: "raw" });
+  expect(decision).toMatchObject({ kind: "deny", code: "raw-path-unavailable" });
+  expect(decision.reason).not.toMatch(/PRIVATE|EACCES|raw-path-identity/u);
+});
+
+test("changing fully existing alias metadata invalidates same-object evidence", () => {
+  native.mkdirSync(join(cwd, "raw"));
+  retainExistingEntry("RAW", "raw");
+  const lookup = vi.mocked(fs.lstatSync).getMockImplementation()!;
+  let observations = 0;
+  vi.mocked(fs.lstatSync).mockImplementation((path: fs.PathLike, options?: fs.StatOptions) => {
+    if (String(path) === join(cwd, "RAW")) {
+      const stat = native.lstatSync(join(cwd, "raw"), { bigint: true });
+      if (++observations > 1) stat.ctimeNs += 1n;
+      return stat;
+    }
+    return lookup(path, options);
+  });
+  expect(decide("write", { file_path: "raw" })).toMatchObject({
+    kind: "deny",
+    code: "raw-path-unavailable",
+  });
+  expect(observations).toBeGreaterThan(1);
+});
+
+test("a symlink replacement cannot establish fully existing alias identity", () => {
+  native.writeFileSync(join(cwd, "raw"), "protected bytes\n");
+  native.symlinkSync(join(cwd, "raw"), join(cwd, "replacement"));
+  retainExistingEntry("RAW", "raw");
+  const lookup = vi.mocked(fs.lstatSync).getMockImplementation()!;
+  vi.mocked(fs.lstatSync).mockImplementation((path: fs.PathLike, options?: fs.StatOptions) =>
+    String(path) === join(cwd, "RAW")
+      ? native.lstatSync(join(cwd, "replacement"), options)
+      : lookup(path, options),
+  );
+  expect(decide("write", { file_path: "raw" })).toMatchObject({
+    kind: "deny",
+    code: "raw-path-unavailable",
+  });
+});
+
+test("same single-link file identity across distinct parents is not case-alias proof", () => {
+  native.mkdirSync(join(cwd, "data"));
+  native.mkdirSync(join(cwd, "other"));
+  native.writeFileSync(join(cwd, "data", "file"), "protected bytes\n");
+  retainExistingEntry("DATA/FILE", "data/file");
+  const lookup = vi.mocked(fs.lstatSync).getMockImplementation()!;
+  vi.mocked(fs.lstatSync).mockImplementation((path: fs.PathLike, options?: fs.StatOptions) =>
+    String(path) === join(cwd, "DATA")
+      ? native.lstatSync(join(cwd, "other"), options)
+      : lookup(path, options),
+  );
+  expect(decide("write", { file_path: "data/file" }, ["DATA/FILE"])).toMatchObject({
+    kind: "deny",
+    code: "raw-path-unavailable",
+  });
 });

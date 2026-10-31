@@ -11,6 +11,11 @@
 - [x] 2.1 Parent verifies build, targeted tests, pnpm run check, openspec strict validation, profile smoke, actual native two-volume controls and raw-guard T1–T5 with unchanged raw hashes; retain commands, outputs and limits in PR evidence. Final check: 145 files, 4832 passed/2 skipped, coverage statements 87.58%/branches 87.20%/functions 93.41%/lines 88.87%, duplication 0.50%; strict/profile and all five live probes passed.
 - [ ] 2.2 Complete expanded fixture review before implementation and three-seat final white-box review plus exact-head CI before merge; synchronize/archive this independent raw identity delta only, leaving M3 PI acceptance untouched.
 
+## 3. Review closure
+
+- [ ] 3.1 Close the existing-alias review finding: prove physical identity before treating fully existing retained-case paths as distinct, cover directory and file/shared-consumer boundaries plus distinct sensitive controls, and add anchor-directory stability regression coverage. Observe the new existing-alias regression RED before fixing, then rerun focused/native/default/live gates and fresh full-diff review without weakening prior assertions.
+  Fix-pass evidence: 21 new semantic RED cases preceded the physical-identity correction; existing directory/file and shared-consumer controls now pass. Focused tests: 1123 passed/1 skipped. Final default gate: 145 files, 4864 passed/2 skipped; strict/profile and native two-volume/mount/ToolRuntime controls passed. A live T4 run correctly failed on a model-added `[exit=0]` suffix; its evidence remains failed and unchanged. A fresh run passed T1–T5 with unchanged raw hashes. Final fresh review and archive remain external delivery steps.
+
 ## Risk / evidence map
 
 - Public API/entry: selected, public decideRawAccess and actual ToolRuntime/pre-execute assertions; no exported signature change.

@@ -1,5 +1,5 @@
 import { lstatSync, opendirSync, realpathSync, type BigIntStats, type Dir } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { containsPath, ReportIdSchema, TaskIdSchema } from "@shud-harness/dsh-shud-core";
 import { readWorkspaceRecord } from "@shud-harness/dsh-shud-records";
 
@@ -287,9 +287,6 @@ function containsRawPath(root: RawPath, target: RawPath): boolean {
       target.foldedParents ? canonical(target.text, "/") : target,
     );
   }
-  // Existing native paths keep their established identity. Only a missing
-  // suffix can require additional evidence, under a shared physical anchor.
-  if (root.text === root.anchor && target.text === target.anchor) return false;
   let anchor = containsPath(root.anchor, target.anchor)
     ? root.anchor
     : containsPath(target.anchor, root.anchor)
@@ -299,13 +296,39 @@ function containsRawPath(root: RawPath, target: RawPath): boolean {
     const shorter = root.anchor.length <= target.anchor.length ? root.anchor : target.anchor;
     const longer = shorter === root.anchor ? target.anchor : root.anchor;
     if (!containsPath(asciiFold(shorter), asciiFold(longer))) return false;
-    // Some native realpath implementations retain case for existing aliases.
-    // Directory identity can establish the common anchor, never its case policy.
+    // Native lookup can retain caller case even for fully existing aliases.
+    // Compare at the shorter anchor's depth, not at two different endpoints.
+    // Entry identity establishes containment, never namespace case folding.
+    const counterpart = longer.slice(0, shorter.length);
     try {
       const left = lstatSync(shorter, { bigint: true });
-      const right = lstatSync(longer.slice(0, shorter.length), { bigint: true });
-      if (!left.isDirectory() || !right.isDirectory()) throw new PathUnavailable();
-      if (left.dev !== right.dev || left.ino !== right.ino) return false;
+      const right = lstatSync(counterpart, { bigint: true });
+      if ((!left.isDirectory() && !left.isFile()) || (!right.isDirectory() && !right.isFile()))
+        throw new PathUnavailable();
+      const sameEntry = left.dev === right.dev && left.ino === right.ino;
+      if (sameEntry && (left.isFile() || right.isFile())) {
+        if (!left.isFile() || !right.isFile() || left.nlink !== 1n || right.nlink !== 1n)
+          throw new PathUnavailable();
+        const leftParentPath = dirname(shorter);
+        const rightParentPath = dirname(counterpart);
+        const leftParent = lstatSync(leftParentPath, { bigint: true });
+        const rightParent = lstatSync(rightParentPath, { bigint: true });
+        if (
+          !leftParent.isDirectory() ||
+          !rightParent.isDirectory() ||
+          leftParent.dev !== rightParent.dev ||
+          leftParent.ino !== rightParent.ino ||
+          !unchanged(leftParent, lstatSync(leftParentPath, { bigint: true })) ||
+          !unchanged(rightParent, lstatSync(rightParentPath, { bigint: true }))
+        )
+          throw new PathUnavailable();
+      }
+      if (
+        !unchanged(left, lstatSync(shorter, { bigint: true })) ||
+        !unchanged(right, lstatSync(counterpart, { bigint: true }))
+      )
+        throw new PathUnavailable();
+      if (!sameEntry) return false;
     } catch {
       throw new PathUnavailable();
     }
