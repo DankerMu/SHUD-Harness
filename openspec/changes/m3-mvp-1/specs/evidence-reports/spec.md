@@ -196,6 +196,27 @@ closure SHALL 在 reconcile 后求值。仅已 collected 的关联作业经 coll
 - **WHEN** 以关联 RunRecord 为 `status: failed`、`exit_class: cvode` 的夹具调用渲染器
 - **THEN** §7 列出该运行的 `run_id` 与 `exit_class`
 
+### Requirement: Decision history Markdown projection
+每次规范 Markdown 渲染 SHALL 在现有 §10 附录中、各运行的命令/日志/产物块之前，以 `### PI decision history` 子标题呈现报告 JSON 的 decision_history；SHALL NOT 添加第十一个二级标题。非空历史 SHALL 以 decision_id、report_id、outcome、decided_at、approval_ref、comment 六列按持久数组顺序投影，不排序、去重、推断或新增决定。空历史 SHALL 显示 `No PI decision recorded.`，不伪造历史行。
+comment SHALL 以 JSON literal 呈现：null 显示为 null，非空字符串保留 JSON 引号与转义，以区分 null 与字符串 "null" 并保留原始空白/换行。所有历史字段 SHALL 经既有结构化 metadata 规则单次转义，不能注入新表格列、物理标题或 HTML 标记，模板样式文本不得递归替换。comment SHALL 与 observations/科学解释分离，不改变模型撰写字段的禁止用语扫描边界；整份渲染 Markdown 的既有密钥检查仍覆盖该附录。
+报告 JSON 仍是提交和决定历史的权威源，approval_ref 仍是执行 callId，真实批准由 session log 关联；Markdown 仅是确定性投影，SHALL NOT 成为新审批 authority。所有七态水印、终态历史约束、只读输入及既有发布/修复规则不变；本要求不授权扫描或批量重写旧报告。
+
+#### Scenario: accepted decision displays null without inference
+- **WHEN** 从持久 JSON 渲染 accepted 报告，其唯一决定的 comment 为 null
+- **THEN** §10 六列与该决定逐项一致、comment 为 null，accepted 水印不变，源 JSON 字节和修改时间不变
+
+#### Scenario: negative outcomes retain PI comments separately
+- **WHEN** 渲染 rejected 或 revision_requested 报告，其决定含非空多行 comment，或 comment 恰为字符串 "null"
+- **THEN** 六列保留相应 outcome 与原始 comment 的 JSON literal，字符串 "null" 不被当成 null，§6 observations 与模型撰写字段不变
+
+#### Scenario: history metadata cannot inject report structure
+- **WHEN** 决定字段含 HTML、管道、反引号、反斜杠、换行或模板样式文本，重复渲染同一持久报告
+- **THEN** 结构字符按既有 metadata 规则单次转义，输出逐字相同，不新增二级标题/表格列，不递归插值，不修改输入
+
+#### Scenario: existing history and validation boundaries remain
+- **WHEN** 渲染空历史或 archived 报告，或用损坏/不匹配的终态历史渲染；另以含密钥形态 comment 的合法报告调用既有 validator
+- **THEN** 空历史不生成决定，archived 继承既有终态水印，非法终态历史仍拒绝；密钥诊断归属 section10 且不回显值，不把 comment 纳入 observations
+
 ### Requirement: Report watermark
 报告 `.md` SHALL 按 `status` 在标题下第一行与文末最后一行渲染正文水印（SHALL NOT 仅以样式或注释承载）：
 

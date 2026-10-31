@@ -2,6 +2,15 @@
 
 合入顺序按依赖而非组号，见 design.md「Migration Plan」：3.1a → 6.1a → 1.1 → 2.1a → 2.1b → 2.1c → 3.1b–d、3.2、3.3a → 3.3b → 3.3c → 4.1 → 4.2、4.3 → 4.4a → 4.4b、4.4c → 5.1 → 7.1 → 6.1b → 6.2 → 6.3（6.1b/6.2 与 7.1 可并行，只有 6.3 须在 7.1 之后）→ 8.1a → 8.1b → 9.1 → 9.2 → 10.1（design 第 7 步所写"6.1"即本文件的 6.1b；6.1a 已作为 spike 前置先行）。各任务写明的"依赖"是硬前置；组内未写依赖的切片只受上述合入顺序约束。fixture level 词表以 `subagent-workflow` 的 `issue-risk-contract.md` 为准。需求名一律引用 `specs/*/spec.md` 的 `### Requirement:` 原文。
 
+### Issue #487 risk/evidence map
+
+- [x] #487 Project all six persisted decision fields inside existing §10, with typed null/string comment display and no new top-level section or decision authority.
+- [x] #487 Prove accepted/rejected/revision_requested, empty/archived history, deterministic structured escaping, source-byte preservation, comment/observations separation and unchanged validator/watermark behavior; update the independent golden only for the added subsection.
+- [x] #487 Sync PI/report-generation docs and authoritative delta; run built real publication/render smoke, actual first-task accepted-report smoke, full check/strict/profile. Expanded white-box review remains a separate merge gate.
+
+Selected packs: rendering API → six-field output/ten headings; readonly IO → JSON/reference bytes/mtime and unchanged input set; provenance/secrets → callId shown without invented authority, structured escaping and section10 secret diagnostics; error/legacy → old terminal-history and seven-watermark tests unchanged, all renderer/publication consumers retain their contracts; documentation → PI comment6526894101 and spec/doc agreement.
+Not selected: config, schema evolution, concurrency/lifecycle, resource policy, dependencies/new packaging API. No history backfill, new staleness rule, schema/approval/decision/state-machine change or PI acceptance. Three seats correctness, test-evidence/spec and security/provenance; existing consumed local oracles remain immutable.
+
 ### Issue #481 risk/evidence map
 
 - [x] #481 Guard task_create's fixed tasks output root in raw-guard; update canonical/delta guarded-tool and pass-through contracts.

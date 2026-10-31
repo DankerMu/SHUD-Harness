@@ -43,4 +43,8 @@ Task: {{task_id}}
 
 ## 10. 附录：命令、日志、artifact manifest
 
+### PI decision history
+
+{{decision_history}}
+
 {{appendix}}{{footer}}
