@@ -704,3 +704,47 @@ test("same single-link file identity across distinct parents is not case-alias p
     code: "raw-path-unavailable",
   });
 });
+
+test.each(["ELOOP", "ENOTDIR"])(
+  "secondary folded-parent %s failure returns a controlled unavailable-path denial",
+  (code) => {
+    native.mkdirSync(join(cwd, "child"));
+    const failingPath = join(cwd, "CHILD", "RAW");
+    const fault = Object.assign(new Error("PRIVATE_SECONDARY_PATH_FAILURE"), {
+      code,
+      path: failingPath,
+    });
+    vi.mocked(fs.realpathSync.native).mockImplementation((path) => {
+      if (String(path) === failingPath) throw fault;
+      return native.realpathSync.native(path);
+    });
+    const decision = decide("write", { file_path: "child/raw/new" }, ["missing/../CHILD/RAW"]);
+    expect(decision).toMatchObject({ kind: "deny", code: "raw-path-unavailable" });
+    expect(decision.reason).toMatch(/unavailable/u);
+    expect(decision.reason).not.toMatch(/PRIVATE|ELOOP|ENOTDIR/u);
+    expect(decision.reason).not.toContain(cwd);
+  },
+);
+
+test.each(["ELOOP", "ENOTDIR"])(
+  "primary %s resolution failure still propagates the original filesystem error",
+  (code) => {
+    native.mkdirSync(join(cwd, "child"));
+    const failingPath = join(cwd, "CHILD", "RAW");
+    const fault = Object.assign(new Error("PRIVATE_PRIMARY_PATH_FAILURE"), {
+      code,
+      path: failingPath,
+    });
+    vi.mocked(fs.realpathSync.native).mockImplementation((path) => {
+      if (String(path) === failingPath) throw fault;
+      return native.realpathSync.native(path);
+    });
+    let thrown: unknown;
+    try {
+      decide("write", { file_path: "child/raw/new" }, ["CHILD/RAW"]);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBe(fault);
+  },
+);

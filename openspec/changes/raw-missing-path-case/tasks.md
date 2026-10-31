@@ -13,8 +13,10 @@
 
 ## 3. Review closure
 
-- [ ] 3.1 Close the existing-alias review finding: prove physical identity before treating fully existing retained-case paths as distinct, cover directory and file/shared-consumer boundaries plus distinct sensitive controls, and add anchor-directory stability regression coverage. Observe the new existing-alias regression RED before fixing, then rerun focused/native/default/live gates and fresh full-diff review without weakening prior assertions.
+- [x] 3.1 Close the existing-alias review finding: prove physical identity before treating fully existing retained-case paths as distinct, cover directory and file/shared-consumer boundaries plus distinct sensitive controls, and add anchor-directory stability regression coverage. Observe the new existing-alias regression RED before fixing, then rerun focused/native/default/live gates and fresh full-diff review without weakening prior assertions. Round-2 independent review confirmed R1 and E1 closed on 7bf7edfc; its separate secondary-error finding is tracked in 3.2.
   Fix-pass evidence: 21 new semantic RED cases preceded the physical-identity correction; existing directory/file and shared-consumer controls now pass. Focused tests: 1123 passed/1 skipped. Final default gate: 145 files, 4864 passed/2 skipped; strict/profile and native two-volume/mount/ToolRuntime controls passed. A live T4 run correctly failed on a model-added `[exit=0]` suffix; its evidence remains failed and unchanged. A fresh run passed T1–T5 with unchanged raw hashes. Final fresh review and archive remain external delivery steps.
+- [ ] 3.2 Close secondary folded-parent identity error handling: translate only failures of the new secondary resolver into controlled unavailable-path denial, retain primary non-ENOENT propagation, and verify native ELOOP/ENOTDIR RED→GREEN plus focused/default/live gates and final independent review.
+  Fix-pass evidence: two native APFSX secondary-error cases and two permanent regressions were RED before the narrow translation; both now return controlled denial while direct primary errors retain the original fault. Focused tests: 1127 passed/1 skipped. Default gate: 145 files, 4868 passed/2 skipped; strict/profile, all native/built controls and live T1–T5/raw hashes passed. Final independent review remains a delivery gate.
 
 ## Risk / evidence map
 

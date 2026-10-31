@@ -282,10 +282,15 @@ function containsRawPath(root: RawPath, target: RawPath): boolean {
   // Folding a missing x/.. can expose an existing child namespace (including
   // a mount). Reuse native canonical resolution for identity, not shell text.
   if (root.foldedParents || target.foldedParents) {
-    return containsRawPath(
-      root.foldedParents ? canonical(root.text, "/") : root,
-      target.foldedParents ? canonical(target.text, "/") : target,
-    );
+    let resolvedRoot: RawPath;
+    let resolvedTarget: RawPath;
+    try {
+      resolvedRoot = root.foldedParents ? canonical(root.text, "/") : root;
+      resolvedTarget = target.foldedParents ? canonical(target.text, "/") : target;
+    } catch {
+      throw new PathUnavailable();
+    }
+    return containsRawPath(resolvedRoot, resolvedTarget);
   }
   let anchor = containsPath(root.anchor, target.anchor)
     ? root.anchor
