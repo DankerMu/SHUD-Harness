@@ -158,6 +158,19 @@ jobs:
     needs: [lint, test, docs-gate, secrets, sast, pr-size, profile-smoke]
     if: always()
     steps:
+      - name: Log CI event metadata
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_EVENT_ACTION: ${{ github.event.action || 'not-applicable (push)' }}
+          CI_RUN_ID: ${{ github.run_id }}
+          CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CI_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || 'not-applicable (push)' }}
+          CI_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          CI_WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          printf 'event_name=%s\nevent_action=%s\nrun_id=%s\nrun_attempt=%s\npr_head_sha=%s\nworkflow_sha=%s\nworkflow_ref=%s\n' \
+            "$CI_EVENT_NAME" "$CI_EVENT_ACTION" "$CI_RUN_ID" "$CI_RUN_ATTEMPT" \
+            "$CI_PR_HEAD_SHA" "$CI_WORKFLOW_SHA" "$CI_WORKFLOW_REF"
       - uses: actions/checkout@v7
         with:
           submodules: false

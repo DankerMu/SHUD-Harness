@@ -212,6 +212,64 @@ ccw fixture 按入口验收（完整布局见 [matrix §4](Test_Fixtures_And_Com
 - [ ] 报告 language guard 有负例测试。
 - [ ] Sandbox path policy 有越界测试。
 
+## CI 同 head 取消后的诊断与恢复（#479）
+
+`gh pr checks --required` 的 PASS 只是 required-check 查询投影，不保证 `mergeStateStatus` 或普通合并已放行。[#479](https://github.com/DankerMu/SHUD-Harness/issues/479) 保留了这种差异；[上游报告 211754](https://github.com/orgs/community/discussions/211754) 已提交，不代表上游已响应或修复。本节只提供诊断与人工恢复，不改变任何门禁、事件、并发或权限。
+
+历史基线：[PR #477](https://github.com/DankerMu/SHUD-Harness/pull/477) 同 head 的 required PASS / BLOCKED 且普通合并被拒绝，重跑已绿 suite 仍未恢复；后来 tree-identical 空提交刷新 SHA 后普通合并成功，这不是 unchanged-head 恢复，也不是推荐办法。其 opened/labeled 归属仅为时间线推断，REST `event=pull_request` 不证明 action。[PR #496](https://github.com/DankerMu/SHUD-Harness/pull/496) 在 head `c079cc16e80e0dd0bd69cbb7a76ccea8d9525a0c` 重跑被取消的 run `41212692050` 全部作业，attempt 2 的七项依赖及 aggregate 成功后恢复 CLEAN / required PASS；该快照不证明普通合并成功或 GitHub 内部选择算法。[PR #506](https://github.com/DankerMu/SHUD-Harness/pull/506) 有取消 suite 却无需干预即 CLEAN，是必须保留的反例。
+
+### 先保留证据，再选择受影响 suite
+
+在仓库根目录用 Bash 执行，输出保存到本地证据并在 PR/issue 发布可审计摘要；介入前冻结 source/head SHA，保留 base、draft/review 状态、分支保护与含继承项的 rulesets。任何读取失败或权限不足都不等于“没有规则”。
+
+```bash
+unset ALL_PROXY
+REPO=DankerMu/SHUD-Harness
+read -r -p 'PR number: ' PR
+HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)
+gh pr view "$PR" --repo "$REPO" --json headRefOid,baseRefName,baseRefOid,isDraft,reviewDecision,mergeable,mergeStateStatus
+gh pr checks "$PR" --repo "$REPO" --required
+gh api "repos/$REPO/branches/main/protection"
+gh api --paginate "repos/$REPO/rulesets?includes_parents=true&per_page=100"
+gh api --paginate "repos/$REPO/rules/branches/main?per_page=100"
+gh api --paginate "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$HEAD_SHA&per_page=100"
+gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?filter=all&per_page=100"
+```
+
+逐个核对同 head 候选 run 的 `event`、`path`、`head_sha`、`run_attempt`、`check_suite_id`、时间和结论；run ID、suite ID、job/check-run ID 不可互换。用以下命令读取每个相关 attempt（含原失败/取消和后续成功），将 jobs 的 `check_run_url` 与 check-runs 的 ID / suite 关联。若 rulesets 非空，另用 `gh api "repos/$REPO/rulesets/$RULESET_ID"` 读取列表中每个实际 ID 的完整规则。
+
+```bash
+read -r -p 'Candidate run ID: ' RUN_ID
+read -r -p 'Attempt number: ' ATTEMPT
+gh api "repos/$REPO/actions/runs/$RUN_ID"
+gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT"
+gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs?per_page=100"
+gh run view "$RUN_ID" --repo "$REPO" --attempt "$ATTEMPT" --log
+```
+
+实际 aggregate 的 `Log CI event metadata` 步骤只输出 event name/action、run ID/attempt、PR head SHA、workflow SHA/ref；push 的 action/PR head 明示 `not-applicable (push)`，workflow SHA 不冒充 PR head。日志未执行、历史日志缺字段或已过期时记为未知，不能从 run 编号、创建顺序或 REST event 猜 action。保留七项依赖 `lint`、`test`、`docs-gate`、`secrets`、`sast`、`pr-size`、`profile-smoke` 各自结果及 `all-checks-passed` 的结果/ID；任何 failure/cancelled/skipped 仍必须使 aggregate 失败。实际并发取消与隔离实验中的人工取消须分别标注。
+
+按上述元数据和实际失败/取消结果选择**受影响的同 head suite 所属 run**，不是数字最大的 run/suite、最后完成的 run，也不是随便选择最新绿 run。必须保留其它同 head suite 和相反结果；suite 顺序只是观察线索，不是已证实的 GitHub 算法。无法确定关联、存在未解释的其它约束或缺少实际结果时保持 blocked，先补证据/升级处理。
+
+### 人工重跑全部作业并复核普通合并
+
+确认 `RUN_ID` 指向上述失败/取消 suite，当前 PR head 仍等于冻结的 `HEAD_SHA`，且原 attempt/权限证据已保留后，才执行一次完整重跑；不加 `--failed` 或 `--job`，不只跑 aggregate，不重跑无关绿 suite：
+
+```bash
+gh run rerun "$RUN_ID" --repo "$REPO"
+gh run watch "$RUN_ID" --repo "$REPO" --exit-status
+gh api "repos/$REPO/actions/runs/$RUN_ID"
+```
+
+等待新 attempt 真正完成；不能把旧 attempt 的 completed 当作本次结果。取 REST 返回的递增 `run_attempt` 重新设置 `ATTEMPT`，重取上节 attempt/jobs/真实日志/check-runs、PR 状态、required 和保护/rulesets 命令。确认 head 未变、authority 未放宽、七项依赖及 aggregate 均实际 SUCCESS，required PASS 且 merge state 已允许合并；保留前后 run/attempt/suite/check IDs。审查及既定验收完成后，以冻结 head 约束执行普通合并并读取实际回执：
+
+```bash
+gh pr merge "$PR" --repo "$REPO" --merge --match-head-commit "$HEAD_SHA"
+gh pr view "$PR" --repo "$REPO" --json headRefOid,state,mergedAt,mergeCommit,mergeStateStatus
+```
+
+这不是普遍有效的恢复保证。不使用空提交、admin merge、修改保护/rulesets/required checks 或自动重试；重跑失败、required 与 merge state 仍不一致或普通合并被拒绝时保持 blocked，带原始证据向 #479 / 上游升级，不能宣称已修复。托管实验与恢复实测结果发布在 PR、issue 和上游评论，保持同一冻结 source SHA，不为追加结果而改动提交；唯有真实普通合并回执能证明 unchanged-head 恢复，不能把计划写成结果。
+
 ## Enforcement Index
 
 本索引是根指令要求实施、审查、提交前必须阅读并遵守的完整规则清单；以下路径均相对仓库根目录。
