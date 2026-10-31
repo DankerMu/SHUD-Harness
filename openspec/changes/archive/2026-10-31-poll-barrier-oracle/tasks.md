@@ -8,7 +8,7 @@
 ## 2. Verification and delivery
 
 - [x] 2.1 Parent ran lifecycle/sibling tests (8/40 PASS), profile smoke, full pnpm run check (145 files, 4870 PASS, 2 SKIP) and strict fixture validation; published controlled RED, counterfactual GREEN, negative publication control and historical limits.
-- [ ] 2.2 Expanded review, exact-head CI and merge complete; independently archive this change without changing M3 PI/ADR/Epic state.
+- [x] 2.2 Expanded three-seat review CLEAN on b92c9432, CI 41231522754 all green, PR #501 merged as 069e5a74; independent archive synced the native settlement test requirement, without changing M3 PI/ADR/Epic state.
 
 ## Risk pack mapping
 
