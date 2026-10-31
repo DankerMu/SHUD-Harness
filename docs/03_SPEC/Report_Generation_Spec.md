@@ -82,7 +82,13 @@ coordinator 提供叙述参数
 ## 9. 建议下一步
 
 ## 10. 附录：命令、日志、artifact manifest
+
+### PI decision history
 ```
+
+§10 的展示权威为 [Decision history Markdown projection](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md#requirement-decision-history-markdown-projection)。`### PI decision history` 位于既有各 Run 命令、日志路径及 artifact manifest 块之前，不增加第十一个二级标题。非空历史按持久数组顺序展示 decision_id、report_id、outcome、decided_at、approval_ref、comment 六列，不排序、去重或推断；空历史精确显示 `No PI decision recorded.`，不伪造历史行。既有 Run 块、七态水印和终态历史约束不变。
+
+comment 先表示为 JSON literal，再与其余五列一起经过既有结构化 metadata 单次转义：null 显示为 `null`，字符串 `"null"` 保留引号；原始空白、换行、反斜杠和引号以 JSON 转义保留。HTML、管道、反引号、反斜杠与物理换行不会生成新表格列或物理标题，模板样式文本不递归替换。该路径不是模型撰写的 prose；comment 不进入 §6 observations 或自动提升为科学解释，禁止用语检查仍只扫描原四个模型撰写字段，整份 Markdown 的密钥检查仍覆盖 §10。
 
 ## 4.1 Theory-to-Code Evidence 章节
 
@@ -276,6 +282,8 @@ M3 EvidenceReport/PiGateDecision 字段以 [evidence-reports schema 契约](../.
 
 报告用品牌 REPORT id，决定用品牌 DEC id；decision_history 含 report_id、approval_ref、outcome、comment、decided_at。approval_ref 为本次工具执行 callId，经 session log asked.callId → asked.id → decided.id 关联审批；accepted 的 comment 为 null，rejected/revision_requested 必须非空。
 
+报告 JSON 是提交与决定历史的权威源，session log 是实际批准关联的来源；Markdown 仅是这些持久字段的确定性展示，不新增审批 authority。规范渲染只读原有 JSON/引用记录与模板，保留输入字节和修改时间；每次新请求均包含历史，但不扫描或自动重写历史文件，也不增加正文差异的 staleness 判据或改变既有发布/修复流程。
+
 ## 11. 验收标准
 
 - [ ] 报告不能在缺少 RunRecord 时标为 reviewed。
@@ -288,4 +296,6 @@ M3 EvidenceReport/PiGateDecision 字段以 [evidence-reports schema 契约](../.
 - [ ] 七态逐一匹配水印表，包括 archived 的终态继承；awaiting_pi/archived 渲染覆盖不冒充 M3 转换已实现。
 - [ ] 报告文件不包含 secrets、完整日志或 raw binary output。
 - [ ] M4 export manifest 不作为 M3 验收前提。
-- [ ] PI decision comments 出现在 report decision history 中。
+- [ ] PI decision comments 在 §10 的六字段历史表中按 JSON literal 展示，与 observations 分离；空历史显示 `No PI decision recorded.`，不增加二级标题。
+- [ ] accepted/null、rejected/revision_requested 非空批注、字符串 `"null"` 与 archived 继承展示正确；结构字符单次转义且重复渲染一致，源 JSON/引用记录字节和修改时间不变。
+- [ ] comment 不扩大禁止用语检查的四字段边界；其中的密钥形态仍由既有检查诊断为 section10，且不回显值。

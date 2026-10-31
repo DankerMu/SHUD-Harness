@@ -140,6 +140,21 @@ function renderRuns(runs: readonly RunRecord[]): string {
   return `${facts}\n\n${health}`;
 }
 
+function renderDecisionHistory(report: EvidenceReport): string {
+  if (report.decision_history.length === 0) return "No PI decision recorded.";
+  return table(
+    ["decision_id", "report_id", "outcome", "decided_at", "approval_ref", "comment"],
+    report.decision_history.map((decision) => [
+      decision.decision_id,
+      decision.report_id,
+      decision.outcome,
+      decision.decided_at,
+      decision.approval_ref,
+      JSON.stringify(decision.comment),
+    ]),
+  );
+}
+
 function renderAppendix(run: RunRecord): string {
   const details = run.command.map((argument, index) => `- argv[${index}]: ${metadata(argument)}`);
   details.push(
@@ -256,6 +271,7 @@ export function renderReportDocument(
     invariants: GOVERNANCE_INVARIANTS.join("\n"),
     risks: risks.length === 0 ? "None." : risks.join("\n"),
     pi_questions: report.pi_questions.join("\n\n"),
+    decision_history: renderDecisionHistory(report),
     appendix: runs.map(renderAppendix).join("\n\n"),
     footer: watermark.footer === null ? "" : `\n\n${watermark.footer}`,
   };

@@ -1,5 +1,12 @@
 # Proposal
 
+## Issue #487 fixture
+
+PI comment6526894101 selects complete decision-history presentation inside existing appendix §10; the triage prerequisite is resolved, not PI functional acceptance. Fixture level expanded for Critical Path #6 (report projection, watermarks and provenance).
+Scope: canonical records renderer/template, focused tests and the independent report golden, PI-decision/report-generation documents, and this evidence-reports specification. No schema, decision writer/state machine, approval/audit join, TaskCard mapping or tool production change.
+Selected packs: Public rendering contract; File IO/read-only integrity; Auth/secrets/provenance presentation; Error/invalid-history boundaries; Legacy compatibility; Documentation. No config, schema evolution, concurrency/lifecycle, new resource limits, dependencies or packaging API.
+Evidence: persisted accepted/rejected/revision_requested histories fail to appear before implementation; after fix six fields, typed null/nonempty comments, deterministic safe structured rendering and isolation from observations pass. Preserve ten headings, all seven watermarks, terminal-history rejection and source JSON bytes/mtime; verify validator section attribution, built publication consumers and actual first-task accepted report, full check/strict/profile plus three-seat review.
+
 ## Issue #481 fixture
 
 Issue type: bounded bug fix. Fixture level: expanded because the change protects raw writes through the pre-execute seam (Critical Path #2), despite its small implementation.

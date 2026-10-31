@@ -106,6 +106,10 @@ Review this evidence?
 
 ## 10. 附录：命令、日志、artifact manifest
 
+### PI decision history
+
+No PI decision recorded.
+
 ### Run RUN-20261029T080000-b002
 
 - argv[0]: shud

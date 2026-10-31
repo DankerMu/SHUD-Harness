@@ -102,11 +102,18 @@ M3 审计使用宿主 session log，不另造 AuditEvent 文件或日志订阅�
 
 EvidenceReport 的 decision_history 只追加规范 PiGateDecision，完整字段/状态规则见 §5 的唯一契约；accepted 的 comment 为 null，其余终态保存 PI 确认的非空原文。旧报告终态不覆盖，修订后新 report_id 不继承旧决定历史。
 
+Markdown 展示以 [Decision history Markdown projection](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md#requirement-decision-history-markdown-projection) 为权威契约：现有 §10 附录在各 Run 块之前增加 `### PI decision history`，按持久数组顺序展示 decision_id、report_id、outcome、decided_at、approval_ref、comment 六列，不排序、去重或推断决定，不增加第十一个二级标题。空历史显示 `No PI decision recorded.`，不生成占位决定。
+
+comment 使用 JSON literal：null 显示为 `null`，字符串保留 JSON 引号与转义，因此字符串 `"null"` 不会与 null 混淆，原始空白和换行也不会丢失。六列均经既有结构化 metadata 规则单次转义，不能注入表格列、物理标题或 HTML；模板样式文本不递归插值。comment 不进入 observations，不因出现在报告中就成为科学结论。
+
+报告 JSON 仍是提交与决定历史的权威源；approval_ref 仍是执行 callId，实际批准仍由 §8 的 session log 关联，Markdown 不构成新的审批 authority。新请求的规范渲染包含历史，但不扫描或自动重写旧 Markdown，不改变既有水印、终态历史约束、状态迁移或修复判据，也不修改源 JSON/引用记录的字节或修改时间。
+
 ## 10. 验收标准
 
 - [ ] 缺少非空 comment 或明确 disposition 时不调用 report_decide；非法参数被工具校验拒绝，不用 REST 400/403 作为契约。
 - [ ] report_submit/report_decide 只在 allowed-once 后执行；其他 outcome 或无审批服务时报告/卡片字节不变。
 - [ ] decide 卡完整回显 disposition/comment；PI 未确认不落领域决定。
 - [ ] decision_history 的 approval_ref 可经 session log callId/approval id 关联本次批准。
-- [ ] M3 不生成 MemoryNote 或独立 AuditEvent；报告 Markdown 含决定历史。
+- [ ] M3 不生成 MemoryNote 或独立 AuditEvent；报告 §10 在 Run 块之前按持久顺序完整展示六字段，空历史为 `No PI decision recorded.`，不新增二级标题。
+- [ ] accepted/null、rejected/revision_requested 的非空 comment 与字符串 `"null"` 按 JSON literal 区分；结构字符单次转义，重复渲染确定，源 JSON/引用记录的字节与修改时间不变。
 - [ ] comment 不作为科学结论自动进入 observations；后续 MemoryNote 保持 generalization_allowed=false。
