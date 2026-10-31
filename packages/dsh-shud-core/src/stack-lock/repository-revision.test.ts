@@ -66,6 +66,36 @@ describe("collectRepositoryRevision", () => {
     });
   });
 
+  test.each([
+    { label: "trailing space", name: "repo " },
+    { label: "trailing LF", name: "repo\n" },
+  ])("collects a root with $label but rejects its empty descendant", ({ name }) => {
+    const repo = committedRepo(name);
+    const head = git(repo, "rev-parse", "HEAD");
+
+    expect(head).toMatch(/^[0-9a-f]{40}$/u);
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: head,
+      branch: "main",
+      dirty: false,
+      dirty_paths: [],
+      dirty_paths_truncated: false,
+    });
+
+    writeFileSync(join(repo, "untracked.txt"), "untracked\n");
+    expect(collectRepositoryRevision(repo)).toEqual({
+      commit: head,
+      branch: "main",
+      dirty: true,
+      dirty_paths: ["untracked.txt"],
+      dirty_paths_truncated: false,
+    });
+
+    const descendant = join(repo, "empty");
+    mkdirSync(descendant);
+    expect(() => collectRepositoryRevision(descendant)).toThrow("not a git repository root");
+  });
+
   test("reports sorted dirty paths with rename destinations and untracked files", () => {
     const repo = committedRepo("dirty-paths");
     const head = git(repo, "rev-parse", "HEAD");
