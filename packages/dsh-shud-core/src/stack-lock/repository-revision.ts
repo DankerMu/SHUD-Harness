@@ -35,7 +35,8 @@ export function collectRepositoryRevision(repoPath: string): RepositoryRevision 
 
   let topLevel: string;
   try {
-    topLevel = run(["rev-parse", "--show-toplevel"]).trim();
+    const output = run(["rev-parse", "--show-toplevel"]);
+    topLevel = output.endsWith("\n") ? output.slice(0, -1) : output;
   } catch (error) {
     throw new Error(`not a git repository: ${repoPath}: ${failureDetail(error)}`, {
       cause: error,
