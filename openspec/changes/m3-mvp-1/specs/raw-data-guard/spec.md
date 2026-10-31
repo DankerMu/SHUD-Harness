@@ -53,6 +53,36 @@
 - **WHEN** session cwd、tasks 或任务目录使用符号链接/本机大小写别名，或 rawDirs 只覆盖另一任务/兄弟前缀；另以非法 task_id 调用
 - **THEN** 同一物理受保护任务目标仍拒绝，非重叠任务目标不误拒绝；非法 task_id 不参与任务路径拼接或查询，既有三个输出根与输入规则不变
 
+### Requirement: Task creation protects its fixed output root
+`task_create` SHALL 以调用 session cwd 下固定的 `tasks` 输出根进行 raw 判定，复用既有 realpath/最近存在祖先和路径包含规则；若任一 raw 根包含该输出根，SHALL 在工具执行前返回 `raw-immutable` deny，SHALL NOT 请求审批或创建目录/TaskCard。该判定不依赖 title 或 question_or_goal 中出现路径。输出根不存在时也必须保护；策略只由 raw-guard 拥有，不复制到工具或记录 writer。
+
+#### Scenario: configured tasks root is immutable before allocation
+- **WHEN** rawDirs 为相对 `tasks`，分别在 tasks 已存在与不存在时经真实注册 ToolRuntime 调用合法 science_assist task_create，参数不含 raw 路径
+- **THEN** 返回 immutable 拒绝，工具 execute 与 approval 均不发生，工作区快照不变，不分配或发布新 TaskCard
+
+#### Scenario: protected ancestors and physical aliases retain containment
+- **WHEN** raw 根包含 tasks 的祖先，或 session cwd、tasks、raw 根使用指向同一物理保护位置的别名
+- **THEN** 使用同一 canonical 包含关系拒绝，不创建目标；不将仅有共同字符串前缀的兄弟目录当作保护祖先
+
+#### Scenario: disjoint task creation still succeeds
+- **WHEN** rawDirs 为非重叠的 data/raw，使用同一合法参数调用 task_create
+- **THEN** 正常创建 schema 有效的 planned TaskCard，保留调用参数，raw 内容不变，不新增审批
+
+### Requirement: Other tools pass through
+对不在守护列表内的工具（如 `read`、`run_code`、`present`），策略门 SHALL 不做判定并委托下一个监听器；SHALL NOT 返回 `{kind: 'allow'}`（它会终止瀑布）；SHALL NOT 因参数缺失或类型不符而抛错，缺失即视为不触及 raw。`task_create` 属于受守护的固定输出 writer，按「Task creation protects its fixed output root」判定，不适用通用 pass-through。`read` 工具读 raw 不需审批是有意为之（provenance 由 M3 DataProvenance 承担）。
+
+#### Scenario: read tool
+- **WHEN** 调用 `read`，`file_path` 位于 raw 目录
+- **THEN** 不作判定，返回 `next()` 的结果
+
+#### Scenario: malformed arguments
+- **WHEN** 调用 `write`，`arguments` 为 `null`
+- **THEN** 不作判定，返回 `next()` 的结果，不抛出异常
+
+#### Scenario: next is called exactly once
+- **WHEN** 任一委托场景经 `apply` 注册的监听器处理
+- **THEN** `next()` 被调用恰好一次，监听器返回其结果
+
 ## ADDED Requirements
 
 ### Requirement: Report generation and validation protect write targets
