@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "node ../../scripts/records/generate-version.ts && tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@shud-harness/dsh-shud-core": "workspace:*"
