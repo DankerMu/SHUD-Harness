@@ -152,11 +152,14 @@ verification:
     command: "pnpm run shud:tiny"
   - surface: "SHUD ccw restart recovery (local block; requires SHUD and DMXAPI_KEY)"
     command: "pnpm run shud:restart"
+  - surface: "SHUD first task to EvidenceReport (local block; requires SHUD and DMXAPI_KEY; CI does not run)"
+    command: "pnpm run shud:first-task <scratch-workspace>"
+    evidence: "Web session logs join worker collection and report_submit asked/allowed-once; done task, accepted Markdown, StackLock llm fields and three revisions, verbatim invariants; automatic approval is engineering evidence, not PI acceptance"
   - surface: "guardrail self-test"
     command: "pnpm run test-guardrails"
 
 readiness_gaps:
-  - "CI cannot run SHUD: shud:tiny and shud:restart remain local-only block gates; shud:restart requires local SHUD and DMXAPI_KEY"
+  - "CI cannot run SHUD: shud:tiny, shud:restart and shud:first-task remain local-only block gates; restart/first-task require local SHUD and DMXAPI_KEY, and first-task requires an explicit scratch workspace"
   - "CI cannot run real LLM probes: raw-guard:probes requires local DMXAPI_KEY; Web approval remains manual"
   - "eng-init rendered-harness checker lives in gitignored .claude/skills; repo-side equivalents are instructions:check + docs:paths"
   - "semgrep not installed locally; CI job sast runs it"

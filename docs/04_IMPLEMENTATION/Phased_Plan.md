@@ -51,7 +51,9 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 ## 3. M3 MVP-1
 
 **交付**：TaskCard 建卡/状态机；EvidenceReport Markdown 生成（模板 + RunRecord 引用）；StackLock llm 三字段（base_url/request_alias/response_model）与 SHUD/rSHUD/AutoSHUD 三 submodule 修订、dirty 路径；DataProvenance 最小记录；审批接线（治理动作经 `tools/pre-execute` 返回 `ask`）；coordinator/worker 两个 agent preset。
-**验收门**：首任务端到端；报告含上述 StackLock llm 三字段与三 submodule 修订。“措辞过四条不变式”的机器判据仅为四句 GOVERNANCE_INVARIANTS 逐字出现且模型撰写节无禁止用语；语义合规不做机器判断，仍由 PI 审阅。此处定义验收，不声明 M3 已交付。
+**验收门**：`pnpm run check`、`pnpm run profile:smoke` 与本机阻断闸 `pnpm run shud:first-task <scratch-workspace>`；后者需本机可执行 SHUD（显式 `SHUD_BIN`）与环境变量 `DMXAPI_KEY`，工作区可位于 `$TMPDIR`，CI 不运行。脚本用独立 Web profile，经 HTTP Allow once 验证首任务调用链、同提交审批审计与 done TaskCard/Accepted by PI Markdown；报告含上述 StackLock llm 三字段与三 submodule 修订。“措辞过四条不变式”的机器判据仅为四句 GOVERNANCE_INVARIANTS 逐字出现且模型撰写节无禁止用语；语义合规仍由 PI 审阅。
+
+**状态（2026-10-31）**：TaskCard、采集/记录、报告工具、角色 preset 与首任务脚本的工程主链已合并；[PR #491](https://github.com/DankerMu/SHUD-Harness/pull/491) 记录真实首任务正例、禁策略门缺审批负例及 SIGTERM/SIGKILL 重启回归。M3 尚未完成 PI 功能验收，其余工程事项由 [Epic #423](https://github.com/DankerMu/SHUD-Harness/issues/423) 跟踪。自动工程 Allow once 不代表 PI 接受报告；PI 须在 Web 亲自完成 Allow once 及拒绝 → 对话 comment → `report_decide` 往返，证据记入 `docs/Migration_Plan_dsh.md`。验收安排见 [ADR-0010 草案](../adr/proposed/0010-m3-epic-acceptance.md)；[验收 issue #452](https://github.com/DankerMu/SHUD-Harness/issues/452)、Epic 与 `m3-mvp-1` 在 PI 明确通过前保持 open/未归档。
 
 ## 4. M4 MVP-2
 
