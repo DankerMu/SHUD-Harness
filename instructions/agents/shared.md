@@ -89,7 +89,7 @@ SHUD-Harness/
 | 密钥 | `pnpm run security:secrets` | gitleaks 0 泄漏 | block |
 | SAST（CI） | `pnpm run security:sast` | semgrep 0 finding | block（CI） |
 | PR 体积 | `pnpm run pr:size` | ≤400 行或已标 `size-exempt`；标签授予/撤销触发完整 CI 重评 | block（CI） |
-| dsh profile 启动（本机 + CI） | `pnpm run profile:smoke` | 路由 deepseek-flash-guan、DMXAPI、session-log-deepseek disabled、raw-guard mounted | block（本机 + CI） |
+| dsh profile 启动（本机 + CI） | `pnpm run profile:smoke` | 路由 deepseek-flash-guan、DMXAPI、session-log-deepseek disabled、raw→policy、全局 restrict、Web 两 preset/default/精确子树、headless 禁用与三目标原子安装 | block（本机 + CI） |
 | raw-guard 五探针（本机，需 `DMXAPI_KEY`） | `pnpm run raw-guard:probes` | T1–T5 PASS、两份 raw md5 不变、总绿汇总（exit 0）；exit 2 = INCONCLUSIVE（模型偏离、guard 证据干净）须重跑，不计回归；exit 1 = 回归 | block（本机） |
 | Web 审批卡往返 | 手工：读 raw → Allow once；写 raw → deny | session log 读审批 allowed-once 后成功；写 immutable 且无新审批；raw md5 不变 | manual |
 | SHUD ccw tiny（本机） | `pnpm run shud:tiny` | exit 0 + `.dat` 产出，<2 min | block（本机） |
@@ -108,6 +108,14 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 ```
 
 `profile:install` 要求 `SHUD_BIN` 是绝对路径、可执行普通文件；缺失或无效时在创建/修改 profile 前失败，不回退默认路径。安装器先以 `web` 模板创建 `shud`，再 `link:` 安装本仓库 bundle：禁用旧 `jobs` 行，并插入 `shud-jobs`（不是按 id 改 name）。安装器整体拥有用户 patch 的唯一 `shud-jobs` 项：`shudBin`、`stateDir: $DSH_HOME/profiles/<name>/shud-jobs`、自身仓库根派生的 `stackRepos.{SHUD,rSHUD,AutoSHUD}`、bundle dsh peer 的 `hostVersion`、bundle provider/model 行的 `llm.{base_url,request_alias}`，以及可选 `SUNDIALS_ROOT` 对应的 `sundialsRoot`。三仓库目录须存在（可为空，提交才检查 Git）；设置的 SUNDIALS_ROOT 须为已存在绝对目录，未设置则删去该键；这些检查均先于建档。apply 严格校验捕获键及父类键并集，不做采集。M2 项原位补齐，raw 覆写与其它字节保持不变，相同配置重装不改文件；不读取或序列化密钥。
+
+Web 默认 preset 为 `coordinator`（`preset-coordinator.config.order: 1`），另有 `worker`；两者按序挂 persona、agent-instructions（maxBytes 65536）、time-context、tool-jobs，coordinator 另挂 tool-subagent（provider spawn、toolName subagent、agentPreset worker、modelSelectionSettings false）。worker 不挂委派工具；子树不沿用 stock 工具、不挂 restrict。宿主 subagent 注册表及 spawn provider 各一次启用，不覆写 maxDepth。persona 的 Loader `!!js` 从 `@shud-harness/dsh-shud-presets/prompts/{coordinator,worker}.md` 导出资产读取 prompt，不嵌入副本或机器路径；agent-instructions 仍负责工作区指令发现。安装器与 smoke 的 YAML 元数据读取不执行 `!!js`。
+
+`shud-role-restrict` 是无固定 role 配置的全局行；raw-guard 仍紧邻且先于 policy-gate，jobs 替换与 tools 顺序不变。restrict 在 agent/created 与 committed agent-preset/selected 后按当前会话投影绑定 Agent 的 inherited 工具面；不读取创建 header 判断切换后的角色。coordinator 的 inherited 为 task_create、report_generate、report_validate、report_submit、report_decide、shud_collect 与三个 job_*，其自有 subagent 不放进 inherited allow；worker 为 shud_run、shud_collect 与三个 job_*，无 subagent。unknown 不绑定角色限制；独立 policy-gate 仍按当前角色做执行时检查。配置 dump 只证明装配与表达式；真实工具面证据取 canonical session log 的 request/header.data.header.tools，prompt 资产文本证据取 system/message.data.message.content，不把 header 当作 prompt 载体或把 smoke 当作 PI 功能验收。
+
+重绑先成功安装新 mask 再释放旧 mask；同角色 committed 事件不叠加，失败保留原限制并明确报告，unknown 切换及 Agent/插件释放只撤销本插件的绑定，不触碰其它来源的限制。不订阅早于投影提交的 tools/change 来判断角色。
+
+headless 安装是用户 patch 所有权的唯一扩展：除整项拥有的 shud-jobs 外，只拥有唯一 preset-coordinator/preset-worker 的 disabled 字段并写 true，保留两项其它属性及目标范围外字节。三个目标全部在内存验证后只做一次原子发布；precheck 使用同一路径而不写入，任一重复项、共享 anchor 或不安全/无效输入使整次更新失败，不先发布 jobs 或第一个 preset。保留注释、raw 覆写、CRLF、flow/缩进/document-end、mode；相同配置不改 bytes/inode/mtime。Web 重装不清除用户刻意的 preset disabled 覆写，不负责同名 profile 的模板转换。
 
 `shud-jobs` 在 apply 时取得 `stateDir` 的排他所有权，维护 `active.json`/`completed.json`：索引修改在实例内串行执行，以临时文件 + rename 原子替换，先写 completed 再移出 active。内部 `stateDir/.lock-guard` 是永久协调 inode，不可删除或改名；`lock` 保存 `{pid, pid_started_at}`。唯一组合生命周期 effect 开始释放时同步停止轮询定时器、关闭轮询、collect、托管 SHUD kill 与提交准入，并行等待已接受的启动对账、结算/收集步骤（含排队的直接 collect、异步完成回调）、通知 flush/失败记账/标记发布与提交/回滚事务结束，再关闭索引修改准入、等待索引写入完成，最后在持有内核 guard 时尝试删除锁元数据，无论删除成败都尝试关闭描述符；成功时元数据删除且内核锁释放，索引保留。父类 disposer 并发运行，状态解锁不能提前清除仍可能收到父类 cancel 的托管登记分类；正常完成/成功回滚会释放对应关联，关闭实例的剩余关联随实例回收。停止不等待脱离包装进程自然结束，但必须排空已接受的恢复取消；不以提交在途集合清空为条件。第二个持有者被拒绝；已发布持有者的诊断包含 stateDir 与 pid。
 
@@ -164,6 +172,8 @@ node ../deepseek-harness/apps/cli/lib/bin.js --profile shud --dump-config
 PROFILE_NAME=shud-probe PROFILE_TEMPLATE=headless pnpm run profile:install
 node ../deepseek-harness/apps/cli/lib/bin.js --profile shud-probe --json "<task>"
 ```
+
+headless 模板没有 agent-preset-registry，不写默认 preset；两 preset 行由安装器禁用，角色保持 unknown。全局 raw-guard、policy-gate、shud-role-restrict 仍挂载；报告 ask 没有审批服务时由宿主 fail-closed，不因 unknown 绕过审批。
 
 headless 任务同样沿用上述 `DSH_HOME`，真实 LLM 调用需环境变量 `DMXAPI_KEY`。切换到研究 workspace 时须使用宿主入口的绝对路径，并保持该 `DSH_HOME`；可选 `--patch <overlay>` 必须在 `--no-open`、`--json` 等应用参数之前，不能代替 bundle 安装。部署期在用户 `$DSH_HOME/profiles/shud/cordis.patch.yml` 覆写 `shud-raw-guard.config.rawDirs`，覆盖 workspace 外的真实 raw 目录；默认 `data/raw` 仅供开发/探针。证据取自 session log（`approval/asked|decided`、`job/settled`、`tool/result`），不取自终端回忆。SHUD 运行一律在 scratch workspace 复制 `input/ccw` 后进行，submodule 永不改动。
 

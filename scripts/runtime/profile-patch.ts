@@ -33,7 +33,7 @@ import {
 
 class PatchError extends Error {}
 
-type Target = { node: Node; map: YAMLMap };
+type Target = { id: string; node: Node; map: YAMLMap };
 type ParsedPatch = {
   document: Document.Parsed;
   lines: LineCounter;
@@ -41,6 +41,9 @@ type ParsedPatch = {
   targets: Target[];
 };
 type JobsPatch = { id: "shud-jobs"; config: Config };
+type OwnedPatch = JobsPatch | { id: "preset-coordinator" | "preset-worker"; disabled: true };
+// Read Loader expressions as inert metadata; only the runtime Loader evaluates them.
+const inertTags = [{ tag: "tag:yaml.org,2002:js", resolve: (source: string) => source }];
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -100,6 +103,7 @@ function installationConfig(shudBin: string, stateDir: string): Config {
         prettyErrors: false,
         merge: false,
         schema: "core",
+        customTags: inertTags,
       },
     );
     if (document.errors.length) throw new PatchError("invalid bundle YAML");
@@ -129,13 +133,14 @@ function fail(file: string, lines: LineCounter, offset: number, reason: string):
   throw new PatchError(`${file}:${line}: ${reason}`);
 }
 
-function parsePatch(file: string, source: string): ParsedPatch {
+function parsePatch(file: string, source: string, ids: readonly string[]): ParsedPatch {
   const lines = new LineCounter();
   const document = parseDocument(source, {
     keepSourceTokens: true,
     prettyErrors: false,
     merge: false,
     schema: "core",
+    customTags: inertTags,
     lineCounter: lines,
   });
   const error = document.errors[0];
@@ -155,10 +160,17 @@ function parsePatch(file: string, source: string): ParsedPatch {
     if (!isMap(map)) fail(file, lines, item.range?.[0] ?? 0, "expected a mapping patch item");
     const id = map.get("id", true);
     const resolvedId = isAlias(id) ? id.resolve(document) : id;
-    if (isScalar(resolvedId) && resolvedId.value === "shud-jobs") targets.push({ node: item, map });
-  }
-  if (targets.length > 1) {
-    fail(file, lines, targets[1].node.range?.[0] ?? 0, "duplicate shud-jobs patch items");
+    if (
+      isScalar(resolvedId) &&
+      typeof resolvedId.value === "string" &&
+      ids.includes(resolvedId.value)
+    ) {
+      const id = resolvedId.value;
+      if (targets.some((target) => target.id === id)) {
+        fail(file, lines, item.range?.[0] ?? 0, `duplicate ${id} patch items`);
+      }
+      targets.push({ id, node: item, map });
+    }
   }
   // Resolve aliases without printing parser exceptions, which may contain user source text.
   try {
@@ -184,40 +196,91 @@ function assertUnsharedTarget(file: string, parsed: ParsedPatch, target: Target)
       if (offset >= range[0] && offset < range[1]) return;
       const resolved = alias.resolve(parsed.document);
       if (resolved && anchors.has(resolved)) {
-        fail(file, parsed.lines, offset, "cannot rewrite a shared shud-jobs anchor");
+        fail(file, parsed.lines, offset, `cannot rewrite a shared ${target.id} anchor`);
       }
     },
   });
 }
 
-function updatePatch(file: string, source: string, desired: JobsPatch): string {
-  const parsed = parsePatch(file, source);
-  const serialized = JSON.stringify(desired);
+function insertFlow(
+  file: string,
+  parsed: ParsedPatch,
+  source: string,
+  collection: YAMLMap | YAMLSeq,
+  item: string,
+): string {
+  const token = collection.srcToken;
+  const kind = isSeq(collection) ? "sequence" : "mapping";
+  if (token?.type !== "flow-collection") fail(file, parsed.lines, 0, `missing flow ${kind} tokens`);
+  const close = token.end.find(
+    (part) => part.type === (isSeq(collection) ? "flow-seq-end" : "flow-map-end"),
+  );
+  if (!close) fail(file, parsed.lines, token.offset, `missing flow ${kind} terminator`);
+  const tail = token.items.at(-1);
+  const trailingComma =
+    tail?.value === undefined &&
+    tail?.key === undefined &&
+    tail?.start.some((part) => part.type === "comma");
+  const separator = collection.items.length > 0 && !trailingComma ? ", " : "";
+  return source.slice(0, close.offset) + separator + item + source.slice(close.offset);
+}
+
+function updatePatch(
+  file: string,
+  source: string,
+  desired: OwnedPatch,
+  ids: readonly string[],
+): string {
+  const parsed = parsePatch(file, source, ids);
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
-  const target = parsed.targets[0];
+  const target = parsed.targets.find((target) => target.id === desired.id);
+  const value: unknown = target?.map.toJS(parsed.document);
+  const expected =
+    desired.id === "shud-jobs" ? desired : { ...(isObject(value) ? value : {}), ...desired };
+  if (target && isDeepStrictEqual(value, expected)) return source;
+  const serialized = JSON.stringify(expected);
   let rendered: string;
   if (target) {
-    const value: unknown = target.map.toJS(parsed.document);
-    if (isDeepStrictEqual(value, desired)) return source;
     assertUnsharedTarget(file, parsed, target);
     const range = target.node.range;
     if (!range) fail(file, parsed.lines, 0, "missing target source range");
-    const old = source.slice(range[0], range[1]);
-    const separator = old.endsWith("\r\n") ? "\r\n" : old.endsWith("\n") ? "\n" : "";
-    rendered = source.slice(0, range[0]) + serialized + separator + source.slice(range[1]);
+    if (desired.id === "shud-jobs") {
+      const old = source.slice(range[0], range[1]);
+      const separator = old.endsWith("\r\n") ? "\r\n" : old.endsWith("\n") ? "\n" : "";
+      rendered = source.slice(0, range[0]) + serialized + separator + source.slice(range[1]);
+    } else {
+      // Preset ownership is one field: retain every other token, tag, alias and comment.
+      if (isAlias(target.node))
+        fail(file, parsed.lines, range[0], `cannot rewrite an aliased ${desired.id} target`);
+      const fields = target.map.items.filter((pair) => {
+        const key = isAlias(pair.key) ? pair.key.resolve(parsed.document) : pair.key;
+        return isScalar(key) && key.value === "disabled";
+      });
+      if (fields.length > 1)
+        fail(file, parsed.lines, range[0], `ambiguous ${desired.id} disabled field`);
+      if (fields.length === 1) {
+        const field = fields[0].value;
+        if (!isNode(field) || !field.range)
+          fail(file, parsed.lines, range[0], "missing disabled source range");
+        rendered = source.slice(0, field.range[0]) + "true" + source.slice(field.range[1]);
+      } else if (target.map.flow) {
+        rendered = insertFlow(file, parsed, source, target.map, "disabled: true");
+      } else {
+        const token = target.map.srcToken;
+        if (token?.type !== "block-map")
+          fail(file, parsed.lines, range[0], "missing block mapping tokens");
+        const offset = range[2],
+          prefix = source.slice(0, offset);
+        const separator = prefix.endsWith("\n") ? "" : newline;
+        rendered =
+          prefix +
+          separator +
+          `${" ".repeat(token.indent)}disabled: true${newline}` +
+          source.slice(offset);
+      }
+    }
   } else if (parsed.root?.flow) {
-    const token = parsed.root.srcToken;
-    if (token?.type !== "flow-collection")
-      fail(file, parsed.lines, 0, "missing flow sequence tokens");
-    const close = token.end.find((part) => part.type === "flow-seq-end");
-    if (!close) fail(file, parsed.lines, token.offset, "missing flow sequence terminator");
-    const tail = token.items.at(-1);
-    const trailingComma =
-      tail?.value === undefined &&
-      tail?.key === undefined &&
-      tail?.start.some((part) => part.type === "comma");
-    const separator = parsed.root.items.length > 0 && !trailingComma ? ", " : "";
-    rendered = source.slice(0, close.offset) + separator + serialized + source.slice(close.offset);
+    rendered = insertFlow(file, parsed, source, parsed.root, serialized);
   } else {
     // Keep all existing bytes, including trailing comments. An explicit document end stays last.
     const offset = parsed.document.directives.docEnd ? parsed.document.range[1] : source.length;
@@ -231,16 +294,14 @@ function updatePatch(file: string, source: string, desired: JobsPatch): string {
     rendered =
       prefix + separator + `${indentation}- ${serialized}${newline}` + source.slice(offset);
   }
-  const checked = parsePatch(file, rendered);
-  if (
-    checked.targets.length !== 1 ||
-    !isDeepStrictEqual(checked.targets[0].map.toJS(checked.document), desired)
-  ) {
+  const checked = parsePatch(file, rendered, ids);
+  const updated = checked.targets.find((target) => target.id === desired.id);
+  if (!updated || !isDeepStrictEqual(updated.map.toJS(checked.document), expected)) {
     fail(
       file,
       checked.lines,
       0,
-      "rendered patch does not contain the requested jobs configuration",
+      `rendered patch does not contain the requested ${desired.id} configuration`,
     );
   }
   return rendered;
@@ -273,13 +334,38 @@ try {
       "profile:install patch update requires a file and absolute shudBin/stateDir",
     );
   }
-  const desired: JobsPatch = { id: "shud-jobs", config: installationConfig(shudBin, stateDir) };
+  const desired: OwnedPatch[] = [
+    { id: "shud-jobs", config: installationConfig(shudBin, stateDir) },
+  ];
+  if (process.env.PROFILE_TEMPLATE === "headless") {
+    desired.push(
+      { id: "preset-coordinator", disabled: true },
+      { id: "preset-worker", disabled: true },
+    );
+  }
   const stats = lstatSync(file, { throwIfNoEntry: false });
   if (stats && !stats.isFile()) throw new PatchError(`${file}:1: expected a regular patch file`);
   const original = stats ? readFileSync(file) : Buffer.alloc(0);
   if (!isUtf8(original)) throw new PatchError(`${file}:1: invalid UTF-8 YAML`);
   const source = original.toString("utf8");
-  const rendered = updatePatch(file, source, desired);
+  const ids = desired.map((item) => item.id);
+  if (desired.length > 1) {
+    // Headless ownership requires safe targets even when their values already match.
+    const parsed = parsePatch(file, source, ids);
+    for (const target of parsed.targets) {
+      if (isAlias(target.node)) {
+        fail(
+          file,
+          parsed.lines,
+          target.node.range?.[0] ?? 0,
+          `cannot rewrite an aliased ${target.id} target`,
+        );
+      }
+      assertUnsharedTarget(file, parsed, target);
+    }
+  }
+  // Validate every target and complete all range edits in memory before the one publication.
+  const rendered = desired.reduce((source, item) => updatePatch(file, source, item, ids), source);
   if (!checking && rendered !== source)
     replaceAtomically(file, rendered, stats ? stats.mode & 0o7777 : 0o600);
 } catch (error) {

@@ -171,7 +171,9 @@ function profilePaths(name) {
   return { directory, manifest: join(directory, "package.json"), patch: join(directory, "cordis.patch.yml") };
 }
 function patchRows(source, label) {
-  const document = parseDocument(source, { prettyErrors: false, merge: false, schema: "core" });
+  // Loader expressions are metadata here, never executable code.
+  const document = parseDocument(source, { prettyErrors: false, merge: false, schema: "core",
+    customTags: [{ tag: "tag:yaml.org,2002:js", resolve: (source) => source }] });
   if (document.errors.length) {
     throw new Error(`${label}: invalid YAML (${document.errors[0].code}); source suppressed`);
   }
@@ -190,16 +192,17 @@ function checkJobsPatch(name, binary, label, sundials = process.env.SUNDIALS_ROO
   check(`${label}: configured stateDir`, jobs[0]?.config?.stateDir === join(paths.directory, "shud-jobs"));
   check(`${label}: exact capture configuration`, isDeepStrictEqual(jobs[0]?.config, desiredJobs(name, binary, sundials)));
 }
-async function preservedInstall(name, binary, label) {
+async function preservedInstall(name, binary, label, template = "web") {
   const paths = profilePaths(name);
   const before = [hash(paths.manifest), hash(paths.patch)];
   const beforeStat = existsSync(paths.patch) ? lstatSync(paths.patch) : null;
-  await install(label, name, binary);
+  await install(label, name, binary, template);
   check(`${label}: package hash unchanged`, hash(paths.manifest) === before[0]);
   check(`${label}: patch hash unchanged`, hash(paths.patch) === before[1]);
   const afterStat = existsSync(paths.patch) ? lstatSync(paths.patch) : null;
   check(`${label}: unchanged patch was not rewritten`,
-    beforeStat === null ? afterStat === null : beforeStat.ino === afterStat?.ino && beforeStat.mtimeMs === afterStat?.mtimeMs);
+    beforeStat === null ? afterStat === null : beforeStat.ino === afterStat?.ino &&
+      beforeStat.mtimeMs === afterStat?.mtimeMs && beforeStat.mode === afterStat?.mode);
 }
 async function rejectedBinary(name, binary, label) {
   const paths = profilePaths(name);
@@ -286,6 +289,116 @@ function checkPolicyGateControls(rows, schema, label) {
     check(`${label}: actual policy-gate assertion rejects ${kind}`,
       policyGateErrors(config, projection).some((error) => error.includes(expected)));
   }
+}
+function presetErrors(rows, schema, headless = false) {
+  const errors = [], all = [];
+  function visit(value, depth = 0) {
+    if (!value || typeof value !== "object") return;
+    if (!Array.isArray(value) && (value.id || value.name)) all.push({ row: value, depth });
+    for (const child of Object.values(value)) visit(child, depth + 1);
+  }
+  for (const row of rows) visit(row);
+  const require = (label, condition) => { if (!condition) errors.push(label); };
+  function global(id, name, disabled = false) {
+    const matches = all.filter(({ row }) => row.id === id || row.name === name);
+    const globals = matches.filter(({ depth }) => depth === 0);
+    require(`${id}: unique global`, globals.length === 1 && !matches.some(({ depth }) => depth > 0));
+    const row = globals[0]?.row;
+    require(`${id}: identity/status`, row?.id === id && row?.name === name && (row?.disabled === true) === disabled);
+    const entries = schema["x-cordis"]?.entries?.filter((entry) => entry.id === id) ?? [];
+    require(`${id}: import`, entries.length === 1 && ["absent", "schema"].includes(entries[0]?.status));
+    return row;
+  }
+  const restrict = global("shud-role-restrict", "@shud-harness/dsh-shud-presets");
+  require("shud-role-restrict: no config", restrict !== undefined && !Object.hasOwn(restrict, "config"));
+  for (const id of ["subagent", "subagent-spawn-in-process"]) {
+    const row = global(id, `@deepseek-ai/dsh-${id}`);
+    require(`${id}: host config`, isDeepStrictEqual(row?.config, id === "subagent" ? undefined : { providerName: "spawn" }));
+  }
+  const registries = all.filter(({ row }) => row.id === "agent-preset-registry" || row.name === "@deepseek-ai/dsh-agent-preset-registry");
+  require("preset default", headless ? registries.length === 0 : registries.length === 1 &&
+    registries[0].depth === 0 && registries[0].row.name === "@deepseek-ai/dsh-agent-preset-registry" &&
+    registries[0].row.disabled !== true && registries[0].row.config?.default === "coordinator");
+  for (const role of ["coordinator", "worker"]) {
+    const id = `preset-${role}`, matches = all.filter(({ row }) => row.id === id || row.name === "@deepseek-ai/dsh-agent-preset" && row.config?.id === role);
+    const preset = matches[0]?.row, plugins = preset?.config?.plugins;
+    require(`${id}: unique global/status`, matches.length === 1 && matches[0].depth === 0 &&
+      preset.id === id && preset.name === "@deepseek-ai/dsh-agent-preset" && (preset.disabled === true) === headless);
+    require(`${id}: config`, preset?.config?.id === role && (role !== "coordinator" || preset?.config?.order === 1) &&
+      isDeepStrictEqual(Object.keys(preset?.config ?? {}).sort(), (role === "coordinator" ? ["id", "order", "plugins"] : ["id", "plugins"])));
+    const ids = ["persona", "agent-instructions", "time-context", "tool-jobs", ...(role === "coordinator" ? ["tool-subagent"] : [])];
+    require(`${id}: child order`, Array.isArray(plugins) && isDeepStrictEqual(plugins.map((row) => row?.id), ids));
+    for (const childId of ids) {
+      const child = plugins?.find?.((row) => row?.id === childId);
+      require(`${id}/${childId}: identity/status`, child?.name === `@deepseek-ai/dsh-${childId}` && child.disabled !== true);
+      const prefix = `process.getBuiltinModule('node:fs').readFileSync(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@shud-harness/dsh-shud-presets/prompts/${role}.md'),'utf8')`;
+      const config = childId === "persona" ? { prefix } : childId === "agent-instructions" ? { maxBytes: 65536 } :
+        childId === "tool-subagent" ? { provider: "spawn", toolName: "subagent", agentPreset: "worker", modelSelectionSettings: false } : undefined;
+      const actual = childId === "persona" && typeof child?.config?.prefix === "string" ?
+        { ...child.config, prefix: child.config.prefix.replace(/('[^']*'|"[^"]*")|\s+/g, (text, literal) => literal ? text.replace(/"/g, "'") : "") } : child?.config;
+      require(`${id}/${childId}: config`, isDeepStrictEqual(actual, config));
+    }
+    const entries = schema["x-cordis"]?.entries?.filter((entry) => entry.id === id) ?? [];
+    require(`${id}: import`, entries.length === 1 && entries[0]?.status === "schema");
+  }
+  require("no records plugin", !all.some(({ row }) => row.id === "shud-records" || row.name === "@shud-harness/dsh-shud-records"));
+  const owned = rows.filter((row) => ["preset-coordinator", "preset-worker", "shud-role-restrict"].includes(row.id));
+  require("no preset machine paths", !/["'](?:\/[^/]|[A-Za-z]:\\\\)/.test(JSON.stringify(owned)));
+  return errors;
+}
+function checkPresets(rows, schema, label, headless = false) {
+  const errors = presetErrors(rows, schema, headless);
+  check(`${label}: presets: ${errors.join("; ")}`, errors.length === 0);
+  let controls = 0;
+  function reject(kind, mutate, expected) {
+    const copy = structuredClone(rows), projection = structuredClone(schema), before = JSON.stringify([copy, projection]);
+    try { mutate(copy, projection); } catch { check(`${label}: ${kind} mutation prerequisites`, false); }
+    check(`${label}: ${kind} actually mutated`, JSON.stringify([copy, projection]) !== before);
+    check(`${label}: rejects ${kind}`, presetErrors(copy, projection, headless).includes(expected));
+    controls++;
+  }
+  const find = (rows, id) => rows.find((row) => row.id === id);
+  if (headless) reject("headless default", (rows) => rows.push({ id: "agent-preset-registry", config: { default: "coordinator" } }), "preset default");
+  else for (const value of [undefined, "worker"]) reject(`default ${value ?? "missing"}`,
+    (rows) => { find(rows, "agent-preset-registry").config.default = value; }, "preset default");
+  for (const id of ["shud-role-restrict", "subagent", "subagent-spawn-in-process", "preset-coordinator", "preset-worker"]) {
+    const identity = `${id}: ${id.startsWith("preset-") ? "unique global/status" : "identity/status"}`;
+    for (const kind of ["missing", "duplicate", "nested", "disabled", "wrong-name"]) reject(`${id} ${kind}`, (rows) => {
+      const index = rows.findIndex((row) => row.id === id), row = find(rows, id);
+      if (!row) throw new Error("missing mutation target");
+      if (kind === "missing") rows.splice(index, 1);
+      if (kind === "duplicate") rows.push(structuredClone(row));
+      if (kind === "nested") { rows.splice(index, 1); rows.push({ id: "negative-preset", config: { plugins: [row] } }); }
+      if (kind === "disabled") row.disabled = id.startsWith("preset-") ? !headless : true;
+      if (kind === "wrong-name") row.name = "@invalid/wrong-package";
+    }, ["missing", "duplicate", "nested"].includes(kind) ? `${id}: ${id.startsWith("preset-") ? "unique global/status" : "unique global"}` : identity);
+    reject(`${id} import-error`, (_, schema) => { schema["x-cordis"].entries.find((entry) => entry.id === id).status = "error"; }, `${id}: import`);
+  }
+  reject("fixed restrict role", (rows) => { find(rows, "shud-role-restrict").config = { role: "coordinator" }; }, "shud-role-restrict: no config");
+  for (const id of ["subagent", "subagent-spawn-in-process"]) reject(`${id} maxDepth override`,
+    (rows) => { const row = find(rows, id); row.config = { ...row.config, maxDepth: 2 }; }, `${id}: host config`);
+  for (const role of ["coordinator", "worker"]) {
+    const id = `preset-${role}`;
+    reject(`${id} wrong preset id`, (rows) => { find(rows, id).config.id = "standard"; }, `${id}: config`);
+    reject(`${id} reversed children`, (rows) => { find(rows, id).config.plugins.reverse(); }, `${id}: child order`);
+    const ids = ["persona", "agent-instructions", "time-context", "tool-jobs", ...(role === "coordinator" ? ["tool-subagent"] : [])];
+    for (const childId of ids) for (const kind of ["missing", "extra", "disabled", "wrong-name", "wrong-config"]) reject(`${id}/${childId} ${kind}`, (rows) => {
+      const plugins = find(rows, id).config.plugins, index = plugins.findIndex((row) => row.id === childId), child = plugins[index];
+      if (!child) throw new Error("missing mutation child");
+      if (kind === "missing") plugins.splice(index, 1);
+      if (kind === "extra") plugins.push({ id: "tool-bash", name: "@deepseek-ai/dsh-tool-bash" });
+      if (kind === "disabled") child.disabled = true;
+      if (kind === "wrong-name") child.name = "@invalid/wrong-child";
+      if (kind === "wrong-config") child.config = { unexpected: true };
+    }, ["missing", "extra"].includes(kind) ? `${id}: child order` : `${id}/${childId}: ${kind === "wrong-config" ? "config" : "identity/status"}`);
+  }
+  for (const [field, value] of [["provider", "fork"], ["toolName", "delegate"], ["agentPreset", undefined], ["modelSelectionSettings", true], ["maxDepth", 2]]) {
+    reject(`coordinator delegation ${field}`, (rows) => { find(rows, "preset-coordinator").config.plugins.find((row) => row.id === "tool-subagent").config[field] = value; }, "preset-coordinator/tool-subagent: config");
+  }
+  reject("coordinator order", (rows) => { find(rows, "preset-coordinator").config.order = 2; }, "preset-coordinator: config");
+  reject("records plugin", (rows) => rows.push({ id: "shud-records", name: "@shud-harness/dsh-shud-records" }), "no records plugin");
+  reject("preset machine path", (rows) => { find(rows, "preset-worker").path = "/Users/profile-control"; }, "no preset machine paths");
+  check(`${label}: every preset negative control executed`, controls === (headless ? 91 : 92));
 }
 async function checkCapturePreflight() {
   const isolated = join(scratch, "isolated-harness");
@@ -530,6 +643,7 @@ try {
       canonicalPlugins.findIndex((row) => row?.id === "shud-raw-guard") + 1);
   check("canonical bundle: policy-gate workspace dependency",
     bundleManifest.dependencies?.["@shud-harness/dsh-shud-policy-gate"] === "workspace:*");
+  check("canonical bundle: no machine-specific paths", !/\/(?:Users|home|srv|tmp|private\/var)\//.test(JSON.stringify(bundleRows)));
   const notExecutable = join(scratch, "not-executable");
   writeFileSync(notExecutable, "not executable\n", { mode: 0o600 });
   const invalidBins = [
@@ -610,6 +724,7 @@ try {
   checkToolsSchema(schema, "Web import");
   checkPolicyGate(composedRows, schema, "Web import");
   checkPolicyGateControls(composedRows, schema, "Web controls");
+  checkPresets(composedRows, schema, "Web");
 
   const rawOnly = "# existing deployment bytes\r\n- id: 'shud-raw-guard'\r\n  config: { rawDirs: ['/srv/data_root/raw'] }\r\n# preserve missing final newline";
   writeFileSync(web.patch, rawOnly, { mode: 0o640 });
@@ -793,6 +908,85 @@ try {
   const headlessRows = patchRows(headlessDump, "composed headless profile");
   checkPolicyGate(headlessRows, headlessSchema, "headless import");
   checkPolicyGateControls(headlessRows, headlessSchema, "headless controls");
+  checkPresets(headlessRows, headlessSchema, "headless", true);
+  const presetIds = ["preset-coordinator", "preset-worker"];
+  function checkDisabledPatch(label, expected) {
+    const rows = patchRows(readFileSync(headless.patch, "utf8"), label);
+    for (const id of presetIds) {
+      const matches = rows.filter((row) => row.id === id);
+      check(`${label}: ${id} uniquely disabled`, matches.length === 1 && matches[0].disabled === true);
+      if (expected) check(`${label}: ${id} other properties preserved`,
+        isDeepStrictEqual(matches[0], { ...expected.find((row) => row.id === id), disabled: true }));
+    }
+    check(`${label}: no headless registry/default override`, !rows.some((row) => row.id === "agent-preset-registry"));
+  }
+  checkDisabledPatch("headless first install");
+  await preservedInstall("shud-probe", shudBin, "headless second install", "headless");
+  const firstHeadless = readFileSync(headless.patch, "utf8");
+  const inertExpression = "(() => { throw new Error('metadata must remain inert'); })()";
+  const tagged = (value) => JSON.stringify(value).replace(`:${JSON.stringify(inertExpression)}`, `: !!js ${JSON.stringify(inertExpression)}`);
+  for (const style of ["block-crlf", "flow", "indented-docend", "flow-insert", "flow-missing", "block-missing"]) {
+    const label = `headless ${style} migration`, flow = style.startsWith("flow"), indent = style === "indented-docend" ? "  " : "";
+    const newline = style === "block-crlf" ? "\r\n" : "\n";
+    const overrides = presetIds.map((id) => ({ id, ...(style.endsWith("missing") ? {} : { disabled: false }),
+      config: { description: `keep ${id}`, note: inertExpression }, optional: true }));
+    const raw = "{id: shud-raw-guard, config: {rawDirs: ['/srv/headless/raw']}}";
+    const prefix = flow ? `[${raw}, ` : `# headless raw${newline}${indent}- ${raw}${newline}`;
+    const middle = flow ? ", " : `${newline}# between targets${newline}`;
+    const suffix = flow ? `] # flow trailer${newline}` : `${newline}# trailing bytes${newline}${style === "indented-docend" ? `... # document end${newline}` : ""}`;
+    const items = [{ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) }, ...(style === "flow-insert" ? [] : overrides)];
+    writeFileSync(headless.patch, prefix + items.map((row) => style === "block-missing" && presetIds.includes(row.id) ?
+      `- id: ${row.id}${newline}  config: ${tagged(row.config)} # keep inside target${newline}  optional: true` :
+      `${flow ? "" : `${indent}- `}${tagged(row)}`).join(middle) + suffix);
+    chmodSync(headless.patch, 0o640);
+    await install(label, "shud-probe", alternateBin, "headless");
+    const updated = readFileSync(headless.patch, "utf8");
+    check(`${label}: raw prefix/trailer bytes preserved`, updated.startsWith(prefix) && updated.endsWith(suffix));
+    check(`${label}: inter-target comments preserved`, flow || updated.split("# between targets").length === items.length);
+    check(`${label}: mode preserved`, (lstatSync(headless.patch).mode & 0o777) === 0o640);
+    check(`${label}: line endings preserved`, style !== "block-crlf" || !/(?<!\r)\n/.test(updated));
+    check(`${label}: inert tags preserved`, style === "flow-insert" || updated.split("!!js").length === 3);
+    check(`${label}: inner comments preserved`, style !== "block-missing" || updated.split("# keep inside target").length === 3);
+    checkDisabledPatch(label, style === "flow-insert" ? undefined : overrides);
+    checkJobsPatch("shud-probe", alternateBin, label);
+    await preservedInstall("shud-probe", alternateBin, `${label} repeated`, "headless");
+    const actual = patchRows((await run(`${label} dump`, process.execPath,
+      [bin, "--profile", "shud-probe", "--dump-config"])).stdout, label);
+    check(`${label}: actual raw override`, isDeepStrictEqual(actual.find((row) => row.id === "shud-raw-guard")?.config?.rawDirs, ["/srv/headless/raw"]));
+    check(`${label}: actual presets disabled`, presetIds.every((id) => actual.filter((row) => row.id === id).length === 1 && actual.find((row) => row.id === id).disabled === true));
+  }
+  const validTargets = `- ${JSON.stringify({ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) })}\n- {id: preset-coordinator, disabled: false}\n`;
+  for (const [kind, invalid, prefix = validTargets, targetDiagnostic] of [
+    ["duplicate worker", "- {id: preset-worker}\n- {id: preset-worker}\n"],
+    ["shared worker anchor", "- &worker {id: preset-worker, disabled: false}\n- {id: other, config: *worker}\n"],
+    ["aliased worker target", "- id: other\n  config: &worker {id: preset-worker, disabled: false}\n- *worker\n"],
+    ["invalid worker YAML", "- id: preset-worker\n  config: [DO_NOT_ECHO_USER_PATCH\n"],
+    ["invalid UTF-8", Buffer.from([0xff])],
+    ...["shud-jobs", ...presetIds].flatMap((id) => {
+      const desired = id === "shud-jobs" ? { id, config: desiredJobs("shud-probe", alternateBin) } : { id, disabled: true };
+      const others = [{ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) }, ...presetIds.map((id) => ({ id, disabled: false }))].filter((row) => row.id !== id).map((row) => `- ${JSON.stringify(row)}\n`).join("");
+      return ["shared", "aliased"].map((kind) => [`already-desired ${kind} ${id}`, others + (kind === "shared" ? `- &owned ${JSON.stringify(desired)}\n- {id: other, config: *owned}\n` : `- id: other\n  config: &owned ${JSON.stringify(desired)}\n- *owned\n`), "", `${kind} ${id}`]);
+    }),
+  ]) {
+    writeFileSync(headless.patch, Buffer.concat([Buffer.from(prefix), Buffer.isBuffer(invalid) ? invalid : Buffer.from(invalid)]));
+    const before = [hash(headless.patch), hash(headless.manifest)], stat = lstatSync(headless.patch);
+    const env = { ...process.env, PROFILE_TEMPLATE: "headless" };
+    for (const stage of ["precheck", "writer", "installer"]) {
+      const label = `headless ${kind} ${stage}`, args = [headless.patch, alternateBin, join(headless.directory, "shud-jobs")];
+      const result = stage === "installer" ? await install(label, "shud-probe", alternateBin, "headless", true) :
+        await run(label, process.execPath, [join(root, "scripts/runtime/profile-patch.ts"), ...(stage === "precheck" ? ["--check"] : []), ...args], false, env, true);
+      const diagnostic = `${result.stdout}\n${result.stderr}`, after = lstatSync(headless.patch);
+      check(`${label}: rejected`, result.status !== 0);
+      check(`${label}: controlled file/target diagnostic`, diagnostic.includes(`${headless.patch}:`) && !diagnostic.includes("DO_NOT_ECHO_USER_PATCH") && (!targetDiagnostic || diagnostic.includes(targetDiagnostic)));
+      check(`${label}: no partial jobs/preset/manifest write`, hash(headless.patch) === before[0] && hash(headless.manifest) === before[1]);
+      check(`${label}: mode/inode/mtime unchanged`, after.mode === stat.mode && after.ino === stat.ino && after.mtimeMs === stat.mtimeMs);
+    }
+  }
+  writeFileSync(headless.patch, firstHeadless);
+  const webOverrides = "\n# deliberate Web user disables\n- {id: preset-coordinator, disabled: true, config: {description: keep}}\n- {id: preset-worker, disabled: true}\n";
+  writeFileSync(web.patch, migrated + webOverrides);
+  await preservedInstall("shud", shudBin, "Web preserves deliberate preset overrides");
+  writeFileSync(web.patch, migrated);
   const headlessGuards = (headlessSchema["x-cordis"]?.entries ?? []).filter((entry) => entry.id === "shud-raw-guard");
   check("headless raw-guard imports", headlessGuards.length === 1 && ["absent", "schema"].includes(headlessGuards[0].status));
   await checkInvalidBoot(bin, web);
