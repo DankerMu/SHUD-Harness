@@ -6,7 +6,11 @@
   },
   "workspaces": {
     ".": {
-      "entry": ["scripts/runtime/profile-patch.ts", "scripts/runtime/shud-restart.ts"],
+      "entry": [
+        "scripts/runtime/profile-patch.ts",
+        "scripts/runtime/shud-restart.ts",
+        "scripts/runtime/shud-first-task.ts"
+      ],
       "project": ["scripts/**/*.ts"]
     },
     "packages/dsh-shud-core": {

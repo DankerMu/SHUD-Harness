@@ -185,6 +185,18 @@ presets 包 SHALL 有一项纳入默认 `pnpm run test` 的漂移测试：读取
 - **WHEN** 会话结束时 `report.md` 不含 `Accepted by PI` 或 `task.json` 不是 `done`
 - **THEN** 退出码非 0，输出指出失败的判据，并打印保留的工作区与 session log 路径
 
+#### Scenario: accepted files without approval audit fail
+- **WHEN** 以一次性 --patch 禁用 shud-policy-gate，模型完成首任务并使 report JSON/Markdown 为 accepted、TaskCard 为 done，但该 report_submit callId 没有匹配的 approval/asked 与 allowed-once approval/decided
+- **THEN** 脚本退出非0并指出缺失的报告审批审计，保留并打印 workspace 与规范 session log 路径，不以 accepted 文件或不存在卡片的超时替代此判据
+
+#### Scenario: worker evidence is bound to the submitted report
+- **WHEN** coordinator 使用另一个子会话/任务/运行的收集结果，或只收到 job_output 终态而 worker 尚未成功 shud_collect 就生成报告
+- **THEN** 脚本拒绝该证据链，即使最终文件看起来 accepted；有效链必须把 parent/child、task/job/run、validated/submitted report 和 decision approval_ref 对齐
+
+#### Scenario: first-task failure retains evidence and owned cleanup boundaries
+- **WHEN** HTTP/审批连接或模型任务失败，或操作被中断
+- **THEN** 脚本非0、保留已创建的工作区/home/session路径，停止并排空自有宿主/连接；仅凭已核实的本次运行身份清理 detached SHUD，无法证明所有权时报告未完成清理而不裸发历史PID信号
+
 ### Requirement: Epic-close PI acceptance
 M3 Epic 收口时 PI SHALL 在 `dsh --profile shud` 的 Web 内亲自完成一次首任务，至少包含一次 `report_submit` 的 Allow once，以及一次拒绝 + 对话 comment + `report_decide` 的往返；证据（session log 路径与 `approval/asked|decided` 事件序列摘录、工作区 task/report 文件路径）SHALL 记入 `docs/Migration_Plan_dsh.md`，验收安排由决策记录 `docs/adr/proposed/0010-m3-epic-acceptance.md`（沿 ADR-0005/0007 模式）登记。子 PR 按工程门合入不等于验收通过；`shud:first-task` 等工程验证 SHALL NOT 替代该验收。
 
