@@ -9,7 +9,7 @@
 ## 2. Verification and delivery
 
 - [x] 2.1 Parent default pnpm docs:check fixture smoke passed AGENTS320, rejected321, and passed AGENTS320/CLAUDE717; guardrails170 PASS, full check146 files/4871 PASS/2 SKIP and strict validation PASS. Final authority wording was re-rendered and eight self-tests/docs/strict revalidated.
-- [ ] 2.2 Complete expanded reviews, exact-head CI and merge; independently archive without M3 PI/ADR/Epic changes.
+- [x] 2.2 Expanded correctness/evidence/invariant reviews CLEAN at 2441567d, no findings or fix passes; CI41239596372 all eight jobs SUCCESS and exact-head ordinary PR506 merge completed. Independently archived with one additive engineering-gates requirement; M3 PI/ADR/Epic state unchanged.
 
 ## Risk pack mapping
 
