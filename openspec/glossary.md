@@ -12,13 +12,13 @@ status: living
 
 | 中文 | 标识符 | 定义 | 权威出处 |
 |---|---|---|---|
-| 任务卡 | `TaskCard` | 研究任务根对象；M3 science_assist 以品牌 TASK id 保存于会话工作区 `tasks/<task_id>/task.json`，聚合运行/报告引用并由确定性状态机推进，不经 ctx.storage | [Minimal_Schemas](../docs/03_SPEC/Minimal_Schemas.md) + [M3 task-cards](changes/m3-mvp-1/specs/task-cards/spec.md) |
-| 栈锁 / 版本锁 | `StackLock` | 品牌 StackId 的复现性快照：SHUD/rSHUD/AutoSHUD 修订、dirty_paths 与截断标记，最小 runtime（os/sundials_version/host_version）及 harness.version；llm 恰为 base_url/request_alias/response_model，响应模型只记录且排除出指纹，不再保留旧字段两态 | [Minimal_Schemas §2](../docs/03_SPEC/Minimal_Schemas.md#2-stacklock) + [M3 stack-lock](changes/m3-mvp-1/specs/stack-lock/spec.md) |
+| 任务卡 | `TaskCard` | 研究任务根对象；M3 science_assist 以品牌 TASK id 保存于会话工作区 `tasks/<task_id>/task.json`，聚合运行/报告引用并由确定性状态机推进，不经 ctx.storage | [Minimal_Schemas](../docs/03_SPEC/Minimal_Schemas.md) + [M3 task-cards](specs/task-cards/spec.md) |
+| 栈锁 / 版本锁 | `StackLock` | 品牌 StackId 的复现性快照：SHUD/rSHUD/AutoSHUD 修订、dirty_paths 与截断标记，最小 runtime（os/sundials_version/host_version）及 harness.version；llm 恰为 base_url/request_alias/response_model，响应模型只记录且排除出指纹，不再保留旧字段两态 | [Minimal_Schemas §2](../docs/03_SPEC/Minimal_Schemas.md#2-stacklock) + [M3 stack-lock](specs/stack-lock/spec.md) |
 | 数据溯源 | `DataProvenance` | 输入数据来源、许可与预处理链记录 | 同上 |
 | 运行作业 | `RunJob` | 一次 SHUD 执行的提交单元（`backend` 枚举在此定义） | 同上 |
 | 运行记录 | `RunRecord` | 作业 collect 后的不可变结果记录（T2 证据载体） | 同上 |
 | 分析计划 | `AnalysisPlan` | 敏感性/校准/基准分析的批量执行计划（`mode=sensitivity` 一等公民） | 同上 |
-| 证据报告 | `EvidenceReport` | 供 PI 决策的规范 JSON 对象 `reports/<report_id>.json`（品牌 REPORT id，含 decision_history）；同名 `.md` 为确定性渲染投影。M3 目标契约，不等于当前报告工具已挂载 | [M3 evidence-reports](changes/m3-mvp-1/specs/evidence-reports/spec.md) |
+| 证据报告 | `EvidenceReport` | 供 PI 决策的规范 JSON 对象 `reports/<report_id>.json`（品牌 REPORT id，含 decision_history）；同名 `.md` 为确定性渲染投影 | [M3 evidence-reports](specs/evidence-reports/spec.md) |
 | 变更请求 | `ChangeRequest` | 代码/参数变更的 patch 载体，走科学分级门 | [Minimal_Schemas](../docs/03_SPEC/Minimal_Schemas.md) |
 | 记忆笔记 | `MemoryNote` | 轻量记忆条目（普通直写 draft，证据类需 PI review） | 同上 + [Memory_Skills_Lite](../docs/03_SPEC/Memory_Skills_Lite.md) |
 
@@ -68,7 +68,7 @@ status: living
 | 语义级别 | `semantic_level` | 科学变更风险分级（决定是否触发 PI gate） | [Scientific_Change_Gating_Spec](../docs/03_SPEC/Scientific_Change_Gating_Spec.md) |
 | 输出语义下限 | output_semantics floor | 特定类别变更的最低语义级别地板 | 同上 |
 | PI 门 | PI gate | 高风险动作阻塞等待 PI 显式决策的状态 | 同上 + [PI_Decision_Comments_Spec](../docs/03_SPEC/PI_Decision_Comments_Spec.md) |
-| PI 门决定 | `PiGateDecision` | M3 报告 decision_history 条目：decision_id/report_id/approval_ref/outcome/comment/decided_at；只在工具获 allowed-once 后记录，approval_ref 为本次 callId，经 session log 关联审批；accepted 的 comment 为 null，其余非空 | [M3 evidence-reports](changes/m3-mvp-1/specs/evidence-reports/spec.md#requirement-pigatedecision-record) |
+| PI 门决定 | `PiGateDecision` | M3 报告 decision_history 条目：decision_id/report_id/approval_ref/outcome/comment/decided_at；只在工具获 allowed-once 后记录，approval_ref 为本次 callId，经 session log 关联审批；accepted 的 comment 为 null，其余非空 | [M3 evidence-reports](specs/evidence-reports/spec.md#requirement-pigatedecision-record) |
 | 决策卡 | decision card | *_review 门的结构化选项卡（3 实分支 + 推荐 + 自由输入，仿 AskUserQuestion） | [Theory_To_Code_Governance_Spec](../docs/03_SPEC/Theory_To_Code_Governance_Spec.md) §5.0 |
 | 停机条件 | stop conditions | Control Kernel 的确定性终止判据集 | Control_Kernel §5 |
 | 无进展判定 | no-progress detector | 停机条件之一：重复无效动作检测 | Control_Kernel §5.1 |

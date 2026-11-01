@@ -9,7 +9,7 @@ canonical_for: [language-guard, reviewer-checklist]
 **适用范围：** EvidenceReport、Markdown 投影、确定性 validator 与 PI 审阅；Reviewer preset 与完整 evidence lineage 属于后续里程碑。
 **目标：** 将 deterministic evidence 与 LLM 叙述分离，避免 Agent 过度解释模型结果。
 
-M3 目标契约以 [m3-mvp-1 design D7/D8](../../openspec/changes/m3-mvp-1/design.md#d7-evidencereport-生成模板与水印) 与 [evidence-reports](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 为准。`dsh-shud-tools` 已挂载 `report_generate` 与 `report_validate`；PI 终态工具 `report_submit` / `report_decide` 属于独立后继切片，不由本两工具代行。
+M3 设计依据见 [m3-mvp-1 design D7/D8](../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d7-evidencereport-生成模板与水印)，当前契约以 [evidence-reports](../../openspec/specs/evidence-reports/spec.md) 为准。`dsh-shud-tools` 已挂载 `report_generate`、`report_validate` 与 PI 终态工具 `report_submit` / `report_decide`；生成与校验不代行终态审批。已挂载工具用法见 [Repository Layout](../04_IMPLEMENTATION/Repository_Layout.md)。
 
 ## 1. 报告定位
 
@@ -48,7 +48,7 @@ coordinator 提供叙述参数
 
 工具不另调 LLM、不自行计算科学指标。引用参数中的 `TASK-/STACK-/DATA-/RUN-/JOB-/REPORT-` 品牌 id 逐一解析；缺失引用返回工具错误，不写 draft、不自动重试，由 coordinator 修正后重新生成。没有额外的 M3 artifact registry/hash 校验或 Reviewer preset 前置门。
 
-报告 JSON 是提交点，其后 TaskCard/Markdown 失败不回滚已提交对象；下一次针对同报告的工具调用按 [写入与修复契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 修复。重新生成总是新 report_id，保留旧报告字节与决定历史，不把旧终态改回 draft。
+报告 JSON 是提交点，其后 TaskCard/Markdown 失败不回滚已提交对象；下一次针对同报告的工具调用按 [写入与修复契约](../../openspec/specs/evidence-reports/spec.md) 修复。重新生成总是新 report_id，保留旧报告字节与决定历史，不把旧终态改回 draft。
 
 `report_generate` 经 `collectShud(id, { readonly: true })` 只读取已 collected 作业的既有规范 RunRecord：缺失、损坏、不安全或身份不符均直接失败，不生成结果、不写失败 ledger、不投影作业状态、不完成登记回执、不通知。普通 `collectShud(id)` 与 `shud_collect` 仍保留原采集行为。保留的收集失败次数另经 `readCollectErrorAttempts(id)` 读取，即使已有成功 RunRecord 也参与 closure；耗尽或损坏 ledger 不会因缓存成功而被绕过。异步证据读取后新出现的作业链接使 closure 拒绝，不重试、不丢弃链接。JSON 提交后的失败明确返回 `report_id` 与 `task_card` / `render` 阶段。
 
@@ -86,7 +86,7 @@ coordinator 提供叙述参数
 ### PI decision history
 ```
 
-§10 的展示权威为 [Decision history Markdown projection](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md#requirement-decision-history-markdown-projection)。`### PI decision history` 位于既有各 Run 命令、日志路径及 artifact manifest 块之前，不增加第十一个二级标题。非空历史按持久数组顺序展示 decision_id、report_id、outcome、decided_at、approval_ref、comment 六列，不排序、去重或推断；空历史精确显示 `No PI decision recorded.`，不伪造历史行。既有 Run 块、七态水印和终态历史约束不变。
+§10 的展示权威为 [Decision history Markdown projection](../../openspec/specs/evidence-reports/spec.md#requirement-decision-history-markdown-projection)。`### PI decision history` 位于既有各 Run 命令、日志路径及 artifact manifest 块之前，不增加第十一个二级标题。非空历史按持久数组顺序展示 decision_id、report_id、outcome、decided_at、approval_ref、comment 六列，不排序、去重或推断；空历史精确显示 `No PI decision recorded.`，不伪造历史行。既有 Run 块、七态水印和终态历史约束不变。
 
 comment 先表示为 JSON literal，再与其余五列一起经过既有结构化 metadata 单次转义：null 显示为 `null`，字符串 `"null"` 保留引号；原始空白、换行、反斜杠和引号以 JSON 转义保留。HTML、管道、反引号、反斜杠与物理换行不会生成新表格列或物理标题，模板样式文本不递归替换。该路径不是模型撰写的 prose；comment 不进入 §6 observations 或自动提升为科学解释，禁止用语检查仍只扫描原四个模型撰写字段，整份 Markdown 的密钥检查仍覆盖 §10。
 
@@ -274,11 +274,11 @@ draft → reviewed → accepted | revision_requested | rejected
 
 终态只由宿主审批结果授权写入：`report_submit` / `report_decide` 的审批为 allowed-once 时工具才执行；rejected/cancelled/无审批服务保持 reviewed，不写决定。模型不能绕开该工具路径直接声明 accepted。`awaiting_pi` 是审批卡挂起的瞬时状态，不落盘；没有 M3 archive endpoint 或归档生产者。
 
-revision_requested 的报告保持该终态，TaskCard 回 planned；下一次 report_generate 分配新 report_id，不覆盖旧报告。新旧报告的延续关系未定义，不虚构父子字段。完整审批/comment 契约由 [M3 policy-gate](../../openspec/changes/m3-mvp-1/specs/policy-gate/spec.md) 定义。
+revision_requested 的报告保持该终态，TaskCard 回 planned；下一次 report_generate 分配新 report_id，不覆盖旧报告。新旧报告的延续关系未定义，不虚构父子字段。完整审批/comment 契约由 [M3 policy-gate](../../openspec/specs/policy-gate/spec.md) 定义。
 
 ## 10. 报告元数据
 
-M3 EvidenceReport/PiGateDecision 字段以 [evidence-reports schema 契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 为准，由 core schema 切片同步 Minimal_Schemas 和生成投影。本文不保留另一套 export/actor/gate 元数据示例。
+M3 EvidenceReport/PiGateDecision 字段以 [evidence-reports schema 契约](../../openspec/specs/evidence-reports/spec.md) 为准，由 core schema 切片同步 Minimal_Schemas 和生成投影。本文不保留另一套 export/actor/gate 元数据示例。
 
 报告用品牌 REPORT id，决定用品牌 DEC id；decision_history 含 report_id、approval_ref、outcome、comment、decided_at。approval_ref 为本次工具执行 callId，经 session log asked.callId → asked.id → decided.id 关联审批；accepted 的 comment 为 null，rejected/revision_requested 必须非空。
 

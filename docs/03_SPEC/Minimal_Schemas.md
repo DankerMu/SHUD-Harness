@@ -19,7 +19,7 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 
 ## 1. TaskCard
 
-M3 品牌标识符修订（#424）的实现源为 `packages/dsh-shud-core/src/schemas/task.ts` 与 `run-identifiers.ts`，依据 [m3-mvp-1 TaskCard 契约](../../openspec/changes/m3-mvp-1/specs/task-cards/spec.md)。本刀仅对齐 TaskCard，不改变其余对象的当前契约。
+M3 品牌标识符修订（#424）的实现源为 `packages/dsh-shud-core/src/schemas/task.ts` 与 `run-identifiers.ts`，依据 [M3 TaskCard 契约](../../openspec/specs/task-cards/spec.md)。本刀仅对齐 TaskCard，不改变其余对象的当前契约。
 
 ```yaml
 task_id: TASK-20261027T080005-3f9c    # TaskId；UTC 秒 + 4 位小写 hex
@@ -298,7 +298,7 @@ created_at: "2026-10-27T09:00:00Z"
 updated_at: "2026-10-27T09:00:00Z"
 ```
 
-M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [m3-mvp-1 报告契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md)。根对象与嵌套 PiGateDecision 均严格拒绝未知字段，以上字段全部必填，不允许省略或 `undefined`。
+M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [M3 报告契约](../../openspec/specs/evidence-reports/spec.md)。根对象与嵌套 PiGateDecision 均严格拒绝未知字段，以上字段全部必填，不允许省略或 `undefined`。
 
 - `report_id` 从 `REPORT-NNNN` 改为品牌 `ReportId`；`task_id` 为品牌 `TaskId`。品牌格式为 `<PREFIX>-YYYYMMDDTHHMMSS-xxxx`，UTC 秒与 4 位小写 hex。
 - `linked_runs` 改为非空品牌 `RunId[]`，允许重复；新增 `stack_ids: StackId[]`、`data_ids: DataId[]`、`llm_response_models: string[]`，三者均非空且拒绝重复。schema 保留调用方顺序，不排序、不静默去重。后续生成器从关联 RunRecord 取引用并去重，不由 schema 读取运行记录。

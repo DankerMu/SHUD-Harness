@@ -329,3 +329,52 @@ env -u ALL_PROXY node ../dsh-spike/runs/m3-issue426/run-remaining.mjs remaining-
 本地证据（不入库）：workspace `/private/tmp/shud-issue457-child-a` 的 `runs/RUN-20261031T171248-6094/{run-job,run-record}.json`；DSH_HOME `/private/tmp/shud-first-task-bgsEdk` 下 `first-task-evidence/{child-wake-diagnostic,resolve-agent-probe,engineering-before-wake,verdict}.json`。该 home 的 `sessions/--private-tmp-shud-issue457-child-a--/<上述会话 id>/session.v4.jsonl.zstd` 是收件与工具事件的 canonical 来源。一次性驱动与探针位于本地 `.workplans/issue-457/`，不成为产品命令或长期测试。
 
 结论仅覆盖上述钉版、真实 Web worker 类型与 `resolveAgent` seam；原受控 detail 仍不能还原每次历史失败的底层原因，不推断其它宿主版本、root 会话或其它投递 API。按 #457 验收分支 (b) 记录此限制；操作路径保持 #426 的 worker `job_output(wait:true)` → `shud_collect`，不能依赖异步 SHUD wake。未改宿主、polling/fallback 或 M3 门禁；`pnpm run shud:restart` 仍必须 delivered，unreachable 仍 FAIL。本次没有重启验证，也不构成 #452 PI 验收，M3 Epic / ADR / OpenSpec 收口状态不变。
+
+### M3 PI acceptance
+
+2026-11-01，PI 逐项完成 A1–A11 后，在 A12 明确选择「通过 M3 阶段验收」，同意整理正式证据、归档 M3 并关闭 [#452](https://github.com/DankerMu/SHUD-Harness/issues/452) / [Epic #423](https://github.com/DankerMu/SHUD-Harness/issues/423)。以下为 PI 在 Web 亲自操作的两条路径，不是 `shud:first-task` 的自动审批。验收安排由 [ADR-0010](adr/implemented/0010-m3-epic-acceptance.md) 登记。
+
+运行环境：dsh `dsh-v0.2.1-rc.2`，模型路由 `deepseek-flash-guan` / DMXAPI，凭据仅环境变量。初始代码为 `59d2cde58efee68c0639600bb91e552786e0f10b`；验收发现 full-access 自动拒绝后暂停，经 [#511 / PR #512](https://github.com/DankerMu/SHUD-Harness/pull/512) 修复，使用合并提交 `10df8dddde27cead4f829989b139aecb985c5b00` 重建、安装并重启同一环境，再完成 A7–A12。重启前后原报告、Markdown、TaskCard 哈希相同，未直接改写业务记录。独立修复的工程审批发生在其它 scratch 环境，不计为本次 PI 操作。
+
+- DSH_HOME：`/Users/danker/.shud-m3-pi-fxht4nhi/home`。
+- 工作区：`/Users/danker/Documents/SHUD-M3-Acceptance-5wc9tdtw`；输入为只读 submodule 的 `input/ccw` 副本，两次提交均未覆盖 END。
+- Root session：`session-dff5aca8-b1bb-42cc-b537-5fea3f6b5fd3`，创建 preset 为 coordinator。
+- Canonical log 根：`/Users/danker/.shud-m3-pi-fxht4nhi/home/sessions/--Users-danker-Documents-SHUD-M3-Acceptance-5wc9tdtw--/`；root 与下表 worker 各自的日志为 `<session-id>/session.v4.jsonl.zstd`。
+
+| 路径 | TaskCard | Run / Job | Worker | 报告 |
+|---|---|---|---|---|
+| Allow once | `TASK-20261101T072233-0dbd` | `RUN-20261101T072730-e35f` / `JOB-20261101T072730-e35f` | `d3a5dcaa-3ef7-42af-99a0-ce97be7b8d77` | `REPORT-20261101T082347-b585` |
+| Reject → comment → revision_requested | `TASK-20261101T145527-c835` | `RUN-20261101T145533-087e` / `JOB-20261101T145533-087e` | `4781e271-e8b8-4e19-badb-7f6b331a8bfb` | `REPORT-20261101T150050-bc3b` |
+
+两个 worker header 均为 `origin=subagent`、`agentPreset=worker`、parent 精确指向上述 root。第一条 worker `shud_run` call/result 为 seq16/17；seq21/22 错用 `dsh_job_id` 被拒后，以 seq26/27 的 `job_output(job_id, wait:true)` 等待，seq31/32 成功 `shud_collect`。第二条依次为 seq17/18 提交、seq22/23 等待、seq27/28 成功收集，最后 seq31 回复 / seq33 turn end。各只有一次 `shud_run`；coordinator 另行读取规范 RunRecord 不构成第二次运行。
+
+工作区持久路径为 `tasks/<task_id>/task.json`、`runs/<run_id>/{run-job,run-record}.json`、`reports/<report_id>.json` 及同名 `.md`。报告引用的 StackLock/DataProvenance 分别在 `stacks/<stack_id>.json`、`provenance/<data_id>.json`。两条任务/运行/报告引用已交叉解析；每条 DataProvenance 的 45 项 SHA256 均与工作区输入、运行副本、只读源文件相符。哈希核对由工程侧只读执行，不声称无文件工具的 coordinator/worker 做过该核对。
+
+Root 的真实 PI 审批摘录：
+
+```jsonl
+{"seq":208,"type":"approval/asked","data":{"id":"2ea9f236-ff53-4785-a756-42e6c9fbe449","toolName":"report_submit","callId":"call_00_xA33aXOybeglDtVruGnW7707","reason":"PI approval required for report REPORT-20261101T082347-b585"}}
+{"seq":209,"type":"approval/decided","data":{"id":"2ea9f236-ff53-4785-a756-42e6c9fbe449","outcome":"allowed-once"}}
+{"seq":257,"type":"approval/asked","data":{"id":"4812707d-8017-43b3-a593-9d844225a316","toolName":"report_submit","callId":"call_00_0WbaISvSfn56wTF7420a1463","reason":"PI approval required for report REPORT-20261101T150050-bc3b"}}
+{"seq":258,"type":"approval/decided","data":{"id":"4812707d-8017-43b3-a593-9d844225a316","outcome":"rejected"}}
+{"seq":281,"type":"approval/asked","data":{"id":"e91675f7-d538-4058-83f1-5e556ecfe128","toolName":"report_decide","callId":"call_00_eIBl10P1TID8BkcYzgZq9995","reason":"PI approval required for report REPORT-20261101T150050-bc3b"}}
+{"seq":282,"type":"approval/decided","data":{"id":"e91675f7-d538-4058-83f1-5e556ecfe128","outcome":"allowed-once"}}
+```
+
+A7 时 PI 确认看到卡片，报告仍 reviewed、决定历史为空、任务 reporting；允许后第一份报告 accepted、任务 done。A9 的人工拒绝后第二份报告仍 reviewed、任务 reporting、历史为空，只有一次 submit，没有重试或 decide。A10 只给评语时，seq271 的 agent 回复追问 rejected / revision_requested；该轮无工具调用或审批，报告/任务字节不变。A11 中 PI 明确选择 revision_requested，seq280 只调用一次 report_decide，PI 核对第二张卡的报告、处置和完整评语后亲自允许；报告变为 revision_requested、任务 planned，没有自动续跑。
+
+| decision_id | report_id | outcome | decided_at | approval_ref | comment |
+|---|---|---|---|---|---|
+| `DEC-20261101T145302-49ad` | `REPORT-20261101T082347-b585` | accepted | `2026-11-01T14:53:02.510Z` | `call_00_xA33aXOybeglDtVruGnW7707` | null |
+| `DEC-20261101T150608-9221` | `REPORT-20261101T150050-bc3b` | revision_requested | `2026-11-01T15:06:08.127Z` | `call_00_eIBl10P1TID8BkcYzgZq9995` | 运行与来源记录可追溯，但科学结论的证据仍不足，限制说明需要更清晰。 |
+
+两份历史各一条、恰有上述六字段，Markdown §10 与 JSON 一致；revision_requested 报告首尾为 `REVISION REQUESTED — not accepted by PI`。approval_ref 是执行 callId，经 asked.callId → asked.id → decided.id 关联，不能与审批 id 混同。首次拒绝不会生成决定；最终修订决定也不引用已拒绝 submit 的 callId。
+
+保留的失败与范围边界：
+
+- 原始 seq147/148 是 full-access 搭配 never 的自动拒绝；PI 明确未看到卡片，不能计作人工 Reject。#511 修复后，root seq190/191 显式重选 danger-full-access，沿用此前 ask，新的 seq208 审批由 PI 实际看到并处理。停止前另一请求只有 asked seq184，保留日志中无对应 decided，不编造关闭时取消或 PI 操作。
+- 两条作业 notify 均为 unreachable/3，受控 detail 为 `SHUD notification session restoration failed`，与上节 #457 边界一致。本次 worker 显式等待/收集完成闭环，不声称自动唤醒成功，也不放宽 `shud:restart` 必须 delivered 的独立判据。
+- 两份 RunRecord 均 succeeded、exit_code=0，分别列出 30 个产物；这不是科学或数值验证。四项 numerical_health 与 peak_memory_mb 仍为 null，metrics_summary 缺席；wall_seconds 是原实例观测窗口，不是求解器耗时。PI 在 A12 知悉上述边界；[#422](https://github.com/DankerMu/SHUD-Harness/issues/422) 的指标生产属于 M5，不随本次关闭。
+- 初始 A5 只读文件/哈希提示超出产品角色工具面，已纠正为报告确定性来源投影加工程侧独立核对；没有为验收扩大角色权限。模型曾误数产物，规范 manifest 与工程核对为准。功能验收不把报告中每一句科学解释认证为正确。
+
+PI 的逐项与总验收回执、只读审计在本地 `.workplans/issue-452/manual-acceptance-20261101/` 保留，不入库也不重写旧证据；本节保留审查所需路径、序列、六字段与明确结论。工程检查、#511 自动 Web 探针与 PI 亲自操作三类证据分别记账。

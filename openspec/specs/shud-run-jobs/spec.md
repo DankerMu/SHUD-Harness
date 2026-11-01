@@ -204,7 +204,7 @@ The shared exit evidence reader used by settlement, recovery, cancellation and c
 - **THEN** 重启后 `job_output` 对该作业 id 报 `unknown job`，不产生运行目录或活动索引条目
 
 ### Requirement: Registry configuration
-插件行配置 SHALL 为 `LocalJobRegistry.Config` 与 {`stateDir`, `shudBin`} 的并集：父类键（`maxConcurrentJobsPerOwner`、`retainBytes`、`settledRetainBytes`、`pumpPollMs`）沿用父类默认值与校验；`stateDir`（绝对路径，可写目录，不存在时创建）与 `shudBin`（可执行文件绝对路径）为必填。任一必填键缺失、为空、不可写或不可执行，或出现并集之外的键时，插件 apply SHALL 抛出指明配置键的错误，SHALL NOT 回退到任何内置默认值。dsh 不把 `shud-jobs` 行视为必需启动项，因此该行激活失败时 dsh 继续启动、在 stderr 打印该行的激活失败诊断（含错误消息）；此时 `ctx.jobs` 不存在，依赖它的插件行（`tool-jobs`、`shud-tools` 等）不激活，`bash run_in_background` 与 Web 作业卡不可用。
+插件行配置 SHALL 为 `LocalJobRegistry.Config` 与 {`stateDir`, `shudBin`, `stackRepos.SHUD`, `stackRepos.rSHUD`, `stackRepos.AutoSHUD`, `sundialsRoot`, `hostVersion`, `llm.base_url`, `llm.request_alias`} 的并集：父类键（`maxConcurrentJobsPerOwner`、`retainBytes`、`settledRetainBytes`、`pumpPollMs`）沿用父类默认值与校验；`stateDir`（绝对路径，可写目录，不存在时创建）与 `shudBin`（可执行文件绝对路径）为必填；StackLock 采集键 `stackRepos.SHUD`、`stackRepos.rSHUD`、`stackRepos.AutoSHUD`（绝对路径）、`hostVersion`、`llm.base_url`、`llm.request_alias`（非空字符串）为必填，`sundialsRoot`（绝对路径）为可选，缺省时 StackLock 的 `runtime.sundials_version` 为 `null`（见 stack-lock「Deterministic capture at shud_run submission」）。任一必填键缺失、为空、不可写或不可执行，或出现并集之外的键时，插件 apply SHALL 抛出指明配置键的错误，SHALL NOT 回退到任何内置默认值。dsh 不把 `shud-jobs` 行视为必需启动项，因此该行激活失败时 dsh 继续启动、在 stderr 打印该行的激活失败诊断（含错误消息）；此时 `ctx.jobs` 不存在，依赖它的插件行（`tool-jobs`、`shud-tools` 等）不激活，`bash run_in_background` 与 Web 作业卡不可用。
 
 #### Scenario: missing shudBin at apply
 - **WHEN** vitest 以缺少 `shudBin` 的配置 apply 注册表插件
@@ -214,8 +214,16 @@ The shared exit evidence reader used by settlement, recovery, cancellation and c
 - **WHEN** 以 `maxConcurrentJobsPerOwner: 2` 加两个必填键 apply，另以多出 `shudbin` 键的配置 apply
 - **THEN** 前者成功且第 3 个并发无 owner 作业的启动按父类规则被拒；后者抛错并指出未知键 `shudbin`
 
+#### Scenario: missing capture key at apply
+- **WHEN** vitest 以缺少 `stackRepos.AutoSHUD`、`hostVersion` 或 `llm.request_alias` 的配置 apply 注册表插件
+- **THEN** apply 抛错且错误消息含缺失的配置键，未注册 `ctx.jobs`
+
+#### Scenario: sundialsRoot is optional
+- **WHEN** 以除 `sundialsRoot` 外全部必填键齐全的配置 apply 注册表插件
+- **THEN** apply 成功
+
 #### Scenario: missing shudBin at real boot
-- **WHEN** 以 `shud-jobs` 行 `config` 为有效 `stateDir` 加空 `shudBin` 的 overlay（按 id 的 patch 整体替换 `config`）执行 `dsh --profile shud --patch <overlay> --no-open --port <p>`
+- **WHEN** 以 `shud-jobs` 行 `config` 为安装时的完整配置（有效 `stateDir` 与全部 StackLock 采集键）、仅把 `shudBin` 置空的 overlay（按 id 的 patch 整体替换 `config`，故 `shudBin` 是唯一缺失项）执行 `dsh --profile shud --patch <overlay> --no-open --port <p>`
 - **THEN** stderr 含 `did not activate`、`shud-jobs` 与 `shudBin`，`tool-jobs` 行未激活
 
 ### Requirement: State directory lock and indexes
@@ -254,7 +262,9 @@ The shared exit evidence reader used by settlement, recovery, cancellation and c
 - **THEN** 拒绝新修改，等待已接收索引修改完成后才尝试删除 `lock` 并关闭内核锁描述符；删除失败仍尝试关闭，保留原错误并明确区分 guard 已释放与关闭结果不确定，不重复清理、不改索引或永久协调 inode；非 shud 作业的父类 teardown 仍由整体注册表释放等待，行为不变
 
 ### Requirement: Shud job submission
-`shud_run` 调用期间注册表 SHALL 同步完成提交，顺序为：分配 `job_id`/`run_id`；创建 `<session cwd>/runs/<run_id>/`，创建前后各以 `lstat` 确认 `runs/` 与 `runs/<run_id>` 均为真实目录（不是符号链接）且 `runs/<run_id>` 由本次非递归 `mkdir` 新建；把输入目录完整复制到 `input/<project>/`（M2 恒为完整复制）；有 `end_days` 时只在副本的 `<project>.cfg.para` 中改写 `END`；原子写 `run-job.json`（`status: created`）并加入活动索引；写 `status: submitted`；经父类 `start` 以无 owner、`kind: shud`、label `<run_id>`（有 `label` 时为 `<run_id> <label>`）登记，并把 `stdout.log` 作为输出源——登记前注册表 SHALL 以自身构造时的无作用域上下文经父类 `attachController` 挂载一个全局层控制器，父类 `start` 返回或抛错后立即释放（无 owner 作业只能由全局控制器放行；该控制器 SHALL NOT 常驻），因此登记不依赖 `tool-jobs` 是否挂载或挂在哪一层；包装进程 spawn 后写 `pid`、`pid_started_at` 与 `status: running`。运行目录复核失败、复制失败或父类 `start` 抛错时，注册表 SHALL 删除本次运行目录（含部分副本）与已加入的索引条目，并以说明原因的错误失败，使 `shud_run` 返回工具错误；此时 SHALL NOT 留下 RunJob、RunRecord 或索引条目。SHALL NOT 修改原输入目录。注册表 SHALL 把 `owner_session` 记为调用所属会话 id，`dsh_job_id` 记为本次登记 id 并追加到 `dsh_job_ids`。
+`shud_run` 调用期间注册表 SHALL 同步完成提交，顺序为：分配 `job_id`/`run_id`；创建 `<session cwd>/runs/<run_id>/`，创建前后各以 `lstat` 确认 `runs/` 与 `runs/<run_id>` 均为真实目录（不是符号链接）且 `runs/<run_id>` 由本次非递归 `mkdir` 新建；把输入目录完整复制到 `input/<project>/`（M2 恒为完整复制）；有 `end_days` 时只在副本的 `<project>.cfg.para` 中改写 `END`；采集 StackLock（会话 cwd 下 `stacks/` 已有指纹相等的 lock 时复用其 `stack_id`、不改写该文件，否则以排他创建写 `stacks/<stack_id>.json`，见 stack-lock「Deterministic capture at shud_run submission」），并在同一步骤由副本生成 DataProvenance、在写 `run-job.json` 之前原子写 `provenance/<data_id>.json`（见 data-provenance；`stacks/` 与 `provenance/` 的路径安全遵循 task-cards「TaskCard workspace file」的工作区文件安全规则）；原子写 `run-job.json`（`status: created`，其 `stack_id`、`data_id` 为上一步的 id，`task_id` 为提交请求携带的值或 `null`）并加入活动索引；写 `status: submitted`；经父类 `start` 以无 owner、`kind: shud`、label `<run_id>`（有 `label` 时为 `<run_id> <label>`）登记，并把 `stdout.log` 作为输出源——登记前注册表 SHALL 以自身构造时的无作用域上下文经父类 `attachController` 挂载一个全局层控制器，父类 `start` 返回或抛错后立即释放（无 owner 作业只能由全局控制器放行；该控制器 SHALL NOT 常驻），因此登记不依赖 `tool-jobs` 是否挂载或挂在哪一层；包装进程 spawn 后写 `pid`、`pid_started_at` 与 `status: running`。运行目录复核失败、复制失败、StackLock 采集或 DataProvenance 生成失败，或父类 `start` 抛错时，注册表 SHALL 删除本次运行目录（含部分副本）、已加入的索引条目与本次写入的 DataProvenance 文件，并以说明原因的错误失败，使 `shud_run` 返回工具错误；此时 SHALL NOT 留下 RunJob、RunRecord、索引条目或本次的 DataProvenance 文件。回滚 SHALL NOT 删除 `stacks/` 中的任何 StackLock 文件：被复用的 lock 属于其它运行，本次新写的 lock 是与运行无关的环境记录，可能已被并发提交复用。SHALL NOT 修改原输入目录。注册表 SHALL 把 `owner_session` 记为调用所属会话 id，`dsh_job_id` 记为本次登记 id 并追加到 `dsh_job_ids`。
+
+为保持原输入不变，提交预检 SHALL 在创建运行目录或采集证据之前拒绝 `stacks/` 或 `provenance/` 写入根等于或位于已解析原始输入树内的布局；已存在的写入根 SHALL 使用 native realpath 的实际物理拼写，不能因输入符号链接或大小写别名漏检。输入仅位于写入根的子目录而发布位置不在输入树内时，SHALL NOT 仅据该反向包含关系拒绝；既有 StackLock 文件枚举等独立校验保持不变。
 
 #### Scenario: input copied and END patched
 - **WHEN** 以 `SHUD/input/ccw` 为输入、`end_days: 30` 提交
@@ -295,6 +305,26 @@ The shared exit evidence reader used by settlement, recovery, cancellation and c
 #### Scenario: no resident global controller
 - **WHEN** 提交过 shud 作业后，一个所在组合未挂载任何控制器的 Agent 以有 owner 的非 shud `JobSpec` 调用 `start`
 - **THEN** 与 `jobs-local` 相同，抛出 `no job controller serves this agent`
+
+#### Scenario: submission records stack and data ids
+- **WHEN** 以 `task_id` 成功提交一次 shud 作业
+- **THEN** `stacks/<stack_id>.json` 与 `provenance/<data_id>.json` 存在且通过各自 schema，`run-job.json` 的 `stack_id`、`data_id`、`task_id` 与之对应，且这三者在 `status: created` 的首次写入中已出现
+
+#### Scenario: capture failure rolls back without touching locks
+- **WHEN** `stacks/` 中已有一个指纹与本次环境相等的 lock，而 DataProvenance 写入失败
+- **THEN** `shud_run` 返回工具错误，`runs/<run_id>/` 不存在，`active.json` 与 `completed.json` 均无该 `run_id`，`provenance/` 下没有本次文件，已有 lock 的字节与修改时间不变
+
+#### Scenario: start failure removes provenance but keeps the lock
+- **WHEN** 采集与生成成功后父类 `start` 抛错
+- **THEN** 运行目录、索引条目与本次 `provenance/<data_id>.json` 被删除，`stacks/` 中的 lock 文件保留
+
+#### Scenario: capture destination overlaps original input
+- **WHEN** 有效项目输入根为工作区 stacks 或 provenance，直接传入或经输入链接/文件系统大小写别名传入
+- **THEN** 在提交副作用前拒绝，原输入成员与字节、工作区、索引和 state 文件不变，不调用 producer
+
+#### Scenario: disjoint or nested input is not an overlap
+- **WHEN** 输入为 stacks-input、provenance-input 或 provenance 的子目录，而写入根不在原输入树内
+- **THEN** 不因 capture-root/input 包含判据拒绝，沿既有复制、采集与提交契约执行；不绕过其它既有路径/记录校验
 
 ### Requirement: Concurrent runs
 多个 shud 作业 SHALL 可以同时处于 `running`，各自使用独立运行目录；注册表 SHALL NOT 设 shud 专属并发上限或排队。同时活动的无 owner 作业数受父类 `maxConcurrentJobsPerOwner`（无 owner 桶）约束；超出时 `shud_run` SHALL 返回说明已达上限的工具错误，且按「Shud job submission」清理，不排队、不启动 SHUD。
@@ -654,3 +684,74 @@ M2 Epic 收口时 PI SHALL 在 `dsh --profile shud` 的 Web 界面亲自完成�
 #### Scenario: acceptance recorded
 - **WHEN** PI 完成该次 Web 验收
 - **THEN** `docs/Migration_Plan_dsh.md` 含该会话的 session log 路径、`shud_run` 调用、重启后的唤醒消息与 RunRecord 路径
+
+### Requirement: Run jobs by task query
+注册表 SHALL 公开后端 API `listRunJobsByTask(task_id: TaskId): Promise<RunJob[]>`，供 `shud-tools` 的 task-cards「TaskCard reconcile」使用：入参 SHALL 先经 `TaskId` 品牌 schema 校验，未通过即拒绝且不读盘；随后遍历活动索引与完成索引的全部条目，按与 `collectShud` 相同的运行路径与身份校验读取每个条目的 `run-job.json` 并经 core RunJob schema 校验，返回其中 `task_id` 等于入参的 RunJob，按 `job_id` 码点升序排列；没有匹配时返回空数组。任一条目的运行路径或身份校验失败、`run-job.json` 不可读或未通过 schema 校验时，SHALL 以指出该 `run_id` 的错误拒绝（fail-closed），SHALL NOT 跳过该条目或改写任何文件。它只读、不经逐条目队列写入、不改变索引；与 `collectShud` 相同，在启动对账完成并就绪之前及关闭准入之后 SHALL 明确拒绝。会话 cwd 不参与查找，未进入索引的磁盘记录不被返回。
+
+查询 SHALL 保持现有 drain-before-unlock 生命周期：已接纳的异步只读查询在 stateDir 所有权释放前结束或失败，关闭后的新查询立即拒绝；查询失败 SHALL NOT 使清理跳过释放步骤。completed 先发布、active 尚未移除的合法窗口内，同一运行身份可能同时存在两份索引快照中；查询 SHALL 按 active 优先处理同一身份并仅返回一次，不改变索引迁移顺序或掩盖不一致身份。
+
+#### Scenario: jobs of one task are listed from both indexes
+- **WHEN** 同一 `task_id` 有一个已 `collected`（完成索引）与一个 `running`（活动索引）的作业，另有一个 `task_id: null` 的作业
+- **THEN** `listRunJobsByTask(task_id)` 恰返回前两个 RunJob，按 `job_id` 码点升序
+
+#### Scenario: unknown task yields an empty list
+- **WHEN** 以没有任何作业的合法 `task_id` 调用
+- **THEN** 返回空数组，不写任何文件
+
+#### Scenario: malformed task id is rejected
+- **WHEN** 以 `"TASK-0001"` 调用
+- **THEN** 调用以指出 `task_id` 的错误拒绝，不读取任何 `run-job.json`
+
+#### Scenario: corrupt indexed record fails closed
+- **WHEN** 某个已索引条目的 `run-job.json` 不是合法 JSON 时调用
+- **THEN** 调用以指出该 `run_id` 的错误拒绝，该文件字节不变
+
+#### Scenario: not ready before startup reconciliation
+- **WHEN** 注册表的启动对账尚未完成时调用
+- **THEN** 调用被明确拒绝，与此时的 `collectShud` 相同
+
+#### Scenario: duplicate index migration returns one run
+- **WHEN** 同一运行的 completed 条目已发布、active 移除尚在等待，查询该任务
+- **THEN** 同一 run_id/job_id/run_dir 只返回一份经校验的 RunJob，查询不修改任一索引
+
+#### Scenario: corrupt unrelated run also rejects
+- **WHEN** 已索引的其它任务记录损坏，目标任务本身有有效记录或没有匹配记录
+- **THEN** 查询整体拒绝并指出损坏条目的 run_id，不返回部分结果或跳过该条目，原文件不变
+
+#### Scenario: accepted readonly query drains before unlock
+- **WHEN** 已接纳查询停在记录读取，注册表开始关闭，且该读取稍后成功或失败
+- **THEN** 新查询立即拒绝，stateDir 所有权保持至已接纳读取结束；读取失败不阻止正常清理释放，查询不加入逐条目写队列
+
+### Requirement: Readonly collection attempt evidence
+注册表 SHALL 提供以 core RunId 或 JobRecordId 为参数的只读收集失败次数入口。品牌校验先于 IO；经当前拥有的 active-first/completed 索引查找，并校验运行路径、完整 RunJob 与条目身份。入口 SHALL 复用既有严格 collect-error.json 解析器，返回 attempts；只有文件真正不存在为0，损坏、额外字段、非法次数/时间、链接/特殊文件或不可读均受控失败，SHALL NOT 泄露 last_error 原文。已有有效 RunRecord 不得短路这次 ledger 读取。SHALL NOT collect、重试、改写记录/索引、清除 ledger 或扫描未索引目录。
+
+此入口 SHALL 与任务查询共用就绪/关闭准入及已接纳读操作 drain-before-unlock 生命周期，不新增调度器或持久状态；接纳的读取成功或失败均排空后才释放所有权。
+
+#### Scenario: successful record retains exhausted evidence
+- **WHEN** 已 collected 作业有有效 succeeded RunRecord，保留的 collect-error.json attempts 为 MAX_COLLECT_ATTEMPTS
+- **THEN** 只读入口仍返回该次数，报告 closure 拒绝耗尽；记录、ledger 与索引字节和修改时间不变
+
+#### Scenario: absent and corrupt ledgers differ
+- **WHEN** 分别读取 ledger 缺失、损坏或符号链接的已索引作业
+- **THEN** 只有真正缺失返回0，其余受控拒绝且不改写文件，不降级为0或泄露 ledger 内容
+
+#### Scenario: attempt reader drains before ownership release
+- **WHEN** 已接纳读取阻塞在 IO 后注册表开始关闭
+- **THEN** 新读取拒绝，旧读取结束或失败后才释放 stateDir 锁，失败不跳过清理
+
+### Requirement: Readonly collected record access
+collectShud SHALL 接受可选只读模式 `{readonly:true}`，供报告生成取得已有已收集记录。未指定或 readonly 为 false 的原调用语义不变。只读模式 SHALL 沿原有就绪/关闭准入、持久品牌 id 的活动优先索引查找、D7 接纳时捕获及逐条目排他队列执行；读取前验证 RunJob 的 collected 状态、完整 schema 与路径/身份，再复用规范已有 RunRecord 解析及运行身份校验。只有已存在的有效记录可返回；未 collected、缺失/损坏/链接/特殊/不可读或身份不符记录 SHALL 受控拒绝。
+
+只读模式 SHALL NOT 生成或改写任何 RunRecord、RunJob、ledger 或索引，不调用正常完成回执、收集失败记账、投影/通知或重试。它不替代报告 closure 的独立 retained-ledger 次数判断；默认收集成功缓存优先规则不变。已接纳只读操作 SHALL 由现有逐条目队列排空后才释放 stateDir 所有权，不新增队列或调度器。
+
+#### Scenario: readonly returns the canonical immutable collected record
+- **WHEN** 以 run_id 或 job_id 对活动/完成索引中的 collected 作业调用 collectShud(id, {readonly:true})
+- **THEN** 返回规范 RunRecord，运行记录/ledger/索引字节和修改时间不变
+
+#### Scenario: readonly cached-record failure never journals or regenerates
+- **WHEN** collected 作业的 RunRecord 缺失、损坏、身份不符或不安全
+- **THEN** 只读调用受控拒绝，缺失文件不被补建，损坏字节保留，不创建或增加 collect-error.json，不改 RunJob 或索引
+
+#### Scenario: readonly keeps admission and drain boundaries
+- **WHEN** 在未就绪/已关闭/D7 在途时调用只读模式，或关闭时已有只读请求停在记录 IO
+- **THEN** 未接纳请求按规范拒绝；D7 接纳时事实不被排队期间完成覆盖；已接纳读取完成或失败后才释放所有权

@@ -178,7 +178,7 @@ matching TaskCard, StackLock and DataProvenance records with branded ids
 no metrics, figure or AnalysisPlan progress artifacts
 ```
 
-这是 [M3 EvidenceReport 契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md) 的确定性 fixture，不要求真实求解器或伪造科学分析。每个引用必须可解析；两份 RunRecord 分别展示成功与失败事实，不能用成功运行掩盖失败。
+这是 [M3 EvidenceReport 契约](../../openspec/specs/evidence-reports/spec.md) 的确定性 fixture，不要求真实求解器或伪造科学分析。每个引用必须可解析；两份 RunRecord 分别展示成功与失败事实，不能用成功运行掩盖失败。
 
 ### 验收
 

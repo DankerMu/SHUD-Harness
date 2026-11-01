@@ -14,7 +14,7 @@ canonical_for: [spec-gaps-register]
 
 - **已定选择（M3 design D4/D7）**：revision_requested 的 EvidenceReport 保持终态，TaskCard 回 planned；每次 report_generate 分配新 report_id，旧报告字节与 decision_history 不变。
 - **边界**：不定义新旧报告的延续关系，不复用旧 report_id、不把旧报告回退 draft、不继承旧决定历史。
-- **依据**：[m3-mvp-1 design](../../openspec/changes/m3-mvp-1/design.md#d4-taskcard-状态机与-closure-谓词)。这是已定实现契约，工具/状态机仍随 M3 对应切片交付。
+- **依据**：[m3-mvp-1 design](../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d4-taskcard-状态机与-closure-谓词)。对应 M3 工具与状态机已交付，入口见 [Repository Layout](../04_IMPLEMENTATION/Repository_Layout.md)。
 
 ### GAP-02: RunJob.timed_out 时 TaskCard 如何转换
 
@@ -38,7 +38,7 @@ canonical_for: [spec-gaps-register]
 
 - **已定并已交付生成器**：core `createBrandedId(prefix)` 使用 `<PREFIX>-YYYYMMDDTHHMMSS-xxxx`（UTC 秒 + 两字节随机数的四位小写 hex），不是计数器或 UUID。TASK/STACK/DATA/REPORT/DEC 品牌 schema 随 #424 / PR #455 交付；各对象 schema 的后续迁移仍由 M3 对应切片完成。
 - **配对与碰撞**：同一次运行的 JOB/RUN 共享时间戳与随机段；其它对象独立生成。文件创建方必须检查冲突并按对象契约重分配，不把短随机后缀当成无碰撞保证；不新增全局计数器。
-- **依据**：[运行标识符实现](../../packages/dsh-shud-core/src/schemas/run-identifiers.ts) 与 [M3 design D3](../../openspec/changes/m3-mvp-1/design.md#d3-品牌-id-与-schema-对齐critical-path-7)。
+- **依据**：[运行标识符实现](../../packages/dsh-shud-core/src/schemas/run-identifiers.ts) 与 [M3 design D3](../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d3-品牌-id-与-schema-对齐critical-path-7)。
 
 ### GAP-05: output_digest 算法（幂等 collect）
 
