@@ -22,6 +22,23 @@
 - id: session-log-deepseek
   disabled: true
 
+# Filesystem access is not PI approval authority, including environment-selected full access.
+- id: approval
+  config:
+    policy: ask
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: ask
+
 # The old row cannot be renamed by an id patch: disable it, then insert the replacement.
 - id: jobs
   disabled: true

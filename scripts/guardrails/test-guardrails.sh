@@ -33,11 +33,27 @@ rm -f "$P"
 SEAM_DIR="packages/dsh-shud-core/src/__guardtest_seams"
 if ! mkdir "$SEAM_DIR"; then echo "FAIL  cannot create seam fixture directory"; exit 1; fi
 PLANTED="$PLANTED $SEAM_DIR"
-expect_seam() { # name, allow or expected rule ID, filename, source
+expect_seam() { # name, allow or expected rule ID, filename, source, optional lint pathname
   name="$1"; expected="$2"; fixture="$SEAM_DIR/$3"
   printf '%s\n' "$4" > "$fixture"
   status=0
-  pnpm exec eslint --format json "$fixture" > "$TMP/seam.json" 2> "$TMP/seam.err" || status=$?
+  if [ "$#" -ge 5 ]; then
+    # Isolate injected syntax from the typed project's on-disk SourceFile at this pathname.
+    # Only this self-test disables type-aware rules; repository import restrictions stay loaded.
+    node --input-type=module -e '
+      import { readFileSync } from "node:fs";
+      import { ESLint } from "eslint";
+      import tseslint from "typescript-eslint";
+      const eslint = new ESLint({ overrideConfig: [tseslint.configs.disableTypeChecked] });
+      const results = await eslint.lintText(readFileSync(0, "utf8"), {
+        filePath: process.argv[1],
+      });
+      process.stdout.write(JSON.stringify(results));
+      process.exitCode = results.some(result => result.errorCount > 0) ? 1 : 0;
+    ' "$5" < "$fixture" > "$TMP/seam.json" 2> "$TMP/seam.err" || status=$?
+  else
+    pnpm exec eslint --format json "$fixture" > "$TMP/seam.json" 2> "$TMP/seam.err" || status=$?
+  fi
   if node -e '
     const fs = require("node:fs");
     const [report, expected, status] = process.argv.slice(1);
@@ -147,6 +163,37 @@ for source in @deepseek-ai/dsh-tools @deepseek-ai/cordis @deepseek-ai/dsh-jobs @
   expect_seam "eslint runtime seam inline type import $source" allow registry.ts "import { type HostType } from '$source'; export type { HostType };"
   expect_seam "eslint runtime seam inline type re-export $source" allow registry.ts "export { type HostType } from '$source';"
 done
+
+# ADR-0012: inject syntax at the exact authorized path without overwriting the real regression.
+APPROVAL_TEST="packages/dsh-shud-policy-gate/src/full-access-approval.test.ts"
+for binding in \
+  "@deepseek-ai/dsh-permission-presets:PermissionPresetService" \
+  "@deepseek-ai/dsh-user-approval:ApprovalService" \
+  "@deepseek-ai/dsh-session:SessionStore" \
+  "@deepseek-ai/dsh-session-projection:SessionProjectionRegistry" \
+  "@deepseek-ai/dsh-system-prompt:SystemPrompt"; do
+  source=${binding%:*}; symbol=${binding#*:}
+  capability="import { $symbol } from '$source'; export { $symbol };"
+  expect_seam "eslint approval named $symbol" allow seam.test.ts "$capability" "$APPROVAL_TEST"
+  expect_seam "eslint approval production $symbol" no-restricted-imports registry.ts "$capability"
+  expect_seam "eslint approval other test $symbol" no-restricted-imports seam.test.ts "$capability"
+  expect_seam "eslint approval other package same basename $symbol" no-restricted-imports full-access-approval.test.ts "$capability"
+  expect_seam "eslint approval helper $symbol" no-restricted-imports test-harness.ts "$capability"
+  expect_seam "eslint approval other named $source" no-restricted-imports seam.test.ts "import { UnlistedCapability } from '$source'; export { UnlistedCapability };" "$APPROVAL_TEST"
+  expect_seam "eslint approval default $source" no-restricted-imports seam.test.ts "import host from '$source'; export { host };" "$APPROVAL_TEST"
+  expect_seam "eslint approval namespace $source" no-restricted-imports seam.test.ts "import * as host from '$source'; export { host };" "$APPROVAL_TEST"
+  expect_seam "eslint approval wildcard export $source" no-restricted-imports seam.test.ts "export * from '$source';" "$APPROVAL_TEST"
+  expect_seam "eslint approval side effect $source" no-restricted-syntax seam.test.ts "import '$source';" "$APPROVAL_TEST"
+  expect_seam "eslint approval empty import $source" no-restricted-syntax seam.test.ts "import {} from '$source';" "$APPROVAL_TEST"
+  expect_seam "eslint approval empty export $source" no-restricted-syntax seam.test.ts "export {} from '$source';" "$APPROVAL_TEST"
+  expect_seam "eslint approval inline-only type $source" no-restricted-syntax seam.test.ts "import { type $symbol } from '$source'; export type { $symbol };" "$APPROVAL_TEST"
+  expect_seam "eslint approval declaration type $source" allow seam.test.ts "import type { $symbol } from '$source'; export type { $symbol };" "$APPROVAL_TEST"
+  expect_seam "eslint approval package subpath $source" no-restricted-imports seam.test.ts "import '$source/internal';" "$APPROVAL_TEST"
+done
+expect_seam "eslint approval preserves unrelated host denial" no-restricted-imports seam.test.ts "import '@deepseek-ai/dsh-agent';" "$APPROVAL_TEST"
+expect_seam "eslint approval preserves testkit denial" no-restricted-imports seam.test.ts "import '@deepseek-ai/dsh-agent-loop-testkit';" "$APPROVAL_TEST"
+expect_seam "eslint approval preserves checkout runtime denial" no-restricted-imports seam.test.ts "import '../../../../deepseek-harness/packages/core/session/src/index.ts';" "$APPROVAL_TEST"
+expect_seam "eslint approval preserves checkout type denial" no-restricted-imports seam.test.ts "import type { Session } from '../../../../deepseek-harness/packages/core/session/src/index.ts'; export type { Session };" "$APPROVAL_TEST"
 rm -rf "$SEAM_DIR"
 
 # 3 jscpd (duplicate block planted in an isolated dir, scanned directly)

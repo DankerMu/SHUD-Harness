@@ -35,6 +35,20 @@ const HOST_SCOPE_IMPORT = {
     "Only named createScope in *.test.ts or test-harness.ts may import dsh-scope at runtime (ADR-0006).",
 };
 
+// ADR-0012: real approval integration in this one regression, never production or other tests.
+const FULL_ACCESS_TEST_IMPORTS = [
+  ["@deepseek-ai/dsh-permission-presets", "PermissionPresetService"],
+  ["@deepseek-ai/dsh-user-approval", "ApprovalService"],
+  ["@deepseek-ai/dsh-session", "SessionStore"],
+  ["@deepseek-ai/dsh-session-projection", "SessionProjectionRegistry"],
+  ["@deepseek-ai/dsh-system-prompt", "SystemPrompt"],
+].map(([name, capability]) => ({
+  name,
+  allowImportNames: [capability],
+  allowTypeImports: true,
+  message: `Only named ${capability} is authorized in the full-access regression (ADR-0012).`,
+}));
+
 // no-restricted-imports cannot check allowImportNames when there are no specifiers.
 function emptyRuntimeImportRestriction(source) {
   return {
@@ -122,6 +136,36 @@ export default tseslint.config(
         "error",
         emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name),
         emptyRuntimeImportRestriction(HOST_SCOPE_IMPORT.name),
+        INLINE_TYPE_RUNTIME_IMPORT,
+      ],
+    },
+  },
+  {
+    files: ["packages/dsh-shud-policy-gate/src/full-access-approval.test.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            HOST_MESSAGE_IMPORT,
+            { ...HOST_SCOPE_IMPORT, allowImportNames: ["createScope"] },
+            ...FULL_ACCESS_TEST_IMPORTS,
+          ],
+          patterns: [
+            HOST_IMPORT_PATTERNS[0],
+            {
+              ...HOST_IMPORT_PATTERNS[1],
+              regex:
+                "^@deepseek-ai/(?!(?:dsh-tools|cordis|dsh-jobs|dsh-jobs-local|dsh-llm|dsh-scope|dsh-permission-presets|dsh-user-approval|dsh-session|dsh-session-projection|dsh-system-prompt)$)",
+            },
+          ],
+        },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name),
+        emptyRuntimeImportRestriction(HOST_SCOPE_IMPORT.name),
+        ...FULL_ACCESS_TEST_IMPORTS.map(({ name }) => emptyRuntimeImportRestriction(name)),
         INLINE_TYPE_RUNTIME_IMPORT,
       ],
     },
