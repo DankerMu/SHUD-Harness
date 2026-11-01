@@ -9,7 +9,7 @@ kind: architecture
 
 [#511](https://github.com/DankerMu/SHUD-Harness/issues/511) 的 full-access 预设在钉版 dsh 0.2.1-rc.2 中把 approval policy 设为 never。真实 ApprovalService 在发出 approval/request 之前自动拒绝；仅替换 approval.request 的既有测试无法发现该问题。asked/decided 日志也不能单独证明审批请求曾到达 answerer。
 
-[ADR-0006](../implemented/0006-dsh-jobs-seam-imports.md) 默认禁止这些宿主服务的运行时导入。本记录按 [full-access-pi-approval design](../../../openspec/changes/full-access-pi-approval/design.md) 为一个行为回归提出窄例外，不扩大生产 seam，也不宣称已获 PI 接受。
+[ADR-0006](../implemented/0006-dsh-jobs-seam-imports.md) 默认禁止这些宿主服务的运行时导入。本记录按 [full-access-pi-approval design](../../../openspec/changes/archive/2026-11-01-full-access-pi-approval/design.md) 为一个行为回归提出窄例外，不扩大生产 seam，也不宣称已获 PI 接受。
 
 ## 选择与边界
 
