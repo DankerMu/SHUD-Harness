@@ -51,6 +51,22 @@ records 包构建在 `tsc` 前执行 `scripts/records/generate-version.ts`，每
 
 R1–R12 启动对账已接入 `[Service.init]`：先排空启动 pass 再开放 SHUD submit/poll/collect 并启动正常 cadence，恢复取消可能等待原始宽限的剩余时间，原有启动锁与 drain 边界不变。#310 原始切片只做文件级对账；#312 现为 R3/R5 建立真实无 owner 接管登记，复用原 label/stdout、不重新 spawn，先清空旧 current id，再不让出地发布新 id/追加历史和完成回执，每个实例只登记一次。发布前 registered 事件中的重入 kill 拒绝，不写意图或发信号；发布后沿用托管 kill。登记/新 id 发布失败保留已清空的 null id 与旧历史，受控报告并排空/移除父类登记后释放关联，不 abort 物理执行、不删除运行文件/索引，后续文件级 poll/collect 不重试登记；存储不能清空旧 id 时仍明确失败。R8 保持无接管登记的恢复取消。R9 优先修复已提交 RunRecord 的状态，pending notify 不变，R12 仅修复已验证通知终态的完成索引。#313 已在初始化后的正常 cadence 投递：成功 `sessions.flush` 后才发布 `delivered`，已校验的通知终态（`delivered` 或 `unreachable`）随后先写 completed 再移出 active；崩溃窗口允许重放，不保证 exactly-once。钉版宿主的 Web worker 子会话仍受 `session/agent-busy` 恢复边界限制，不能据此声称所有会话均可唤醒。Linux R3 以原生 proc/getconf 证据判新鲜度，lstart 身份不变，不确定证据 fail closed。完整恢复、投递顺序、worker 子会话边界及 #343/#344 已知限制集中在 [Park/Resume §9](../03_SPEC/Park_Resume_Design.md#9-服务重启恢复)。
 
+### 文件权限与 PI 审批
+
+SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permission` 行保留完整三项 catalog。文件访问范围不代表 PI 的报告审批权：
+
+| 权限预设 | sandbox 模式 | 需要审批的操作 |
+| --- | --- | --- |
+| `read-only` | `read-only` | `ask` |
+| `workspace-write` | `workspace-write` | `ask` |
+| `danger-full-access` | `danger-full-access` | `ask` |
+
+即使启动环境设置 `DSH_PERMISSION_MODE=danger-full-access`，SHUD 的默认 approval 仍为 ask；不把 full access 降为 workspace-write，也不自动批准。`report_submit` / `report_decide` 仍须经过既有 policy-gate 和真实 answerer，只有本次 `allowed-once` 才能执行；拒绝、取消及无 answerer 均 fail closed。headless 不因这个配置获得自动 PI 权限。raw 不可变/provenance 审批、角色工具面和报告/TaskCard 写入顺序不变。
+
+**旧会话需要显式重选。** 安装更新、重启宿主不会改写已有会话的 durable `approval/policy: never` 事件；旧 full-access 会话可显示为 `custom`。保留原会话/报告/任务历史，在更新后的 SHUD Web 权限选择器中明确重选所需预设（包括 full access），由宿主公开权限机制追加 ask；重复选择相同有效预设不追加事件。不要手改日志或报告来“恢复审批”。已有用户 patch 仍由用户拥有；若它显式覆写 approval 或 permission 为 never，bundle 不偷偷覆盖，需检查有效配置并由操作者决定调整。
+
+钉版宿主的 never 会在 `approval/request` 之前自动拒绝，通用错误仍可能写成 “the user rejected”。这不是 PI 点了拒绝；`approval/asked`（甚至随后出现 `approval/decided: rejected`）也不能单独证明卡片已展示或 PI 已操作。工程验证必须证明真实 answerer 往返；自动测试/探针不替代 PI 对原验收流程的显式操作，不据此关闭 M3 验收。
+
 ### 已挂载的 `shud_run`
 
 构建后沿用同一导出的 `DSH_HOME` 与有效 `SHUD_BIN` 执行 `pnpm run profile:install`；`pnpm run profile:smoke` 检查 Web/headless profile 中的 `shud-tools` 组合与可导入性。运行前在 scratch 工作区复制输入，不改只读 SHUD submodule。模型工具调用示例（不是 shell 命令）：
