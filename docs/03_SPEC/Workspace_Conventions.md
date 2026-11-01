@@ -28,7 +28,7 @@ SHUD-Harness/          ← 项目根
 
 ### 1.2 Runtime workspace (执行副本)
 
-会话 cwd 是工作区根；一个工作区可包含多张 TaskCard。M3 的对象落点如下（目标契约，随 [m3-mvp-1](../../openspec/changes/m3-mvp-1/design.md#d2-工作区文件落点与原子写) 交付；M2 runs 布局保持不变）：
+会话 cwd 是工作区根；一个工作区可包含多张 TaskCard。M3 已交付的对象落点如下（设计依据见 [m3-mvp-1](../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d2-工作区文件落点与原子写)，当前布局见 [Repository Layout §2](../04_IMPLEMENTATION/Repository_Layout.md#2-运行时资产不进代码仓)；M2 runs 布局保持不变）：
 
 ```text
 workspace/

@@ -234,7 +234,7 @@ interface PiGateDecision {
 }
 ```
 
-M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [m3-mvp-1 报告契约](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md)。对象严格限定以上六个必填字段，拒绝未知键；品牌 id 使用 UTC 秒与 4 位小写十六进制随机段。`comment` 不允许缺省或 `undefined`，违反 outcome/comment 关系的错误定位到 `comment`。非空字符串不裁剪、不强制转换；`decided_at` 使用 `z.iso.datetime()`，不接受本地时间或时区偏移形式。
+M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [M3 报告契约](../../openspec/specs/evidence-reports/spec.md)。对象严格限定以上六个必填字段，拒绝未知键；品牌 id 使用 UTC 秒与 4 位小写十六进制随机段。`comment` 不允许缺省或 `undefined`，违反 outcome/comment 关系的错误定位到 `comment`。非空字符串不裁剪、不强制转换；`decided_at` 使用 `z.iso.datetime()`，不接受本地时间或时区偏移形式。
 
 `approval_ref` 记录执行上下文的 callId，不是 approval id，也不是 schema 可验证的审批凭证。审计经 session log 的 `approval/asked.callId` → `asked.id` → `decided.id` 关联；不新增日志订阅或先前被拒 submit 卡的引用。schema 不执行审批、不检查报告状态迁移、跨记录 report_id 一致性或时间先后。
 

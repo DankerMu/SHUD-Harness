@@ -9,9 +9,9 @@ kind: architecture
 
 M3 的报告终态需要 PI 明确决定与可关联的审计证据，但钉版 dsh 原生审批卡没有 comment 表单。宿主审批结果 `allowed-once | rejected | cancelled | unavailable` 与报告领域结果 `accepted | rejected | revision_requested` 是两个不同的契约：卡片拒绝不等于报告 rejected，也不自动表示需要修订。
 
-本记录说明 [M3 design D9 候选 (a)](../../../openspec/changes/m3-mvp-1/design.md#d9-审批接线report_submitreport_decide-与-pigatedecisioncritical-path-3) 的工具侧实现选择。依据为 [#447](https://github.com/DankerMu/SHUD-Harness/issues/447)、[#426 O5 的已审阅结论](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6463590574) 与 [PI 批准的最小 raw 路由扩展](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6525339104)。O5 确认工具公开执行上下文提供 callId，不提供 approval id。这些依据不代表本 ADR 已独立获 PI 接受；状态仍为 proposed。
+本记录说明 [M3 design D9 候选 (a)](../../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d9-审批接线report_submitreport_decide-与-pigatedecisioncritical-path-3) 的工具侧实现选择。依据为 [#447](https://github.com/DankerMu/SHUD-Harness/issues/447)、[#426 O5 的已审阅结论](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6463590574) 与 [PI 批准的最小 raw 路由扩展](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6525339104)。O5 确认工具公开执行上下文提供 callId，不提供 approval id。这些依据不代表本 ADR 已独立获 PI 接受；状态仍为 proposed。
 
-字段和对话规则的权威源仍为 [PI Decision Comments §7–8](../../03_SPEC/PI_Decision_Comments_Spec.md#7-dsh-审批卡字段) 与 [evidence-reports](../../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md)，本记录不另建 schema 或审批服务。
+字段和对话规则的权威源仍为 [PI Decision Comments §7–8](../../03_SPEC/PI_Decision_Comments_Spec.md#7-dsh-审批卡字段) 与 [evidence-reports](../../../openspec/specs/evidence-reports/spec.md)，本记录不另建 schema 或审批服务。
 
 ## 选择与所有权
 

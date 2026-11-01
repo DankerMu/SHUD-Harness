@@ -8,7 +8,7 @@ canonical_for: [scientific-semantic-levels]
 **状态**：v0.8.3 P0 补充规范  
 **目标**：根据科学语义风险对 ChangeRequest 分级，并决定是否需要 Theory-to-Code Bundle、VerificationCase 和 PI approval。
 
-本页 ChangeRequest/VerificationCase 科学分级链属于 M4；M3 仅接线报告终态审批，按 [M3 policy-gate 契约](../../openspec/changes/m3-mvp-1/specs/policy-gate/spec.md) 执行。下列后续科学规则不表示 M3 已有相应工具或校验生产者。
+本页 ChangeRequest/VerificationCase 科学分级链属于 M4；M3 仅接线报告终态审批，按 [M3 policy-gate 契约](../../openspec/specs/policy-gate/spec.md) 执行。下列后续科学规则不表示 M3 已有相应工具或校验生产者。
 
 ## 1. Semantic level
 

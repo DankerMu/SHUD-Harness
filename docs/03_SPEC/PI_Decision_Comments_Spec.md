@@ -38,7 +38,7 @@ M3 报告 PiGateDecision 的 outcome 为 `accepted | rejected | revision_request
 
 ## 5. PiGateDecision schema
 
-M3 的字段契约为 [evidence-reports / PiGateDecision](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md#requirement-pigatedecision-record)，schema 切片将同步 [Support_Schema_Contracts](Support_Schema_Contracts.md) 与 Minimal_Schemas。本文不再保留旧 gate_id/actor/decision 字段的第二套接口。`approval_ref` 固定取本次执行 callId，审计关联见 §8。
+M3 的字段契约为 [evidence-reports / PiGateDecision](../../openspec/specs/evidence-reports/spec.md#requirement-pigatedecision-record)，schema 已同步 [Support_Schema_Contracts](Support_Schema_Contracts.md) 与 Minimal_Schemas。本文不再保留旧 gate_id/actor/decision 字段的第二套接口。`approval_ref` 固定取本次执行 callId，审计关联见 §8。
 
 本文的 **PiDecisionMemoryNote 是后续记忆对象权威源**（Minimal_Schemas 中为其投影），不是 M3 PiGateDecision 的替代持久化路径。
 
@@ -102,7 +102,7 @@ M3 审计使用宿主 session log，不另造 AuditEvent 文件或日志订阅�
 
 EvidenceReport 的 decision_history 只追加规范 PiGateDecision，完整字段/状态规则见 §5 的唯一契约；accepted 的 comment 为 null，其余终态保存 PI 确认的非空原文。旧报告终态不覆盖，修订后新 report_id 不继承旧决定历史。
 
-Markdown 展示以 [Decision history Markdown projection](../../openspec/changes/m3-mvp-1/specs/evidence-reports/spec.md#requirement-decision-history-markdown-projection) 为权威契约：现有 §10 附录在各 Run 块之前增加 `### PI decision history`，按持久数组顺序展示 decision_id、report_id、outcome、decided_at、approval_ref、comment 六列，不排序、去重或推断决定，不增加第十一个二级标题。空历史显示 `No PI decision recorded.`，不生成占位决定。
+Markdown 展示以 [Decision history Markdown projection](../../openspec/specs/evidence-reports/spec.md#requirement-decision-history-markdown-projection) 为权威契约：现有 §10 附录在各 Run 块之前增加 `### PI decision history`，按持久数组顺序展示 decision_id、report_id、outcome、decided_at、approval_ref、comment 六列，不排序、去重或推断决定，不增加第十一个二级标题。空历史显示 `No PI decision recorded.`，不生成占位决定。
 
 comment 使用 JSON literal：null 显示为 `null`，字符串保留 JSON 引号与转义，因此字符串 `"null"` 不会与 null 混淆，原始空白和换行也不会丢失。六列均经既有结构化 metadata 规则单次转义，不能注入表格列、物理标题或 HTML；模板样式文本不递归插值。comment 不进入 observations，不因出现在报告中就成为科学结论。
 

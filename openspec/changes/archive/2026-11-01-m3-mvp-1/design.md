@@ -693,7 +693,7 @@ PI issuecomment6522484479 澄清：入口修复先于本次工具前置条件与
 
 - 工程门：`pnpm run check` + `profile:smoke`（web profile：两 preset 行启用与默认 preset；`shud-probe`：两 preset 行 `disabled: true`；宿主平面 subagent 注册表与 `subagent-spawn-in-process` 行、policy-gate 行、`shud-jobs` 行的采集配置键齐全且 llm 与 `llm-deepseek`/`agent-default-model` 一致）；新增本机 `pnpm run shud:first-task`：headless 不可用（无审批卡），故用 Web 模板 + HTTP 接口（M2 `shud-restart.sh` 的会话恢复机制）驱动一次首任务；脚本以显式参数接收 scratch 工作区路径（不检查、不拒绝 `$TMPDIR` 下的路径），判据取 session log 的 `approval/asked|decided` 与工作区文件（task.json `done`、report.md 含 `Accepted by PI`、StackLock llm 三字段（base_url/request_alias/response_model）与三 submodule 修订出现在 md、四句不变式逐字出现）。
 - 门禁措辞：Phased_Plan §3 的"StackLock 三字段"按"StackLock llm 三字段（base_url/request_alias/response_model）与三 submodule 修订"对齐；"措辞过四条不变式"= 四句不变式逐字出现且模型撰写节无禁止用语，语义合规不做机器检查、仍由 PI 审阅（D8）。
-- PI 验收：Epic 收口时在 Web 亲自完成一次首任务（含至少一次 Allow once 与一次 reject + comment + `report_decide`），证据记 `Migration_Plan_dsh.md`；决策记录 `docs/adr/proposed/0010-m3-epic-acceptance.md`（沿 0007）；PI comment 对话承载为 `docs/adr/proposed/0011-pi-comment-conversation-carrier.md`。
+- PI 验收：Epic 收口时在 Web 亲自完成一次首任务（含至少一次 Allow once 与一次 reject + comment + `report_decide`），证据记 `Migration_Plan_dsh.md`；决策记录 `docs/adr/implemented/0010-m3-epic-acceptance.md`（沿 0007，2026-11-01 PI 明确通过后转 accepted）；PI comment 对话承载为 `docs/adr/proposed/0011-pi-comment-conversation-carrier.md`。
 
 ### D13 Spec 对齐任务组（实现组之前）
 

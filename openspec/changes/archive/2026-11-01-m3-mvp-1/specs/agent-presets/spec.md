@@ -198,7 +198,7 @@ presets 包 SHALL 有一项纳入默认 `pnpm run test` 的漂移测试：读取
 - **THEN** 脚本非0、保留已创建的工作区/home/session路径，停止并排空自有宿主/连接；仅凭已核实的本次运行身份清理 detached SHUD，无法证明所有权时报告未完成清理而不裸发历史PID信号
 
 ### Requirement: Epic-close PI acceptance
-M3 Epic 收口时 PI SHALL 在 `dsh --profile shud` 的 Web 内亲自完成一次首任务，至少包含一次 `report_submit` 的 Allow once，以及一次拒绝 + 对话 comment + `report_decide` 的往返；证据（session log 路径与 `approval/asked|decided` 事件序列摘录、工作区 task/report 文件路径）SHALL 记入 `docs/Migration_Plan_dsh.md`，验收安排由决策记录 `docs/adr/proposed/0010-m3-epic-acceptance.md`（沿 ADR-0005/0007 模式）登记。子 PR 按工程门合入不等于验收通过；`shud:first-task` 等工程验证 SHALL NOT 替代该验收。
+M3 Epic 收口时 PI SHALL 在 `dsh --profile shud` 的 Web 内亲自完成一次首任务，至少包含一次 `report_submit` 的 Allow once，以及一次拒绝 + 对话 comment + `report_decide` 的往返；证据（session log 路径与 `approval/asked|decided` 事件序列摘录、工作区 task/report 文件路径）SHALL 记入 `docs/Migration_Plan_dsh.md`，验收安排由决策记录 `docs/adr/implemented/0010-m3-epic-acceptance.md`（沿 ADR-0005/0007 模式）登记。子 PR 按工程门合入不等于验收通过；`shud:first-task` 等工程验证 SHALL NOT 替代该验收。
 
 #### Scenario: acceptance evidence is recorded
 - **WHEN** PI 完成 Epic 收口验收
