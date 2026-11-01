@@ -9,7 +9,9 @@
 ## 2. Engineering gate and acceptance resumption
 
 - [x] 2.1 Parent full check, test-guardrails, profile:smoke and strict fixture validation PASS; independent real Web/full-access first-task evidence proves actual effective mode and approval round trip, with no writes or approval in the PI workspace. Preserve secrets and clean owned probe resources.
-- [ ] 2.2 Complete expanded correctness/evidence/invariant white-box review, exact-head CI and normal merge; independently archive this fix only. Rebuild/restart the preserved PI environment and request explicit full-access reselection/A7 re-verification; never mark #452/#423 accepted or archive M3 from engineering evidence.
+- [x] 2.2 Complete expanded correctness/evidence/invariant white-box review, exact-head CI and normal merge; independently archive this fix only. Rebuild/restart the preserved PI environment and request explicit full-access reselection/A7 re-verification; never mark #452/#423 accepted or archive M3 from engineering evidence.
+
+Engineering closure: PR #512 merged as `10df8dddde27cead4f829989b139aecb985c5b00`; three-seat round 1 CLEAN and exact-head CI `41316081503` passed. The preserved PI environment was rebuilt/reinstalled and restarted; authenticated HTTP returned 200, and report/Markdown/task hashes remained unchanged (reviewed, no decisions, reporting). Explicit full-access reselection and the single A7 prompt were requested. This independent fix archive does not record a PI verdict or close #452/#423; A7 and later manual items remain pending.
 
 ## Risk pack mapping
 
