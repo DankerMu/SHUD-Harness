@@ -76,7 +76,7 @@ task worktree、分析 artifacts、warehouse、通知等下文目录属于未激
 - **Sandbox path policy** (`Execution_Jobs_Runs.md` §9.2): 允许路径列表对应上表中"允许"和"受限"行
 - **StackLock**: 无 build 取配置三仓库修订；M4 有 build 时 SHUD 来源取 BuildRecord，另两个仓库照常采集。
 - **ChangeRequest patch**: M4 对钉定 HEAD 的 `repos/SHUD` 观测已跟踪修改，保存到 `patches/<change_id>.patch`，不用根 submodule 与工作副本间的任意 diff 替代。
-- **构建与回滚**: 钉定 commit 的 archive 加已批 patch 在 `builds/.tmp-<build_id>/src/` 构建，发布前失败仅清理本次临时构建；不修改 `repos/SHUD` 或根 submodule。
+- **构建与回滚**: base 仅从钉定 commit 的 archive 构建，不要求 CR/patch；candidate 从同一 archive 加已批 CR 的 patch 构建。两者均在 `builds/.tmp-<build_id>/src/` 内，发布前失败仅清理本次临时构建；不修改 `repos/SHUD` 或根 submodule。
 
 源码与构建来源必须可追溯；M4 不用 worktree，也不声称工作树里的任意文件都是构建输入。
 

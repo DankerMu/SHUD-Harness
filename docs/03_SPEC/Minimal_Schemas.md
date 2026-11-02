@@ -110,7 +110,7 @@ status stdout 先按原始字节确定完整 NUL 记录和 R/C 双路径边界�
 
 **llm 与指纹**（ADR-0004 K4）：`base_url`、`request_alias` 以及仓库修订（含路径与截断标记）、runtime、harness 都参与指纹；`response_model` 只记录，不自动使 lock 失效。每条 RunRecord 另记模型与来源；不可把 configured 模型 id 冒称为响应体原值。指纹排除根 `stack_id`、`created_at`、`fingerprint` 和 `llm.response_model`；M4 的 `build_id` 为 `null` 或缺键时也排除，非 null 时保留。其余内容按每层键名排序、数组保持顺序、无空白 JSON 的 UTF-8 字节计算 SHA-256，加 `sha256:` 前缀。无 build 时与 M3 指纹逐字节相同，旧 lock 可复用且不改写；不同 build id 改变指纹。键顺序、身份、创建时间、响应模型变化不影响指纹；`base_url` 或 `request_alias` 变化仍为 stack 变更，行为 eval 子集见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)。
 
-**M4 构建来源：** `build_id` 为品牌 `BuildId` 或 `null`，缺键按 `null` 解析而不改写旧 lock。有 build 时 `repos.SHUD` 取 BuildRecord 的 `source_commit`、`source_branch` 与 `dirty_paths`，`dirty` 等于路径非空、`dirty_paths_truncated: false`；不再采集配置的 SHUD 仓库，其余两仓库照常采集。构建时的 dirty 列表是观测，不是构建输入；精确输入为钉定 commit 加已批 patch。
+**M4 构建来源：** `build_id` 为品牌 `BuildId` 或 `null`，缺键按 `null` 解析而不改写旧 lock。有 build 时 `repos.SHUD` 取 BuildRecord 的 `source_commit`、`source_branch` 与 `dirty_paths`，`dirty` 等于路径非空、`dirty_paths_truncated: false`；不再采集配置的 SHUD 仓库，其余两仓库照常采集。构建时的 dirty 列表是观测，不是构建输入；base 的精确输入仅为钉定 commit 的归档，不要求 CR 或 patch；候选的精确输入为同一归档加已批 CR 的 patch。
 
 **废弃字段**: `runtime.container`（MVP 不强制容器）、`limits`（已移入 RunJob.resources）、`policy_version`（已合并入 harness.version）、`repos.zero`（内核改为 dsh，ADR-0004 K1）、`llm.provider` / `llm.model_id` / `llm.params_digest` / `llm.prompt_pack_digest`（K4 收窄为三字段）。
 
@@ -437,7 +437,7 @@ M4 严格对象，字段权威见 [BuildRecord record](../../openspec/changes/m4
 | `stdout_path` / `stderr_path` | builds/&lt;build_id&gt;/make.stdout.log / builds/&lt;build_id&gt;/make.stderr.log |
 | `created_at` | 创建时间 |
 
-base 构建 `change_id: null`，必须 `dirty_paths: []`、`patch_sha256: null`；候选构建 `change_id` 非 null 时，必须 `dirty_paths` 非空且 `patch_sha256` 非 null，空路径数组即拒绝。patch 摘要等于已批 CR，精确输入为钉定 commit 的归档加该 patch，不采用工作树或陈旧二进制。构建记录不把 rhs_openmp 为真等同于实际编译带 OpenMP 标志；回放另验 make 回显的 `-fopenmp`。首次发布采用临时目录整体 rename，消费者校验普通可执行文件与 binary_sha256。
+base 构建 `change_id: null`，必须 `dirty_paths: []`、`patch_sha256: null`，精确输入仅为钉定 commit 的归档；候选构建 `change_id` 非 null 时，必须 `dirty_paths` 非空且 `patch_sha256` 非 null，空路径数组即拒绝。仅候选的 patch 摘要须等于已批 CR，其精确输入为同一归档加该 patch；两类构建均不采用工作树或陈旧二进制。构建记录不把 rhs_openmp 为真等同于实际编译带 OpenMP 标志；回放另验 make 回显的 `-fopenmp`。首次发布采用临时目录整体 rename，消费者校验普通可执行文件与 binary_sha256。
 
 ---
 
