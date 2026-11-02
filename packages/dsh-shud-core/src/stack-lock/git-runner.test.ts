@@ -390,7 +390,7 @@ describe("runGit", () => {
     const result = await runGit(repo, ["cat-file", "blob", object]);
 
     expect(Buffer.isBuffer(result.stdout)).toBe(true);
-    expect(result).toEqual({ stdout: expected });
+    expect(result.stdout.equals(expected)).toBe(true);
     await expect(runGit(repo, ["cat-file", "blob", object], { maxBuffer: 1024 })).rejects.toThrow(
       /ERR_CHILD_PROCESS_STDIO_MAXBUFFER/u,
     );
