@@ -159,7 +159,7 @@ PI decision comment 必填：
 | accepted_for_search despite inconclusive verification | 必填 |
 | accepted report only | 可选 |
 
-**M4 comment 偏离（D15(2)）：** 宿主审批卡没有 comment 通道，高风险 ChangeRequest 的 `allowed-once` 即批准，不要求落盘 comment；不是 agent 批准。拒绝时 CR 保持 proposed，PI 理由仅经对话由 coordinator 转述给 coder，不写入 CR/TaskCard/patch 或其它工作区文件，不新增 change_decide。报告 `report_decide(comment)` 的既有契约不变，见 [ADR-0011](../adr/proposed/0011-pi-comment-conversation-carrier.md)。这是 M4 范围裁剪、非放宽 baseline；其它通用 comment 要求不因此解除。
+**M4 comment 偏离（D15(2)）：** 宿主审批卡没有 comment 通道，高风险 ChangeRequest 的 `allowed-once` 即批准，不要求落盘 comment；不是 agent 批准。拒绝时 CR 保持 proposed，PI 理由仅经对话由 coordinator 转述给 coder，不写入 CR/TaskCard/patch 或其它工作区文件，不新增 change_decide。报告 `report_decide(comment)` 的既有契约不变，见 [ADR-0011](../adr/implemented/0011-pi-comment-conversation-carrier.md)。这是 M4 范围裁剪、非放宽 baseline；其它通用 comment 要求不因此解除。
 
 ## 6. 禁止路径
 

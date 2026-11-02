@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 kind: architecture
 ---
 
@@ -9,7 +9,7 @@ kind: architecture
 
 M3 的报告终态需要 PI 明确决定与可关联的审计证据，但钉版 dsh 原生审批卡没有 comment 表单。宿主审批结果 `allowed-once | rejected | cancelled | unavailable` 与报告领域结果 `accepted | rejected | revision_requested` 是两个不同的契约：卡片拒绝不等于报告 rejected，也不自动表示需要修订。
 
-本记录说明 [M3 design D9 候选 (a)](../../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d9-审批接线report_submitreport_decide-与-pigatedecisioncritical-path-3) 的工具侧实现选择。依据为 [#447](https://github.com/DankerMu/SHUD-Harness/issues/447)、[#426 O5 的已审阅结论](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6463590574) 与 [PI 批准的最小 raw 路由扩展](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6525339104)。O5 确认工具公开执行上下文提供 callId，不提供 approval id。这些依据不代表本 ADR 已独立获 PI 接受；状态仍为 proposed。
+本记录说明 [M3 design D9 候选 (a)](../../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d9-审批接线report_submitreport_decide-与-pigatedecisioncritical-path-3) 的工具侧实现选择。依据为 [#447](https://github.com/DankerMu/SHUD-Harness/issues/447)、[#426 O5 的已审阅结论](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6463590574) 与 [PI 批准的最小 raw 路由扩展](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6525339104)。O5 确认工具公开执行上下文提供 callId，不提供 approval id。这些既有依据不单独构成本 ADR 的接受。此次 accepted 状态转换由 [#517](https://github.com/DankerMu/SHUD-Harness/issues/517) 的 PR 承载，必须在 PI 于该 PR 明确确认后才能合入；接受日期与确认原文以该 PR 的 PI 评论时间为准，工程测试与批量执行授权不替代此确认。未合并的状态迁移提案不改变主分支的 proposed 状态。
 
 字段和对话规则的权威源仍为 [PI Decision Comments §7–8](../../03_SPEC/PI_Decision_Comments_Spec.md#7-dsh-审批卡字段) 与 [evidence-reports](../../../openspec/specs/evidence-reports/spec.md)，本记录不另建 schema 或审批服务。
 
@@ -46,8 +46,16 @@ callId 不是 approval id，也不直接承载 actor/gate 身份。先前被拒 
 
 选择 (a) 复用现有卡片/策略/宿主权限边界，代价是多一轮对话与第二次确认。PI 必须检查完整转述，系统不对 comment 做科学语义判断，也不把 comment 自动提升为 observations、物理机制或跨任务结论。
 
+## 第二个消费者：M4 change_submit 的拒绝理由经对话承载
+
+M4 `change_submit` 复用宿主审批卡，没有 comment 通道；高风险 CR 只在宿主 `allowed-once` 放行后写 approved，不要求或采集 PI comment。未获放行的 ChangeRequest 保持 proposed、approval_ref 为 null，文件字节不变；不存在 CR 的 rejected 持久状态，不新增 change_decide 或其它 CR 决定工具。
+
+PI 的拒绝理由只经对话由 coordinator 转述给 coder，不写入 ChangeRequest、TaskCard、patch 或任何其它工作区文件；修改后由 coder 生成新的 CR，不给旧 CR 加修订链。此条仅属于 CR 路由，报告 `report_decide` 仍须带非空 comment 与明确 disposition，经第二张卡核对后逐字持久化。
+
+该消费者是 M4 实现契约，不表示本 ADR 迁移时工具已经交付。权威来源为 [policy-gate「M4 approval comment deviation」](../../../openspec/changes/m4-mvp-2/specs/policy-gate/spec.md#requirement-m4-approval-comment-deviation)、[change-requests「change_submit」](../../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_submit) 与 [design D5/D15](../../../openspec/changes/m4-mvp-2/design.md#d15-偏离登记独立于功能-pr-之外可审计)。M4 不新建 comment 表单或审批服务，不改 M3 已有报告状态机与审计关联。
+
 ## 证据与限制
 
 伴生测试位于 `packages/dsh-shud-tools/src/report-decisions.test.ts`、`report-decision-contract.test.ts`、`report-decision-publication.test.ts`、`report-decision-ordering.test.ts` 与 `report-decision-raw.test.ts`，使用真实 ToolRuntime、已挂载 policy/raw、宿主 approval 边界 double 与真实工作区文件，覆盖终态、拒绝、身份、部分提交/修复、共享发布顺序和 raw-before-ask。
 
-这些测试不证明真实 Web 卡展示、session-log 持久化或 PI 功能验收；approval double 的入参和 logger buffer 不是持久审计证据。真实端到端审计/PI 验收仍由相应验收切片承担。也不宣称防止 PI 自己用 bash 编辑文件、跨进程竞争或外部文件命名空间替换。接受一份报告不是认可普遍科学结论，且本 ADR 的 proposed 状态不因工程测试通过而改变。
+这些测试不证明真实 Web 卡展示、session-log 持久化或 PI 功能验收；approval double 的入参和 logger buffer 不是持久审计证据。真实端到端审计/PI 验收仍由相应验收切片承担。也不宣称防止 PI 自己用 bash 编辑文件、跨进程竞争或外部文件命名空间替换。接受一份报告不是认可普遍科学结论，本 ADR 的接受也不代表 M4 功能验收通过；状态转换只能依据 #517 PR 的 PI 明确确认，不能依据工程测试成功。
