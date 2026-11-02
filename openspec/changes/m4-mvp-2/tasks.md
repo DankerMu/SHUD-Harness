@@ -121,6 +121,24 @@
 - 验证：focused wording.test真实RED→GREEN；built core公开导出与scanner smoke；所有31生成投影保持不变；pnpm run check（含knip），Critical Path#6白盒审查和同SHA CI。无装配变更，不额外要求profile:smoke。
 - 非目标：报告§5渲染/golden为#533，第14项validator为#541，prompt为#542；不得用本常量测试声称这些运行链已经完成。
 
+### Issue #526 risk and evidence fixture
+
+本刀仅2.6；2.5由#563合并。线上#526明确collect不改走新runner，旧.workplans草稿不是实现oracle。
+
+- Public API：导出async runGit(sourceDir,args,options?)，返回{stdout:Buffer}；execFile不经shell，统一argv前缀["-C",sourceDir,"-c","core.fsmonitor=false"]。args首项是subcommand；不支持前置全局option绕过动词/root判定。沿既有index wildcard，不另造readHead或重复runner。
+- Auth/secrets：每次调用只拾取宿主PATH/HOME并构造固定LC_ALL=C、GIT_OPTIONAL_LOCKS=0、GIT_CONFIG_NOSYSTEM=1、GIT_CONFIG_GLOBAL=/dev/null、GIT_TERMINAL_PROMPT=0。缺PATH/HOME明确失败，不补宿主env。以系统cc编译的最小native executable shim记录进入main的真实env再exec真git，断言恰7键和值、无假DMX sentinel/GIT_DIR/GIT_WORK_TREE/GIT_CONFIG_PARAMETERS；只记录全键名及白名单值，不能落真实密钥。
+- Root/argv：status/diff/archive自动先用同白名单/prefix读rev-parse --show-toplevel，剥且只剥一个末尾LF后对双方native realpath比较；嵌套普通目录拒绝且目标命令未执行。空格/末尾LF根合法，物理路径别名同根合法。status强制--porcelain -z --untracked-files=all；diff强制--no-ext-diff --no-textconv --no-color，附加在-- pathspec分隔符之前，不重写路径。
+- Apply例外：options.applyCeiling只允许apply，取已存在绝对目录的native realpath且须为sourceDir严格祖先，唯一额外env键GIT_CEILING_DIRECTORIES；该非仓库调用不做toplevel校验。普通apply仍查根；其它动词不能借选项跳过根或扩env。真实外层repo内的tmp/src中apply --check须成功且不改字节，随后apply必须真正修改目标副本且不修改外层tracked文件。
+- Resource/error：命名64MiB默认maxBuffer（实测SHUD18,636,800bytes），允许显式正整数maxBuffer；新runner任意stdout/stderr溢出均受控失败，不返回截断成功。错误含退出码/受控系统码及最多4096bytes的stderr尾部/截断标记；不带原exec error cause、stdout、env对象或完整命令dump。非零退出、spawn失败、无stderr、stderr洪泛与小限额溢出有证据。
+- Legacy：collectRepositoryRevision源码和全部既有用例期望保持；新增宿主GIT_CONFIG_GLOBAL/core.excludesFile区分性回归，collect仍继承忽略配置，新runner不继承。旧collector四调用/normal/status ENOBUFS语义不变。编排器用预变更built captureStackLock真实3repo生成记录，变更后同配置重用同id/fingerprint，原bytes/mtime/inventory不变。
+- 正反例：真实仓库local diff.external、textconv、core.fsmonitor配置marker不执行，color.ui=always不产生ANSI、输出标准diff；空格/换行文件status为原NUL字节。二进制stdout超过1MiB成功、明确小maxBuffer失败；根不匹配目标verb零执行；仅apply ceiling例外允许多一env键。
+- Fixture review补强（revision1）：连续两次runGit分别更换PATH/HOME，以两个native shim/trace证明每次读取当前值；同一次逻辑调用的root guard与target使用同一环境快照。缺PATH、缺HOME各自拒绝且无spawn，apply额外键不得污染后续普通调用。
+- 诊断负控：非零退出断言numeric exit，spawn失败断言系统code；构造超过4096bytes stderr，断言完整末尾窗口与截断标记。stdout诱饵、未传入子进程的假env sentinel、被裁去的stderr前缀和完整命令字符串不得出现于message/stack/inspect/附加属性/cause；root guard失败同样适用。不要求屏蔽规范允许返回的stderr尾部内容。
+- 缓冲负控：正整数校验覆盖0/负数/小数/非有限值；真实二进制stdout超过1MiB逐字节比较。target stdout溢出、target stderr溢出、root guard溢出分别拒绝；guard溢出不得执行target。所有execFile调用共享显式maxBuffer约束，行为测试用小限额证明，不以永久mock参数回声测试替代。
+- Apply负控：对非apply传applyCeiling必须spawn前拒绝；相对、不存在、等于sourceDir、非祖先及物理解析后非祖先的ceiling均拒绝；普通nested apply仍查根。物理ceiling含平台path.delimiter时不能编码为单个GIT_CEILING_DIRECTORIES条目，spawn前拒绝（含alias解析后命中）；实测冒号路径下实际apply返回0却无修改，不能冒充成功。该限制不扩散到普通sourceDir。仅合法apply --check/apply的trace恰为7键加GIT_CEILING_DIRECTORIES。
+- Documentation/测试前置：Darwin实测Node/Python初始化会自行加__CF_USER_TEXT_ENCODING，native env探针恰7键；这是旧测量器失真，不放宽生产白名单，不过滤后冒充精确证据。新增最小C fixture仅用于cc编译临时探针（二进制不入库）；Testing_Strategy登记cc前置，并沿knip.json既有系统工具登记模式加入cc（不是排除测试或关闭deadcode规则），缺失明确失败不skip。31generated保持，无生产依赖、重试、配置/并发新机制。Git配置仅按规范禁外部diff/textconv/color/fsmonitor，不承诺关闭所有local/global attributes；archive内容核对属于#537，literal pathspec绑定属于#528。
+- 验证：focused新runner语义RED→GREEN、既有repository-revision与capture suites；built真实env/root/diff/archive/apply smoke与capture复用；pnpm run check，CriticalPath#5三席白盒审查、同SHA CI。无profile装配变更。
+
 ## 2. core：floor 常量、三对象 schema、品牌 id、角色映射、措辞常量、git runner（Critical Path #1/#7）
 
 - [x] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
@@ -130,8 +148,8 @@
 - [x] 2.2c 依赖 2.1。RunJob/RunRecord 增 nullable `build_id`/`threads`（正整数）/`binary_sha256`（缺键按 null；iff `build_id` 的 refine 在默认值之后求值）；M2/M3 夹具原样可读回归；投影。按 run-records「RunJob record」「RunRecord record」「Generated projection」。
 - [x] 2.2d DataProvenance 增 `sources.external_files`（`{path(绝对), sha256, size_bytes}` 数组，缺键按 `[]`）；M3 夹具回归；投影。按 data-provenance「DataProvenance record」「DataProvenance generated projection」。无依赖。
 - [x] 2.4 `role-tool-map.ts` 四角色真实 id（coordinator `local` 三委派工具；coder/reviewer/repo_explorer `inherited` 按 agent-presets「Role tool map uses mounted names」）；删除 `harness.memory.propose`、`patch.apply`、`validator.run`、`repo.*`、`git.inspect`；`readCallerPresetId` 映射增 coder/reviewer（policy-gate「Caller role derivation」）；`ROLE_TOOL_IDS` 并集测试；policy-gate-core `role-tool-surface` 表随之更新并附四角色 × 新工具的 deny 正反例（policy-gate「Role tool surface rule」）。无依赖。
-- [ ] 2.5 `governance/wording.ts` 导出 `code_change` §5 固定句常量，正反例测试（逐字、不进扫描短语集）；按 evidence-reports「code_change report wording constant」、engineering-gates「Scientific wording rules are enforced by tested constants」。无依赖。
-- [ ] 2.6 `stack-lock/repository-revision.ts` 扩展导出受控 git runner（env 白名单 `PATH/HOME/LC_ALL=C/GIT_OPTIONAL_LOCKS=0/GIT_CONFIG_NOSYSTEM=1/GIT_CONFIG_GLOBAL=/dev/null/GIT_TERMINAL_PROMPT=0`、`-c core.fsmonitor=false`、realpath == `rev-parse --show-toplevel` 校验、status `-z`、diff `--no-ext-diff --no-textconv --no-color`）；既有 `collectRepositoryRevision` 行为与 StackLock 采集字节不变的回归；子进程看不到 `DMXAPI_KEY` 的断言。按 change-requests「Source change observation」、shud-build「Workspace source checkout validation」。无依赖。
+- [x] 2.5 `governance/wording.ts` 导出 `code_change` §5 固定句常量，正反例测试（逐字、不进扫描短语集）；按 evidence-reports「code_change report wording constant」、engineering-gates「Scientific wording rules are enforced by tested constants」。无依赖。
+- [x] 2.6 `stack-lock/repository-revision.ts` 扩展导出受控 git runner（env 白名单 `PATH/HOME/LC_ALL=C/GIT_OPTIONAL_LOCKS=0/GIT_CONFIG_NOSYSTEM=1/GIT_CONFIG_GLOBAL=/dev/null/GIT_TERMINAL_PROMPT=0`、`-c core.fsmonitor=false`、realpath == `rev-parse --show-toplevel` 校验、status `-z`、diff `--no-ext-diff --no-textconv --no-color`）；既有 `collectRepositoryRevision` 行为与 StackLock 采集字节不变的回归；子进程看不到 `DMXAPI_KEY` 的断言。按 change-requests「Source change observation」、shud-build「Workspace source checkout validation」。无依赖。
 
 - Suggested fixture level: expanded - 共享 schema 单源、生成投影、分级常量、策略门决策表与受控子进程（Critical Path #1/#7）
 - Minimal mergeable slice: 2.3 首刀（无依赖、无消费者）；2.1 依赖 2.3；2.2a–d 依赖 2.1（2.2d 可独立）且彼此独立；2.4、2.5、2.6 各自独立于其它切片

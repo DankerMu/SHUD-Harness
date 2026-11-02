@@ -1,14 +1,15 @@
 # Proposal
 
-## Active issue fixture: #525
+## Active issue fixture: #526
 
-- Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree: public scientific-governance constant, Critical Path #6).
-- Scope: task 2.5 only; CODE_CHANGE_SECTION5_WORDING exact primitive string and its contract tests.
-- Selected risk packs: Public API; Legacy compatibility; Documentation; scientific wording governance.
-- Evidence floor: exact-byte and scanner semantic RED/GREEN, built public-export smoke, unchanged legacy scanner/invariants, full check and three-seat whitebox review/same-SHA CI.
-- Governing source: evidence-reports「code_change report wording constant」and engineering-gates wording requirement; #524 delivered by #562.
-- Existing index.ts wildcard export is sufficient; no duplicate re-export or new public wrapper. String literal as const needs no Object.freeze allocation.
-- No template/report validator/prompt/profile/schema/generated artifact changes; downstream consumers remain #533/#541/#542. This slice does not deliver code_change report rendering.
+- Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree: child-process secrets/path boundary, Critical Path #5).
+- Scope: task 2.6 only; async runGit in repository-revision.ts, Buffer stdout, fixed environment/command hardening/root checks and controlled failures.
+- Selected risk packs: Public API; Auth/secrets; File IO/path safety; Resource limits; Error handling; Legacy compatibility; test prerequisite/dependencies; Documentation.
+- Evidence floor: real temporary git repositories and native env shim RED/GREEN, unchanged legacy collector/captured lock bytes, built runner smoke including archive/apply, full check and whitebox/same-SHA CI.
+- Live issue #526 and normative specs prevail over stale local issue draft: collectRepositoryRevision SHALL NOT call the new runner; its source, four calls, inherited env, normal-untracked behavior and errors remain unchanged.
+- New runner owns root checks before status/diff/archive; apply has only a named ceiling-directory exception, not arbitrary env or generic skip-root knobs. Status/diff mandatory flags precede pathspec separator.
+- Actual pinned SHUD tar is 18,636,800 bytes; bounded 64 MiB default maxBuffer plus explicit per-call maxBuffer supports archive without unbounded memory or partial-output success.
+- No observer/CR/build orchestration, new HEAD helper, extra environment variables, pathspec rewriting or legacy refactor. Existing index wildcard exports the new API.
 
 ## Why
 
