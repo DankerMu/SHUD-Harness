@@ -5,11 +5,11 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 
 # Canonical Schema Contract (v0.8)
 
-> **本文件是 8 个核心对象 + MemoryNote 的唯一权威字段定义。**
+> **本文件是核心对象、M4 VerificationCase / BuildRecord 与 MemoryNote 的权威字段定义。**
 > 其他文档（Research_Object_Model、SPEC_v0.8_Final、Execution_Jobs_Runs 等）若与本文件冲突，以本文件为准。
 > 进入实现后，Zod schema 必须与此一一对应。
 
-> **Canonical Source 说明：** Support schema（Artifact、ErrorRecord、PiGate、PiGateDecision、NotificationRecord、ReportExport、AnalysisProgressPayload、User、Session、AuditEvent、LockRecord、IdempotencyRecord 等）的权威定义不在本文件，见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md)。本文件仅定义 8 个核心对象 + MemoryNote。
+> **Canonical Source 说明：** Support schema（Artifact、ErrorRecord、PiGate、PiGateDecision、NotificationRecord、ReportExport、AnalysisProgressPayload、User、Session、AuditEvent、LockRecord、IdempotencyRecord 等）的权威定义不在本文件，见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md)。本文件的 M4 修订依据 [m4-mvp-2](../../openspec/changes/m4-mvp-2/design.md)，是实现组的字段基线，不表示相关运行时或生成投影已交付；实现与投影由对应子 issue 同步。
 
 > **M2 修订来源：** RunJob（§4）与 RunRecord（§5）已按 OpenSpec [m2-run-chain「Run identifiers / RunJob record / RunRecord record」](../../openspec/specs/run-records/spec.md) tasks 4.1–4.2 与 `packages/dsh-shud-core/src/schemas/run-job.ts`、`packages/dsh-shud-core/src/schemas/run-record.ts` 对齐。该修订不改变其余对象的当前契约。
 >
@@ -23,7 +23,7 @@ M3 品牌标识符修订（#424）的实现源为 `packages/dsh-shud-core/src/sc
 
 ```yaml
 task_id: TASK-20261027T080005-3f9c    # TaskId；UTC 秒 + 4 位小写 hex
-type: engineering | science_assist | ops
+type: engineering | science_assist | ops | code_change
 status: created | planned | running | parked | reporting | awaiting_pi | done | cancelled | blocked
 runtime_phase: null               # 运行时辅助字段，见下方说明
 title: "给 SHUD 添加 event flux 诊断输出"
@@ -40,6 +40,9 @@ inference_budget:
   reviewer_enabled: false
 linked_jobs: []                     # JobRecordId[]，如 JOB-20261027T081000-0123
 linked_reports: []                  # ReportId[]，如 REPORT-20261027T090000-5b10
+linked_changes: []                  # ChangeId[]，排序唯一；缺键按 []
+linked_verifications: []            # VerificationId[]，排序唯一；缺键按 []
+source_base_commit: null            # code_change 必须为 40 位小写 hex，其它类型必须为 null
 created_at: 2026-10-27T08:00:05Z
 updated_at: 2026-10-27T08:00:05Z
 ```
@@ -51,6 +54,8 @@ updated_at: 2026-10-27T08:00:05Z
 - 所有上述品牌 id 使用 UTC 秒与 4 位小写十六进制随机段，拒绝旧短 id、UUID 格式、大写 hex 和错误前缀；关联对象不要求共享随机段。`generateRunIdentifiers(now?)` 的 JOB/RUN 同后缀配对保持不变。
 - `reviewer`、`type`/`status`/`runtime_phase` 枚举与其余字段保持不变；`theory_bundle_ids` 仍为可选非空字符串数组（数组可为空），`runtime_phase` 仍允许缺省或 `null`。根对象与 `inference_budget` 的未知键仍接受后剥离，不改为严格拒绝。
 - 新建卡的 `stack_id`、`data_id` 显式为 `null`；后续提交回填品牌引用。StackLock、DataProvenance、EvidenceReport 的对象对齐与回填流程不在本刀交付。
+
+**M4 扩展：** `linked_changes`、`linked_verifications` 分别为品牌 `CHG-`、`VC-` 数组，码点升序且唯一；M3 文件缺键按 `[]` 解析，不改写原文件。`source_base_commit` 缺键按 `null` 解析；`code_change` 必须为完整的 40 位小写十六进制 commit，其它类型必须为 `null`。建卡时从会话工作区 `repos/SHUD` 的 HEAD 钉定，后续变更、构建与验证均复核，不由模型指定。状态/链接语义见 [M4 task-cards](../../openspec/changes/m4-mvp-2/specs/task-cards/spec.md)。
 
 **废弃字段**: 单个 `owner`（歧义）、嵌套 `linked_objects`（过深）。
 
@@ -92,6 +97,7 @@ llm:                                 # 恰好三个非空 string（ADR-0004 K4�
   base_url: "https://www.dmxapi.cn"   # 第三方端点必锁
   request_alias: "deepseek-flash-guan" # 请求中发送的 model id
   response_model: "deepseek-flash-guan" # 仅记录、不使 lock 失效；来源由对应 RunRecord 标注
+build_id: null                       # BuildId | null；M3 缺键按 null
 fingerprint: "sha256:..."            # 排除 stack_id/created_at/fingerprint/llm.response_model 后的规范 JSON SHA-256
 created_at: 2026-10-27T08:00:00Z
 ```
@@ -102,7 +108,9 @@ created_at: 2026-10-27T08:00:00Z
 
 status stdout 先按原始字节确定完整 NUL 记录和 R/C 双路径边界，再对保留的新路径严格解码 UTF-8；完整路径含非法 UTF-8 时，以含仓库路径的受控读取错误失败并保留解码异常 cause，不返回替换字符或转义格式。合法字面 U+FFFD 与路径开头 U+FEFF 原样保留。溢出的未完整尾记录先丢弃，即使截在多字节字符中也不解码、不误拒绝完整前缀；前三条 git 命令的解码/错误行为、四次调用与既有缓冲上限不变。
 
-**llm 与指纹**（ADR-0004 K4）：`base_url`、`request_alias` 以及仓库修订（含路径与截断标记）、runtime、harness 都参与指纹；`response_model` 只记录，不自动使 lock 失效。每条 RunRecord 另记模型与来源；不可把 configured 模型 id 冒称为响应体原值。指纹恰排除根 `stack_id`、`created_at`、`fingerprint` 和 `llm.response_model`，其余内容按每层键名排序、数组保持顺序、无空白 JSON 的 UTF-8 字节计算 SHA-256，加 `sha256:` 前缀。键顺序、身份、创建时间、响应模型变化不影响指纹；`base_url` 或 `request_alias` 变化仍为 stack 变更，行为 eval 子集见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)。
+**llm 与指纹**（ADR-0004 K4）：`base_url`、`request_alias` 以及仓库修订（含路径与截断标记）、runtime、harness 都参与指纹；`response_model` 只记录，不自动使 lock 失效。每条 RunRecord 另记模型与来源；不可把 configured 模型 id 冒称为响应体原值。指纹排除根 `stack_id`、`created_at`、`fingerprint` 和 `llm.response_model`；M4 的 `build_id` 为 `null` 或缺键时也排除，非 null 时保留。其余内容按每层键名排序、数组保持顺序、无空白 JSON 的 UTF-8 字节计算 SHA-256，加 `sha256:` 前缀。无 build 时与 M3 指纹逐字节相同，旧 lock 可复用且不改写；不同 build id 改变指纹。键顺序、身份、创建时间、响应模型变化不影响指纹；`base_url` 或 `request_alias` 变化仍为 stack 变更，行为 eval 子集见 [Agent_Behavior_Eval_Spec](../04_IMPLEMENTATION/Agent_Behavior_Eval_Spec.md)。
+
+**M4 构建来源：** `build_id` 为品牌 `BuildId` 或 `null`，缺键按 `null` 解析而不改写旧 lock。有 build 时 `repos.SHUD` 取 BuildRecord 的 `source_commit`、`source_branch` 与 `dirty_paths`，`dirty` 等于路径非空、`dirty_paths_truncated: false`；不再采集配置的 SHUD 仓库，其余两仓库照常采集。构建时的 dirty 列表是观测，不是构建输入；base 的精确输入仅为钉定 commit 的归档，不要求 CR 或 patch；候选的精确输入为同一归档加已批 CR 的 patch。
 
 **废弃字段**: `runtime.container`（MVP 不强制容器）、`limits`（已移入 RunJob.resources）、`policy_version`（已合并入 harness.version）、`repos.zero`（内核改为 dsh，ADR-0004 K1）、`llm.provider` / `llm.model_id` / `llm.params_digest` / `llm.prompt_pack_digest`（K4 收窄为三字段）。
 
@@ -122,21 +130,24 @@ sources:
     - path: ccw.sp.mesh             # 相对于输入副本根的 POSIX 路径
       sha256: "sha256:mesh"         # schema 只要求非空，不限制摘要语法
       size_bytes: 1024              # 必填非负整数，允许 0
+  external_files: []                # {path(绝对), sha256, size_bytes}；M3 缺键按 []
 preprocess: null
 uncertainty_notes: null
 ```
 
-**字段契约：** 上列字段全部必填，根对象、`event_window`、`sources` 与每个文件条目均严格拒绝未知键。`event_window.start` / `end` 各接受非空字符串或 `null`，不解析日期；M3 生成约定两端均为 `null`，不推算事件窗口。`preprocess`、`uncertainty_notes` 仅接受显式 `null`。
+**字段契约：** 除 `sources.external_files` 缺键按 `[]` 解析外，上列字段全部必填，根对象、`event_window`、`sources` 与每个文件条目均严格拒绝未知键。`event_window.start` / `end` 各接受非空字符串或 `null`，不解析日期；生成约定两端均为 `null`，不推算事件窗口。`preprocess`、`uncertainty_notes` 仅接受显式 `null`。读取默认值不改写 M3 文件。
 
 **路径与文件：** `input_root` 按运行平台的绝对路径规则校验。`files[].path` 非空，拒绝 POSIX 绝对路径、`..` 路径段与 NUL，保留 Unicode、空白、反斜杠等合法文件名字符；这是词法检查，不访问文件系统。`files` 允许为空，schema 不要求排序或去重；确定性生成时的清单排序属于后续采集流程。
 
 **M3 对齐处置（#431）：** `data_id` 复用 `DataIdSchema`，拒绝旧 `DATA-NNNN`、`DATA-<UUID>` 与大写 hex。删除 `sources.terrain` / `mesh` / `forcing` / `observations` 分类，改为 `input_root` + `files`；删除 `preprocess` 对象及其开放 `params`，不保留兼容分支。旧 `event_window` 数组、无 sha256 的文件条目和已删除字段均拒绝。此刀仅交付 schema/type 与生成文档投影，不交付输入遍历、hash 计算、持久化或提交接线。
 
+**M4 外部 forcing：** `sources.external_files` 条目为 `{path, sha256, size_bytes}`，`path` 必须为绝对路径，摘要与非负整数字节数沿用 `files` 约束。提交解析副本 `<project>.tsd.forc` 的站点数、目录与 Filename 列；目录按运行 cwd 解析并 realpath 后位于输入副本内则为 `[]`，副本外仅哈希实际引用的普通文件，去重并按绝对路径码点升序记录，不复制或修改外部文件。缺文件、链接/特殊文件、站点数不符或解析失败均使提交失败并回滚，不能降级为空清单。此规则也作用于无 build 提交；ccw 的 forcing 位于副本内，keliya 回放引用外部 32 个文件。详见 [M4 provenance 契约](../../openspec/changes/m4-mvp-2/specs/data-provenance/spec.md)。
+
 ---
 
 ## 4. RunJob
 
-实现源为 `packages/dsh-shud-core/src/schemas/run-job.ts`；以下示例是仍然有效的 M2 `submitted` 记录。所有列出的字段都必填，可空字段必须显式传 `null`。根对象与 `llm`、`notify` 均拒绝未知字段。
+实现源为 `packages/dsh-shud-core/src/schemas/run-job.ts`；以下示例保留 M2 `submitted` 记录形态并列出 M4 扩展字段。除下述三个 M4 字段缺键按 `null` 解析外，所有字段都必填，可空字段必须显式传 `null`。根对象与 `llm`、`notify` 均拒绝未知字段。
 
 ```yaml
 job_id: JOB-20261022T031500-a1b2
@@ -152,6 +163,9 @@ input_dir: /models/input/ccw        # 原始输入目录绝对路径
 run_dir: /workspace/runs/RUN-20261022T031500-a1b2 # 运行目录绝对路径，取代 cwd
 command: ["/usr/local/bin/shud", "-o", "output/ccw.out", "ccw"] # 非空 argv 数组
 end_days: 30                        # END 覆写正整数，或 null
+build_id: null                      # BuildId | null；M2/M3 缺键按 null
+threads: null                       # 正整数 | null；缺键按 null，不强制转换
+binary_sha256: null                 # 64 位小写 hex | null；非 null iff build_id 非 null
 owner_session: null                 # 发起会话 id，仅用于唤醒投递
 dsh_job_id: null                    # 当前宿主登记 id：shud- + 16 位小写十六进制，或 null
 dsh_job_ids: []                     # 历次宿主登记 id
@@ -177,6 +191,8 @@ notify:
 
 **M3 提交关联（#443）：** `shud_run` 使用的注册表 `submitShud` 请求可携带品牌 `task_id`，未提供时写 `null`，显式 `null` 或非法值在文件系统操作前拒绝；本刀不新增工具参数或回写 TaskCard。输入完整复制并完成可选 END 改写后，调用规范 `captureStackLock`，再等待 `generateProvenance` 对运行副本计算文件 hash/字节数；在首次 `created` RunJob 原子写之前，StackLock 与本次 DataProvenance 已持久化。该次写入同时包含 `task_id`、非空 `stack_id`、非空 `data_id`，后续 collect 原样继承；schema 仍允许三者为 `null`，M2 恢复与旧结果不迁移。
 
+**M4 运行绑定：** `build_id`、`threads`、`binary_sha256` 缺键各按 `null` 解析，默认值之后校验 `binary_sha256` 非 null 当且仅当 `build_id` 非 null。`threads` 接受正整数或 null，拒绝 0、负数、小数与字符串；它不是仅允许 1 的 schema，N=1 是回放验证门。有 build 的提交校验 BuildRecord 与二进制摘要，复制二进制到本次运行目录 `bin/shud` 并执行副本；首次 `created` 即记录三字段，collect 原样继承。提供 threads 时设置 `OMP_NUM_THREADS` 与 `SHUD_RHS_THREADS`；缺省不设置，继承宿主环境。旧 M2/M3 文件读取不改写。
+
 采集来源由注册表必填配置 `stackRepos.{SHUD,rSHUD,AutoSHUD}`（绝对路径）、`hostVersion`、`llm.{base_url,request_alias}` 指定；可选 `sundialsRoot` 为绝对路径。apply 验证这些键与父类配置的严格并集，不采集 Git 或写工作区证据。安装器从自身所在仓库根派生三仓库路径，从 bundle peer 读取 hostVersion，从 bundle 模型行读取 llm；`SUNDIALS_ROOT` 未设置则省略，设置时须为已存在绝对目录。新 lock 的 response_model 与请求相同；指纹匹配时复用原 lock，保留其字节/mtime，不因响应模型变化改写。
 
 提交失败沿既有事务回滚：先证明执行已不能继续 I/O、完成登记清理，再移除自有索引/运行目录及本次返回的 provenance。删除前复核 provenance 普通文件及父目录身份，拒绝链接和外来替换；不扫描认领其它 provenance，从不删除任何 StackLock（包括本次新建或复用的 lock）。清理失败保留既有聚合错误、D7/预留 fail-closed 语义，不宣称全部删除；采集及回滚均纳入关闭前 drain。
@@ -195,13 +211,13 @@ created → submitted → running → succeeded | failed | cancelled → collect
 
 **相对原文的处置：** `command` 从命令字符串改为 argv 数组；`cwd` 被删除并由 `run_dir` 取代。新增 `run_id`、`project`、`label`、`input_dir`、`run_dir`、`end_days`、`owner_session`、`dsh_job_id`、`dsh_job_ids`、`pid_started_at`、`input_bytes`、`started_at`、`cancel_requested_at`、`exit_code`、`llm` 与 `notify`。M2 不接受 `timed_out`、`local_direct`、`docker_job`、`slurm`、`k8s` 或旧 `backend: local`。
 
-**M3（不属于 M2 字段）：** `timed_out` 及其超时转换、`resources.max_wall_minutes`、`resources.max_memory_mb`、`cost_budget.max_compute_minutes` 延后；M2 对 `resources`、`cost_budget`、旧 `resources.cpu` 与 `cwd` 均不接收。
+**未排期（GAP-02）：** `timed_out` 及其超时转换、`resources.max_wall_minutes`、`resources.max_memory_mb`、`cost_budget.max_compute_minutes` 仍无生产者；M4 不接收 `resources`、`cost_budget`、旧 `resources.cpu` 与 `cwd`，不增加超时终止。
 
 ---
 
 ## 5. RunRecord
 
-实现源为 `packages/dsh-shud-core/src/schemas/run-record.ts`。RunRecord 是 collect 后的不可变结果记录；以下为仍然有效的 M2 成功记录。所有字段必填，未测量或未绑定的可空字段显式传 `null`；`numerical_health` 本身必须是对象。
+实现源为 `packages/dsh-shud-core/src/schemas/run-record.ts`。RunRecord 是 collect 后的不可变结果记录；以下示例保留 M2 成功记录形态并列出 M4 扩展字段。除三个 M4 字段缺键按 `null` 解析外，所有字段必填，未测量或未绑定的可空字段显式传 `null`；`numerical_health` 本身必须是对象。
 
 ```yaml
 run_id: RUN-20261022T031500-a1b2
@@ -209,6 +225,9 @@ job_id: JOB-20261022T031500-a1b2
 task_id: null                       # schema 保持可空；collect 继承 RunJob 的同名值
 stack_id: null                      # M2 null 仍有效；M3 新提交的采集引用原样继承
 data_id: null                       # M2 null 仍有效；M3 新提交的 provenance 引用原样继承
+build_id: null                      # BuildId | null；collect 原样继承
+threads: null                       # 正整数 | null；collect 原样继承
+binary_sha256: null                 # 64 位小写 hex | null；非 null iff build_id 非 null
 status: succeeded                  # succeeded | failed；仅 exit_class: ok 成功
 command: ["/usr/local/bin/shud", "-o", "output/ccw.out", "ccw"] # argv
 exit_code: 0                       # 整数或 null
@@ -235,6 +254,8 @@ collected_at: "2026-10-22T03:16:00Z" # ISO 8601 UTC
 ```
 
 **提交来源：** collect 不补采集、不猜测引用；`task_id`、`stack_id`、`data_id` 逐一取所属 RunJob 的值。M3 新提交的 stack/data 非空，task 可空；这不收紧 durable schema，也不改写已有 M2 null-id RunRecord。
+
+**M4 兼容：** `build_id`、`threads`、`binary_sha256` 的类型、缺键默认值与默认值后的 iff 校验同 §4；collect 不重新推断三字段，不改写已有 M2/M3 RunRecord 字节或 mtime。
 
 **退出类别：** `classifyRunExit(exitCode, missingOutcome?)` 为唯一映射：`0 → ok`、`10 → nan`、`12 → file_io`、`13 → input`、`19 → cvode`、`20 → consistency`，其它非零整数为 `other`（退出码事实见 [SHUD_IO_Facts](../01_CODEBASE/SHUD_IO_Facts.md#退出码)）。`exit_code: null` 必须明确提供 `cancelled`（取消且无退出码）或 `lost`（进程丢失/从未启动且无退出码），不猜测默认结果。数值退出证据优先于取消意图。schema 拒绝退出码与类别矛盾的记录，并要求 `ok` 对应 `succeeded`，其余八类对应 `failed`。
 
@@ -293,18 +314,21 @@ linked_runs: [RUN-20261027T083000-b2c3, RUN-20261027T082000-a1b2]
 stack_ids: [STACK-20261027T081500-b2c3, STACK-20261027T080000-a1b2]
 data_ids: [DATA-20261027T081500-8e3f, DATA-20261027T081000-7d2e]
 llm_response_models: [deepseek-flash-guan]
+change_ids: []                      # ChangeId[]，去重；M3 缺键按 []
+verification_ids: []                # VerificationId[]，去重；M3 缺键按 []
 decision_history: []
 created_at: "2026-10-27T09:00:00Z"
 updated_at: "2026-10-27T09:00:00Z"
 ```
 
-M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [M3 报告契约](../../openspec/specs/evidence-reports/spec.md)。根对象与嵌套 PiGateDecision 均严格拒绝未知字段，以上字段全部必填，不允许省略或 `undefined`。
+M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [M3 报告契约](../../openspec/specs/evidence-reports/spec.md)；M4 扩展依据 [M4 报告契约](../../openspec/changes/m4-mvp-2/specs/evidence-reports/spec.md)。根对象与嵌套 PiGateDecision 均严格拒绝未知字段；除 `change_ids`、`verification_ids` 缺键按 `[]` 解析外，以上字段全部必填。
 
 - `report_id` 从 `REPORT-NNNN` 改为品牌 `ReportId`；`task_id` 为品牌 `TaskId`。品牌格式为 `<PREFIX>-YYYYMMDDTHHMMSS-xxxx`，UTC 秒与 4 位小写 hex。
 - `linked_runs` 改为非空品牌 `RunId[]`，允许重复；新增 `stack_ids: StackId[]`、`data_ids: DataId[]`、`llm_response_models: string[]`，三者均非空且拒绝重复。schema 保留调用方顺序，不排序、不静默去重。后续生成器从关联 RunRecord 取引用并去重，不由 schema 读取运行记录。
 - `summary` 为非空字符串；`observations`、`limitations`、`pi_questions` 可为空数组，但元素必须是非空字符串。响应 model 元素也必须非空。不裁剪、不强制转换、不填默认值。
 - 新增必填 `decision_history: PiGateDecision[]`，允许空数组；新增必填 `updated_at`。`created_at`/`updated_at` 沿用 TaskCard 非空字符串约定，不做时间格式或先后关系校验。仅 PiGateDecision 的 `decided_at` 要求 ISO 8601 UTC。
 - `status` 恰为 `draft | reviewed | awaiting_pi | accepted | revision_requested | rejected | archived`。schema 不强制 history 与状态一致，不校验 history 中 report_id 与外层一致，不检查决策时间顺序或审批权限。
+- M4 `change_ids`、`verification_ids` 为品牌 id 的去重数组，允许空数组；生成时按新鲜 TaskCard 的 `linked_changes`、`linked_verifications` 顺序取值，不接受模型指定。M3 报告缺键按 `[]` 解析，文件不改写。字段名固定为 `verification_ids`，不接受 Theory-to-Code 规划中的 `verification_case_ids`。
 
 **状态流转边界**：后续记录/工具层负责 `draft` → `reviewed` → `accepted | revision_requested | rejected`；`awaiting_pi` 在 M3 仅表示审批卡挂起瞬时态，不写入持久报告；`archived` 保留但无 M3 入口。解析成功不等同 PI 审批通过。
 
@@ -314,24 +338,36 @@ M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据
 
 ## 8. ChangeRequest
 
+M4 严格对象，依据 [ChangeRequest record](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-changerequest-record)：
+
 ```yaml
-change_id: CHG-0001                   # 格式: CHG-NNNN
-task_id: TASK-0001
-risk: low | medium | high
-files_changed:
-  - "repos/SHUD/src/output.c"
-  - "repos/rSHUD/R/read_output.R"
-interface_impact:
-  output_change: additive | breaking | none
-  backward_compatible: true | false
-compat_checks:
-  old_output_reader: pass | fail | skipped
-  tiny_case: pass | fail | skipped
-gates:
-  needs_pi_approval: true
-  reason: "output compatibility changed"
-patch_bundle: "artifacts/CHG-0001.patch"   # null 若未生成
+change_id: CHG-20261102T093000-4a1f   # 品牌 ChangeId；UTC 秒 + 4 位小写 hex
+task_id: TASK-20261102T090000-3f9c
+source_path: repos/SHUD
+base_commit: 9a422e5eb708df7d2f8b4066a3083a031d679a82
+files_changed: [Makefile, src/Model/MD_rhs_core.cpp]
+semantic_level: numerical_implementation
+semantic_floor: numerical_implementation
+floor_categories: [numerical_implementation]
+risk: high
+patch_path: patches/CHG-20261102T093000-4a1f.patch
+patch_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+status: proposed
+approval_ref: null
+approved_at: null
+description: "StrictOMP RHS slice"
+created_by: coder
+created_at: "2026-11-02T09:30:00Z"
+updated_at: "2026-11-02T09:30:00Z"
 ```
+
+上列为全部字段，未知键拒绝。`source_path` 固定 `repos/SHUD`；`base_commit` 为完整 40 位小写 hex，工具复核其等于卡片 `source_base_commit`。`files_changed` 为非空、唯一、码点升序的相对 POSIX 路径数组，不含父目录穿越与 NUL。`description` 为字符串或 null；`patch_path` 必须与 `change_id` 对应，`patch_sha256` 为 64 位小写 hex。
+
+`semantic_level` 与 `semantic_floor` 采用 [Gating §1](Scientific_Change_Gating_Spec.md#1-semantic-level) 七档顺序，前者不得低于后者；`floor_categories` 非空、唯一、按该顺序升序，最后一项必须等于 `semantic_floor`，包含全部匹配类别而不只保留最大值。`risk` 必须等于级别映射：pure_engineering → low、io_format → medium、其余 → high。
+
+`status` 只接受 proposed/approved；proposed 的 `approval_ref` 与 `approved_at` 必须为 null，approved 则分别为非空字符串与非空 ISO 时间。`approval_ref` 是执行 callId，需与 session log 核对，不是独立的审批证明。被拒 CR 保持 proposed，不产生 rejected 或修订链。读取不修改文件。
+
+M4 原地删除 `interface_impact`、`compat_checks`、`gates`、`patch_bundle`、`theory_bundle_id`、`verification_case_ids`、`pi_gate_required`，旧 `CHG-NNNN` 拒绝；不保留无生产者字段或别名。这是 M4 范围裁剪、非放宽 baseline（design D15）。
 
 ---
 
@@ -352,26 +388,66 @@ created_at: 2026-04-25T16:00:00Z
 
 ---
 
+## 10. VerificationCase
+
+M4 严格对象，字段权威见 [VerificationCase record](../../openspec/changes/m4-mvp-2/specs/verification-cases/spec.md#requirement-verificationcase-record)。全部字段如下：
+
+| 字段 | 类型与约束 |
+|---|---|
+| `vc_id` / `task_id` / `change_id` | 品牌 `VerificationId` / `TaskId` / `ChangeId`；VC 格式 `VC-YYYYMMDDTHHMMSS-xxxx` |
+| `bundle_id` | 非空字符串或 null；M4 生产者恒为 null |
+| `case_type` | dimension_check / mass_balance / limiting_case / manufactured_solution / regression / unit_test / tiny_basin / output_semantics |
+| `expected_result_source` | analytic / published / pi_provided / baseline_regression / agent_proposed |
+| `target_code_targets` | 相对 POSIX 路径数组 |
+| `description` / `expected_result` / `pass_criteria` | 非空字符串 |
+| `base_run_id` / `candidate_run_id` | 品牌 RunId |
+| `base_build_id` / `candidate_build_id` | 品牌 BuildId |
+| `artifact_refs` | 恰两项相对 POSIX 路径，对应 base/candidate 实际比较文件 |
+| `observed` | `{ compared_path, base_sha256, candidate_sha256 }`；路径相对运行目录，摘要为 SHA256 |
+| `status` | not_run / running / passed / failed / inconclusive / waived_by_pi |
+| `failure_reason` | 非空字符串或 null |
+| `reviewed_by` | 非空字符串 |
+| `reviewer_notes` | 至少一条非空字符串 |
+| `compatibility_verdict` | compatible / incompatible / unknown |
+| `created_at` | 创建时间 |
+
+M4 只生产 regression / baseline_regression / passed 或 failed，拒绝 agent_proposed，不生产其余 schema 保留状态。passed 要求两个摘要相等且 failure_reason 为 null；failed 要求摘要不等且原因非空。缺失、链接或非普通比较文件是工具错误，不生成 failed 判定。`artifact_refs` 写入时必须为实际比较文件；报告校验第 (15) 项再次复核存在性与摘要。
+
+旧 `id` / `verification_case_id` 改为 `vc_id`；旧 `run_job_ids` / `run_record_ids` 收敛为 base/candidate 运行与构建两对引用，不保留 `target_equations` 或无生产者的 bundle 扩展字段。M4 bundle 免除与字段裁剪见 [Verification_Case_Spec 的 M4 实现范围](Verification_Case_Spec.md#m4-实现范围)，不是普遍放宽科学验证门。
+
+## 11. BuildRecord
+
+M4 严格对象，字段权威见 [BuildRecord record](../../openspec/changes/m4-mvp-2/specs/shud-build/spec.md#requirement-buildrecord-record)。全部字段如下：
+
+| 字段 | 类型与约束 |
+|---|---|
+| `build_id` / `task_id` | 品牌 BuildId / TaskId；BUILD 格式 `BUILD-YYYYMMDDTHHMMSS-xxxx` |
+| `change_id` / `patch_sha256` | ChangeId 或 null / 64 位小写 hex 或 null；两者同时非 null |
+| `source_path` | 相对 POSIX 路径，M4 固定 repos/SHUD |
+| `source_commit` | 40 位小写 hex，等于 TaskCard.source_base_commit |
+| `source_branch` | 非空字符串 |
+| `dirty_paths` | 排序唯一的相对 POSIX 路径数组，表示构建时工作树观测，不是构建输入 |
+| `make_argv` | 非空字符串数组，实际 make argv |
+| `sundials_dir` | 绝对路径 |
+| `rhs_openmp` | boolean |
+| `compiler` | 非空字符串，构建所用 CXX 的 --version 首行 |
+| `exit_code` | 恒 0；失败构建不产生 BuildRecord |
+| `duration_seconds` | 非负数 |
+| `binary_path` / `binary_sha256` | builds/&lt;build_id&gt;/shud / 64 位小写 hex |
+| `stdout_path` / `stderr_path` | builds/&lt;build_id&gt;/make.stdout.log / builds/&lt;build_id&gt;/make.stderr.log |
+| `created_at` | 创建时间 |
+
+base 构建 `change_id: null`，必须 `dirty_paths: []`、`patch_sha256: null`，精确输入仅为钉定 commit 的归档；候选构建 `change_id` 非 null 时，必须 `dirty_paths` 非空且 `patch_sha256` 非 null，空路径数组即拒绝。仅候选的 patch 摘要须等于已批 CR，其精确输入为同一归档加该 patch；两类构建均不采用工作树或陈旧二进制。构建记录不把 rhs_openmp 为真等同于实际编译带 OpenMP 标志；回放另验 make 回显的 `-fopenmp`。首次发布采用临时目录整体 rename，消费者校验普通可执行文件与 binary_sha256。
+
+---
+
 ## Theory-to-Code optional field additions
 
-以下字段为 optional，不破坏现有 8 核心对象。high-risk `semantic_level` 触发 Scientific_Change_Gating_Spec。
+以下为未激活的 Theory-to-Code 规划，不覆盖上文 M4 严格对象契约；M4 不生产 bundle。TaskCard 与 AnalysisPlan 的后续可选字段保留，ChangeRequest 与 EvidenceReport 不接受旧别名。
 
 ```ts
 // TaskCard optional additions
 theory_bundle_ids?: string[];
-
-// ChangeRequest additions
-semantic_level?:
-  | "pure_engineering"
-  | "io_format"
-  | "output_semantics"
-  | "numerical_implementation"
-  | "parameter_default"
-  | "physical_equation"
-  | "model_assumption";
-theory_bundle_id?: string;
-verification_case_ids?: string[];
-pi_gate_required?: boolean;
 
 // AnalysisPlan additions
 requires_theory_bundle_id?: string;
@@ -379,9 +455,6 @@ baseline_run_id?: string;
 search_preflight_status?: "not_run" | "passed" | "failed";
 experiment_ledger_id?: string;
 
-// EvidenceReport additions
-theory_bundle_ids?: string[];
-verification_case_ids?: string[];
 ```
 
 ---

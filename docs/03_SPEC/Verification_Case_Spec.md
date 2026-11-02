@@ -23,6 +23,20 @@ verification passed → model mechanism proven
 benchmark improvement → general improvement
 ```
 
+## M4 实现范围
+
+[M4 VerificationCase 契约](../../openspec/changes/m4-mvp-2/specs/verification-cases/spec.md) 与 [Minimal_Schemas §10](Minimal_Schemas.md#10-verificationcase) 是本次实现字段基线；下文通用 Theory-to-Code schema 保留为后续规划，不是第二套 M4 对象。以下为 design D15(1)/(6) 的 M4 范围裁剪、非放宽 baseline：
+
+- 旧 `id` / `verification_case_id` 统一为品牌 `vc_id: VC-YYYYMMDDTHHMMSS-xxxx`；必填 `task_id`、`change_id`，不保留别名。
+- `bundle_id` 允许非空字符串或 null，M4 生产者恒写 null；不生产 bundle，不保留 `target_equations`、numerical_scheme/mapping 等无生产者字段。
+- `run_job_ids` / `run_record_ids` 改为 `base_run_id` / `candidate_run_id` 与 `base_build_id` / `candidate_build_id` 两对引用；RunJob 经注册表只读查询交叉校验，不另存一份 job 数组。
+- 只生产 `case_type: regression`、`expected_result_source: baseline_regression` 与 `status: passed|failed`；拒绝 `agent_proposed`。schema 仍保留其它类型、来源与状态词表，不等于实现了其它生产者。
+- `observed` 记录 `compared_path`、`base_sha256`、`candidate_sha256`。比较器只对两份 `output/<project>.out/<project>.rivqdown.dat` 的普通文件字节计算 SHA256；不读数值、无容差、不比较其它输出。
+- passed 必须摘要相等、`failure_reason: null`；failed 必须摘要不等且原因非空。缺失、链接或特殊文件是工具错误，不落 failed/inconclusive。`artifact_refs` 恰两项，为真实比较文件的工作区相对路径；报告校验第 (15) 项复核其存在性与摘要。
+- `reviewed_by` 非空、`reviewer_notes` 至少一条，`compatibility_verdict` 为 compatible/incompatible/unknown；不另造 ReviewNote。失败 VC 允许进入报告 closure，但必须在风险节呈现，且不能使 `shud:replay` 通过。
+
+M4 只接受同卡、同 project、同钉定 commit、同输入证据的两次成功且已 collected 运行；base 必须来自 null-CR 且 `rhs_openmp: false` 的构建，候选来自 approved CR，两次 `threads: 1`。bitwise 一致只支持 N=1 与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。
+
 ## 2. Schema
 
 ```ts
@@ -81,6 +95,8 @@ interface VerificationCase {
 
 ## 4. Pass/fail 规则
 
+下列为通用验证规则。M4 不生产 metrics，failed VC 保留实际的两份 rivqdown artifact、关联运行/构建日志、patch 与 failure_reason，并在报告 §7 显示；不要求为满足通用清单而生成 metrics。bundle 自动接受及 inconclusive/waived 生产者在 M4 不激活，其余证据保留原则继续适用。
+
 - `passed` 必须有 deterministic artifact 支持。
 - `failed` 必须保留 logs、metrics、patch、failure_reason。
 - `inconclusive` 必须说明缺少什么证据。
@@ -94,6 +110,8 @@ interface VerificationCase {
 - `expected_result_source = agent_proposed` 的 case，**其 `passed` 不能计入 bundle 进入 `accepted_for_search` 的验证证据**，除非 `pass_criteria_confirmed_by` 已由 PI/工程师填写（gate 上一并确认，不要求单独流程）。
 - pass_criteria 必须是确定性可求值表达式（阈值/容差），judgement 型标准（"结果看起来合理"）拒绝进 schema。
 - 报告的 Theory-to-Code Evidence 章节必须展示每个 case 的 expected_result_source——PI 一眼能看出哪些期望值是 agent 自拟的。
+
+M4 的 expected_result_source 固定 baseline_regression，不接受 agent_proposed；正确性门是 SHA256 字节相等，不使用数值阈值/容差。上述 Theory-to-Code 章节要求在 M4 由报告 §3 的 CR/VC/Build 事实表替代，VC 表仍必须显示 expected_result_source；不要求不存在的 bundle 章节或 metrics，不改变后续完整 Theory-to-Code 的独立性门。
 
 ## 5. 与 RunRecord 关系
 

@@ -8,7 +8,7 @@ canonical_for: [scientific-semantic-levels]
 **状态**：v0.8.3 P0 补充规范  
 **目标**：根据科学语义风险对 ChangeRequest 分级，并决定是否需要 Theory-to-Code Bundle、VerificationCase 和 PI approval。
 
-本页 ChangeRequest/VerificationCase 科学分级链属于 M4；M3 仅接线报告终态审批，按 [M3 policy-gate 契约](../../openspec/specs/policy-gate/spec.md) 执行。下列后续科学规则不表示 M3 已有相应工具或校验生产者。
+本页 M4 已知答案回放的具体范围以 [m4-mvp-2 policy-gate](../../openspec/changes/m4-mvp-2/specs/policy-gate/spec.md) 与下列 M4 注记为准；这是实现契约，不表示工具已交付。M3 报告终态审批保持 [M3 policy-gate 契约](../../openspec/specs/policy-gate/spec.md)。通用 bundle/search 规则保留为后续范围，不冒充 M4 生产者。
 
 ## 1. Semantic level
 
@@ -27,10 +27,10 @@ type ChangeSemanticLevel =
 
 **问题（AGA-P0-2）**：semantic_level 由 Coder（LLM）自填。若无制衡，agent 把物理语义改动标为 `pure_engineering` 即可旁路整条治理链。分类是治理链最弱环节，必须有机器强制的下限。
 
-**机制**：维护确定性的 path → 最低 semantic_level 映射表（配置文件，非硬编码）：
+**机制**：确定性的 path → 最低 semantic_level 映射落在仓库内受测常量模块，初值由下表约束；不是 profile/运行时可覆写配置。M4 仅观测 `repos/SHUD`，使用表中 SHUD 模式去掉 `SHUD/` 前缀后的相对源仓库根路径，以及 docs/scripts/templates 模式；rSHUD/AutoSHUD 条目不进入 M4 源检出工具。
 
 ```yaml
-# config/semantic_level_floor.yaml（示例初值，随 ImplementationMapping 积累细化）
+# 规范初值；M4 由 core 的受测常量与生成投影表达，不创建此 YAML 配置文件
 floors:
   - pattern: "SHUD/src/ModelData/**"        # 求解器物理/数值核心
     floor: numerical_implementation
@@ -78,6 +78,8 @@ floors:
    命中 output_semantics 时即使 effective_level 被更高 floor 覆盖，bundle 仍须含 output registry
    patch 项（[Preflight §1](Preflight_And_Mutation_Boundary_Spec.md) output_semantics 行）。类别不因枚举序被吞（对抗审查 A05-4）。
 
+**M4 确定性落地（保留规则 2/6 原文）：** 每个路径取全部匹配条目的最大 floor，不采用首匹配；未匹配路径按规则 2 取 `numerical_implementation`。例如 `src/classes/Model_Control.cpp` 同时命中两档，最大值为 numerical_implementation，而 `floor_categories` 同时保留 output_semantics 与 numerical_implementation，按七档顺序去重排序。`Makefile`、`README.md` 未匹配同样取 numerical_implementation。`files_changed` 由工具观测生成，不接受模型路径列表；观测使用受控 git 的 porcelain `-z`，拒绝未忽略 untracked、删除、重命名，只接受已跟踪修改。申报低于 floor 自动抬升，不提供 M4 降级入口；Mapping 自动增补与 CommandTrace 对账不在本轮实现。floor/categories/风险校验只有一个 core 来源，具体规则见 [Semantic level floor](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-semantic-level-floor)。
+
 ## 1.2 参数语义下限（无 ChangeRequest 的 search 任务）
 
 纯 sensitivity/calibration 任务不改代码，files_changed 为空集，§1.1 的 floor 完全不参与——对抗审查 A05-1
@@ -110,7 +112,11 @@ parameters:
 | physical_equation | 是 | 是 | 是 | accepted_for_search 后 |
 | model_assumption | 是 | 是 | 是 | accepted_for_search 后 |
 
+**M4 bundle 免除（D15(1)）：** 本轮不生产 TheoryToCodeBundle，对 output_semantics 及以上的 bundle 门整体免除，以 `change_submit` 的 PI 审批卡替代 bundle → mapping → accepted_for_search 路由；VerificationCase.bundle_id 恒写 null。不开放 search/calibration，也不以该例外推导可无审批变更科学语义。这是 M4 范围裁剪、非放宽 baseline。
+
 ## 3. ChangeRequest additions
+
+本节接口是未激活的 Theory-to-Code 扩展规划；M4 严格对象只接受 [Minimal_Schemas §8](Minimal_Schemas.md#8-changerequest) 字段，尤其不接受 theory_bundle_id、verification_case_ids、pi_gate_required 或其它无生产者扩展。
 
 ```ts
 interface ChangeRequestScientificAdditions {
@@ -138,6 +144,8 @@ interface ChangeRequestScientificAdditions {
   触发条件是派生字段 `analysis_mode`（[Report_Review §2](Report_Review_And_Evidence_Lineage_Spec.md)，非 LLM 自填），不依赖叙事检测或 agent
   自愿 emit（对抗审查 A08-6）；narrative 级换述仍由 Reviewer (L) + PI 审阅兜底。
 
+**M4 `change_submit`：** role-tool-surface 未 deny 后，策略门先按品牌 id 只读校验 CR 与 patch。两者可读且 patch SHA256 不符即 deny `change-patch-mismatch`，不弹卡；高风险五档返回 ask，displayReason 包含 floor_categories，文件缺失或损坏仍先 ask，执行时再明确失败。pure_engineering/io_format 在证据可读且摘要匹配时 next。工具执行时再次复核 patch，只有宿主放行后才原子写 proposed → approved、approval_ref = 本次 exec.callId。rejected/cancelled/unavailable 均不执行、CR 不变；danger-full-access 仍 ask。`change_create` 本身不 ask，候选 `shud_build` 只接受已批且摘要匹配的 CR。
+
 ## 5. Comment required rules
 
 PI decision comment 必填：
@@ -151,6 +159,8 @@ PI decision comment 必填：
 | accepted_for_search despite inconclusive verification | 必填 |
 | accepted report only | 可选 |
 
+**M4 comment 偏离（D15(2)）：** 宿主审批卡没有 comment 通道，高风险 ChangeRequest 的 `allowed-once` 即批准，不要求落盘 comment；不是 agent 批准。拒绝时 CR 保持 proposed，PI 理由仅经对话由 coordinator 转述给 coder，不写入 CR/TaskCard/patch 或其它工作区文件，不新增 change_decide。报告 `report_decide(comment)` 的既有契约不变，见 [ADR-0011](../adr/proposed/0011-pi-comment-conversation-carrier.md)。这是 M4 范围裁剪、非放宽 baseline；其它通用 comment 要求不因此解除。
+
 ## 6. 禁止路径
 
 ```text
@@ -162,6 +172,8 @@ physical_equation ChangeRequest
 
 必须被拒绝。
 
+M4 仅免除上述路径中的 bundle 前置，以 CR 的 PI 卡及确定性 VerificationCase 走已知答案回放；不存在从该例外进入 sensitivity/search 的入口。agent 不得直接把 CR 标为 approved 或改写治理文件。
+
 ```text
 calibration improved
 → report says theory validated
@@ -171,6 +183,8 @@ calibration improved
 
 ## 7. 验收标准
 
+M4 不以“高风险缺 bundle”或“批准缺 comment”判本轮失败；对应前两项通用验收暂不激活，替代判据是高风险 CR ask/非 allowed-once 不执行、patch 摘要不符 deny、VC 有真实证据且失败不隐藏。其余 scientific governance 边界继续有效（M4 范围裁剪、非放宽 baseline）。
+
 - [ ] semantic_level 高风险但缺 bundle 时，在相应工具/校验前置阶段返回明确错误，不执行变更；不以 REST 422 为契约。
 - [ ] high-risk approve 缺必需 comment 时校验拒绝，不关闭领域 gate；不以 REST 400 为契约。
 - [ ] Agent 不自行 approve scientific gate；需审批的工具经 tools/pre-execute ask，只有宿主 allowed-once 才执行，其余 outcome/无服务 fail-closed，不以 agent principal 的 API 403 代替审批语义。
@@ -179,4 +193,4 @@ calibration improved
 - [ ] 负例：files_changed 触及 floor=numerical_implementation 的路径而声明 pure_engineering → effective_level 按 floor 生效，gate 照常触发（EVAL-GOV-001）。
 - [ ] 负例：worktree 实际改动 solver 路径但 files_changed 漏报 → observed 集仍触发 floor，且对账失败拒绝进入 reviewed（EVAL-GOV-005，对抗审查 A01-1）。
 - [ ] 负例：AnalysisPlan.parameters 含 solver 容差键且无 accepted_for_search bundle → preflight 拒绝（对抗审查 A05-1）；含未登记键 → 直接 block。
-- [ ] agent 无法修改 semantic_level_floor 配置（路径在沙箱写禁区）。
+- [ ] agent 无法通过 profile/运行时覆写 semantic level floor；M4 的表为仓库内受测常量，变更须走代码审查与投影漂移闸。

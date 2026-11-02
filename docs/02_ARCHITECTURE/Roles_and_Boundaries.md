@@ -24,8 +24,8 @@ coordinator | repo_explorer | worker | coder | reviewer
 | `coordinator` | 调度工具（spawn/wait agent、job submit、report build）；不直接改仓库源码 | TaskCard 计划、EvidenceReport 草稿 |
 | `repo_explorer` | 只读：file read/search、git inspect、只读诊断命令；禁 write/edit、禁提交 RunJob | RepoContextBrief |
 | `worker` | sandbox 命令执行 + artifact 写入（workspaces/artifacts/runs）；禁改仓库源码 | RunRecord、metrics、图表 |
-| `coder` | worktree 内 write/edit + patch 工具；禁直接改 baseline 与主分支 | ChangeRequest、patch bundle |
-| `reviewer` | 只读 + 调用确定性 validator；禁改写任何原始输出 | review note、检查结果 |
+| `coder` | scratch workspace 内 `repos/SHUD` 本地 clone 的 write/edit 与受控变更/构建工具；禁直接改 baseline 与主分支 | ChangeRequest、`patches/<change_id>.patch`、BuildRecord（M4 契约） |
+| `reviewer` | 只读检查 + 确定性 verification_run；禁改写任何原始输出 | VerificationCase 的工程判定与 reviewer 字段（M4 契约） |
 
 人类角色（不进 Agent 枚举）：**PI/Researcher**（科学判断）、**Data Support**（数据与 benchmark 维护）。
 
@@ -146,15 +146,15 @@ Worker 不直接写长期 memory，不决定科学结论。代码修改与 patch
 
 ## 6. Coder Agent
 
-Coder 是代码变更的唯一执行者，工作范围限定在 task worktree 内。
+Coder 是代码变更执行者，一般职责包括在任务隔离且独占的 runtime 工作副本中修改代码、编写或更新配套测试，不直接修改 source reference 或主分支。M4 工作范围具体限定在 scratch workspace 内 `repos/SHUD` 的独立本地 clone；不得用 `git worktree add` 写根 submodule 元数据，也不直接修改根 submodule。以下是 [M4 agent-presets](../../openspec/changes/m4-mvp-2/specs/agent-presets/spec.md) 的额外实现契约，不表示 preset 已交付（D15(4)/(8)，M4 范围裁剪、非放宽 baseline）。回放的五文件切片与 VerificationCase 不替代其它代码任务的配套测试职责。
 
-Coder 负责：
+M4 Coder 负责：
 
 ```text
-- 在 worktree 中修改 SHUD / rSHUD / AutoSHUD / Harness 代码；
-- 生成 patch bundle 和 diff 摘要；
-- 编写或更新配套测试；
-- 把变更落入 ChangeRequest（含 semantic_level 与 interface_impact）。
+- 先在干净、钉定 HEAD 的 repos/SHUD 上调用 shud_build 生成 base，再修改已跟踪源码；
+- 调用 change_create：由工具观测 diff，写 patches/<change_id>.patch 与确定性分级的 ChangeRequest；
+- 调用 change_submit，等待 PI 卡放行；未获放行停止回报，不自行重试或改写批准状态；
+- 获批后调用 shud_build(change_id, rhs_openmp: true)，交由 worker 运行，coder 不运行 SHUD。
 ```
 
 Coder 不负责：
@@ -162,12 +162,14 @@ Coder 不负责：
 ```text
 - 直接修改 baseline、主分支或默认参数（必须走 ChangeRequest + gate）；
 - 决定变更是否被接受；
-- 在 implementation_mapping 起草前修改高风险科学语义代码（见 Agent_Architecture §4.4a）。
+- 改写 tasks/stacks/provenance/reports/runs/changes/patches/verifications/builds 九个治理根；
+- git commit 改变钉定 HEAD，或把未跟踪新文件、删除、重命名纳入本次切片；
+- 在 M4 之外跳过高风险 implementation_mapping/bundle 路由；M4 的特定替代门见 Agent_Architecture §4.4a。
 ```
 
-**semantic_level 声明不是自由填空**：Coder 填写的级别只是声明值，harness 按
-`max(声明值, path floor)` 求 effective_level（见 [Scientific_Change_Gating_Spec](../03_SPEC/Scientific_Change_Gating_Spec.md) §1.1），
-Reviewer validator 交叉核对 files_changed。Coder 无降级权，降级豁免仅 PI/工程师可做。
+**semantic_level 声明不是自由填空**：Coder 的级别只是声明值，工具按 `max(声明值, 全部匹配的 path floor)` 派生；未匹配路径下限为 numerical_implementation，floor_categories 保留全部命中类别。M4 不采集 interface_impact，不生成 patch bundle 对象；Reviewer 调用 verification_run 把 reviewer_notes、reviewed_by、compatibility_verdict 写入 VerificationCase，不另建 review note。完整规则见 [Scientific_Change_Gating_Spec §1.1](../03_SPEC/Scientific_Change_Gating_Spec.md#11-分类的确定性下限semantic-level-floor)；agent 无降级权。
+
+治理目录必须经对应领域工具写入，raw-guard 对模型 edit/write/shell 写治理根 deny；此 shell 保护是启发式而非沙箱强隔离，其局限与摘要复核见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
 
 ## 7. Reviewer Agent
 

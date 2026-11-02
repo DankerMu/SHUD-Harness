@@ -75,7 +75,11 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 {"input_dir":"input/ccw","end_days":30,"label":"ccw END=30"}
 ```
 
-仅接受 `input_dir`、可选 `project`、`end_days`、`label`；未知参数（包括 `workdir`/`threads`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
+当前 M3 接受 `input_dir`、可选 `project`、`end_days`、`label` 与品牌 `task_id`；未知参数（包括 `workdir`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
+
+**M4 扩参契约（待 #534/#539 交付）**：新增可选品牌 `build_id` 与正整数 `threads`；零、负数、小数、字符串或非法品牌在文件系统操作前拒绝。未知参数的负例保留 workdir，不再以合法整数 threads 作未知键。注册表解析本工作区 `builds/<build_id>/build-record.json`，校验普通可执行二进制及 SHA256，复制到 `runs/<run_id>/bin/shud` 并执行副本；RunJob/RunRecord 原样记录 build_id、threads、binary_sha256，StackLock 记录构建来源。threads 提供时设置 OMP_NUM_THREADS/SHUD_RHS_THREADS，缺省不新增环境变量；无 build 沿用配置 shudBin。M4 对所有提交新增 tsd.forc 解析与外部 forcing 只读哈希，缺失或解析失败拒绝，不把无 build 路径称为完全无行为变化。详见 [shud_run arguments](../../openspec/changes/m4-mvp-2/specs/shud-run-tools/spec.md#requirement-shud_run-arguments)。
+
+回放传 `input_dir: input/keliya`、task_id、build_id、`threads: 1`，不传 end_days，保留准备后的 START/END；N=1 是 VerificationCase 的准入条件，不把工具正整数 schema 收窄为只接受 1（D15(3)，M4 范围裁剪、非放宽 baseline）。
 
 工具要求会话 id/cwd 与已配置模型：先取 `agent.session.requestHeader()?.config.model`，缺失再取 `agent.options.model`；恒记 `response_model_source: configured`，不把 assistant `source.model` 当响应体模型。它通过导出的 `produceDetachedShud` 提交实际执行，沿用 jobs 内与接管共用的登记完成工厂；`submitShud(request, producer)` 的显式 producer 参数仍必需。
 
@@ -118,14 +122,21 @@ $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指
   storages/                         # dsh 自有 storage-json 后端，不存 SHUD 领域对象
   profiles/shud/shud-jobs/          # 注册表 stateDir：active/completed 索引与排他锁
 <workspace>/                        # session cwd = workspace root；可容纳多张 TaskCard
-  tasks/<task_id>/task.json         # 已有最小 task_create；后续状态转换归 M3
-  stacks/<stack_id>.json            # M3 规划
-  provenance/<data_id>.json         # M3 规划
-  reports/<report_id>.json          # M3 规划：规范 EvidenceReport 对象
-  reports/<report_id>.md            # M3 规划：同名 JSON 的确定性 Markdown 投影
+  tasks/<task_id>/task.json         # M3 TaskCard，工具推进状态
+  stacks/<stack_id>.json            # M3 StackLock
+  provenance/<data_id>.json         # M3 DataProvenance
+  reports/<report_id>.json          # M3 规范 EvidenceReport 对象
+  reports/<report_id>.md            # 同名 JSON 的确定性 Markdown 投影
   runs/<run_id>/                    # M2 运行记录、输入副本、日志、pid/退出码与 output 产物
+  repos/SHUD/                      # M4 目标：scratch 内独立本地 clone，不是 git worktree
+  changes/<change_id>.json          # M4 目标：ChangeRequest
+  patches/<change_id>.patch         # M4 目标：确定性 patch
+  verifications/<vc_id>.json        # M4 目标：VerificationCase
+  builds/<build_id>/                # M4 目标：build-record.json、shud、make.stdout.log、make.stderr.log
 <data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```
+
+M4 新目录由 [m4-mvp-2](../../openspec/changes/m4-mvp-2/design.md) 分项实现；本文不预先链接未生成的 schema 或未创建的测试。源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写。九个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
 
 ## 3. 与 dsh 的边界
 
