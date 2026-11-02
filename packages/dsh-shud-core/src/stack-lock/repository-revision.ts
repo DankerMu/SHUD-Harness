@@ -179,6 +179,7 @@ const GIT_STDERR_TAIL_BYTES = 4096;
  * Status returns raw NUL-delimited paths; diff disables external programs and color.
  * Only applyCeiling permits apply in a nonrepository directory beneath that physical ancestor.
  * Output is bounded; subprocess failures never expose partial stdout or the original error.
+ * No stdin is supplied: each child receives EOF immediately.
  */
 export async function runGit(
   sourceDir: string,
@@ -232,7 +233,7 @@ export async function runGit(
   const run = (commandArgs: readonly string[]): Promise<{ stdout: Buffer }> =>
     new Promise<{ stdout: Buffer }>((resolve, reject) => {
       try {
-        execFile(
+        const child = execFile(
           "git",
           ["-C", sourceDir, "-c", "core.fsmonitor=false", ...commandArgs],
           { encoding: "buffer", env, maxBuffer },
@@ -241,6 +242,7 @@ export async function runGit(
             else resolve({ stdout });
           },
         );
+        child.stdin?.end();
       } catch (error) {
         reject(controlledGitFailure(error));
       }

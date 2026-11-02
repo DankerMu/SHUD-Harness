@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -516,6 +516,25 @@ process.exit(23);`,
     ]);
   });
 
+  test.each(["repository root", "apply ceiling"] as const)(
+    "empty-input apply at %s completes with a controlled rejection rather than waiting for stdin",
+    async (mode) => {
+      const { repo, source, ceiling } = applyFixture();
+
+      const result = await boundedEmptyApply(
+        mode === "repository root" ? repo : source,
+        mode === "apply ceiling" ? ceiling : undefined,
+      );
+
+      expect(result).toEqual({
+        rejected: true,
+        message: expect.stringContaining("exit 128") as unknown,
+      });
+      expect(readFileSync(join(repo, "model.txt"), "utf8")).toBe("before\n");
+      expect(readFileSync(join(source, "model.txt"), "utf8")).toBe("before\n");
+    },
+  );
+
   test("legacy collection honors the host global ignore while the controlled runner does not", async () => {
     const repo = committedRepo("host-ignore");
     const ignored = join(root, "host-ignore.txt");
@@ -713,5 +732,66 @@ function assertControlledError(error: Error, forbidden: readonly string[]): void
   ];
   for (const value of forbidden) {
     for (const view of views) expect(view).not.toContain(value);
+  }
+}
+
+async function boundedEmptyApply(sourceDir: string, applyCeiling?: string): Promise<unknown> {
+  const moduleUrl = new URL("./repository-revision.ts", import.meta.url).href;
+  const script = `
+import { runGit } from ${JSON.stringify(moduleUrl)};
+const result = await runGit(
+  ${JSON.stringify(sourceDir)}, ["apply"], ${JSON.stringify({ applyCeiling })}
+).then(
+  () => ({ rejected: false }),
+  error => ({ rejected: true, message: error.message })
+);
+process.stdout.write(JSON.stringify(result));
+`;
+  // Isolate the actual runner and Git in one owned group so a RED timeout leaves no child behind.
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    detached: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  const stopGroup = (): void => {
+    if (child.pid === undefined) return;
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  };
+  let timedOut = false;
+  let watchdog: NodeJS.Timeout | undefined;
+  const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+      // Real subprocess I/O cannot advance under fake timers; only a stuck RED pays this deadline.
+      watchdog = setTimeout(() => {
+        timedOut = true;
+        try {
+          stopGroup();
+        } catch (error) {
+          reject(new Error("Failed to terminate empty-apply probe", { cause: error }));
+        }
+      }, 2000);
+    },
+  );
+  try {
+    const exit = await completion;
+    if (timedOut) throw new Error("empty-input git apply did not settle within 2000ms");
+    expect(exit, stderr).toEqual({ code: 0, signal: null });
+    return JSON.parse(stdout) as unknown;
+  } finally {
+    clearTimeout(watchdog);
+    stopGroup();
   }
 }

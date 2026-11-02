@@ -117,6 +117,8 @@ Apply exception: named applyCeiling only for apply, existing absolute physical s
 
 Resource/error contract: bounded 64 MiB default (actual pinned SHUD archive 18,636,800 bytes), optional positive integer maxBuffer; any new-runner overflow fails, never partial success. Bounded 4096-byte stderr tail, exit/system code and truncation indication, without raw cause/stdout/env/command dumps.
 
+Subprocess lifecycle: the API accepts no stdin input. The shared execFile invocation immediately ends its unused stdin pipe so EOF-driven commands, including ordinary and ceiling apply without a patch operand, return Git's controlled exit rather than waiting indefinitely. Regression probes use an isolated process group and clean it up on failure; no production timeout or input API is added.
+
 Sibling surfaces: legacy collector and tests; captureStackLock repository snapshots/reuse; future observeSourceChanges, task_create HEAD and shud_build archive/apply. No new helper framework or consumer implementation.
 
 Required evidence: native git shim exact entry environment/prefix and absent fake-secret, compiled by system cc into test-owned temporary directories; Node/Python runtime-added Darwin variables cannot be filtered to fake this oracle. Record only key names and allowlisted values. Real config markers remain untouched; special path/root LF preservation; nested target verbs never run; archive beyond Node default buffer; real nonrepo apply isolation; legacy host-config discriminator and pre/post capture bytes/mtime.
