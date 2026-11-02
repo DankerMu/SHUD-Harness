@@ -56,6 +56,9 @@ export const schemaDefinitions: SchemaDefinition[] = [
       data_id: null,
       linked_jobs: ["JOB-20261027T081000-0123"],
       linked_reports: ["REPORT-20261027T090000-5b10"],
+      linked_changes: [],
+      linked_verifications: [],
+      source_base_commit: null,
     },
   },
   {

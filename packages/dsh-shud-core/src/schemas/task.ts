@@ -1,10 +1,12 @@
 import { z } from "zod";
 import {
+  ChangeIdSchema,
   DataIdSchema,
   JobRecordIdSchema,
   ReportIdSchema,
   StackIdSchema,
   TaskIdSchema,
+  VerificationIdSchema,
 } from "./run-identifiers.ts";
 
 export const TaskStatusSchema = z.enum([
@@ -26,7 +28,7 @@ export const TaskRuntimePhaseSchema = z.enum([
   "collecting",
 ]);
 
-export const TaskTypeSchema = z.enum(["engineering", "science_assist", "ops"]);
+export const TaskTypeSchema = z.enum(["engineering", "science_assist", "ops", "code_change"]);
 
 export const InferenceBudgetSchema = z.object({
   mode: z.enum(["cheap", "normal", "deep"]),
@@ -35,25 +37,37 @@ export const InferenceBudgetSchema = z.object({
   reviewer_enabled: z.boolean().optional(),
 });
 
-export const TaskCardSchema = z.object({
-  task_id: TaskIdSchema,
-  type: TaskTypeSchema,
-  status: TaskStatusSchema,
-  runtime_phase: TaskRuntimePhaseSchema.nullable().optional(),
-  title: z.string().min(1),
-  question_or_goal: z.string().min(1),
-  created_by: z.string().min(1),
-  current_owner: z.string().min(1),
-  reviewer: z.string().min(1),
-  stack_id: StackIdSchema.nullable(),
-  data_id: DataIdSchema.nullable(),
-  inference_budget: InferenceBudgetSchema,
-  linked_jobs: z.array(JobRecordIdSchema),
-  linked_reports: z.array(ReportIdSchema),
-  created_at: z.string().min(1),
-  updated_at: z.string().min(1),
-  theory_bundle_ids: z.array(z.string().min(1)).optional(),
-});
+export const TaskCardSchema = z
+  .object({
+    task_id: TaskIdSchema,
+    type: TaskTypeSchema,
+    status: TaskStatusSchema,
+    runtime_phase: TaskRuntimePhaseSchema.nullable().optional(),
+    title: z.string().min(1),
+    question_or_goal: z.string().min(1),
+    created_by: z.string().min(1),
+    current_owner: z.string().min(1),
+    reviewer: z.string().min(1),
+    stack_id: StackIdSchema.nullable(),
+    data_id: DataIdSchema.nullable(),
+    inference_budget: InferenceBudgetSchema,
+    linked_jobs: z.array(JobRecordIdSchema),
+    linked_reports: z.array(ReportIdSchema),
+    linked_changes: z.array(ChangeIdSchema).default([]),
+    linked_verifications: z.array(VerificationIdSchema).default([]),
+    source_base_commit: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/u)
+      .nullable()
+      .default(null),
+    created_at: z.string().min(1),
+    updated_at: z.string().min(1),
+    theory_bundle_ids: z.array(z.string().min(1)).optional(),
+  })
+  .refine((card) => (card.type === "code_change") === (card.source_base_commit !== null), {
+    path: ["source_base_commit"],
+    message: "Source base commit must be non-null exactly when the task type is code_change",
+  });
 
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
 export type TaskRuntimePhase = z.infer<typeof TaskRuntimePhaseSchema>;

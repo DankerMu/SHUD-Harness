@@ -43,10 +43,23 @@
 - RED/GREEN：先由编排器运行focused新测试得到缺实现RED（只证明接线），实现后通过；另外用隔离负控移除CR审批一致性、VC结果一致性、BR三字段关联中的对应约束，合法向量先绿、非法向量在变体中被错误接受导致断言红，恢复原版绿；不改受保护测试/源表来清闸。
 - 命令：四个focused schema/brand测试文件 → `pnpm run schema:generate` / `pnpm run test:schema-generation` → built core index smoke（有效/无效CR、VC、BR及CHG/VC/BUILD生成）→ `pnpm run check` → 三席review与同SHA CI。生成新文件先加入索引再跑schema:check；变更生成物全部来自生成器。
 
+### Issue #520 risk and evidence fixture
+
+本刀仅2.2a，2.1已由#556合并（#519 closed）；原M3输入fixture/磁盘字节保持，不以给旧输入批量补键来消除迁移证据。规范场景不改。
+
+- Public API / Schema：TaskType增加code_change；两新链接数组为品牌schema的default([])，source_base_commit为40位小写hex或null且default(null)，对象refine在默认值后求值。code_change非null成功；缺省/null拒绝；engineering/science_assist/ops全部只允许null，非null均指出source_base_commit。
+- 正反例：fresh science_assist显式空/null；带commit及两品牌链接的code_change；旧M3卡缺三键解析得到[]/[]/null；短/大写/非hex commit拒绝；CHG-0001/大写VC拒绝对应字段；code_review拒绝type；显式null数组拒绝；无序/重复合法品牌链接保留，不排序、不去重。
+- Legacy compatibility：保留TaskCard根与inference_budget未知键剥离、可选runtime_phase/theory_bundle_ids与全部旧字段约束；不改成strict，不改既有时间字段规则。旧parse(input)==input断言因新默认输出契约不再适用时，改成保留原字段+明确三项默认值的行为断言，不重新pin整对象或改旧存储fixture。
+- File IO/read compatibility：编排器用真实built records readWorkspaceRecord(...,{readonly:true})读缺三键M3 task.json；解析结果有三默认值，读取前后bytes/mtime相同，无新文件。不改records读取/状态机实现；这项用临时smoke而不是核心包反向依赖records。
+- 既有typed写入方若输出类型编译失败，只补[]/[]/null字面值（含必要测试构造输入），不扩工具参数或业务行为。仍保留独立缺键M3输入与磁盘smoke；若旧读回测试因默认输出变化失败，只调整其新输出契约断言，保留既有安全/身份断言和原始fixture。
+- Documentation/生成：registry只补TaskCard示例三键；schema:generate/self-test/check通过；只允许TaskCard的Markdown/JSON Schema变化，其余29份生成物逐字节不变。
+- Auth/governance、Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：本刀不改审批、角色、配置、并发、发现、事务或依赖；唯一治理相关约束是类型与base commit的纯schema一致性，已有消费者不新增IO。
+- 验证顺序：focused task-card-schema测试在旧实现上出现真实语义RED（code_change/默认字段缺失/非法base被剥离）→ 实现GREEN → generator自证/生成 → typecheck中仅最小写入字面值适配 → built core+records smoke → full pnpm run check → 白盒review/同SHA CI。
+
 ## 2. core：floor 常量、三对象 schema、品牌 id、角色映射、措辞常量、git runner（Critical Path #1/#7）
 
 - [x] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
-- [ ] 2.1 依赖 2.3。新增 `ChangeId`/`VerificationId`/`BuildId` 品牌 id（复用 `run-identifiers.ts`）与 `change-request.ts`（含 `floor_categories`、`risk == riskForLevel` refine）、`verification-case.ts`、`build-record.ts`（含 `patch_sha256` iff `change_id`、40 hex `source_commit`）严格 schema（字段与 refine 按 change-requests「ChangeRequest record」、verification-cases「VerificationCase record」、shud-build「BuildRecord record」）；正反例测试；`pnpm run schema:generate` 投影；`index.ts` 导出。
+- [x] 2.1 依赖 2.3。新增 `ChangeId`/`VerificationId`/`BuildId` 品牌 id（复用 `run-identifiers.ts`）与 `change-request.ts`（含 `floor_categories`、`risk == riskForLevel` refine）、`verification-case.ts`、`build-record.ts`（含 `patch_sha256` iff `change_id`、40 hex `source_commit`）严格 schema（字段与 refine 按 change-requests「ChangeRequest record」、verification-cases「VerificationCase record」、shud-build「BuildRecord record」）；正反例测试；`pnpm run schema:generate` 投影；`index.ts` 导出。
 - [ ] 2.2a 依赖 2.1。`TaskTypeSchema` 增 `code_change`；TaskCard 增 `linked_changes`/`linked_verifications`（`default([])`，排序唯一）与 `source_base_commit`（40 hex 或 null，缺键按 null；refine `code_change` ⇒ 非 null、其它 ⇒ null）；M3 卡片夹具原样可读回归；投影更新。按 task-cards「TaskCard record」「TaskCard generated projection」。
 - [ ] 2.2b 依赖 2.1。StackLock 增 nullable `build_id`（非 null 时纳入 `computeStackFingerprint`，null 时指纹与 M3 逐字节相同、旧 lock 仍可复用）；固定向量测试；投影。按 stack-lock「StackLock schema alignment」「Stack fingerprint」。
 - [ ] 2.2c 依赖 2.1。RunJob/RunRecord 增 nullable `build_id`/`threads`（正整数）/`binary_sha256`（缺键按 null；iff `build_id` 的 refine 在默认值之后求值）；M2/M3 夹具原样可读回归；投影。按 run-records「RunJob record」「RunRecord record」「Generated projection」。
