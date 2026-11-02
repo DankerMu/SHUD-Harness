@@ -437,7 +437,7 @@ M4 严格对象，字段权威见 [BuildRecord record](../../openspec/changes/m4
 | `stdout_path` / `stderr_path` | builds/&lt;build_id&gt;/make.stdout.log / builds/&lt;build_id&gt;/make.stderr.log |
 | `created_at` | 创建时间 |
 
-base 构建 `change_id: null`，必须 `dirty_paths: []`、`patch_sha256: null`；候选构建两者非空，patch 摘要等于已批 CR，精确输入为钉定 commit 的归档加该 patch，不采用工作树或陈旧二进制。构建记录不把 rhs_openmp 为真等同于实际编译带 OpenMP 标志；回放另验 make 回显的 `-fopenmp`。首次发布采用临时目录整体 rename，消费者校验普通可执行文件与 binary_sha256。
+base 构建 `change_id: null`，必须 `dirty_paths: []`、`patch_sha256: null`；候选构建 `change_id` 非 null 时，必须 `dirty_paths` 非空且 `patch_sha256` 非 null，空路径数组即拒绝。patch 摘要等于已批 CR，精确输入为钉定 commit 的归档加该 patch，不采用工作树或陈旧二进制。构建记录不把 rhs_openmp 为真等同于实际编译带 OpenMP 标志；回放另验 make 回显的 `-fopenmp`。首次发布采用临时目录整体 rename，消费者校验普通可执行文件与 binary_sha256。
 
 ---
 

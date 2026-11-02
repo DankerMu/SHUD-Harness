@@ -159,7 +159,7 @@ If task/change semantic_level is `physical_equation`, `model_assumption`, `numer
 4. Reviewer checks theory-to-code lineage.
 5. PI gate controls accepted/accepted_for_search.
 
-**M4 替代路由（D15(1)/(8)，M4 范围裁剪、非放宽 baseline）：** 本轮不生产 bundle，不执行上述 bundle → mapping → accepted_for_search 路由。coordinator 建 code_change 卡、钉定 scratch workspace 的 `repos/SHUD` 本地 clone HEAD；coder 先构建 base，再重导出切片并 change_create → change_submit，经 PI 卡批准后构建候选；worker 以两个 build_id、threads: 1 各跑 keliya；reviewer 调用 verification_run；coordinator 生成并提交报告，经第二张 PI 卡结束。根 submodule 不变，不用 git worktree add；search/calibration 未开放。CR 拒绝理由由 PI 在对话给出，coordinator 转述，不由 agent 自批或写入批准元数据。
+**M4 替代路由（D15(1)/(8)，M4 范围裁剪、非放宽 baseline）：** 本轮不生产 bundle，不执行上述 bundle → mapping → accepted_for_search 路由。coordinator 建 code_change 卡、钉定 scratch workspace 的 `repos/SHUD` 本地 clone HEAD；coder 先构建 base，再重导出切片并 change_create → change_submit，经 PI 卡批准后构建候选；worker 以两个 build_id、threads: 1 各跑 keliya；reviewer 调用 verification_run；coordinator 生成并提交报告，经第二张 PI 卡结束。根 submodule 不变，不用 git worktree add；search/calibration 未开放。CR 拒绝理由由 PI 在对话给出，仅经 coordinator 转述，不写入 CR/TaskCard/patch 或其它工作区文件；agent 不自行批准或改写批准元数据。
 
 ### 4.5 Dispatch
 
@@ -256,7 +256,7 @@ TaskCard 不能仅因为 LLM 认为“完成了”而关闭。closure 由两层�
 1. 同一 TaskCard 只能有一个 active Coordinator。
 2. Repo Explorer 可以与 Coordinator planning 并行，但只能读 source/runtime repo 和 task artifact。
 3. 同一 workspace 可并行多个 RunJob，但不得共享同一 run directory。
-4. M4 代码变更任务采用单卡单 coder，独占 scratch workspace 的 `repos/SHUD` 本地 clone；多卡共享检出的互斥未实现，不宣称运行时自动锁定。
+4. 代码变更任务必须独占对应隔离检出，不能让多个任务同时修改同一工作副本。M4 采用单卡单 coder，独占 scratch workspace 的 `repos/SHUD` 本地 clone；多卡共享检出的互斥未实现，不宣称运行时自动锁定，也不解除非 M4 任务的独占要求。
 5. sensitivity batch 可并发，但每个 parameter set 必须独立 RunRecord。
 6. Reviewer 可以并行审查多个已完成 artifact，但不能改写原始输出。
 

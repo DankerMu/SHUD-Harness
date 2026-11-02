@@ -272,7 +272,7 @@ Markdown 由 JSON 及其引用记录确定性渲染；PI 通过 dsh 对话提供
 12. 四句 GOVERNANCE_INVARIANTS 在渲染 Markdown 中逐字出现；
 13. 整份 Markdown 不匹配 REPORT_SECRET_PATTERN；失败只指出所在节，不回显密钥匹配文本。
 14. `change_ids` 非空时，Markdown §5 逐字含 code_change 固定句；为空时通过并标注不适用；
-15. 每个 `verification_ids` 对象的两个 artifact_refs 必须是会话 cwd 下安全的普通文件，SHA256 分别等于 observed.base_sha256/candidate_sha256；缺失、链接或摘要不符均失败，空 verification_ids 时通过并标注不适用。
+15. 按工作区文件安全规则读取每个 `verification_ids` 引用的 VC，校验 schema 及文件内 vc_id 与引用相等；其两个 artifact_refs 的每级路径组件与目标经 lstat 验证，不跟随链接，目标必须是会话 cwd 下的普通文件。第一、第二项 SHA256 分别等于 observed.base_sha256/candidate_sha256；缺失、不安全、不可读或摘要不符均失败，指出 vc_id 与路径，报告保持 draft。空 verification_ids 时通过并标注不适用。
 
 第 (4)、(10)、(11) 项在 M3/M4 无指标/图表产物时恒真并明确标注，不伪造 artifact。不按路径含 tmp 或位于 `$TMPDIR` 拒绝报告：scratch 工作区与运行目录是合法事实来源。语义判断（L）仍由 PI 审阅，M4 reviewer 只补工程判定字段，不执行下列三项 LLM 语义判断：
 

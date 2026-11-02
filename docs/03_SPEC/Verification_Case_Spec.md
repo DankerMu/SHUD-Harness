@@ -95,6 +95,8 @@ interface VerificationCase {
 
 ## 4. Pass/fail 规则
 
+下列为通用验证规则。M4 不生产 metrics，failed VC 保留实际的两份 rivqdown artifact、关联运行/构建日志、patch 与 failure_reason，并在报告 §7 显示；不要求为满足通用清单而生成 metrics。bundle 自动接受及 inconclusive/waived 生产者在 M4 不激活，其余证据保留原则继续适用。
+
 - `passed` 必须有 deterministic artifact 支持。
 - `failed` 必须保留 logs、metrics、patch、failure_reason。
 - `inconclusive` 必须说明缺少什么证据。
@@ -108,6 +110,8 @@ interface VerificationCase {
 - `expected_result_source = agent_proposed` 的 case，**其 `passed` 不能计入 bundle 进入 `accepted_for_search` 的验证证据**，除非 `pass_criteria_confirmed_by` 已由 PI/工程师填写（gate 上一并确认，不要求单独流程）。
 - pass_criteria 必须是确定性可求值表达式（阈值/容差），judgement 型标准（"结果看起来合理"）拒绝进 schema。
 - 报告的 Theory-to-Code Evidence 章节必须展示每个 case 的 expected_result_source——PI 一眼能看出哪些期望值是 agent 自拟的。
+
+M4 的 expected_result_source 固定 baseline_regression，不接受 agent_proposed；正确性门是 SHA256 字节相等，不使用数值阈值/容差。上述 Theory-to-Code 章节要求在 M4 由报告 §3 的 CR/VC/Build 事实表替代，VC 表仍必须显示 expected_result_source；不要求不存在的 bundle 章节或 metrics，不改变后续完整 Theory-to-Code 的独立性门。
 
 ## 5. 与 RunRecord 关系
 

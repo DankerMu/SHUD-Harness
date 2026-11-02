@@ -24,7 +24,7 @@ SHUD-Harness/          ← 项目根
   AutoSHUD/            ← submodule, 只读参考
 ```
 
-**规则**: Agent 不得直接修改根 submodule。M4 在 scratch runtime workspace 内以根 SHUD 对象库作来源建立 `repos/SHUD` 独立本地 clone，钉定切片前 commit；不使用 `git worktree add`，避免改写根 submodule 的 git 元数据（design D15(8)，M4 范围裁剪、非放宽 baseline）。
+**规则**: Agent 不得直接修改根 submodule。代码变更任务必须使用 runtime workspace 内隔离的工作副本，不直接修改 source reference 或主分支；任务独占其检出。M4 具体在 scratch runtime workspace 内以根 SHUD 对象库作来源建立 `repos/SHUD` 独立本地 clone，钉定切片前 commit；不使用 `git worktree add`，避免改写根 submodule 的 git 元数据（design D15(8)，M4 范围裁剪、非放宽 baseline）。M4 以外的隔离副本要求仍有效，不以本轮 clone 例外解除。
 
 ### 1.2 Runtime workspace (执行副本)
 
