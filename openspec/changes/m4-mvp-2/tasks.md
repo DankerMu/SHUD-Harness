@@ -69,12 +69,26 @@
 - Auth/governance、Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：本刀不改审批、权限、配置、并发、发现、事务或依赖；复用原capture只读/排他发布语义，不新增采集入口。
 - 验证：focused stack-lock-schema/fingerprint真实语义RED→GREEN；独立shasum双向量；schema:generate/selftest/typecheck；built public core与真实records读取/复用smoke；full pnpm run check；白盒review和同SHA CI。
 
+### Issue #522 risk and evidence fixture
+
+本刀仅2.2c；2.2b已由#558合并（#521 closed）。同步已确认的DAG硬依赖：4.1加2.2c、6.1加2.5、8.1加1.2，与GitHub #534/#542/#549现有依赖一致；不改这些任务的行为或验收场景。
+
+- Public API / Schema：RunJob和RunRecord均增加BuildId|null、正整数threads|null、64小写hex binary_sha256|null，三者分别default(null)。唯一关系为binary_sha256非null当且仅当build_id非null，错误字段binary_sha256；threads独立，不默认1、不与build绑定。
+- 正反例：两schema显式全null、合法build/hash/threads1、旧缺三键→三null；两向iff失败含单键缺失；threads0/-1/1.5/"1"拒绝；BUILD-0001/大写hex/错前缀、短/大写/非hex digest拒绝对应字段。build+threads:null与无build+threads1均须成功。
+- 状态边界：RunJob的新iff在全部合法status上生效，不落入现有running-only superRefine的提前return；submitted/collected和有效pid身份的running均有反例。RunRecord两合法status均验证iff，仍保留exit_code/exit_class/status原有一致性与测量/产物安全规则。
+- Legacy compatibility：core-schemas.test.ts原validRunJob/validRunRecord与jobs原始M2/M3缺键fixture保持；其required-field遍历继续覆盖原必需字段，不把新增default键误列为必填。旧输出精确比较必要时仅增加3null期待或拆出新增字段后保留全部原字段，不放宽身份/状态/安全断言。
+- File IO/read compatibility：编排器将冻结的缺键collected RunJob和RunRecord存为临时文件，用built core schema解析实际readFile字节，结果三null且原字段/文件bytes/mtime/inventory不变。只证明纯schema读回兼容，不冒称registry/collector运行集成；不得经会poll/collect/写索引的路径制造只读证据。
+- 生产写入方仅在类型检查要求时补null字面值，不改接口为宽泛input/Partial，不提前传播build来源或threads环境。jobs提交/collect的实际新行为留给4.1；本刀不改事务/进程/恢复/通知逻辑。
+- Documentation/生成：registry只补两个对象示例三null；schema:generate/selftest/check通过；仅RunJob/RunRecord四份投影改变，其余27份字节不变，JSONSchema threads拒绝0、digest为64小写hex|null。
+- Auth/governance、Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：不改权限、配置、并发、发现、事务或依赖；原pid/退出分类/时间/资源字段规则保持，仅新增纯字段关系。
+- 验证：focused新行为真实语义RED→GREEN；generator/selftest/typecheck及最小字面值/输出断言适配；built文件读回smoke；full pnpm run check；如触及jobs写入字面值，加既有profile:smoke；白盒review与同SHA CI。
+
 ## 2. core：floor 常量、三对象 schema、品牌 id、角色映射、措辞常量、git runner（Critical Path #1/#7）
 
 - [x] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
 - [x] 2.1 依赖 2.3。新增 `ChangeId`/`VerificationId`/`BuildId` 品牌 id（复用 `run-identifiers.ts`）与 `change-request.ts`（含 `floor_categories`、`risk == riskForLevel` refine）、`verification-case.ts`、`build-record.ts`（含 `patch_sha256` iff `change_id`、40 hex `source_commit`）严格 schema（字段与 refine 按 change-requests「ChangeRequest record」、verification-cases「VerificationCase record」、shud-build「BuildRecord record」）；正反例测试；`pnpm run schema:generate` 投影；`index.ts` 导出。
 - [x] 2.2a 依赖 2.1。`TaskTypeSchema` 增 `code_change`；TaskCard 增 `linked_changes`/`linked_verifications`（`default([])`，排序唯一）与 `source_base_commit`（40 hex 或 null，缺键按 null；refine `code_change` ⇒ 非 null、其它 ⇒ null）；M3 卡片夹具原样可读回归；投影更新。按 task-cards「TaskCard record」「TaskCard generated projection」。
-- [ ] 2.2b 依赖 2.1。StackLock 增 nullable `build_id`（非 null 时纳入 `computeStackFingerprint`，null 时指纹与 M3 逐字节相同、旧 lock 仍可复用）；固定向量测试；投影。按 stack-lock「StackLock schema alignment」「Stack fingerprint」。
+- [x] 2.2b 依赖 2.1。StackLock 增 nullable `build_id`（非 null 时纳入 `computeStackFingerprint`，null 时指纹与 M3 逐字节相同、旧 lock 仍可复用）；固定向量测试；投影。按 stack-lock「StackLock schema alignment」「Stack fingerprint」。
 - [ ] 2.2c 依赖 2.1。RunJob/RunRecord 增 nullable `build_id`/`threads`（正整数）/`binary_sha256`（缺键按 null；iff `build_id` 的 refine 在默认值之后求值）；M2/M3 夹具原样可读回归；投影。按 run-records「RunJob record」「RunRecord record」「Generated projection」。
 - [ ] 2.2d DataProvenance 增 `sources.external_files`（`{path(绝对), sha256, size_bytes}` 数组，缺键按 `[]`）；M3 夹具回归；投影。按 data-provenance「DataProvenance record」「DataProvenance generated projection」。无依赖。
 - [ ] 2.4 `role-tool-map.ts` 四角色真实 id（coordinator `local` 三委派工具；coder/reviewer/repo_explorer `inherited` 按 agent-presets「Role tool map uses mounted names」）；删除 `harness.memory.propose`、`patch.apply`、`validator.run`、`repo.*`、`git.inspect`；`readCallerPresetId` 映射增 coder/reviewer（policy-gate「Caller role derivation」）；`ROLE_TOOL_IDS` 并集测试；policy-gate-core `role-tool-surface` 表随之更新并附四角色 × 新工具的 deny 正反例（policy-gate「Role tool surface rule」）。无依赖。
@@ -99,7 +113,7 @@
 
 ## 4. jobs：提交消费 build 与线程环境（Critical Path #4 局部）
 
-- [ ] 4.1 依赖 3.1、3.4、3.5。`submitShud` 请求增 `build_id`/`threads`：输入复制之后、StackLock 采集之前解析 `builds/<build_id>/build-record.json`（schema、`task_id` 相容）、校验二进制 sha256、原子复制为 `<run_dir>/bin/shud` 并让包装进程执行该副本、RunJob 写入 `binary_sha256`；`threads` 为包装进程追加 `OMP_NUM_THREADS`/`SHUD_RHS_THREADS`；RunJob 写入两字段、collect 原样继承；StackLock 采集传 build 源；provenance 含 `external_files`；任一失败走既有回滚不留运行目录；无 `build_id` 的执行与二进制选择逐字节不变（shud-run-jobs「Shud job submission」「Build-referenced execution」「Detached execution and exit capture」、run-records「RunJob record」）。集成测试覆盖 tampered binary、缺记录、threads 环境可见（包装脚本回显 env）、外部 forcing 缺失回滚、ccw 提交得 `external_files: []`。
+- [ ] 4.1 依赖 2.2c、3.1、3.4、3.5。`submitShud` 请求增 `build_id`/`threads`：输入复制之后、StackLock 采集之前解析 `builds/<build_id>/build-record.json`（schema、`task_id` 相容）、校验二进制 sha256、原子复制为 `<run_dir>/bin/shud` 并让包装进程执行该副本、RunJob 写入 `binary_sha256`；`threads` 为包装进程追加 `OMP_NUM_THREADS`/`SHUD_RHS_THREADS`；RunJob 写入两字段、collect 原样继承；StackLock 采集传 build 源；provenance 含 `external_files`；任一失败走既有回滚不留运行目录；无 `build_id` 的执行与二进制选择逐字节不变（shud-run-jobs「Shud job submission」「Build-referenced execution」「Detached execution and exit capture」、run-records「RunJob record」）。集成测试覆盖 tampered binary、缺记录、threads 环境可见（包装脚本回显 env）、外部 forcing 缺失回滚、ccw 提交得 `external_files: []`。
 
 - Suggested fixture level: expanded - 提交事务、回滚与持久化文件、包装进程环境（Critical Path #4）
 - Minimal mergeable slice: atomic - build 解析、二进制复制与替换、threads 环境、RunJob 字段与 provenance 外部文件在同一提交事务内，拆开会留下"记录 build_id 但仍跑 shudBin"或"threads 落盘但未设环境"的中间态
@@ -119,7 +133,7 @@
 
 ## 6. presets 与 profile：coder/reviewer、三条委派行、restrict 与 headless
 
-- [ ] 6.1 依赖 2.4。`prompts/{coder,reviewer}.md`、`coordinator.md` 新增 code_change 流程段与 `worker.md` 的 build_id/threads 提交段（agent-presets「Preset system prompts」「code_change orchestration」）；wording 漂移测试覆盖三份 prompt；restrict 按四角色 `inherited` 绑定（agent-presets「Role tool surface restriction」）；未被 profile 引用时可独立保绿。
+- [ ] 6.1 依赖 2.4、2.5。`prompts/{coder,reviewer}.md`、`coordinator.md` 新增 code_change 流程段与 `worker.md` 的 build_id/threads 提交段（agent-presets「Preset system prompts」「code_change orchestration」）；wording 漂移测试覆盖三份 prompt；restrict 按四角色 `inherited` 绑定（agent-presets「Role tool surface restriction」）；未被 profile 引用时可独立保绿。
 - [ ] 6.2a 依赖 6.1、5.0。bundle：`preset-coder`、`preset-reviewer` 行与子树、coordinator 三条 `tool-subagent` 行（id/toolName/agentPreset 互异）、worker 不变（agent-presets「Coordinator and worker preset rows」「Preset plugin subtrees」）；`profile:smoke` 断言四 preset、三委派行、宿主 subagent/provider 各一次（shud-profile「Profile composition」「Local profile smoke」、agent-presets「Profile smoke covers presets」）。**首条断言**为 dump-config 三委派行且 `toolName` 互异；若宿主拒绝同包三行，按 Seam-only 报告偏差并停止（design D11/O4）。
 - [ ] 6.2b 依赖 6.2a。`profile-patch.ts` headless 禁用四个 preset 行（扩展既有两行逻辑，原子发布不变；shud-profile「Idempotent profile installation」）；`profile:smoke` 断言 headless 四行禁用。
 - [ ] 6.2c 依赖 6.2b、5.2、5.3、5.5。真实 Web session log 证明四角色 header 与 coordinator `header.tools` 含三委派工具、coder/reviewer 的 `header.tools` 为各自 inherited（agent-presets「Role tool surface restriction」）；`instructions/agents/shared.md` 的 Runtime Lifecycle 段（四 preset、三委派、headless 四行、治理根写保护）同步并 `pnpm run instructions:render`，CI 比对无漂移。
@@ -138,7 +152,7 @@
 
 ## 8. Epic 收口：PI 功能验收
 
-- [ ] 8.1 依赖 7.2。PI 在 Web 亲自完成一次回放（CR 卡与报告卡各至少一次操作），证据记 `docs/Migration_Plan_dsh.md`；新决策记录 `docs/adr/proposed/00NN-m4-epic-acceptance.md`（沿 ADR-0010 模式，PI 通过后转 implemented）；`shud:replay` 自动审批与子 PR 合并不表述为 PI 验收；bitwise 一致不表述为并行正确性/性能/模型改进（known-answer-replay「Epic-close PI acceptance for replay」）。
+- [ ] 8.1 依赖 1.2、7.2。PI 在 Web 亲自完成一次回放（CR 卡与报告卡各至少一次操作），证据记 `docs/Migration_Plan_dsh.md`；新决策记录 `docs/adr/proposed/00NN-m4-epic-acceptance.md`（沿 ADR-0010 模式，PI 通过后转 implemented）；`shud:replay` 自动审批与子 PR 合并不表述为 PI 验收；bitwise 一致不表述为并行正确性/性能/模型改进（known-answer-replay「Epic-close PI acceptance for replay」）。
 
 - Suggested fixture level: none - 手工验收记录
 - Minimal mergeable slice: atomic - 一次完整验收与其证据记录

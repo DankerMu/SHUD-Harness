@@ -15,6 +15,9 @@ Required is evaluated within the immediate parent object.
 | task_id | yes | yes | string \| null | minLength=1 |
 | stack_id | yes | yes | string \| null | minLength=1 |
 | data_id | yes | yes | string \| null | minLength=1 |
+| build_id | no | yes | string \| null | pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| threads | no | yes | integer \| null | maximum=9007199254740991 |
+| binary_sha256 | no | yes | string \| null | pattern=^[0-9a-f]{64}$ |
 | backend | yes | no | string | - |
 | status | yes | no | enum<string> | values: `created`, `submitted`, `running`, `succeeded`, `failed`, `cancelled`, `collected` |
 | project | yes | no | string | minLength=1 |
@@ -64,6 +67,9 @@ run_id: "RUN-20261022T031500-a1b2"
 task_id: null
 stack_id: null
 data_id: null
+build_id: null
+threads: null
+binary_sha256: null
 backend: "local_job"
 status: "submitted"
 project: "ccw"
@@ -100,12 +106,15 @@ notify:
 ## Changelog Diff
 
 ```diff
-+ schema RunJob sha256:a53bfe9576261f7a47dbe877e777662428e1a0949db65baf85412fcc0930530f
++ schema RunJob sha256:b2d5d591f6e9e8663505860250112da5e7649a217f6a342ac94b6dd0749ff0a7
 + field job_id required=yes nullable=no type=string constraints=pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field run_id required=yes nullable=no type=string constraints=pattern=^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field task_id required=yes nullable=yes type=string | null constraints=minLength=1
 + field stack_id required=yes nullable=yes type=string | null constraints=minLength=1
 + field data_id required=yes nullable=yes type=string | null constraints=minLength=1
++ field build_id required=no nullable=yes type=string | null constraints=pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field threads required=no nullable=yes type=integer | null constraints=maximum=9007199254740991
++ field binary_sha256 required=no nullable=yes type=string | null constraints=pattern=^[0-9a-f]{64}$
 + field backend required=yes nullable=no type=string constraints=-
 + field status required=yes nullable=no type=enum<string> constraints=values: `created`, `submitted`, `running`, `succeeded`, `failed`, `cancelled`, `collected`
 + field project required=yes nullable=no type=string constraints=minLength=1
