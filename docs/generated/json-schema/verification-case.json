@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/verification-case.json",
+  "title": "VerificationCase",
+  "type": "object",
+  "properties": {
+    "vc_id": {
+      "type": "string",
+      "pattern": "^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "change_id": {
+      "type": "string",
+      "pattern": "^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "bundle_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "case_type": {
+      "type": "string",
+      "enum": [
+        "dimension_check",
+        "mass_balance",
+        "limiting_case",
+        "manufactured_solution",
+        "regression",
+        "unit_test",
+        "tiny_basin",
+        "output_semantics"
+      ]
+    },
+    "expected_result_source": {
+      "type": "string",
+      "enum": [
+        "analytic",
+        "published",
+        "pi_provided",
+        "baseline_regression",
+        "agent_proposed"
+      ]
+    },
+    "target_code_targets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected_result": {
+      "type": "string",
+      "minLength": 1
+    },
+    "pass_criteria": {
+      "type": "string",
+      "minLength": 1
+    },
+    "base_run_id": {
+      "type": "string",
+      "pattern": "^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "candidate_run_id": {
+      "type": "string",
+      "pattern": "^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "base_build_id": {
+      "type": "string",
+      "pattern": "^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "candidate_build_id": {
+      "type": "string",
+      "pattern": "^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "artifact_refs": {
+      "minItems": 2,
+      "maxItems": 2,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "observed": {
+      "type": "object",
+      "properties": {
+        "compared_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "candidate_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "compared_path",
+        "base_sha256",
+        "candidate_sha256"
+      ],
+      "additionalProperties": false
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "not_run",
+        "running",
+        "passed",
+        "failed",
+        "inconclusive",
+        "waived_by_pi"
+      ]
+    },
+    "failure_reason": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "reviewed_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reviewer_notes": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "compatibility_verdict": {
+      "type": "string",
+      "enum": [
+        "compatible",
+        "incompatible",
+        "unknown"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+    }
+  },
+  "required": [
+    "vc_id",
+    "task_id",
+    "change_id",
+    "bundle_id",
+    "case_type",
+    "expected_result_source",
+    "target_code_targets",
+    "description",
+    "expected_result",
+    "pass_criteria",
+    "base_run_id",
+    "candidate_run_id",
+    "base_build_id",
+    "candidate_build_id",
+    "artifact_refs",
+    "observed",
+    "status",
+    "failure_reason",
+    "reviewed_by",
+    "reviewer_notes",
+    "compatibility_verdict",
+    "created_at"
+  ],
+  "additionalProperties": false
+}

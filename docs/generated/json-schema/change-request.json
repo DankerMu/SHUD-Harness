@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/change-request.json",
+  "title": "ChangeRequest",
+  "type": "object",
+  "properties": {
+    "change_id": {
+      "type": "string",
+      "pattern": "^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "source_path": {
+      "type": "string",
+      "const": "repos/SHUD"
+    },
+    "base_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "files_changed": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "semantic_level": {
+      "type": "string",
+      "enum": [
+        "pure_engineering",
+        "io_format",
+        "output_semantics",
+        "numerical_implementation",
+        "parameter_default",
+        "physical_equation",
+        "model_assumption"
+      ]
+    },
+    "semantic_floor": {
+      "type": "string",
+      "enum": [
+        "pure_engineering",
+        "io_format",
+        "output_semantics",
+        "numerical_implementation",
+        "parameter_default",
+        "physical_equation",
+        "model_assumption"
+      ]
+    },
+    "floor_categories": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "pure_engineering",
+          "io_format",
+          "output_semantics",
+          "numerical_implementation",
+          "parameter_default",
+          "physical_equation",
+          "model_assumption"
+        ]
+      }
+    },
+    "risk": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "patch_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "patch_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "approved"
+      ]
+    },
+    "approval_ref": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "approved_at": {
+      "anyOf": [
+        {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+    }
+  },
+  "required": [
+    "change_id",
+    "task_id",
+    "source_path",
+    "base_commit",
+    "files_changed",
+    "semantic_level",
+    "semantic_floor",
+    "floor_categories",
+    "risk",
+    "patch_path",
+    "patch_sha256",
+    "status",
+    "approval_ref",
+    "approved_at",
+    "description",
+    "created_by",
+    "created_at",
+    "updated_at"
+  ],
+  "additionalProperties": false
+}

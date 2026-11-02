@@ -1,13 +1,14 @@
 # Proposal
 
-## Active issue fixture: #518
+## Active issue fixture: #519
 
 - Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree).
-- Scope: task 2.3 only; core semantic floor public API and existing schema generator constant projection.
-- Selected risk packs: Public API; Schema/field names; Auth/governance; File IO; Legacy compatibility; Documentation.
-- Evidence floor: semantic negative/positive unit cases, generator self-test, real generated-output drift rejection, built public-export smoke, full `pnpm run check`, independent review and CI.
-- Governing source: change-requests「Semantic level floor」and engineering-gates「New core objects participate in schema drift gate」. The older summary below saying unmatched pure_engineering is stale; the approved D6/scenarios require numerical_implementation. Categories preserve every matched entry, including lower levels shadowed by a higher floor.
-- No new schemas, tools, runtime overrides, dependencies, or host changes in this slice.
+- Scope: task 2.1 only; three strict core record schemas, three branded identifiers, registry examples and generated projections.
+- Selected risk packs: Public API; Schema/field names; Auth/governance; File IO/path safety; Legacy compatibility; Documentation.
+- Evidence floor: schema/brand positive and semantic-negative cases, generator self-test and drift gate, built public-export parse/id smoke, full `pnpm run check`, independent review and same-SHA CI.
+- Governing sources: change-requests, verification-cases and shud-build identifier/record/generated-projection requirements; engineering-gates registry coverage. Existing task 2.3 is delivered by #554.
+- Preserve the #518 floor rule: unmatched paths are numerical_implementation, and categories retain all matched entries; the older broad proposal summary below is not the active oracle.
+- No task/run/stack/provenance schema extensions, filesystem record APIs, tools, profile, runtime configuration, new dependencies or host changes.
 
 ## Why
 

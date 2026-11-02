@@ -5,6 +5,8 @@ import { z, type ZodType } from "zod";
 
 import { ArtifactSchema } from "../../packages/dsh-shud-core/src/schemas/artifact.ts";
 import { ArtifactManifestSchema } from "../../packages/dsh-shud-core/src/schemas/artifact-manifest.ts";
+import { BuildRecordSchema } from "../../packages/dsh-shud-core/src/schemas/build-record.ts";
+import { ChangeRequestSchema } from "../../packages/dsh-shud-core/src/schemas/change-request.ts";
 import { DataProvenanceSchema } from "../../packages/dsh-shud-core/src/schemas/data-provenance.ts";
 import { ErrorRecordSchema } from "../../packages/dsh-shud-core/src/schemas/error.ts";
 import {
@@ -17,6 +19,7 @@ import { RunJobSchema } from "../../packages/dsh-shud-core/src/schemas/run-job.t
 import { RunRecordSchema } from "../../packages/dsh-shud-core/src/schemas/run-record.ts";
 import { StackLockSchema } from "../../packages/dsh-shud-core/src/schemas/stack-lock.ts";
 import { TaskCardSchema } from "../../packages/dsh-shud-core/src/schemas/task.ts";
+import { VerificationCaseSchema } from "../../packages/dsh-shud-core/src/schemas/verification-case.ts";
 
 export type SchemaDefinition = {
   name: string;
@@ -275,6 +278,108 @@ export const schemaDefinitions: SchemaDefinition[] = [
         response_model_source: "configured",
       },
       collected_at: "2026-10-22T03:16:00Z",
+    },
+  },
+  {
+    name: "ChangeRequest",
+    slug: "change-request",
+    sourcePath: "packages/dsh-shud-core/src/schemas/change-request.ts",
+    exportName: "ChangeRequestSchema",
+    schema: ChangeRequestSchema,
+    strictInput: true,
+    exampleOverrides: {
+      change_id: "CHG-20261102T093000-4a1f",
+      task_id: "TASK-20261102T090000-3f9c",
+      source_path: "repos/SHUD",
+      base_commit: "9a422e5eb708df7d2f8b4066a3083a031d679a82",
+      files_changed: ["Makefile", "src/Model/MD_rhs_core.cpp"],
+      semantic_level: "numerical_implementation",
+      semantic_floor: "numerical_implementation",
+      floor_categories: ["numerical_implementation"],
+      risk: "high",
+      patch_path: "patches/CHG-20261102T093000-4a1f.patch",
+      patch_sha256: "a".repeat(64),
+      status: "proposed",
+      approval_ref: null,
+      approved_at: null,
+      description: "Restore the RHS build flag for the replay.",
+      created_by: "coder",
+      created_at: "2026-11-02T09:30:00Z",
+      updated_at: "2026-11-02T09:30:00Z",
+    },
+  },
+  {
+    name: "VerificationCase",
+    slug: "verification-case",
+    sourcePath: "packages/dsh-shud-core/src/schemas/verification-case.ts",
+    exportName: "VerificationCaseSchema",
+    schema: VerificationCaseSchema,
+    strictInput: true,
+    exampleOverrides: {
+      vc_id: "VC-20261102T101500-0c3e",
+      task_id: "TASK-20261102T090000-3f9c",
+      change_id: "CHG-20261102T093000-4a1f",
+      bundle_id: null,
+      case_type: "regression",
+      expected_result_source: "baseline_regression",
+      target_code_targets: ["Makefile", "src/Model/MD_rhs_core.cpp"],
+      description: "Compare the pinned base and candidate rivqdown outputs.",
+      expected_result: "Identical rivqdown bytes at one thread.",
+      pass_criteria: "sha256(candidate rivqdown.dat) == sha256(base rivqdown.dat)",
+      base_run_id: "RUN-20261102T100100-a1b2",
+      candidate_run_id: "RUN-20261102T101000-b2c3",
+      base_build_id: "BUILD-20261102T100000-7b2d",
+      candidate_build_id: "BUILD-20261102T100500-8c3e",
+      artifact_refs: [
+        "runs/RUN-20261102T100100-a1b2/output/keliya.out/keliya.rivqdown.dat",
+        "runs/RUN-20261102T101000-b2c3/output/keliya.out/keliya.rivqdown.dat",
+      ],
+      observed: {
+        compared_path: "output/keliya.out/keliya.rivqdown.dat",
+        base_sha256: "a".repeat(64),
+        candidate_sha256: "a".repeat(64),
+      },
+      status: "passed",
+      failure_reason: null,
+      reviewed_by: "reviewer",
+      reviewer_notes: ["The compared output bytes match for this replay."],
+      compatibility_verdict: "compatible",
+      created_at: "2026-11-02T10:15:00Z",
+    },
+  },
+  {
+    name: "BuildRecord",
+    slug: "build-record",
+    sourcePath: "packages/dsh-shud-core/src/schemas/build-record.ts",
+    exportName: "BuildRecordSchema",
+    schema: BuildRecordSchema,
+    strictInput: true,
+    exampleOverrides: {
+      build_id: "BUILD-20261102T100000-7b2d",
+      task_id: "TASK-20261102T090000-3f9c",
+      change_id: null,
+      patch_sha256: null,
+      source_path: "repos/SHUD",
+      source_commit: "9a422e5eb708df7d2f8b4066a3083a031d679a82",
+      source_branch: "replay/base",
+      dirty_paths: [],
+      make_argv: [
+        "make",
+        "-C",
+        "builds/.tmp-BUILD-20261102T100000-7b2d/src",
+        "shud",
+        "SUNDIALS_DIR=/opt/sundials",
+      ],
+      sundials_dir: "/opt/sundials",
+      rhs_openmp: false,
+      compiler: "Apple clang version 17.0.0",
+      exit_code: 0,
+      duration_seconds: 8.25,
+      binary_path: "builds/BUILD-20261102T100000-7b2d/shud",
+      binary_sha256: "b".repeat(64),
+      stdout_path: "builds/BUILD-20261102T100000-7b2d/make.stdout.log",
+      stderr_path: "builds/BUILD-20261102T100000-7b2d/make.stderr.log",
+      created_at: "2026-11-02T10:00:00Z",
     },
   },
 ];

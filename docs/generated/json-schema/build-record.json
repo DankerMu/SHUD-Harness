@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shud-harness.local/generated/json-schema/build-record.json",
+  "title": "BuildRecord",
+  "type": "object",
+  "properties": {
+    "build_id": {
+      "type": "string",
+      "pattern": "^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+    },
+    "change_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "patch_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "source_path": {
+      "type": "string",
+      "const": "repos/SHUD"
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "source_branch": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dirty_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "make_argv": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "sundials_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rhs_openmp": {
+      "type": "boolean"
+    },
+    "compiler": {
+      "type": "string",
+      "minLength": 1
+    },
+    "exit_code": {
+      "type": "number",
+      "const": 0
+    },
+    "duration_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "binary_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "binary_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "stdout_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stderr_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+    }
+  },
+  "required": [
+    "build_id",
+    "task_id",
+    "change_id",
+    "patch_sha256",
+    "source_path",
+    "source_commit",
+    "source_branch",
+    "dirty_paths",
+    "make_argv",
+    "sundials_dir",
+    "rhs_openmp",
+    "compiler",
+    "exit_code",
+    "duration_seconds",
+    "binary_path",
+    "binary_sha256",
+    "stdout_path",
+    "stderr_path",
+    "created_at"
+  ],
+  "additionalProperties": false
+}
