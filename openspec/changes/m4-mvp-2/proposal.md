@@ -1,14 +1,15 @@
 # Proposal
 
-## Active issue fixture: #523
+## Active issue fixture: #524
 
 - Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree).
-- Scope: task 2.2d only; strict external-file metadata entries in DataProvenance.sources with default empty array, projections and minimum producer literal.
-- Selected risk packs: Public API; Schema/field names; File IO/read compatibility; Legacy compatibility; Documentation.
-- Evidence floor: focused semantic RED/GREEN, actual built readonly M3 file smoke, generator/drift and sibling-byte checks, full check, Critical Path #7 review and same-SHA CI.
-- Governing source: data-provenance「DataProvenance record」「DataProvenance generated projection」; #522 run schemas delivered by #559.
-- Preserve existing sources.files permissive digest and relative-path contracts; new external entries alone require absolute paths and lowercase64 hex. No schema sorting/dedup policy.
-- No tsd.forc parsing, external file access/hashing, submission rollback, verification comparison, jobs/host/config/dependency changes.
+- Scope: task 2.4; canonical role-tool collections, four-role mapping and authority decisions; required consumer type/test migration only.
+- Selected risk packs: Public API; Auth/permissions; Legacy compatibility; Error handling; Documentation. No new IO/config/concurrency/resource/dependency behavior.
+- Evidence floor: focused semantic RED/GREEN; actual built public-core policy smoke; affected consumer tests, full check/profile smoke, Critical Path #1 review and same-SHA CI.
+- Governing source: agent-presets「Role tool map uses mounted names」and policy-gate「Caller role derivation」「Role tool surface rule」; #523 delivered by #560.
+- Preserve readCallerPresetId attribution verbatim; presetIdToRole alone confers four policy roles. Unknown/standard/repo_explorer/custom remain unknown for policy mapping.
+- Necessary boundary correction: the existing restrict consumer stores a two-role type and its tests treat coder/reviewer as unknown; widen that type from the canonical mapper and migrate stale consumer assertions, without changing binding/lifecycle algorithms.
+- No new presets/prompts/tools, profile installation, change_submit ask rule or restrict lifecycle feature. Existing consumers immediately observe the new core mapping when given coder/reviewer projections; bundled activation remains #543, full restrict evidence #542.
 
 ## Why
 

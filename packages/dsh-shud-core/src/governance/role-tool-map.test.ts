@@ -9,7 +9,7 @@ const EXPECTED_CANONICAL_ROLES = [
   "reviewer",
 ] as const satisfies readonly core.CanonicalHarnessRole[];
 
-// Normative M3 collections and the pre-change M4 inventory, not derived from production.
+// Normative mounted tool collections, independent of the production map.
 const EXPECTED_TOOL_COLLECTIONS = {
   coordinator: {
     inherited: [
@@ -23,10 +23,10 @@ const EXPECTED_TOOL_COLLECTIONS = {
       "job_list",
       "job_kill",
     ],
-    local: ["subagent"],
+    local: ["subagent", "subagent_coder", "subagent_reviewer"],
   },
   repo_explorer: {
-    inherited: ["git.inspect", "read", "repo.glob", "repo.grep", "repo.search"],
+    inherited: ["read"],
     local: [],
   },
   worker: {
@@ -34,38 +34,36 @@ const EXPECTED_TOOL_COLLECTIONS = {
     local: [],
   },
   coder: {
-    inherited: ["bash", "edit", "harness.memory.propose", "patch.apply", "read", "write"],
+    inherited: ["bash", "read", "edit", "change_create", "change_submit", "shud_build"],
     local: [],
   },
   reviewer: {
-    inherited: ["harness.memory.propose", "read", "validator.run"],
+    inherited: ["read", "verification_run", "shud_collect", "job_output", "job_list"],
     local: [],
   },
 } as const satisfies core.RoleToolMap;
 
 const EXPECTED_ROLE_TOOL_IDS = [
   "bash",
+  "change_create",
+  "change_submit",
   "edit",
-  "git.inspect",
-  "harness.memory.propose",
   "job_kill",
   "job_list",
   "job_output",
-  "patch.apply",
   "read",
-  "repo.glob",
-  "repo.grep",
-  "repo.search",
   "report_decide",
   "report_generate",
   "report_submit",
   "report_validate",
+  "shud_build",
   "shud_collect",
   "shud_run",
   "subagent",
+  "subagent_coder",
+  "subagent_reviewer",
   "task_create",
-  "validator.run",
-  "write",
+  "verification_run",
 ] as const;
 
 const WRITE_CLASS_TOOL_IDS = [
@@ -78,12 +76,18 @@ const WRITE_CLASS_TOOL_IDS = [
 ] as const;
 const REPOSITORY_SOURCE_EDIT_TOOL_IDS = ["write", "edit", "patch.apply"] as const;
 
-// Only obsolete M3-exclusive names; M4 still owns harness.memory.propose and read.
+// Obsolete Zero-era names and the unmounted write tool remain forbidden for every role.
 const REMOVED_TOOL_IDS = [
   "artifact.write",
+  "git.inspect",
   "harness.job.collect",
   "harness.job.submit",
+  "harness.memory.propose",
   "harness.report.generate",
+  "patch.apply",
+  "repo.glob",
+  "repo.grep",
+  "repo.search",
   "rshud.compute_metrics",
   "rshud.read_output",
   "sandbox.exec",
@@ -91,10 +95,12 @@ const REMOVED_TOOL_IDS = [
   "shud.run",
   "spawn_agent",
   "wait_agent",
+  "validator.run",
+  "write",
 ] as const;
 
 describe("canonical role to tool collections", () => {
-  test("matches the normative M3 collections and preserves the exact M4 inventory", () => {
+  test("matches the exact normative mounted collections", () => {
     expect(core.ROLE_TOOL_MAP).toEqual(EXPECTED_TOOL_COLLECTIONS);
     for (const role of EXPECTED_CANONICAL_ROLES) {
       expect(core.getRoleToolIds(role)).toEqual(EXPECTED_TOOL_COLLECTIONS[role]);
@@ -164,7 +170,7 @@ describe("canonical role to tool collections", () => {
     }
   });
 
-  test("rejects obsolete M3-exclusive tool names for every role", () => {
+  test("rejects obsolete tool names and write for every role", () => {
     for (const toolId of REMOVED_TOOL_IDS) {
       expect(core.ROLE_TOOL_IDS).not.toContain(toolId);
       for (const role of EXPECTED_CANONICAL_ROLES) {
@@ -197,18 +203,15 @@ describe("canonical role to tool collections", () => {
     }
   });
 
-  test("keeps coder as the only role with write, edit, or patch.apply", () => {
-    for (const toolId of REPOSITORY_SOURCE_EDIT_TOOL_IDS) {
-      expect(core.isRoleToolIdAllowed("coder", toolId)).toBe(true);
-    }
+  test("keeps coder as the only role with repository source edit access", () => {
+    expect(core.isRoleToolIdAllowed("coder", "edit")).toBe(true);
+    expect(core.isRoleToolIdAllowed("coder", "write")).toBe(false);
+    expect(core.isRoleToolIdAllowed("coder", "patch.apply")).toBe(false);
     expect(rolesContainingAny(REPOSITORY_SOURCE_EDIT_TOOL_IDS)).toEqual(["coder"]);
   });
 
-  test("preserves the M4 proposal memory adapter but excludes raw harness memory", () => {
-    expect(rolesContainingAny(["harness.memory.propose"])).toEqual(["coder", "reviewer"]);
-    expect(core.isRoleToolIdAllowed("reviewer", "harness.memory.propose")).toBe(true);
-    expect(core.isRoleToolIdAllowed("reviewer", "memory")).toBe(false);
-    expect(core.isRoleToolIdAllowed("repo_explorer", "harness.memory.propose")).toBe(false);
+  test("excludes both proposal and raw harness memory from every role", () => {
+    expect(rolesContainingAny(["harness.memory.propose", "memory"])).toEqual([]);
   });
 });
 

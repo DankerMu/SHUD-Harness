@@ -7,7 +7,7 @@ import { getRoleToolIds, presetIdToRole, readCallerPresetId } from "@shud-harnes
 export const name = "shud-role-restrict";
 
 interface Restriction {
-  role: "coordinator" | "worker";
+  role: Exclude<ReturnType<typeof presetIdToRole>, "unknown">;
   release: () => void;
 }
 

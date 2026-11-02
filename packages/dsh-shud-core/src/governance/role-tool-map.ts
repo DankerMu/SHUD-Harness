@@ -23,24 +23,22 @@ export const ROLE_TOOL_MAP = Object.freeze({
       "job_list",
       "job_kill",
     ],
-    ["subagent"],
+    ["subagent", "subagent_coder", "subagent_reviewer"],
   ),
-  // M4 contract: no M3 preset consumer or restrict validation.
-  repo_explorer: defineRoleToolProfile(
-    ["git.inspect", "read", "repo.glob", "repo.grep", "repo.search"],
-    [],
-  ),
+  // M4 has no repo_explorer preset, consumer, or restrict validation.
+  repo_explorer: defineRoleToolProfile(["read"], []),
   worker: defineRoleToolProfile(
     ["shud_run", "shud_collect", "job_output", "job_list", "job_kill"],
     [],
   ),
-  // M4 contract: no M3 preset consumer or restrict validation.
   coder: defineRoleToolProfile(
-    ["bash", "edit", "harness.memory.propose", "patch.apply", "read", "write"],
+    ["bash", "read", "edit", "change_create", "change_submit", "shud_build"],
     [],
   ),
-  // M4 contract: no M3 preset consumer or restrict validation.
-  reviewer: defineRoleToolProfile(["harness.memory.propose", "read", "validator.run"], []),
+  reviewer: defineRoleToolProfile(
+    ["read", "verification_run", "shud_collect", "job_output", "job_list"],
+    [],
+  ),
 });
 
 type RoleToolEntry = (typeof ROLE_TOOL_MAP)[HarnessRole];

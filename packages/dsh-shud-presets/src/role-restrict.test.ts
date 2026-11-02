@@ -105,29 +105,50 @@ describe("shud-role-restrict public lifecycle", () => {
     expect(caller.surface()).toContain("bash");
   });
 
+  it.each(["unknown", "standard", "custom-research", "repo_explorer", null, ""])(
+    "leaves %s unmasked and tracks it for a later known role",
+    async (preset) => {
+      const harness = await setup();
+      const caller = harness.prepareAgent(preset);
+      const unrestricted = caller.surface();
+      await caller.announce();
+      expect(caller.surface()).toEqual(unrestricted);
+      expect(caller.surface()).toContain("bash");
+      caller.setProjection("worker");
+      caller.selected("standard");
+      expect(caller.surface()).toEqual(WORKER_TOOLS);
+      caller.setProjection(preset);
+      caller.selected("worker");
+      expect(caller.surface()).toEqual(unrestricted);
+    },
+  );
+
   it.each([
-    "unknown",
-    "standard",
-    "custom-research",
-    "repo_explorer",
-    "coder",
-    "reviewer",
-    null,
-    "",
-  ])("leaves %s unmasked and tracks it for a later known role", async (preset) => {
-    const harness = await setup();
-    const caller = harness.prepareAgent(preset);
-    const unrestricted = caller.surface();
-    await caller.announce();
-    expect(caller.surface()).toEqual(unrestricted);
-    expect(caller.surface()).toContain("bash");
-    caller.setProjection("worker");
-    caller.selected("standard");
-    expect(caller.surface()).toEqual(WORKER_TOOLS);
-    caller.setProjection(preset);
-    caller.selected("worker");
-    expect(caller.surface()).toEqual(unrestricted);
-  });
+    {
+      role: "coder",
+      registrations: ["change_create", "change_submit", "shud_build"],
+      expected: ["bash", "change_create", "change_submit", "edit", "read", "shud_build"],
+    },
+    {
+      role: "reviewer",
+      registrations: ["verification_run"],
+      expected: ["job_list", "job_output", "read", "shud_collect", "verification_run"],
+    },
+  ])(
+    "binds the current $role inherited mask instead of its stale header",
+    async ({ role, registrations, expected }) => {
+      const harness = await setup();
+      for (const tool of registrations) harness.registerGlobal(tool);
+      const restrict = vi.spyOn(ToolRuntime.prototype, "restrict");
+      const caller = harness.prepareAgent(role);
+      expect(caller.session.header.agentPreset).toBe("coordinator");
+      await caller.announce();
+      expect(caller.surface()).toEqual(expected);
+      expect(restrict).toHaveBeenCalledTimes(1);
+      expect([...(restrict.mock.calls[0]?.[0].allow ?? [])].sort()).toEqual(expected);
+      expect(harness.stateOf).toHaveBeenCalledWith(caller.session, "agentPreset");
+    },
+  );
 
   it("does not infer a known role from a header when the projection service is absent", async () => {
     const harness = await setup({ projections: false });

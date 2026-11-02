@@ -263,6 +263,28 @@ Review focus: separate internal/external path+digest contracts; default only the
 - prompt：`packages/dsh-shud-presets/prompts/{coder,reviewer}.md`。coder.md 含：只在 `repos/SHUD` 改已跟踪文件、不 `git commit`、先 base 构建再改码、改完 `change_create` → `change_submit`、被拒即停止并回报（不重试提交）、批准后 `shud_build(change_id, rhs_openmp: true)` 并回报 `build_id`、禁止科学结论措辞、禁止跑 SHUD、禁止改写 `changes/ patches/ builds/ tasks/` 等治理目录（工具会拒绝）。reviewer.md 含：只调用 `verification_run`、`reviewer_notes` 只陈述工程事实、"bitwise 相等 ≠ 并行正确性/性能"。worker.md 增：收到 `build_id` 时以 `shud_run(input_dir, task_id, build_id, threads: 1)` 提交、不传 `end_days`，等待收集后回报 `run_id` 与 `build_id`；无 `build_id` 时同 M3。coordinator.md 增加 code_change 流程（建卡 → 派 coder base 构建 → 派 coder 改码提交 → 派 worker 跑 base → 派 coder 候选构建 → 派 worker 跑候选 → 派 reviewer 验证 → 报告），以及"CR 被拒时把 PI 的话转给 coder、不自行批准"。prompt 中的 wording 文案由既有漂移测试与 `wording.ts` 比对。
 - `instructions/agents/shared.md` 的 Runtime Lifecycle 段（preset/委派/headless 目标）随 6.2 同步并 `instructions:render`，否则 CLAUDE.md/AGENTS.md 漂移。
 
+#### Issue #524 implementation boundary
+
+Change surface: role-tool-map, caller-preset policy mapping, role-tool-surface and tests; necessary existing consumer type/test migration only.
+
+Governing invariant: current projection confers only one of four active policy roles; its allowed inherited/local union is the sole authority tool surface, without erasing attribution or widening other roles.
+
+Must preserve: coordinator inherited/worker collections, frozen collections, unknown policy behavior, raw custom attribution, projection receiver/error/header semantics, authority classification and input-independent denial.
+
+Must add: exact normative five-row map and union, coder/reviewer role mapping and off-role denial, coordinator two new local delegations, deletion of obsolete Zero capabilities.
+
+Sibling surfaces: task-create attribution; policy-gate listener/evaluator/approval tests; role-restrict type and direct consumer tests; core exports and generic default context.
+
+Boundary correction: widening presetIdToRole cannot compile against Restriction.role's old two-role union, and existing plugin tests explicitly expect coder/reviewer unknown. Minimal canonical-derived type and changed-contract tests belong to this cutover; no second mapper or cast workaround.
+
+Seams under test: core public projection/mapping/evaluation APIs, existing real Cordis consumer suites; built core smoke and pinned profile smoke. No claim of new preset rows or complete four-role Web tools.
+
+Required evidence: independent exact collections and cross-role matrix; stale header switches, custom attribution/unknown separation, removed IDs false; payload/workDir not accessed, denial no approval/next; full gate and unchanged old lifecycle guards.
+
+Non-goals: new tools/ask rules, prompts/profile rows, restrict algorithm/lifecycle expansion or scientific conclusions. Full four-role restrict lifecycle/unknown-name checks remain #542, bundle #543.
+
+Review focus: clean identity/authorization separation; consumer compatibility without disabling new roles; no stale Zero allow paths or softened old lifecycle/approval evidence.
+
 ### D12 报告：`code_change` 的事实表与固定措辞（Critical Path #6）
 
 - `report_generate` 对 `code_change` 卡求 D7 谓词；报告 `.json` 新增 `change_ids`、`verification_ids`（M3 报告 `default([])`），生成投影随之更新。

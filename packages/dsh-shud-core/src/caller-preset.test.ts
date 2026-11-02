@@ -127,8 +127,8 @@ test.each([
   { preset: "unknown", role: "unknown" },
   { preset: "standard", role: "unknown" },
   { preset: "repo_explorer", role: "unknown" },
-  { preset: "coder", role: "unknown" },
-  { preset: "reviewer", role: "unknown" },
+  { preset: "coder", role: "coder" },
+  { preset: "reviewer", role: "reviewer" },
   { preset: "custom-preset", role: "unknown" },
   { preset: "", role: "unknown" },
   { preset: " ", role: "unknown" },
@@ -146,3 +146,15 @@ test("custom attribution is preserved without granting a coordinator policy role
   expect(attribution).toBe(" custom-preset ");
   expect(presetIdToRole(attribution)).toBe("unknown");
 });
+
+test.each(["coder", "reviewer"] as const)(
+  "current %s projection preserves attribution and overrides the stale coordinator policy role",
+  (preset) => {
+    const { agent, stateOf } = callerWithProjection(preset, "coordinator");
+    const attribution = readCallerPresetId(agent);
+    expect(attribution).toBe(preset);
+    expect(presetIdToRole(attribution)).toBe(preset);
+    expect(agent.session.header.agentPreset).toBe("coordinator");
+    expect(stateOf).toHaveBeenCalledWith(agent.session, "agentPreset");
+  },
+);

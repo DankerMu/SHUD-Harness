@@ -5,10 +5,10 @@ export const ROLE_TOOL_SURFACE_RULE_ID = "role-tool-surface";
 
 export const ROLE_TOOL_SURFACE_RULE: PolicyRule = Object.freeze({
   ruleId: ROLE_TOOL_SURFACE_RULE_ID,
-  description: "Limit coordinator and worker calls to their inherited and local tools.",
+  description: "Limit the four policy roles to their inherited and local tools.",
   guardClass: "authority",
   evaluate: ({ role, toolId }) => {
-    if (role !== "coordinator" && role !== "worker") {
+    if (role !== "coordinator" && role !== "worker" && role !== "coder" && role !== "reviewer") {
       return { decision: "allow" };
     }
     if (isRoleToolIdAllowed(role, toolId)) {

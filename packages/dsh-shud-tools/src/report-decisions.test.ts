@@ -249,7 +249,7 @@ test("registered generation validation and approved submission complete the real
 
 for (const tool of TERMINAL_TOOLS) {
   test(`${tool} unknown current role asks instead of inheriting a worker creation header`, async () => {
-    const h = await decisionHarness({ preset: "reviewer" });
+    const h = await decisionHarness({ preset: "standard" });
     try {
       await seedReviewed(h);
       Object.assign(h.agent.session.header, { agentPreset: "worker" });

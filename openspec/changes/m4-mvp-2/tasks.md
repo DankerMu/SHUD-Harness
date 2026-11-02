@@ -97,6 +97,19 @@
 - Auth/governance、Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：无权限、配置、并发、外部发现、回滚或依赖变化；producer新行为明确属于3.4/4.1，不在schema内实现。
 - 验证：focused data-provenance-schema真实语义RED→GREEN；generator/selftest/typecheck与必要最小字面值/输出断言适配；built readonly smoke；full pnpm run check；若触及records producer字面值加既有profile:smoke；白盒review/同SHA CI。
 
+### Issue #524 risk and evidence fixture
+
+本刀仅2.4；2.2d已由#560合并。issue对readCallerPresetId的“映射”简称遵从规范的attribution/role分离，不抹去custom attribution。
+
+- Public API/Auth：ROLE_TOOL_MAP五行严格按agent-presets规范，coordinator inherited与worker不变，coordinator local三委派，coder六inherited、reviewer五inherited、repo_explorer仅read且无preset；ROLE_TOOL_IDS仍从两集合唯一派生。旧Zero id与write全角色拒绝，不保留别名。
+- 四角色role-tool-surface按并集决定allow/deny；unknown与直接传入repo_explorer维持不判定。精确独立集合矩阵覆盖所有新工具，coder/reviewer越界拒绝，authority id/remediation/瀑布规则不变；reason仅角色与工具id，不读取input/workDir或泄露其值。
+- Legacy/error：readCallerPresetId原样返回非空投影，不读取creation header；仅presetIdToRole增加coder/reviewer。standard/repo_explorer/custom/空值映射unknown，缺失/异常读取仍unknown；冻结旧header下切换coder/reviewer正反例。
+- 必要consumer迁移：role-restrict.ts的Restriction.role从mapper返回类型推导而非复制新枚举；绑定算法不改。旧coder/reviewer unknown用例改为真实新角色行为，unknown审批用例改用standard并保留原审批目的。policy-gate插件生产代码不改；相关测试按观察到的RED最小迁移，不以cast或第二套映射掩盖兼容问题。
+- Legacy工具面与readonly/审批不变量保留；新增角色在现有共享consumer上立即生效，不能声称完全“无运行时效果”。没有新preset装配，#542仍负责完整restrict四角色生命周期/未知工具失败证据，#543负责bundle四角色。
+- File IO/paths、Config/setup、Concurrency/state、Resource/discovery、Release/dependencies：不改这些机制；现有restrict生命周期只做类型适配，不新增IO、配置、并发或依赖。Error pack由projection缺失/异常、deny不读取载荷与consumer负例覆盖。
+- Documentation：active fixture记录范围纠正，规范docs已在#516对齐；不改generated schema。旧id在负例及冻结历史可保留，生产role map不再含旧id。
+- 验证：三核心测试真实RED→GREEN与完整allow/deny矩阵；built core公开API oracle验证投影→角色→规则、未知角色/旧工具拒绝与载荷不读取；受影响policy/presets测试；pnpm run check、profile:smoke；三席白盒审查及同SHA CI。
+
 ## 2. core：floor 常量、三对象 schema、品牌 id、角色映射、措辞常量、git runner（Critical Path #1/#7）
 
 - [x] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
@@ -104,7 +117,7 @@
 - [x] 2.2a 依赖 2.1。`TaskTypeSchema` 增 `code_change`；TaskCard 增 `linked_changes`/`linked_verifications`（`default([])`，排序唯一）与 `source_base_commit`（40 hex 或 null，缺键按 null；refine `code_change` ⇒ 非 null、其它 ⇒ null）；M3 卡片夹具原样可读回归；投影更新。按 task-cards「TaskCard record」「TaskCard generated projection」。
 - [x] 2.2b 依赖 2.1。StackLock 增 nullable `build_id`（非 null 时纳入 `computeStackFingerprint`，null 时指纹与 M3 逐字节相同、旧 lock 仍可复用）；固定向量测试；投影。按 stack-lock「StackLock schema alignment」「Stack fingerprint」。
 - [x] 2.2c 依赖 2.1。RunJob/RunRecord 增 nullable `build_id`/`threads`（正整数）/`binary_sha256`（缺键按 null；iff `build_id` 的 refine 在默认值之后求值）；M2/M3 夹具原样可读回归；投影。按 run-records「RunJob record」「RunRecord record」「Generated projection」。
-- [ ] 2.2d DataProvenance 增 `sources.external_files`（`{path(绝对), sha256, size_bytes}` 数组，缺键按 `[]`）；M3 夹具回归；投影。按 data-provenance「DataProvenance record」「DataProvenance generated projection」。无依赖。
+- [x] 2.2d DataProvenance 增 `sources.external_files`（`{path(绝对), sha256, size_bytes}` 数组，缺键按 `[]`）；M3 夹具回归；投影。按 data-provenance「DataProvenance record」「DataProvenance generated projection」。无依赖。
 - [ ] 2.4 `role-tool-map.ts` 四角色真实 id（coordinator `local` 三委派工具；coder/reviewer/repo_explorer `inherited` 按 agent-presets「Role tool map uses mounted names」）；删除 `harness.memory.propose`、`patch.apply`、`validator.run`、`repo.*`、`git.inspect`；`readCallerPresetId` 映射增 coder/reviewer（policy-gate「Caller role derivation」）；`ROLE_TOOL_IDS` 并集测试；policy-gate-core `role-tool-surface` 表随之更新并附四角色 × 新工具的 deny 正反例（policy-gate「Role tool surface rule」）。无依赖。
 - [ ] 2.5 `governance/wording.ts` 导出 `code_change` §5 固定句常量，正反例测试（逐字、不进扫描短语集）；按 evidence-reports「code_change report wording constant」、engineering-gates「Scientific wording rules are enforced by tested constants」。无依赖。
 - [ ] 2.6 `stack-lock/repository-revision.ts` 扩展导出受控 git runner（env 白名单 `PATH/HOME/LC_ALL=C/GIT_OPTIONAL_LOCKS=0/GIT_CONFIG_NOSYSTEM=1/GIT_CONFIG_GLOBAL=/dev/null/GIT_TERMINAL_PROMPT=0`、`-c core.fsmonitor=false`、realpath == `rev-parse --show-toplevel` 校验、status `-z`、diff `--no-ext-diff --no-textconv --no-color`）；既有 `collectRepositoryRevision` 行为与 StackLock 采集字节不变的回归；子进程看不到 `DMXAPI_KEY` 的断言。按 change-requests「Source change observation」、shud-build「Workspace source checkout validation」。无依赖。

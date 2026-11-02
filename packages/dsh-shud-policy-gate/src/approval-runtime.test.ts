@@ -99,24 +99,27 @@ for (const tool of ["report_submit", "report_decide"]) {
   });
 }
 
-test("current worker identity denies a registered report before the host approval service", async () => {
-  const h = await createPolicyHarness({ preset: "worker", approval: "allowed-once" });
-  try {
-    const result = await h.call("report_submit", { report_id: REPORT_ID });
-    expect(result).toMatchObject({
-      isError: true,
-      error: { message: "Role worker cannot call tool report_submit." },
-    });
-    expect(h.request).not.toHaveBeenCalled();
-    expect(h.executions).toEqual([]);
-    expect(h.policyLogs()).toEqual([["deny report_submit role-tool-surface"]]);
-  } finally {
-    await h.dispose();
-  }
-});
+test.each(["worker", "coder", "reviewer"])(
+  "current %s identity denies a registered report before the host approval service",
+  async (preset) => {
+    const h = await createPolicyHarness({ preset, approval: "allowed-once" });
+    try {
+      const result = await h.call("report_submit", { report_id: REPORT_ID });
+      expect(result).toMatchObject({
+        isError: true,
+        error: { message: `Role ${preset} cannot call tool report_submit.` },
+      });
+      expect(h.request).not.toHaveBeenCalled();
+      expect(h.executions).toEqual([]);
+      expect(h.policyLogs()).toEqual([["deny report_submit role-tool-surface"]]);
+    } finally {
+      await h.dispose();
+    }
+  },
+);
 
 test("unknown current role still reaches host approval rather than inheriting worker denial", async () => {
-  const h = await createPolicyHarness({ preset: "reviewer", approval: "allowed-once" });
+  const h = await createPolicyHarness({ preset: "standard", approval: "allowed-once" });
   try {
     h.session.header.agentPreset = "worker";
     expect(await h.call("report_submit", { report_id: REPORT_ID })).toMatchObject({

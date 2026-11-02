@@ -31,7 +31,14 @@ export function readCallerPresetId(
   }
 }
 
-/** Only the two active preset ids confer a policy role; custom attribution stays separate. */
-export function presetIdToRole(presetId: string): "coordinator" | "worker" | "unknown" {
-  return presetId === "coordinator" || presetId === "worker" ? presetId : "unknown";
+/** Only the four policy preset ids confer a role; custom attribution stays separate. */
+export function presetIdToRole(
+  presetId: string,
+): "coordinator" | "worker" | "coder" | "reviewer" | "unknown" {
+  return presetId === "coordinator" ||
+    presetId === "worker" ||
+    presetId === "coder" ||
+    presetId === "reviewer"
+    ? presetId
+    : "unknown";
 }
