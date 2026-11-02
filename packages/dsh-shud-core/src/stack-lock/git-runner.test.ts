@@ -474,6 +474,48 @@ process.exit(23);`,
     assertControlledError(error, ["spawn-fake-secret", "private-command-argument"]);
   });
 
+  test.each([
+    { label: "empty argument list", args: [] },
+    { label: "empty verb", args: [""] },
+    { label: "leading global option", args: ["-c", "core.fsmonitor=true", "status"] },
+  ])("rejects $label before spawning git", async ({ args }) => {
+    const repo = committedRepo("invalid-entry");
+    const trace = traceGit();
+
+    await expect(runGit(repo, args)).rejects.toThrow(/subcommand/u);
+
+    expect(existsSync(trace)).toBe(false);
+  });
+
+  test("controls synchronous execFile argument rejection without spawning or exposing the argument", async () => {
+    const repo = committedRepo("nul-argument");
+    const trace = traceGit();
+    const privateArgument = "private-nul-argument";
+
+    const error = await rejectedBy(() => runGit(repo, ["rev-parse", `${privateArgument}\0`]));
+
+    expect(error.message).toContain("ERR_INVALID_ARG_VALUE");
+    assertControlledError(error, [privateArgument]);
+    expect(existsSync(trace)).toBe(false);
+  });
+
+  test("controls root-output realpath failure without executing status or exposing the private path", async () => {
+    const repo = committedRepo("invalid-root-output");
+    const privatePath = join(root, "private-nonexistent-root");
+    const trace = faultGit(
+      "rev-parse",
+      `require("node:fs").writeSync(1, ${JSON.stringify(`${privatePath}\n`)});`,
+    );
+
+    const error = await rejectedBy(() => runGit(repo, ["status"]));
+
+    expect(error.message).toContain("ENOENT");
+    assertControlledError(error, [privatePath]);
+    expect(readGitTrace(trace).map((call) => call.args)).toEqual([
+      ["-C", repo, "-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"],
+    ]);
+  });
+
   test("legacy collection honors the host global ignore while the controlled runner does not", async () => {
     const repo = committedRepo("host-ignore");
     const ignored = join(root, "host-ignore.txt");
