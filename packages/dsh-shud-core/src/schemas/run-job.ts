@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 
-import { JobRecordIdSchema, RunIdSchema } from "./run-identifiers.ts";
+import { BuildIdSchema, JobRecordIdSchema, RunIdSchema } from "./run-identifiers.ts";
 
 export const RunJobSchema = z
   .strictObject({
@@ -10,6 +10,13 @@ export const RunJobSchema = z
     task_id: z.string().min(1).nullable(),
     stack_id: z.string().min(1).nullable(),
     data_id: z.string().min(1).nullable(),
+    build_id: BuildIdSchema.nullable().default(null),
+    threads: z.number().int().positive().nullable().default(null),
+    binary_sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable()
+      .default(null),
     backend: z.literal("local_job"),
     status: z.enum([
       "created",
@@ -69,6 +76,13 @@ export const RunJobSchema = z
     }),
   })
   .superRefine((job, context) => {
+    if ((job.build_id !== null) !== (job.binary_sha256 !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["binary_sha256"],
+        message: "Binary digest must be non-null exactly when the run has a build id",
+      });
+    }
     if (job.status !== "running") return;
     for (const field of ["pid", "pid_started_at"] as const) {
       if (job[field] === null) {

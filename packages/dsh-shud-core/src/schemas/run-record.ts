@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { ArtifactSchema } from "./artifact.ts";
-import { JobRecordIdSchema, RunIdSchema } from "./run-identifiers.ts";
+import { BuildIdSchema, JobRecordIdSchema, RunIdSchema } from "./run-identifiers.ts";
 
 export const RunExitClassSchema = z.enum([
   "ok",
@@ -67,6 +67,13 @@ export const RunRecordSchema = z
     task_id: z.string().min(1).nullable(),
     stack_id: z.string().min(1).nullable(),
     data_id: z.string().min(1).nullable(),
+    build_id: BuildIdSchema.nullable().default(null),
+    threads: z.number().int().positive().nullable().default(null),
+    binary_sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .nullable()
+      .default(null),
     status: z.enum(["succeeded", "failed"]),
     command: z.array(z.string()).min(1),
     exit_code: z.number().int().nullable(),
@@ -113,6 +120,13 @@ export const RunRecordSchema = z
     collected_at: z.iso.datetime(),
   })
   .superRefine((record, context) => {
+    if ((record.build_id !== null) !== (record.binary_sha256 !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["binary_sha256"],
+        message: "Binary digest must be non-null exactly when the run has a build id",
+      });
+    }
     const classMatches =
       record.exit_code === null
         ? record.exit_class === "cancelled" || record.exit_class === "lost"

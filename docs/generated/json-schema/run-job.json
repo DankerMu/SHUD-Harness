@@ -45,6 +45,43 @@
         }
       ]
     },
+    "build_id": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "threads": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "binary_sha256": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "backend": {
       "type": "string",
       "const": "local_job"

@@ -200,6 +200,30 @@ Non-goals: BuildRecord-derived repo metadata, job submission, binary validation,
 
 Review focus: null-only exclusion (never unconditional build_id exclusion); no broad input-type weakening; unchanged serialization algorithm; legacy evidence remains raw; capture adaptation is literal-only.
 
+#### Issue #522 implementation boundary
+
+Change surface: RunJob/RunRecord schemas, focused schema tests, generated examples/projections; only minimum null literals at typed jobs writers if required.
+
+Governing invariant: after defaults, build identity and binary digest are either both null or both present on either record type, independent of execution status or thread annotation.
+
+Must preserve: raw M2/M3 missing-key fixtures and file bytes/mtime; RunJob running pid/start checks; RunRecord exit triple, artifact paths, measurement and provenance constraints; original required fields and strict object shapes.
+
+Must add: branded nullable build_id, independently nullable positive-integer threads, nullable lowercase64 binary_sha256; default each to null; field-specific iff failure on binary_sha256 for all valid statuses.
+
+Sibling surfaces: source/public schema exports; existing core-schemas.test.ts fixtures and required-field checks; jobs submission/collector typed record construction and readonly file consumers; registry/selftest; generated RunJob/RunRecord projections.
+
+Control-flow boundary: RunJob's current running-only early return must not skip the new iff for submitted/collected or other statuses. Append an independent refine or place the relation outside that branch without changing the old pid check.
+
+Compatibility boundary: old raw inputs remain missing the new keys; parsed outputs intentionally add defaults. Adapt only observed output assertions or minimum writer null literals; never populate old fixtures to hide missing-key behavior.
+
+Seams under test: built core schema parsing of actual legacy JSON file reads and public valid/invalid records; this does not claim registry, collector, recovery, or submission behavior for non-null build fields.
+
+Required evidence: both schemas' null/build/partial-missing/invalid cases, all-status iff, independent threads validity, semantic RED/GREEN, unchanged legacy file evidence, only four generated artifacts changed, full check and same-SHA CI.
+
+Non-goals: build lookup/copy/hash computation, execution thread environment, collect inheritance, tool parameters, process/state/index/notification transitions, scientific claims.
+
+Review focus: defaults before iff; no accidental status gate or threads coupling; old predicates and raw evidence preserved; consumer adaptations literal-only.
+
 ### D10 DataProvenance 的外部 forcing 引用
 
 - `generateProvenance` 在遍历副本后解析 `<copied input>/<project>.tsd.forc`：第 2 行为 forcing 目录；相对路径按运行目录解析（SHUD 以运行目录为 cwd；ccw 的 `./input/ccw/` 落在副本内）。解析结果（realpath）位于副本目录之内 → `external_files: []`；位于副本外 → 第 3 行起的表格每行最后一列 `Filename` 拼该目录，逐一 `lstat` 为普通文件、计算 sha256 与字节数，按路径排序写入新增字段 `sources.external_files: [{path(绝对), sha256, size_bytes}]`（M3 记录读取时 `default([])`，不改写）。目录不存在、文件缺失、非普通文件或 `tsd.forc` 解析失败 → 提交失败并回滚（不降级为空列表）。这对 ccw 与所有无 build 提交同样生效：是 M4 对无 build 路径唯一的行为变化，Migration 回滚不声称"逐字节不变"。

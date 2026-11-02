@@ -1,14 +1,14 @@
 # Proposal
 
-## Active issue fixture: #521
+## Active issue fixture: #522
 
 - Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree).
-- Scope: task 2.2b only; nullable defaulted StackLock build_id and canonical fingerprint inclusion for non-null builds, fixed vectors, generated projection, minimum capture literal.
-- Selected risk packs: Public API; Schema/field names; File IO/read-reuse compatibility; Legacy compatibility; Documentation.
-- Evidence floor: schema/fingerprint semantic RED/GREEN, independently shasum-computed fixed vectors, real legacy readonly/capture reuse smoke, projection drift and unchanged siblings, full check, Critical Path #7 whitebox review and same-SHA CI.
-- Governing source: stack-lock「StackLock schema alignment」「Stack fingerprint」「StackLock generated projection」; #519 brands delivered by #556, #520 TaskCard delivered by #557.
+- Scope: task 2.2c only; RunJob/RunRecord nullable build_id, threads and binary_sha256 defaults, post-default build/hash equivalence, projections and minimum writer literals.
+- Selected risk packs: Public API; Schema/field names; File IO/read compatibility; Legacy compatibility; Documentation.
+- Evidence floor: focused semantic RED/GREEN on both schemas and all relevant statuses, frozen M2/M3 file-read smoke through built core, generator/drift and sibling-byte checks, full check, Critical Path #7 review and same-SHA CI.
+- Governing source: run-records「RunJob record」「RunRecord record」「Generated projection」; #519 brands delivered by #556, #521 StackLock delivered by #558.
 - Preserve #518 all-match floor semantics and #520 writer-owned link ordering; prior broad proposal summaries are historical context, not the active oracle.
-- No BuildRecord source capture, jobs/tools/profile/report behavior, other object extensions, host/config/dependency changes.
+- No build-file validation/copy, execution environment, collect inheritance, tool argument, state-machine, host/config/dependency changes.
 
 ## Why
 

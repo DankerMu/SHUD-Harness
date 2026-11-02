@@ -126,7 +126,12 @@ describe("RunRecord contract", () => {
       ...generateRunIdentifiers(),
       llm: { response_model: "deepseek-flash-guan", response_model_source: "configured" },
     };
-    expect(RunRecordSchema.parse(record)).toEqual(record);
+    expect(RunRecordSchema.parse(record)).toEqual({
+      ...record,
+      build_id: null,
+      threads: null,
+      binary_sha256: null,
+    });
   });
 
   test.each([
@@ -154,7 +159,12 @@ describe("RunRecord contract", () => {
     };
     const resources = { wall_seconds: value, peak_memory_mb: value };
     const candidate = { ...validRunRecord(), numerical_health, resources };
-    expect(RunRecordSchema.parse(candidate)).toEqual(candidate);
+    expect(RunRecordSchema.parse(candidate)).toEqual({
+      ...candidate,
+      build_id: null,
+      threads: null,
+      binary_sha256: null,
+    });
   });
 
   test.each([
@@ -218,7 +228,12 @@ describe("RunJob contract", () => {
   });
 
   test("submitted records preserve nullable references and process identity", () => {
-    expect(RunJobSchema.parse(validRunJob())).toEqual(validRunJob());
+    expect(RunJobSchema.parse(validRunJob())).toEqual({
+      ...validRunJob(),
+      build_id: null,
+      threads: null,
+      binary_sha256: null,
+    });
     expect(
       RunJobSchema.parse({
         ...validRunJob(),

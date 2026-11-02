@@ -15,6 +15,9 @@ Required is evaluated within the immediate parent object.
 | task_id | yes | yes | string \| null | minLength=1 |
 | stack_id | yes | yes | string \| null | minLength=1 |
 | data_id | yes | yes | string \| null | minLength=1 |
+| build_id | no | yes | string \| null | pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| threads | no | yes | integer \| null | maximum=9007199254740991 |
+| binary_sha256 | no | yes | string \| null | pattern=^[0-9a-f]{64}$ |
 | status | yes | no | enum<string> | values: `succeeded`, `failed` |
 | command | yes | no | array<string> | - |
 | exit_code | yes | yes | integer \| null | minimum=-9007199254740991; maximum=9007199254740991 |
@@ -59,6 +62,9 @@ job_id: "JOB-20261022T031500-a1b2"
 task_id: null
 stack_id: null
 data_id: null
+build_id: null
+threads: null
+binary_sha256: null
 status: "succeeded"
 command:
   - "/usr/local/bin/shud"
@@ -92,12 +98,15 @@ collected_at: "2026-10-22T03:16:00Z"
 ## Changelog Diff
 
 ```diff
-+ schema RunRecord sha256:fd8b130f453319d2aef766004688822a160a9c4d8fd7ecbd1f02b6cc2304c6c0
++ schema RunRecord sha256:6be4f0e369e46afa7389b842f10b5d5e897d25f52ced860abbb1fd3949c8a53f
 + field run_id required=yes nullable=no type=string constraints=pattern=^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field job_id required=yes nullable=no type=string constraints=pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field task_id required=yes nullable=yes type=string | null constraints=minLength=1
 + field stack_id required=yes nullable=yes type=string | null constraints=minLength=1
 + field data_id required=yes nullable=yes type=string | null constraints=minLength=1
++ field build_id required=no nullable=yes type=string | null constraints=pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field threads required=no nullable=yes type=integer | null constraints=maximum=9007199254740991
++ field binary_sha256 required=no nullable=yes type=string | null constraints=pattern=^[0-9a-f]{64}$
 + field status required=yes nullable=no type=enum<string> constraints=values: `succeeded`, `failed`
 + field command required=yes nullable=no type=array<string> constraints=-
 + field exit_code required=yes nullable=yes type=integer | null constraints=minimum=-9007199254740991; maximum=9007199254740991
