@@ -103,6 +103,28 @@ Review focus: precise strict shapes and error paths; complete bidirectional pred
 - 持久化顺序：CR JSON（`proposed`）→ patch → TaskCard 回写（`linked_changes` 追加；卡 `planned` 时转 `running`、`runtime_phase: running_local`；已 `running` 不变）；任一步失败返回含 `change_id` 的错误，已写文件保留（与 M3 `shud_run` 回写失败"运行已 durable"同一语义）。
 - `change_create` 不 ask：它只生成对象（对应 `report_generate`）。备选"单一 change_submit 一次完成"被 pre-execute 顺序否决：ask 先于执行，被拒即无 durable 记录。
 
+#### Issue #526 implementation boundary
+
+Change surface: repository-revision.ts exported runGit and focused tests; index wildcard already exposes the API.
+
+Governing invariant: every new-runner child receives only the specified environment and hardening argv, and protected commands cannot observe a parent repository through a nested cwd.
+
+Must preserve: collectRepositoryRevision source, four-call argv, inherited env excluding locator vars, normal untracked listing, existing overflow/error semantics and StackLock capture bytes. The new capability does not replace this legacy collector.
+
+Must add: async non-shell execFile returning Buffer; automatic native-realpath root validation for status/diff/archive and normal apply; fixed status/diff flags inserted before pathspec separator.
+
+Apply exception: named applyCeiling only for apply, existing absolute physical strict ancestor; add only GIT_CEILING_DIRECTORIES and skip root check. No arbitrary extraEnv or generic skipRootCheck.
+
+Resource/error contract: bounded 64 MiB default (actual pinned SHUD archive 18,636,800 bytes), optional positive integer maxBuffer; any new-runner overflow fails, never partial success. Bounded 4096-byte stderr tail, exit/system code and truncation indication, without raw cause/stdout/env/command dumps.
+
+Sibling surfaces: legacy collector and tests; captureStackLock repository snapshots/reuse; future observeSourceChanges, task_create HEAD and shud_build archive/apply. No new helper framework or consumer implementation.
+
+Required evidence: native git shim exact entry environment/prefix and absent fake-secret, compiled by system cc into test-owned temporary directories; Node/Python runtime-added Darwin variables cannot be filtered to fake this oracle. Record only key names and allowlisted values. Real config markers remain untouched; special path/root LF preservation; nested target verbs never run; archive beyond Node default buffer; real nonrepo apply isolation; legacy host-config discriminator and pre/post capture bytes/mtime.
+
+Non-goals: arbitrary Git-config determinism, pathspec literalization (#528), archive-attribute integrity (#537), source observation/build orchestration, additional environment variables, legacy refactor or retries.
+
+Review focus: actual subprocess environment rather than shell-added keys; unavoidable root checks; bounded complete output; no diagnostic raw-cause leak; unchanged legacy behavior and no fake archive/apply proof.
+
 ### D5 `change_submit` 与 policy-gate ask（Critical Path #3）
 
 - 参数：`change_id`。工具读取 CR，要求 `proposed`、`task_id` 的卡存在且 `running`，`lstat` 读取 `patches/<change_id>.patch` 并校验 sha256 == `patch_sha256`（不等 → 错误、零写入），然后原子写 `status: approved`、`approval_ref: exec.callId`、`approved_at`；CR 无 Markdown 投影。已 `approved` 的 CR 再次调用返回错误（不重复审批）。

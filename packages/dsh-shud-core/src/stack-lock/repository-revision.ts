@@ -1,5 +1,7 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { delimiter, isAbsolute } from "node:path";
+import { containsPath } from "../path-containment.ts";
 import type { RepositoryRevision } from "../schemas/index.ts";
 import { compareRepositoryPaths } from "./compare-paths.ts";
 
@@ -166,4 +168,124 @@ function failureDetail(error: unknown): string {
   const firstLine = typeof text === "string" ? (text.trim().split("\n")[0] ?? "") : "";
   if (firstLine !== "") return firstLine;
   return error instanceof Error ? error.message : "unknown git failure";
+}
+
+const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+const GIT_STDERR_TAIL_BYTES = 4096;
+
+/**
+ * Execute a new-workflow Git command without inheriting host configuration or secrets.
+ * Status, diff, archive and apply require the physical repository root.
+ * Status returns raw NUL-delimited paths; diff disables external programs and color.
+ * Only applyCeiling permits apply in a nonrepository directory beneath that physical ancestor.
+ * Output is bounded; subprocess failures never expose partial stdout or the original error.
+ */
+export async function runGit(
+  sourceDir: string,
+  args: readonly string[],
+  options: { maxBuffer?: number; applyCeiling?: string } = {},
+): Promise<{ stdout: Buffer }> {
+  const { PATH, HOME } = process.env;
+  if (PATH === undefined || HOME === undefined) {
+    throw new Error("git requires host PATH and HOME");
+  }
+  const maxBuffer = options.maxBuffer ?? GIT_MAX_BUFFER;
+  if (!Number.isSafeInteger(maxBuffer) || maxBuffer <= 0) {
+    throw new Error("git maxBuffer must be a positive safe integer");
+  }
+  const command = args[0];
+  if (command === undefined || command === "" || command.startsWith("-")) {
+    throw new Error("git requires a subcommand before options");
+  }
+  const env: NodeJS.ProcessEnv = {
+    PATH,
+    HOME,
+    LC_ALL: "C",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  if (options.applyCeiling !== undefined) {
+    if (command !== "apply") {
+      throw new Error("applyCeiling is only supported for git apply");
+    }
+    if (!isAbsolute(options.applyCeiling)) {
+      throw new Error("applyCeiling must be an absolute existing ancestor directory");
+    }
+    let ceiling: string;
+    let source: string;
+    try {
+      ceiling = realpathSync.native(options.applyCeiling);
+      source = realpathSync.native(sourceDir);
+    } catch {
+      throw new Error("applyCeiling and sourceDir must resolve to existing paths");
+    }
+    if (ceiling === source || !containsPath(ceiling, source)) {
+      throw new Error("applyCeiling must be a strict physical ancestor of sourceDir");
+    }
+    if (ceiling.includes(delimiter)) {
+      throw new Error("applyCeiling cannot contain the environment path-list delimiter");
+    }
+    env.GIT_CEILING_DIRECTORIES = ceiling;
+  }
+  const run = (commandArgs: readonly string[]): Promise<{ stdout: Buffer }> =>
+    new Promise<{ stdout: Buffer }>((resolve, reject) => {
+      try {
+        execFile(
+          "git",
+          ["-C", sourceDir, "-c", "core.fsmonitor=false", ...commandArgs],
+          { encoding: "buffer", env, maxBuffer },
+          (error, stdout, stderr) => {
+            if (error !== null) reject(controlledGitFailure(error, stderr));
+            else resolve({ stdout });
+          },
+        );
+      } catch (error) {
+        reject(controlledGitFailure(error));
+      }
+    });
+
+  const commandArgs = [...args];
+  if (
+    command === "status" ||
+    command === "diff" ||
+    command === "archive" ||
+    (command === "apply" && options.applyCeiling === undefined)
+  ) {
+    const { stdout } = await run(["rev-parse", "--show-toplevel"]);
+    const output = stdout.toString("utf8");
+    const topLevel = output.endsWith("\n") ? output.slice(0, -1) : output;
+    let sameRoot: boolean;
+    try {
+      sameRoot = realpathSync.native(sourceDir) === realpathSync.native(topLevel);
+    } catch (error) {
+      throw controlledGitFailure(error);
+    }
+    if (!sameRoot) throw new Error("not a git repository root");
+  }
+  if (command === "status" || command === "diff") {
+    const flags =
+      command === "status"
+        ? ["--porcelain", "-z", "--untracked-files=all"]
+        : ["--no-ext-diff", "--no-textconv", "--no-color"];
+    const separator = commandArgs.indexOf("--");
+    commandArgs.splice(separator === -1 ? commandArgs.length : separator, 0, ...flags);
+  }
+  return run(commandArgs);
+}
+
+function controlledGitFailure(error: unknown, stderr?: Buffer): Error {
+  const code = failureField(error, "code");
+  const detail =
+    typeof code === "number"
+      ? `exit ${code}`
+      : typeof code === "string"
+        ? `code ${code}`
+        : "code unknown";
+  const truncated = stderr !== undefined && stderr.length > GIT_STDERR_TAIL_BYTES;
+  const tail = stderr?.subarray(-GIT_STDERR_TAIL_BYTES).toString("utf8") ?? "";
+  return new Error(
+    `git failed (${detail})${truncated ? " [stderr truncated]" : ""}${tail ? `: ${tail}` : ""}`,
+  );
 }
