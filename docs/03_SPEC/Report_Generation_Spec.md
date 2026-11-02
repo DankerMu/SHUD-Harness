@@ -6,10 +6,12 @@ canonical_for: [language-guard, reviewer-checklist]
 # EvidenceReport 生成规范
 
 **状态：** P1 设计规范  
-**适用范围：** EvidenceReport、Markdown 投影、确定性 validator 与 PI 审阅；Reviewer preset 与完整 evidence lineage 属于后续里程碑。
+**适用范围：** EvidenceReport、Markdown 投影、确定性 validator 与 PI 审阅；M4 增 code_change / VerificationCase，完整 evidence lineage 仍属后续里程碑。
 **目标：** 将 deterministic evidence 与 LLM 叙述分离，避免 Agent 过度解释模型结果。
 
 M3 设计依据见 [m3-mvp-1 design D7/D8](../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d7-evidencereport-生成模板与水印)，当前契约以 [evidence-reports](../../openspec/specs/evidence-reports/spec.md) 为准。`dsh-shud-tools` 已挂载 `report_generate`、`report_validate` 与 PI 终态工具 `report_submit` / `report_decide`；生成与校验不代行终态审批。已挂载工具用法见 [Repository Layout](../04_IMPLEMENTATION/Repository_Layout.md)。
+
+M4 实现基线为 [m4-mvp-2 evidence-reports](../../openspec/changes/m4-mvp-2/specs/evidence-reports/spec.md)，下列 15 项检查和 code_change 扩展由对应实现 issue 交付，不把本次文档对齐视为运行时完成。M3 science_assist 的报告字节、七态水印与审批状态机必须保留。
 
 ## 1. 报告定位
 
@@ -29,6 +31,8 @@ M3 生成报告前必须通过 TaskCard closure 谓词，并解析其链接的 R
 
 M3 没有 metrics/图表/AnalysisPlan 生产者，不把这些作为生成前提；§5“指标与图表”固定说明本里程碑无指标 artifact，缺失写入 limitations。没有 RunRecord 的信息不能冒充已复盘结果。失败运行在渲染器/validator fixture 中保持可见；正常 report_generate 的 closure 已拒绝失败/取消运行。
 
+M4 的 code_change 另读取卡片链接的 ChangeRequest、patch、VerificationCase 与其 base/candidate BuildRecord，按 [code_change closure](../02_ARCHITECTURE/Agent_Architecture.md#7-closure-判据) 六子句检查。失败 VC 不阻止报告生成，但必须可见；缺失或不安全证据仍拒绝。`change_ids`、`verification_ids` 来自同一新鲜 TaskCard，不由模型提供。
+
 ## 3. 生成流程
 
 ```text
@@ -41,12 +45,12 @@ coordinator 提供叙述参数
 → 写 reports/<report_id>.json（draft）
 → TaskCard reporting / linked_reports 回写
 → 渲染同名 .md
-→ report_validate 的 13 项确定性检查
+→ report_validate 的 15 项确定性检查（M4 目标契约）
 → reviewed
 → report_submit / report_decide 经宿主审批
 ```
 
-工具不另调 LLM、不自行计算科学指标。引用参数中的 `TASK-/STACK-/DATA-/RUN-/JOB-/REPORT-` 品牌 id 逐一解析；缺失引用返回工具错误，不写 draft、不自动重试，由 coordinator 修正后重新生成。没有额外的 M3 artifact registry/hash 校验或 Reviewer preset 前置门。
+工具不另调 LLM、不自行计算科学指标。引用参数中的 `TASK-/STACK-/DATA-/RUN-/JOB-/REPORT-` 及 M4 `CHG-/VC-/BUILD-` 品牌 id 逐一解析；缺失引用返回工具错误，不写 draft、不自动重试，由 coordinator 修正后重新生成。M4 的 VC artifact 哈希复核仅限第 (15) 项，不扩展为通用 artifact registry 或语义审查。
 
 报告 JSON 是提交点，其后 TaskCard/Markdown 失败不回滚已提交对象；下一次针对同报告的工具调用按 [写入与修复契约](../../openspec/specs/evidence-reports/spec.md) 修复。重新生成总是新 report_id，保留旧报告字节与决定历史，不把旧终态改回 draft。
 
@@ -54,7 +58,7 @@ coordinator 提供叙述参数
 
 `report_validate` 先执行卡片与 Markdown 首部修复，再检查新鲜报告是否为 draft。修复独立提交，后续前置条件或 validator 失败不撤销修复、也不改报告 JSON。卡片修复只使用既有合法转换，不重开 done/cancelled，不以较早已链接报告移动卡片；未链接终态报告先在内存中完成全部转换，再一次发布最终卡片。正确水印下的正文差异不触发修复。
 
-校验结果为 `{ report_id, status, ok, checks }`，成功与检查失败都完整返回规范 13 项；检查失败保持 draft，而请求、前置条件与 IO 失败仍为工具错误。通过后仅提交 reviewed JSON 并更新 Markdown，不产生 PI 决定。raw-guard 在执行前保护生成的 reports 命名空间与本任务目标，以及校验的确切 JSON/Markdown 对和关联任务修复目标，写保护不提供审批绕过。
+M4 校验结果为 `{ report_id, status, ok, checks }`，成功与检查失败都完整返回规范 15 项；检查失败保持 draft，而请求、前置条件与 IO 失败仍为工具错误。通过后仅提交 reviewed JSON 并更新 Markdown，不产生 PI 决定。raw-guard 在执行前保护生成的 reports 命名空间与本任务目标，以及校验的确切 JSON/Markdown 对和关联任务修复目标，写保护不提供审批绕过。
 
 规范 `renderReport` / `validateReport` 及工具的入口 Markdown 修复、最终渲染共用无创建副作用的引用读取：报告、StackLock、DataProvenance 的路径安全、schema 与文件内 id 绑定由共享 readonly 工作区读取负责。缺失的 `reports` / `stacks` / `provenance` 目录保持不存在，包括配置为 raw 的引用根；不通过扩大 raw 拒绝范围或工具侧重复解析来掩盖读取副作用。普通三参数 `readWorkspaceRecord` 的既有创建目录行为不变。
 
@@ -90,9 +94,17 @@ coordinator 提供叙述参数
 
 comment 先表示为 JSON literal，再与其余五列一起经过既有结构化 metadata 单次转义：null 显示为 `null`，字符串 `"null"` 保留引号；原始空白、换行、反斜杠和引号以 JSON 转义保留。HTML、管道、反引号、反斜杠与物理换行不会生成新表格列或物理标题，模板样式文本不递归替换。该路径不是模型撰写的 prose；comment 不进入 §6 observations 或自动提升为科学解释，禁止用语检查仍只扫描原四个模型撰写字段，整份 Markdown 的密钥检查仍覆盖 §10。
 
+M4 在 §3 增加三个确定性事实表段：ChangeRequest（含 floor_categories、patch 路径/摘要、状态与 approval_ref）、VerificationCase（两 run/build 引用、两个 SHA256、判定与 reviewer 字段）、BuildRecord（先 base 后 candidate，含 source_commit、rhs_openmp、make_argv、compiler、patch_sha256、binary_sha256）；StackLock 仅在 build_id 非 null 时展示该行。不内联 patch、编译日志或求解器输出；字段清单遵循 [Deterministic facts table](../../openspec/changes/m4-mvp-2/specs/evidence-reports/spec.md#requirement-deterministic-facts-table)。
+
+code_change 报告 §5 逐字渲染 core 措辞常量（模板文本，不进入禁止短语集）：
+
+> 本里程碑无指标 artifact；验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。
+
+§7 除失败运行外还列出每个 failed VC 的 vc_id 与 failure_reason；无变更引用、无 build 的 M3 报告不新增这些段或 build_id 行，渲染字节不变。
+
 ## 4.1 Theory-to-Code Evidence 章节
 
-本节为 M4 科学变更规划；M3 只有 science_assist 首任务，不引入 Theory-to-Code 生产者或据此增加 closure 前提。
+本节完整 Theory-to-Code 章节是后续科学变更规划，不在 M4 已知答案回放中激活。M4 不生产 bundle，以 §3 的 CR/VC/Build 三段事实表与 §5 固定句承载证据（design D15(1)，M4 范围裁剪、非放宽 baseline）；M3 science_assist 不增加这些前提。
 
 对以下任务类型（semantic_level），报告必须增加 `Theory-to-Code Evidence` 章节：
 
@@ -136,7 +148,7 @@ comment 先表示为 JSON literal，再与其余五列一起经过既有结构�
 - Calibration improvement does not prove the physical hypothesis.
 ```
 
-高风险任务报告缺 Theory-to-Code Evidence 不能进入 reviewed。
+在完整 Theory-to-Code 范围激活后，高风险任务报告缺此章节不能进入 reviewed；M4 采用上面的替代契约，不要求不存在的 bundle 字段。
 
 ## 5. 语言约束
 
@@ -222,7 +234,7 @@ M3 的规范对象与唯一阅读格式：
 <workspace>/reports/<report_id>.md
 ```
 
-Markdown 由 JSON 及其引用记录确定性渲染；PI 通过 dsh 对话提供的路径或文件面板阅读。`export_manifest.yaml` 属于 M4 导出规划，不在 M3 生成，也不是 M3 验收前提。
+Markdown 由 JSON 及其引用记录确定性渲染；PI 通过 dsh 对话提供的路径或文件面板阅读。`export_manifest.yaml` 属于后续导出规划，不在 M3/M4 生成，也不是回放验收前提。
 
 **水印表（canonical，原 Report_Export_Spec §4 并入）**——按报告状态查表，7 态各有标记；布尔判据 `status != accepted` 已废除，它会把 accepted 后归档的报告误标为草稿（对抗审查 A06-6）：
 
@@ -236,7 +248,7 @@ Markdown 由 JSON 及其引用记录确定性渲染；PI 通过 dsh 对话提供
 
 规则：水印是正文的一部分（标题下第一行 + 文末最后一行），不得仅靠样式/注释承载；accepted 例外按表只在首部显示接受标记。后续 artifact registry 的 evidence_usable 与小型图表内联规则不作 M3 前提；任何阶段不得内联完整 stdout/stderr、raw SHUD binary output、大型 timeseries 或 secrets。
 
-M4 的 export manifest 规划记录 included/excluded artifacts；M3 仅引用 RunRecord 中的日志路径与产物清单，不读取/内联日志、raw 或求解器产物内容。`awaiting_pi` 保留水印渲染分支但只在审批卡挂起期间瞬时存在，M3 不将其落盘；`archived` 无 M3 状态转换生产者。
+后续 export manifest 规划记录 included/excluded artifacts；M3/M4 报告仅引用日志路径与产物清单，不内联日志、raw 或求解器产物内容，M4 比较器与第 (15) 项只读取目标 artifact 计算摘要。`awaiting_pi` 保留水印渲染分支但只在审批卡挂起期间瞬时存在，不将其落盘；`archived` 无 M3/M4 状态转换生产者。
 
 ### Evidence Lineage
 
@@ -244,7 +256,7 @@ M4 的 export manifest 规划记录 included/excluded artifacts；M3 仅引用 R
 
 ## 8. Reviewer 检查清单
 
-M3 的 draft → reviewed 唯一入口是 `report_validate`；每次列出全部 13 项结果，任一失败保持原状态，不消耗额外 LLM 调用。确定性 validator（D）：
+`report_validate` 是 draft → reviewed 唯一入口；M4 扩展后每次列出全部 15 项结果，任一失败保持原状态，不消耗额外 LLM 调用。确定性 validator（D）：
 
 1. StackLock 引用存在且 id 一致；
 2. DataProvenance 引用存在；
@@ -253,14 +265,16 @@ M3 的 draft → reviewed 唯一入口是 `report_validate`；每次列出全部
 5. limitations 非空；
 6. pi_questions 非空；
 7. 模型撰写节无十条禁止用语，命中指出短语与字段；
-8. 失败运行在“风险和失败项”列出（渲染/validator fixture 覆盖，正常生成仍受 closure 限制）；
+8. 失败运行与每个 failed VerificationCase 在“风险和失败项”列出；失败运行受生成 closure 限制，失败 VC 不被隐藏；
 9. 每个 dirty 仓库在 Markdown 有标注；
 10. 关键指标有 source_ref（M3 无指标，恒真并明确标注）；
 11. 图表观察有 artifact ref（M3 无图表，恒真并明确标注）；
 12. 四句 GOVERNANCE_INVARIANTS 在渲染 Markdown 中逐字出现；
 13. 整份 Markdown 不匹配 REPORT_SECRET_PATTERN；失败只指出所在节，不回显密钥匹配文本。
+14. `change_ids` 非空时，Markdown §5 逐字含 code_change 固定句；为空时通过并标注不适用；
+15. 每个 `verification_ids` 对象的两个 artifact_refs 必须是会话 cwd 下安全的普通文件，SHA256 分别等于 observed.base_sha256/candidate_sha256；缺失、链接或摘要不符均失败，空 verification_ids 时通过并标注不适用。
 
-不按路径含 tmp 或位于 `$TMPDIR` 拒绝报告：scratch 工作区与运行目录是合法事实来源。语义判断（L）仍由 PI 审阅，M3 无 Reviewer preset：
+第 (4)、(10)、(11) 项在 M3/M4 无指标/图表产物时恒真并明确标注，不伪造 artifact。不按路径含 tmp 或位于 `$TMPDIR` 拒绝报告：scratch 工作区与运行目录是合法事实来源。语义判断（L）仍由 PI 审阅，M4 reviewer 只补工程判定字段，不执行下列三项 LLM 语义判断：
 
 - calibration 是否被换述为结构验证；
 - PI comment 是否被误当科学事实；
@@ -295,7 +309,7 @@ M3 EvidenceReport/PiGateDecision 字段以 [evidence-reports schema 契约](../.
 - [ ] 每个 EvidenceReport 落为 standalone Markdown 文件。
 - [ ] 七态逐一匹配水印表，包括 archived 的终态继承；awaiting_pi/archived 渲染覆盖不冒充 M3 转换已实现。
 - [ ] 报告文件不包含 secrets、完整日志或 raw binary output。
-- [ ] M4 export manifest 不作为 M3 验收前提。
+- [ ] 后续 export manifest 不作为 M3/M4 验收前提。
 - [ ] PI decision comments 在 §10 的六字段历史表中按 JSON literal 展示，与 observations 分离；空历史显示 `No PI decision recorded.`，不增加二级标题。
 - [ ] accepted/null、rejected/revision_requested 非空批注、字符串 `"null"` 与 archived 继承展示正确；结构字符单次转义且重复渲染一致，源 JSON/引用记录字节和修改时间不变。
 - [ ] comment 不扩大禁止用语检查的四字段边界；其中的密钥形态仍由既有检查诊断为 section10，且不回显值。

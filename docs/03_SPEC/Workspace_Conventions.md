@@ -24,7 +24,7 @@ SHUD-Harness/          ← 项目根
   AutoSHUD/            ← submodule, 只读参考
 ```
 
-**规则**: Agent 不得直接修改根 submodule。任何需要改代码的任务，必须在 runtime workspace 中通过 `git worktree` 创建工作副本。
+**规则**: Agent 不得直接修改根 submodule。M4 在 scratch runtime workspace 内以根 SHUD 对象库作来源建立 `repos/SHUD` 独立本地 clone，钉定切片前 commit；不使用 `git worktree add`，避免改写根 submodule 的 git 元数据（design D15(8)，M4 范围裁剪、非放宽 baseline）。
 
 ### 1.2 Runtime workspace (执行副本)
 
@@ -40,7 +40,22 @@ workspace/
   runs/<run_id>/
 ```
 
-`repos/`、task worktree、分析 artifacts、warehouse、通知等下文目录是后续能力的预留布局，不由 M3 创建。会话与作业索引属于宿主/profile stateDir，不混入这张领域对象目录表。
+M4 新增的目标布局如下；由 [m4-mvp-2](../../openspec/changes/m4-mvp-2/design.md) 对应实现组交付，不因本页新增即视为已创建：
+
+```text
+workspace/
+  repos/SHUD/                       # 独立本地 clone；源码修改面
+  changes/<change_id>.json
+  patches/<change_id>.patch
+  verifications/<vc_id>.json
+  builds/<build_id>/
+    build-record.json
+    shud
+    make.stdout.log
+    make.stderr.log
+```
+
+task worktree、分析 artifacts、warehouse、通知等下文目录属于未激活的后续规划，不由 M3/M4 回放创建。会话与作业索引属于宿主/profile stateDir，不混入领域对象目录。
 
 原始数据目录 `<data_root>/raw/` **必须位于 workspace root 之外**（ADR-0004 治理不变式：dsh `workspace-write` 沙箱下由 Seatbelt 拒写，`data/raw` 字节保护不依赖字符串扫描）。M3 DataProvenance 记录提交输入副本的文件级 sha256，不在此定义原始数据语义分类。布局以 [Repository Layout §2](../04_IMPLEMENTATION/Repository_Layout.md#2-运行时资产不进代码仓) 为准。
 
@@ -49,21 +64,21 @@ workspace/
 | 层级 | 路径 | 用途 | Agent 写权限 |
 |------|------|------|-------------|
 | Source | `SHUD/`, `rSHUD/`, `AutoSHUD/` | 只读参考、StackLock 基线 | 禁止 |
-| Runtime repos | `workspace/repos/*` | 编译、运行的工作副本 | 受限（Sandbox policy） |
-| Task worktree | `workspace/tasks/TASK-*/worktrees/*` | 任务特定代码修改 | 允许 |
-| Scratch/tmp | `workspace/tasks/TASK-*/scratch/`, `workspace/tmp/` | 临时文件 | 允许 |
-| Artifacts | `workspace/artifacts/`, `workspace/runs/*/` | 运行产出 | 允许 |
-| Data provenance | `workspace/provenance/` | DATA-*.json 记录 | 允许（只读读取） |
+| Runtime repos | `workspace/repos/SHUD` | M4 修改源码的本地 clone；构建另在 builds 临时树 | coder 受 sandbox 限制 |
+| Task worktree | `workspace/tasks/TASK-*/worktrees/*` | 未激活的后续规划，M4 不使用 | M4 模型工具不得写 tasks |
+| Scratch/tmp | `workspace/tmp/` | 非证据临时文件 | 受 sandbox 限制 |
+| Artifacts / runs | `workspace/artifacts/`, `workspace/runs/*/` | 后续分析 / 已有运行产出 | runs 仅领域工具与受控求解器写 |
+| Governance records | `workspace/{tasks,stacks,provenance,reports,changes,patches,verifications,builds}` | 领域事实与投影 | 仅对应领域工具写；模型可只读 |
 | Secrets | `workspace/secrets/` | local-token 等敏感文件（0600） | backend 私有 |
 
 ### 1.4 与其他规范的关系
 
 - **Sandbox path policy** (`Execution_Jobs_Runs.md` §9.2): 允许路径列表对应上表中"允许"和"受限"行
-- **StackLock**: 记录 source submodule 的 commit；若 runtime repos 有本地修改，StackLock 标记 `dirty: true`
-- **ChangeRequest patch bundle**: 基于 task worktree 与 source submodule 的 diff 生成
-- **Git worktree rollback**: 仅影响 `workspace/tasks/TASK-*/worktrees/`，不触及 source submodule
+- **StackLock**: 无 build 取配置三仓库修订；M4 有 build 时 SHUD 来源取 BuildRecord，另两个仓库照常采集。
+- **ChangeRequest patch**: M4 对钉定 HEAD 的 `repos/SHUD` 观测已跟踪修改，保存到 `patches/<change_id>.patch`，不用根 submodule 与工作副本间的任意 diff 替代。
+- **构建与回滚**: 钉定 commit 的 archive 加已批 patch 在 `builds/.tmp-<build_id>/src/` 构建，发布前失败仅清理本次临时构建；不修改 `repos/SHUD` 或根 submodule。
 
-源码仓库可以来自 submodule、runtime clone 或 worktree，但 StackLock 必须记录实际 commit 和 dirty state。
+源码与构建来源必须可追溯；M4 不用 worktree，也不声称工作树里的任意文件都是构建输入。
 
 ## 2. Task 目录
 
@@ -87,13 +102,14 @@ runs/<run_id>/
   stderr.log
   wrapper.pid
   exit_code                      # 包装进程完成时原子发布
+  bin/shud                       # M4 仅有 build_id 时：经摘要校验的执行副本
 ```
 
 这是 M2 已交付布局；可选/完成后文件并非提交时全部存在。active.json、completed.json、lock 与永久 .lock-guard 位于插件 stateDir，不在 run 目录。每个 RunRecord 对应一个运行目录，产物只记路径与元数据，M3 不增加 metrics.yaml 或 artifacts.yaml。
 
 ## 4. 领域对象与 Artifact 落点
 
-| 对象 | M3 工作区路径 | 所有权 |
+| 对象 | 工作区路径（M4 行为目标契约） | 所有权 |
 |---|---|---|
 | TaskCard | `tasks/<task_id>/task.json` | records 文件层，经工具推进状态 |
 | StackLock | `stacks/<stack_id>.json` | 提交期确定性采集/复用，不覆盖既有 lock |
@@ -101,17 +117,21 @@ runs/<run_id>/
 | EvidenceReport | `reports/<report_id>.json` | 规范对象，含 decision_history |
 | Markdown 报告 | `reports/<report_id>.md` | 同名 JSON 的确定性投影，状态改变后重渲染 |
 | RunJob / RunRecord | `runs/<run_id>/{run-job,run-record}.json` | M2 注册表与收集器 |
+| ChangeRequest | `changes/<change_id>.json` | change_create / change_submit |
+| Patch | `patches/<change_id>.patch` | change_create 确定性生成，批准/构建/closure 复核摘要 |
+| VerificationCase | `verifications/<vc_id>.json` | verification_run |
+| BuildRecord 与二进制 | `builds/<build_id>/` | shud_build 整体发布，消费者校验二进制摘要 |
 
-以上对象不经 ctx.storage，不另建 stateDir 对象索引；目录与目标文件拒绝符号链接/特殊文件，读入后校验 schema。records 包是 M3 规划文件层，不是 Cordis 服务行。报告不在 `artifacts/` 下保留第二份。
+以上领域对象不经 ctx.storage；新对象不另建 stateDir 索引，运行索引仍归 jobs。目录与目标文件拒绝符号链接/特殊文件，按品牌 id 定位并核对文件内 id、schema。records 是文件层而非 Cordis 服务行。M4 新对象首次采用排他创建，碰撞至多重新分配 id 三次，不覆盖既有对象；build 临时目录排他 mkdir 后整体 rename 发布。报告不在 artifacts 下保留第二份。
 
-后续 M4/M5 的 figures、metrics、patches、repo_context、manifests 与数据打包路径由对应契约定义；不据此要求 M3 生成不存在的分析或导出产物。
+后续 figures、metrics、repo_context、manifests 与数据打包路径不属于 M4 回放交付；patch 的唯一落点已在上表定义。
 
 Artifact 文件名建议包含 task/run/report ID：
 
 ```text
 RUN-001_rivqdown_hydrograph.png
 RUN-001_metrics.yaml
-TASK-001_patch_bundle.diff
+CHG-20261102T093000-4a1f.patch
 ```
 
 ## 5. Data 目录
@@ -179,6 +199,10 @@ resolve path
 → record normalized path
 ```
 
+**M4 治理根写保护：** 相对会话 cwd 固定九根 `tasks stacks provenance reports runs changes patches verifications builds`，不可配置。模型 write/edit/str_replace_editor（非 view）目标命中即 deny `governance-immutable`；bash/pwsh 触及且被既有写 denylist 判为写也 deny，只读触及 next。与角色或 sandbox_permissions 无关，raw 同时命中时优先执行 raw 规则；`repos/` 不在集合中。
+
+这是启发式保护，不是工作区内的沙箱强隔离。绕过 shell denylist 的写法仍可能改写治理记录，`repos/SHUD/.git` 篡改亦不在 M4 威胁模型内。补偿为 ask 前、change_submit 执行时、shud_build 与 closure 的 patch 摘要复核、运行二进制摘要复核，以及回放对 approval_ref 与 session log 的交叉核对；不宣称密码学审批证明。边界见 [design D15(9)/D16](../../openspec/changes/m4-mvp-2/design.md#d16-治理根写保护critical-path-23)。
+
 ## 9.1 Operational UX artifact paths
 
 ### Report files
@@ -188,7 +212,7 @@ reports/<report_id>.json
 reports/<report_id>.md
 ```
 
-M3 只交付 Markdown 及规范 JSON；不生成 HTML。`export_manifest.yaml` 属于 M4 导出规划，不是 M3 报告必需产物。下面的通知/分析进度等 operational UX 目录仍是后续规划，不代表当前宿主已经生成这些文件。
+M3/M4 只交付 Markdown 及规范 JSON，不生成 HTML；`export_manifest.yaml` 属于后续导出规划，不是回放必需产物。下面的通知/分析进度等 operational UX 目录仍是后续规划，不代表当前宿主已经生成这些文件。
 
 ### Notification records
 

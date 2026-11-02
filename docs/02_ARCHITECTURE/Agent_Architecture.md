@@ -159,6 +159,8 @@ If task/change semantic_level is `physical_equation`, `model_assumption`, `numer
 4. Reviewer checks theory-to-code lineage.
 5. PI gate controls accepted/accepted_for_search.
 
+**M4 替代路由（D15(1)/(8)，M4 范围裁剪、非放宽 baseline）：** 本轮不生产 bundle，不执行上述 bundle → mapping → accepted_for_search 路由。coordinator 建 code_change 卡、钉定 scratch workspace 的 `repos/SHUD` 本地 clone HEAD；coder 先构建 base，再重导出切片并 change_create → change_submit，经 PI 卡批准后构建候选；worker 以两个 build_id、threads: 1 各跑 keliya；reviewer 调用 verification_run；coordinator 生成并提交报告，经第二张 PI 卡结束。根 submodule 不变，不用 git worktree add；search/calibration 未开放。CR 拒绝理由由 PI 在对话给出，coordinator 转述，不由 agent 自批或写入批准元数据。
+
 ### 4.5 Dispatch
 
 Coordinator 根据计划派发 Worker。短任务可以同步执行，长任务必须转换成 RunJob 并进入 Park/Resume 流程。
@@ -236,14 +238,25 @@ TaskCard 不能仅因为 LLM 认为“完成了”而关闭。closure 由两层�
 | sensitivity | AnalysisPlan.parameter_sets 全部处于终态；failed cell 均有 failure_reason；sensitivity_table artifact 存在 |
 | calibration | 参数空间、目标函数、calibration/holdout 窗口已落盘；holdout 结果存在或明确标记 not_run；报告含 calibration ≠ validation 限制 |
 | benchmark | baseline 与 candidate 的 RunRecord 均存在且 stack_id/data_id 可比；差异摘要 artifact 存在 |
-| code_change | ChangeRequest、patch、测试结果、review note 四者完整；semantic_level 已填写 |
+| code_change | 下列 M4 六子句全部成立；review note 由 VerificationCase 字段承载，不另造对象 |
+
+**M4 code_change closure**（[task-cards 权威契约](../../openspec/changes/m4-mvp-2/specs/task-cards/spec.md#requirement-code_change-closure-predicate)；实现不以 LLM 为据）：
+
+0. `linked_jobs` 非空，且本次 report_generate 参数的 observations、limitations、pi_questions 各至少一条；limitations 仅计模型传入条目，不用模板补充凑数。
+1. 至少一个 linked CR 属本卡、status 为 approved，且对应 patch 安全可读、SHA256 匹配。
+2. 至少一个 linked VC 属本卡且引用该 approved CR，status 为 passed 或 failed；其 base/candidate 对应 RunJob 的 job_id 均在 linked_jobs。
+3. 该 VC 的 reviewer_notes 至少一条且 reviewed_by 非空；由 schema 保证，读取不合格对象即不成立。
+4. 该 CR 的 semantic_level 已填写；由 schema 保证。
+5. 所有 linked_jobs 满足既有 science_assist 运行子句：均已 collected、RunRecord succeeded 且 stack_id/data_id 非 null；不存在 failed/cancelled 或收集重试耗尽的作业。
+
+所有对象按链接只读解析，不扫描目录认领；缺失、损坏、不安全或身份不符使谓词不成立。异步读取后以新鲜卡片求值，不丢弃新增链接。failed VC 允许进入 reporting、必须展示失败，但不能通过回放验收；closure 成立也不等于 PI 接受报告。其它表行中的未激活类型仍是规划，M4 不借此实现 engineering/ops/search 生产者。
 
 ## 8. 并发规则
 
 1. 同一 TaskCard 只能有一个 active Coordinator。
 2. Repo Explorer 可以与 Coordinator planning 并行，但只能读 source/runtime repo 和 task artifact。
 3. 同一 workspace 可并行多个 RunJob，但不得共享同一 run directory。
-4. 代码变更任务必须独占对应 worktree。
+4. M4 代码变更任务采用单卡单 coder，独占 scratch workspace 的 `repos/SHUD` 本地 clone；多卡共享检出的互斥未实现，不宣称运行时自动锁定。
 5. sensitivity batch 可并发，但每个 parameter set 必须独立 RunRecord。
 6. Reviewer 可以并行审查多个已完成 artifact，但不能改写原始输出。
 

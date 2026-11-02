@@ -8,7 +8,7 @@ status: living
 **用途**：语料库为中文叙述 + 英文标识符混写，同一概念的 grep 关键词被劈成两种形态。检索前先查本表，把术语翻成中英两态再搜。
 **维护**：由 `grill-with-docs` / `improve-codebase-architecture` 技能维护；新增术语必须带权威出处，出处冲突以 [CANONICAL_CONTRACTS](../docs/00_INDEX/CANONICAL_CONTRACTS.md) 判序。
 
-## 1. 核心对象（8 + 1）
+## 1. 核心对象（含 M4 扩展）
 
 | 中文 | 标识符 | 定义 | 权威出处 |
 |---|---|---|---|
@@ -20,7 +20,8 @@ status: living
 | 分析计划 | `AnalysisPlan` | 敏感性/校准/基准分析的批量执行计划（`mode=sensitivity` 一等公民） | 同上 |
 | 证据报告 | `EvidenceReport` | 供 PI 决策的规范 JSON 对象 `reports/<report_id>.json`（品牌 REPORT id，含 decision_history）；同名 `.md` 为确定性渲染投影 | [M3 evidence-reports](specs/evidence-reports/spec.md) |
 | 变更请求 | `ChangeRequest` | 代码/参数变更的 patch 载体，走科学分级门 | [Minimal_Schemas](../docs/03_SPEC/Minimal_Schemas.md) |
-| 记忆笔记 | `MemoryNote` | 轻量记忆条目（普通直写 draft，证据类需 PI review） | 同上 + [Memory_Skills_Lite](../docs/03_SPEC/Memory_Skills_Lite.md) |
+| 构建记录 | `BuildRecord` | M4 一次成功 SHUD 构建的身份：钉定 source_commit、可空已批 change_id/patch_sha256、构建命令、编译器、二进制摘要；不是工作树快照 | [Minimal_Schemas §11](../docs/03_SPEC/Minimal_Schemas.md#11-buildrecord) |
+| 记忆笔记 | `MemoryNote` | 轻量记忆条目（普通直写 draft，证据类需 PI review） | [Minimal_Schemas §9](../docs/03_SPEC/Minimal_Schemas.md#9-memorynote) + [Memory_Skills_Lite](../docs/03_SPEC/Memory_Skills_Lite.md) |
 
 ## 2. 角色（canonical 枚举）
 
@@ -30,7 +31,7 @@ status: living
 | 协调员 | `coordinator` | 建卡、执行计划、监控消耗、生成报告；无科学决策权 | 同上 |
 | 仓库探索者 | `repo_explorer` | 只读探索仓库、定位入口/调用链/影响面 | 同上 |
 | 执行者 | `worker` | 跑模型、解析日志、写脚本、生成图表 | 同上 |
-| 编码者 | `coder` | 在 worktree 改代码、产 patch/ChangeRequest | 同上 |
+| 编码者 | `coder` | M4 在 scratch workspace 内 repos/SHUD 本地 clone 改已跟踪代码，经工具产 patch/ChangeRequest/BuildRecord；不直接运行 SHUD | 同上 |
 | 审查者 | `reviewer` | 工程完整性与兼容性检查，不判断科学结论 | 同上 |
 
 ## 3. 信任与上下文
@@ -67,7 +68,10 @@ status: living
 | 策略门 | policy gate | `tools/pre-execute` waterfall 监听器返回 `deny`/`ask`/`allow`；`ctx.tools.guard()` 作单调终局拒绝 | [ADR-0004](../docs/adr/implemented/0004-dsh-kernel.md) + 上游 `docs/tool-execution-pipeline.md` |
 | 语义级别 | `semantic_level` | 科学变更风险分级（决定是否触发 PI gate） | [Scientific_Change_Gating_Spec](../docs/03_SPEC/Scientific_Change_Gating_Spec.md) |
 | 输出语义下限 | output_semantics floor | 特定类别变更的最低语义级别地板 | 同上 |
-| PI 门 | PI gate | 高风险动作阻塞等待 PI 显式决策的状态 | 同上 + [PI_Decision_Comments_Spec](../docs/03_SPEC/PI_Decision_Comments_Spec.md) |
+| 语义级别下限 | semantic level floor / `semantic_floor` | 仓库内受测 path→floor 常量派生的最低级别；全部匹配取最大、未匹配取 numerical_implementation，不由 LLM 降级 | [Gating §1.1](../docs/03_SPEC/Scientific_Change_Gating_Spec.md#11-分类的确定性下限semantic-level-floor) |
+| 下限类别集合 | `floor_categories` | 观测路径命中全部 floor 值的排序去重集合，包含被更高 floor 遮盖的类别；最大值为 semantic_floor | 同上 |
+| 治理根 | governance roots / `governance-immutable` | tasks、stacks、provenance、reports、runs、changes、patches、verifications、builds；M4 模型文件/shell 工具不得写、由领域工具拥有；shell 判定为启发式 | [Workspace §9](../docs/03_SPEC/Workspace_Conventions.md#9-路径安全) |
+| PI 门 | PI gate | 高风险动作阻塞等待 PI 显式决策的状态 | [Scientific_Change_Gating_Spec](../docs/03_SPEC/Scientific_Change_Gating_Spec.md) + [PI_Decision_Comments_Spec](../docs/03_SPEC/PI_Decision_Comments_Spec.md) |
 | PI 门决定 | `PiGateDecision` | M3 报告 decision_history 条目：decision_id/report_id/approval_ref/outcome/comment/decided_at；只在工具获 allowed-once 后记录，approval_ref 为本次 callId，经 session log 关联审批；accepted 的 comment 为 null，其余非空 | [M3 evidence-reports](specs/evidence-reports/spec.md#requirement-pigatedecision-record) |
 | 决策卡 | decision card | *_review 门的结构化选项卡（3 实分支 + 推荐 + 自由输入，仿 AskUserQuestion） | [Theory_To_Code_Governance_Spec](../docs/03_SPEC/Theory_To_Code_Governance_Spec.md) §5.0 |
 | 停机条件 | stop conditions | Control Kernel 的确定性终止判据集 | Control_Kernel §5 |
@@ -92,7 +96,9 @@ status: living
 | 验证用例 | `VerificationCase` | verification/validation/calibration 三界清晰的验证单元 | [Verification_Case_Spec](../docs/03_SPEC/Verification_Case_Spec.md) |
 | 准入搜索 | `accepted_for_search` | bundle 状态：允许下游校准/搜索的前置门 | [Controlled_Search_Boundary_Spec](../docs/03_SPEC/Controlled_Search_Boundary_Spec.md) |
 | 校准 ≠ 结构验证 | calibration vs structural validation | 校准结果必须标注 calibration，不得表述为模型结构改进 | Verification_Case_Spec + CLAUDE.md Governance Rules |
-| 已知答案回放 | known-answer replay | 首任务模式：从兄弟项目 openMP 抽取已完成变更，经 Harness 治理链路重走，用既有 ground truth 评价 Harness 正确性 | [ADR-0002](../docs/adr/implemented/0002-mvp-reality-anchoring.md) D3/D4 |
+| 已知答案回放 | known-answer replay | M4 第二任务：只给 P1e 设计与五文件清单、不提供上游 diff，由 coder 从切片前 base 重导出，经 CR 审批、两次运行、VC 与报告审批评价 Harness 治理链路 | [Phased_Plan M4](../docs/04_IMPLEMENTATION/Phased_Plan.md#4-m4-mvp-2) |
+| 基线 / 已知答案 | base / known answer | base 是 9a422e5 全 sha 的干净 serial 构建及其本次输出；known answer 指上游已交付切片作为回放背景，不是把上游 diff 或历史性能数字交给模型复制 | [M4 design D2/D13](changes/m4-mvp-2/design.md) |
+| 回放本机闸 | `shud:replay` | M4 目标脚本：Web 单提示、恰两次自动审批与文件/session log 联合判据；N=1 bitwise passed 才成功，自动审批不是 PI 功能验收 | [known-answer-replay](changes/m4-mvp-2/specs/known-answer-replay/spec.md) |
 
 ## 7. 记忆与技能
 

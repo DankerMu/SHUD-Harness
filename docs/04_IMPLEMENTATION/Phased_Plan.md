@@ -57,8 +57,21 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 
 ## 4. M4 MVP-2
 
-**交付**：ChangeRequest + VerificationCase 对象；coder/reviewer preset（worktree 内改代码、生成 patch）；openMP RHS 切片回放（素材按 ADR-0002 开放项 1）。
-**验收门**：ADR-0002 D4。
+**交付契约**（[Epic #515](https://github.com/DankerMu/SHUD-Harness/issues/515)，[m4-mvp-2](../../openspec/changes/m4-mvp-2/proposal.md)，不是完成状态）：ChangeRequest、VerificationCase、BuildRecord；code_change TaskCard 与确定性 closure；coder/reviewer preset 与四角色工具面；change_create/change_submit/shud_build/verification_run；构建绑定运行与报告事实表。coder 在 scratch workspace 内 `repos/SHUD` 的独立本地 clone 修改已跟踪文件，不使用 git worktree add、不修改根 submodule（D15(8)，M4 范围裁剪、非放宽 baseline）。
+
+**回放素材**：SHUD 钉定切片前 `9a422e5eb708df7d2f8b4066a3083a031d679a82`；提供 P1e StrictOMP 设计文档与五文件清单，不给上游 diff，由 coder 重导出。base 从干净钉定 commit 构建，candidate 从同一归档加已批 patch 构建。keliya 输入只在副本改 NUM_OPENMP=1 与外部 forcing 路径，窗口保留 12053–12143，不传 end_days。
+
+**工程验收门**：ADR-0002 D4，目标命令 `pnpm run shud:replay <scratch-workspace>`（由 #547 交付、本机阻断、CI 不运行），必须满足 [Replay acceptance criteria 全部判据](../../openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)：
+
+- TaskCard/CR/两个 BuildRecord 的 base commit 均为上述完整 sha；恰一个 approved CR，文件集限五文件且含 Makefile 与 MD_rhs_core.cpp，numerical_implementation/high。
+- 恰两个成功 BuildRecord：base 无 CR/patch、rhs_openmp=false；candidate 绑定已批 CR/patch、rhs_openmp=true，make.stdout.log 有 `-fopenmp` 编译链接证据。
+- 两个已 collected、成功的 keliya 运行，threads=1、分别绑定两构建，每份 provenance 的 external_files 恰 32 项；恰一个 passed VC，rivqdown SHA256 bitwise 相等。
+- 报告 accepted、卡 done；两份不同 build_id 的 StackLock、CR/VC/Build 事实表、四句不变式与 §5 固定句齐全；四角色 header 与 coordinator 三委派工具有 canonical session log 证据。
+- 恰两次自动 Allow once（CR、报告），approval_ref 与对应 asked/decided 关联；clone HEAD/git dir、根 submodule 修订与 git 元数据、ccw 输入及 raw 字节按判据保持不变。
+
+前置为本机 SHUD 工具链、SHUD_BIN、SUNDIALS_ROOT、DMXAPI_KEY 与 keliya 来源；缺项明确失败。VC failed 或任何判据不成立均 exit 1，不降为 INCONCLUSIVE。bitwise 一致只证明 N=1 与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论；不做性能复现。
+
+**PI 功能验收**：按 Epic 安排在 #549 收口，由 PI 在 Web 亲自完成 CR 卡与报告卡各至少一次操作，证据记 Migration_Plan；另立验收 ADR，PI 明确通过后转 implemented。子 PR 工程合并、脚本自动审批不等于 PI 验收，模型能否重导出切片仍是实测项；PI 通过前 Epic 保持 open、change 未归档。此计划不自行批准 ADR-0011 的状态转换（#517 另需 PI 确认）。
 
 ## 5. 全程不变式
 
@@ -67,3 +80,5 @@ secrets 不进 RunRecord/报告/git；agent 不作科学结论判断；高风险
 ## 6. 升级节奏
 
 每个里程碑边界开一条 `chore(dsh-upgrade)` issue：读上游 `docs/upgrade-guide/<tag>/`，评估 seam 影响，升级或记录跳过原因；升级后重跑 spike 五项探针（`../dsh-spike/runs/`）作为回归。
+
+**M4 边界例外（2026-11-02，D15(7)）：** PI 决定保持 dsh `0.2.1-rc.2`，本轮不新开 `chore(dsh-upgrade)` issue；理由是已知答案回放只扩展现有 seam，避免把宿主升级引入回放变量。这是本轮范围裁剪、非放宽 baseline，后续边界仍执行上述升级评估规则。rc.2 同包三条 tool-subagent 的装配由 #543 首条 smoke 断言实测，失败报告 seam 偏差，不修改宿主绕过。
