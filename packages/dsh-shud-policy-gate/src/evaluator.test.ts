@@ -15,7 +15,7 @@ beforeEach(() => vi.mocked(evaluatePolicyGate).mockClear());
 test.each([
   { preset: "coordinator", role: "coordinator" },
   { preset: "worker", role: "worker" },
-  { preset: "reviewer", role: "unknown" },
+  { preset: "reviewer", role: "reviewer" },
   { preset: undefined, role: "unknown" },
 ])(
   "canonical rules evaluate current $preset as $role with the original input",

@@ -27,6 +27,18 @@ test.each([
   { role: "coordinator", tool: "shud_run", reason: "Role coordinator cannot call tool shud_run." },
   { role: "coordinator", tool: "read", reason: "Role coordinator cannot call tool read." },
   { role: "worker", tool: "read", reason: "Role worker cannot call tool read." },
+  { role: "coder", tool: "shud_run", reason: "Role coder cannot call tool shud_run." },
+  { role: "coder", tool: "subagent", reason: "Role coder cannot call tool subagent." },
+  { role: "coder", tool: "job_kill", reason: "Role coder cannot call tool job_kill." },
+  { role: "reviewer", tool: "shud_build", reason: "Role reviewer cannot call tool shud_build." },
+  { role: "reviewer", tool: "edit", reason: "Role reviewer cannot call tool edit." },
+  { role: "reviewer", tool: "bash", reason: "Role reviewer cannot call tool bash." },
+  {
+    role: "reviewer",
+    tool: "change_submit",
+    reason: "Role reviewer cannot call tool change_submit.",
+  },
+  { role: "reviewer", tool: "job_kill", reason: "Role reviewer cannot call tool job_kill." },
 ])("$role calling $tool receives the canonical deny", async ({ role, tool, reason }) => {
   const h = await createPolicyHarness({ preset: role });
   try {
@@ -63,6 +75,19 @@ test.each([
   { role: "coordinator", tool: "task_create" },
   { role: "coordinator", tool: "subagent" },
   { role: "coordinator", tool: "shud_collect" },
+  { role: "coordinator", tool: "subagent_coder" },
+  { role: "coordinator", tool: "subagent_reviewer" },
+  { role: "coder", tool: "bash" },
+  { role: "coder", tool: "read" },
+  { role: "coder", tool: "edit" },
+  { role: "coder", tool: "change_create" },
+  { role: "coder", tool: "change_submit" },
+  { role: "coder", tool: "shud_build" },
+  { role: "reviewer", tool: "read" },
+  { role: "reviewer", tool: "verification_run" },
+  { role: "reviewer", tool: "shud_collect" },
+  { role: "reviewer", tool: "job_output" },
+  { role: "reviewer", tool: "job_list" },
 ])("$role delegates $tool exactly once without terminating allow", async ({ role, tool }) => {
   const h = await createPolicyHarness({ preset: role });
   try {
@@ -90,17 +115,7 @@ test("delegation propagates a downstream rejection without reclassifying or retr
   }
 });
 
-test.each([
-  undefined,
-  null,
-  "",
-  "unknown",
-  "standard",
-  "repo_explorer",
-  "coder",
-  "reviewer",
-  " custom ",
-])(
+test.each([undefined, null, "", "unknown", "standard", "repo_explorer", " custom "])(
   "unmapped current identity %j delegates ordinary tools but still asks for reports",
   async (preset) => {
     const h = await createPolicyHarness({ preset });
