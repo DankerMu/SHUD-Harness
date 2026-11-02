@@ -1,5 +1,14 @@
 # Proposal
 
+## Active issue fixture: #518
+
+- Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree).
+- Scope: task 2.3 only; core semantic floor public API and existing schema generator constant projection.
+- Selected risk packs: Public API; Schema/field names; Auth/governance; File IO; Legacy compatibility; Documentation.
+- Evidence floor: semantic negative/positive unit cases, generator self-test, real generated-output drift rejection, built public-export smoke, full `pnpm run check`, independent review and CI.
+- Governing source: change-requests「Semantic level floor」and engineering-gates「New core objects participate in schema drift gate」. The older summary below saying unmatched pure_engineering is stale; the approved D6/scenarios require numerical_implementation. Categories preserve every matched entry, including lower levels shadowed by a higher floor.
+- No new schemas, tools, runtime overrides, dependencies, or host changes in this slice.
+
 ## Why
 
 M4 的用户可见步骤是"提交 openMP RHS 切片 ChangeRequest，经 VerificationCase 判定"（`docs/04_IMPLEMENTATION/Phased_Plan.md` §0 M4 行、§4），验收门为 ADR-0002 D4：治理链路走通 + 正确性门按 serial baseline 一致性判定，不做性能复现。M3 已于 2026-11-01 通过 PI 阶段验收（ADR-0010），TaskCard → RunJob → RunRecord → EvidenceReport 主链与报告终态审批就绪；但 M4 需要的三个对象（ChangeRequest、VerificationCase、BuildRecord）在代码里不存在，`TaskTypeSchema` 没有 `code_change`，`role-tool-map.ts:29-43` 的 coder/reviewer/repo_explorer 仍是 Zero 时代工具 id，coordinator 只能派 worker，所有运行都用预构建 `SHUD_BIN`（仓库内没有任何构建步骤），`Scientific_Change_Gating_Spec.md` 引用的 semantic_level floor 配置不存在。M3→M4 边界的 dsh 升级评估由 PI 决定本轮不做（保持 `dsh-v0.2.1-rc.2`，npm latest 已是 rc.5，仅记录）。

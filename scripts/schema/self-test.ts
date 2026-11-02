@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z, type ZodType } from "zod";
 
+import {
+  SEMANTIC_LEVEL_FLOORS,
+  SEMANTIC_LEVEL_ORDER,
+  riskForLevel,
+} from "../../packages/dsh-shud-core/src/governance/semantic-level-floor.ts";
 import { TaskCardSchema } from "../../packages/dsh-shud-core/src/schemas/task.ts";
 import { recreateGeneratedDirectory } from "./generated-paths.ts";
 import {
@@ -16,6 +21,7 @@ import {
   buildExample,
   buildJsonSchema,
   buildMarkdown,
+  buildSemanticLevelFloorMarkdown,
   flattenFields,
   nonNullSchema,
   type JsonSchema,
@@ -286,6 +292,7 @@ export async function runSelfTest(): Promise<void> {
   await assertGeneratedPathRejectsSymlinkAncestor();
   assertTaskCardUnknownKeyParity();
   assertGeneratorSemanticContracts();
+  assertSemanticLevelFloorProjection();
   for (const definition of schemaDefinitions) {
     const jsonSchema = buildJsonSchema(definition);
     if (definition.strictInput) {
@@ -296,6 +303,37 @@ export async function runSelfTest(): Promise<void> {
   }
 
   console.log("schema generator self-test passed");
+}
+
+function assertSemanticLevelFloorProjection(): void {
+  const tables: string[][][] = [];
+  let rows: string[][] | undefined;
+  for (const line of buildSemanticLevelFloorMarkdown().split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) {
+      rows = undefined;
+      continue;
+    }
+    const cells = trimmed
+      .slice(1, -1)
+      .split("|")
+      .map((value) => value.trim());
+    if (cells.every((value) => /^:?-+:?$/.test(value))) {
+      rows = [];
+      tables.push(rows);
+    } else if (rows) {
+      rows.push(cells);
+    }
+  }
+  const expectedTables = [
+    SEMANTIC_LEVEL_ORDER.map((level) => [level, riskForLevel(level)]),
+    SEMANTIC_LEVEL_FLOORS.map(({ pattern, floor }) => [pattern, floor]),
+  ];
+  if (JSON.stringify(tables) !== JSON.stringify(expectedTables)) {
+    throw new Error(
+      "semantic level floor projection must preserve all ordered level/risk and path/floor rows",
+    );
+  }
 }
 
 function assertGeneratorSemanticContracts(): void {
