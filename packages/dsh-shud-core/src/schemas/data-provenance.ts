@@ -12,6 +12,12 @@ const DataSourceSchema = z.strictObject({
   size_bytes: ArtifactSchema.shape.size_bytes.unwrap(),
 });
 
+const ExternalDataSourceSchema = z.strictObject({
+  path: z.string().min(1).refine(isAbsolute, "Expected an absolute external file path"),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+  size_bytes: ArtifactSchema.shape.size_bytes.unwrap(),
+});
+
 export const DataProvenanceSchema = z.strictObject({
   data_id: DataIdSchema,
   basin: z.string().min(1),
@@ -22,6 +28,7 @@ export const DataProvenanceSchema = z.strictObject({
   sources: z.strictObject({
     input_root: z.string().min(1).refine(isAbsolute, "Expected an absolute input directory"),
     files: z.array(DataSourceSchema),
+    external_files: z.array(ExternalDataSourceSchema).default([]),
   }),
   preprocess: z.literal(null),
   uncertainty_notes: z.literal(null),

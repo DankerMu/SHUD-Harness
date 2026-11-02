@@ -1,14 +1,14 @@
 # Proposal
 
-## Active issue fixture: #522
+## Active issue fixture: #523
 
 - Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree).
-- Scope: task 2.2c only; RunJob/RunRecord nullable build_id, threads and binary_sha256 defaults, post-default build/hash equivalence, projections and minimum writer literals.
+- Scope: task 2.2d only; strict external-file metadata entries in DataProvenance.sources with default empty array, projections and minimum producer literal.
 - Selected risk packs: Public API; Schema/field names; File IO/read compatibility; Legacy compatibility; Documentation.
-- Evidence floor: focused semantic RED/GREEN on both schemas and all relevant statuses, frozen M2/M3 file-read smoke through built core, generator/drift and sibling-byte checks, full check, Critical Path #7 review and same-SHA CI.
-- Governing source: run-records「RunJob record」「RunRecord record」「Generated projection」; #519 brands delivered by #556, #521 StackLock delivered by #558.
-- Preserve #518 all-match floor semantics and #520 writer-owned link ordering; prior broad proposal summaries are historical context, not the active oracle.
-- No build-file validation/copy, execution environment, collect inheritance, tool argument, state-machine, host/config/dependency changes.
+- Evidence floor: focused semantic RED/GREEN, actual built readonly M3 file smoke, generator/drift and sibling-byte checks, full check, Critical Path #7 review and same-SHA CI.
+- Governing source: data-provenance「DataProvenance record」「DataProvenance generated projection」; #522 run schemas delivered by #559.
+- Preserve existing sources.files permissive digest and relative-path contracts; new external entries alone require absolute paths and lowercase64 hex. No schema sorting/dedup policy.
+- No tsd.forc parsing, external file access/hashing, submission rollback, verification comparison, jobs/host/config/dependency changes.
 
 ## Why
 

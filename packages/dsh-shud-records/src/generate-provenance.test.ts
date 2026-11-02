@@ -195,7 +195,7 @@ describe("generateProvenance", () => {
     expect(result).toEqual({
       data_id: result.data_id,
       basin: project,
-      sources: { input_root: original, files: expectedFiles },
+      sources: { input_root: original, files: expectedFiles, external_files: [] },
       event_window: { start: null, end: null },
       preprocess: null,
       uncertainty_notes: null,
@@ -228,7 +228,11 @@ describe("generateProvenance", () => {
   test("original input is absolute metadata, not a directory that must still exist", async () => {
     realFs.rmSync(original, { recursive: true });
     const result = await generateProvenance(runDir, project, original);
-    expect(result.sources).toEqual({ input_root: original, files: expectedFiles });
+    expect(result.sources).toEqual({
+      input_root: original,
+      files: expectedFiles,
+      external_files: [],
+    });
     expect(realFs.existsSync(original)).toBe(false);
   });
 
@@ -411,7 +415,11 @@ describe("generateProvenance", () => {
       const pending = DataProvenanceSchema.parse(
         JSON.parse(realFs.readFileSync(temporary, "utf8")),
       );
-      expect(pending.sources).toEqual({ input_root: original, files: expectedFiles });
+      expect(pending.sources).toEqual({
+        input_root: original,
+        files: expectedFiles,
+        external_files: [],
+      });
       expectClosed();
       observed = true;
       throw Object.assign(new Error(payload), { code: "EIO" });

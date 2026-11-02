@@ -23,7 +23,25 @@ function validDataProvenance() {
 
 test("DataProvenance preserves branded input provenance with explicit null metadata", () => {
   const provenance = validDataProvenance();
-  expect(DataProvenanceSchema.parse(provenance)).toEqual(provenance);
+  expect(DataProvenanceSchema.parse(provenance)).toEqual({
+    ...provenance,
+    sources: { ...provenance.sources, external_files: [] },
+  });
+});
+
+test("DataProvenance defaults missing M3 external files without mutating input", () => {
+  const provenance = validDataProvenance();
+  const original = structuredClone(provenance);
+  expect(Object.hasOwn(provenance.sources, "external_files")).toBe(false);
+
+  const parsed = DataProvenanceSchema.parse(provenance);
+
+  expect(provenance).toEqual(original);
+  expect(Object.hasOwn(provenance.sources, "external_files")).toBe(false);
+  expect(parsed).toEqual({
+    ...original,
+    sources: { ...original.sources, external_files: [] },
+  });
 });
 
 test.each(["input/ccw", "./input/ccw", "../input/ccw"])(
@@ -73,19 +91,28 @@ test.each([
 ])("DataProvenance preserves legal POSIX file path %j", (path) => {
   const provenance = validDataProvenance();
   provenance.sources.files = [{ path, sha256: "digest", size_bytes: 1024 }];
-  expect(DataProvenanceSchema.parse(provenance)).toEqual(provenance);
+  expect(DataProvenanceSchema.parse(provenance)).toEqual({
+    ...provenance,
+    sources: { ...provenance.sources, external_files: [] },
+  });
 });
 
 test("DataProvenance accepts an empty input file list", () => {
   const provenance = validDataProvenance();
   provenance.sources.files = [];
-  expect(DataProvenanceSchema.parse(provenance)).toEqual(provenance);
+  expect(DataProvenanceSchema.parse(provenance)).toEqual({
+    ...provenance,
+    sources: { ...provenance.sources, external_files: [] },
+  });
 });
 
 test("DataProvenance preserves a zero-byte input file", () => {
   const provenance = validDataProvenance();
   provenance.sources.files = [{ path: "empty.dat", sha256: "digest", size_bytes: 0 }];
-  expect(DataProvenanceSchema.parse(provenance)).toEqual(provenance);
+  expect(DataProvenanceSchema.parse(provenance)).toEqual({
+    ...provenance,
+    sources: { ...provenance.sources, external_files: [] },
+  });
 });
 
 test("DataProvenance preserves nonempty event window strings without date parsing", () => {
@@ -93,7 +120,10 @@ test("DataProvenance preserves nonempty event window strings without date parsin
     ...validDataProvenance(),
     event_window: { start: "event-start", end: "event-end" },
   };
-  expect(DataProvenanceSchema.parse(provenance)).toEqual(provenance);
+  expect(DataProvenanceSchema.parse(provenance)).toEqual({
+    ...provenance,
+    sources: { ...provenance.sources, external_files: [] },
+  });
 });
 
 function expectInvalid(input: unknown, path: string): void {
@@ -158,7 +188,10 @@ test.each([
   { start: "event-start", end: null },
 ])("DataProvenance preserves independently nullable window endpoints %j", (eventWindow) => {
   const provenance = { ...validDataProvenance(), event_window: eventWindow };
-  expect(DataProvenanceSchema.parse(provenance)).toEqual(provenance);
+  expect(DataProvenanceSchema.parse(provenance)).toEqual({
+    ...provenance,
+    sources: { ...provenance.sources, external_files: [] },
+  });
 });
 
 test.each(["preprocess", "uncertainty_notes"])(
@@ -293,5 +326,160 @@ test("DataProvenance preserves file order and duplicates without inventory polic
     { path: "a.mesh", sha256: "digest", size_bytes: 0 },
     { path: "a.mesh", sha256: "digest", size_bytes: 0 },
   ];
-  expect(DataProvenanceSchema.parse(provenance)).toEqual(provenance);
+  expect(DataProvenanceSchema.parse(provenance)).toEqual({
+    ...provenance,
+    sources: { ...provenance.sources, external_files: [] },
+  });
+});
+
+function validExternalFile() {
+  return {
+    path: "/data/keliya/forcing.trimmed/X82.45Y36.25.csv",
+    sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    size_bytes: 40960,
+  };
+}
+
+test.each([0, 40960])("DataProvenance preserves valid external file size %j", (sizeBytes) => {
+  const provenance = validDataProvenance();
+  const input = {
+    ...provenance,
+    sources: {
+      ...provenance.sources,
+      external_files: [{ ...validExternalFile(), size_bytes: sizeBytes }],
+    },
+  };
+  expect(DataProvenanceSchema.parse(input)).toEqual(input);
+});
+
+test("DataProvenance accepts an explicit empty external file list", () => {
+  const provenance = validDataProvenance();
+  const input = {
+    ...provenance,
+    sources: { ...provenance.sources, external_files: [] },
+  };
+  expect(DataProvenanceSchema.parse(input)).toEqual(input);
+});
+
+test("DataProvenance creates independent empty external file defaults", () => {
+  const provenance = validDataProvenance();
+  const first = DataProvenanceSchema.parse(provenance);
+  const second = DataProvenanceSchema.parse(provenance);
+  expect(first.sources.external_files).toEqual([]);
+  expect(second.sources.external_files).toEqual([]);
+  expect(first.sources.external_files).not.toBe(second.sources.external_files);
+
+  first.sources.external_files.push(validExternalFile());
+  expect(second.sources.external_files).toEqual([]);
+  expect(Object.hasOwn(provenance.sources, "external_files")).toBe(false);
+});
+
+test.each(["path", "sha256", "size_bytes"])(
+  "DataProvenance requires external file field %s",
+  (field) => {
+    const provenance = validDataProvenance();
+    expectInvalid(
+      {
+        ...provenance,
+        sources: {
+          ...provenance.sources,
+          external_files: [withoutField(validExternalFile(), field)],
+        },
+      },
+      `sources.external_files.0.${field}`,
+    );
+  },
+);
+
+test.each([
+  ["path", "forcing.trimmed/a.csv"],
+  ["path", "./forcing.trimmed/a.csv"],
+  ["path", "../forcing.trimmed/a.csv"],
+  ["path", ""],
+  ["path", null],
+  ["path", 431],
+  ["path", undefined],
+  ["sha256", ""],
+  ["sha256", "digest"],
+  ["sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"],
+  ["sha256", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"],
+  ["sha256", "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"],
+  ["sha256", "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+  ["sha256", null],
+  ["sha256", 431],
+  ["sha256", undefined],
+  ["size_bytes", -1],
+  ["size_bytes", 0.5],
+  ["size_bytes", null],
+  ["size_bytes", "40960"],
+  ["size_bytes", false],
+  ["size_bytes", undefined],
+  ["size_bytes", NaN],
+  ["size_bytes", Infinity],
+] as const)("DataProvenance rejects invalid external file %s=%j", (field, value) => {
+  const provenance = validDataProvenance();
+  expectInvalid(
+    {
+      ...provenance,
+      sources: {
+        ...provenance.sources,
+        external_files: [{ ...validExternalFile(), [field]: value }],
+      },
+    },
+    `sources.external_files.0.${field}`,
+  );
+});
+
+test.each([null, {}, "files", 431, false])(
+  "DataProvenance rejects non-array external files %j",
+  (externalFiles) => {
+    const provenance = validDataProvenance();
+    expectInvalid(
+      { ...provenance, sources: { ...provenance.sources, external_files: externalFiles } },
+      "sources.external_files",
+    );
+  },
+);
+
+test.each([null, [], "/data/forcing.csv", 431, false])(
+  "DataProvenance rejects a non-object external file %j",
+  (file) => {
+    const provenance = validDataProvenance();
+    expectInvalid(
+      { ...provenance, sources: { ...provenance.sources, external_files: [file] } },
+      "sources.external_files.0",
+    );
+  },
+);
+
+test("DataProvenance rejects unknown external file fields", () => {
+  const provenance = validDataProvenance();
+  expectInvalid(
+    {
+      ...provenance,
+      sources: {
+        ...provenance.sources,
+        external_files: [{ ...validExternalFile(), extra: true }],
+      },
+    },
+    "sources.external_files.0",
+  );
+});
+
+test("DataProvenance preserves external file order and duplicates without inventory policy", () => {
+  const provenance = validDataProvenance();
+  const input = {
+    ...provenance,
+    sources: {
+      ...provenance.sources,
+      external_files: [
+        { ...validExternalFile(), path: "/data/z.csv" },
+        { ...validExternalFile(), path: "/data/a.csv", size_bytes: 0 },
+        { ...validExternalFile(), path: "/data/a.csv", size_bytes: 0 },
+      ],
+    },
+  };
+  const original = structuredClone(input);
+  expect(DataProvenanceSchema.parse(input)).toEqual(original);
+  expect(input).toEqual(original);
 });
