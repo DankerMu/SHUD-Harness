@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { StackIdSchema, StackLockSchema, type StackLock } from "../schemas/index.ts";
+import { BuildIdSchema, StackIdSchema, StackLockSchema, type StackLock } from "../schemas/index.ts";
 import { computeStackFingerprint } from "./fingerprint.ts";
 
 describe("computeStackFingerprint", () => {
@@ -36,10 +36,12 @@ describe("computeStackFingerprint", () => {
   });
 
   test("key order at every nesting level does not affect the fingerprint", () => {
-    const lock = baseLock();
+    const build_id = BuildIdSchema.parse("BUILD-20261102T080000-3f9c");
+    const lock = { ...baseLock(), build_id };
     const reordered: StackLock = {
       created_at: lock.created_at,
       fingerprint: lock.fingerprint,
+      build_id: lock.build_id,
       llm: {
         response_model: lock.llm.response_model,
         request_alias: lock.llm.request_alias,
@@ -117,6 +119,33 @@ describe("computeStackFingerprint", () => {
     },
   );
 
+  test("a null and a missing build reference both preserve the M3 fixed vector", () => {
+    const lock = baseLock();
+    const { build_id, ...legacyLock } = lock;
+    expect(build_id).toBeNull();
+    expect(legacyLock).not.toHaveProperty("build_id");
+    expect(computeStackFingerprint(legacyLock)).toBe(
+      "sha256:974a68b60908c59c718e3e4e84a9a7f5af2e079337bc0450be529f06fbb64948",
+    );
+    expect(computeStackFingerprint(lock)).toBe(
+      "sha256:974a68b60908c59c718e3e4e84a9a7f5af2e079337bc0450be529f06fbb64948",
+    );
+  });
+
+  test("a build reference changes the fingerprint from null and from another build", () => {
+    const withoutBuild = baseLock();
+    const first = {
+      ...withoutBuild,
+      build_id: BuildIdSchema.parse("BUILD-20261102T080000-3f9c"),
+    };
+    const second = {
+      ...withoutBuild,
+      build_id: BuildIdSchema.parse("BUILD-20261102T080000-3f9d"),
+    };
+    expect(computeStackFingerprint(first)).not.toBe(computeStackFingerprint(withoutBuild));
+    expect(computeStackFingerprint(second)).not.toBe(computeStackFingerprint(first));
+  });
+
   test("matches an independently computed fixed vector", () => {
     // Independently hashed with `shasum -a 256`; canonical UTF-8 bytes have no trailing newline.
     // Exclusions: stack_id, created_at, fingerprint and llm.response_model.
@@ -126,11 +155,25 @@ describe("computeStackFingerprint", () => {
       "sha256:974a68b60908c59c718e3e4e84a9a7f5af2e079337bc0450be529f06fbb64948",
     );
   });
+
+  test("matches an independently computed fixed vector with a build reference", () => {
+    // Independently hashed with `shasum -a 256`; the M3 canonical bytes above gain only
+    // the leading property "build_id":"BUILD-20261102T080000-3f9c", with no trailing newline.
+    const lock = {
+      ...baseLock(),
+      build_id: BuildIdSchema.parse("BUILD-20261102T080000-3f9c"),
+    };
+    expect(StackLockSchema.parse(lock)).toEqual(lock);
+    expect(computeStackFingerprint(lock)).toBe(
+      "sha256:b0dfc39447ff3685933c7db596191d9202b9e3c4ea8f86c5515b9d3e25d5bc19",
+    );
+  });
 });
 
 function baseLock(): StackLock {
   return {
     stack_id: StackIdSchema.parse("STACK-20261027T080000-3f9a"),
+    build_id: null,
     repos: {
       SHUD: {
         commit: "9b55b0cb9b55b0cb9b55b0cb9b55b0cb9b55b0cb",

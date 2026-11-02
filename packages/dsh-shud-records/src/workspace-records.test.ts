@@ -139,7 +139,9 @@ describe.each(recordCases)("$kind workspace reads", (fixture) => {
   const expectedOutput =
     fixture.kind === "task"
       ? { ...fixture.value, linked_changes: [], linked_verifications: [], source_base_commit: null }
-      : fixture.value;
+      : fixture.kind === "stack"
+        ? { ...fixture.value, build_id: null }
+        : fixture.value;
 
   test("reads a schema-valid pre-existing object without changing its bytes", () => {
     const text = `  ${JSON.stringify(fixture.value, null, 2)}\n\n`;

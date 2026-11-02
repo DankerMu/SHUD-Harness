@@ -49,7 +49,9 @@ for (const fixture of recordCases) {
             linked_verifications: [],
             source_base_commit: null,
           }
-        : fixture.value;
+        : fixture.kind === "stack"
+          ? { ...fixture.value, build_id: null }
+          : fixture.value;
     expect(readWorkspaceRecord(cwd, fixture.kind, fixture.id, { readonly: true })).toEqual(
       expectedOutput,
     );

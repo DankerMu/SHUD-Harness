@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { compareRepositoryPaths } from "../stack-lock/compare-paths.ts";
 import { isRelativePosixPath } from "./relative-posix-path.ts";
-import { StackIdSchema } from "./run-identifiers.ts";
+import { BuildIdSchema, StackIdSchema } from "./run-identifiers.ts";
 
 const RepositoryRevisionSchema = z
   .strictObject({
@@ -57,6 +57,7 @@ export const StackLockSchema = z.strictObject({
     request_alias: z.string().min(1),
     response_model: z.string().min(1),
   }),
+  build_id: BuildIdSchema.nullable().default(null),
   fingerprint: z.string().min(1),
   created_at: z.string().min(1),
 });

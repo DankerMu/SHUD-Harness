@@ -56,11 +56,24 @@
 - Auth/governance、Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：本刀不改审批、角色、配置、并发、发现、事务或依赖；唯一治理相关约束是类型与base commit的纯schema一致性，已有消费者不新增IO。
 - 验证顺序：focused task-card-schema测试在旧实现上出现真实语义RED（code_change/默认字段缺失/非法base被剥离）→ 实现GREEN → generator自证/生成 → typecheck中仅最小写入字面值适配 → built core+records smoke → full pnpm run check → 白盒review/同SHA CI。
 
+### Issue #521 risk and evidence fixture
+
+本刀仅2.2b；2.2a已由#557合并（#520 closed）。旧M3规范JSON字节与固定digest不能改，缺键磁盘fixture不能补键。
+
+- Public API / Schema：StackLock strict增加BuildId|null、default(null)；缺键解析null；合法null/id成功，BUILD-0001/大写hex/RUN前缀拒绝并指出build_id。旧字段/strict/dirty_paths全部约束保持。computeStackFingerprint输入类型仅额外容许build_id缺失以表达M3形态，不把其它字段放宽为Partial或任意输入。
+- 指纹不变量：仅null值的build_id排除；缺键与null同M3。非null必须参与hash，null→id、idA→idB变化；既有stack_id/created_at/fingerprint/llm.response_model排除、嵌套键序无关、数组顺序与dirty/dirty_paths/truncation/base_url/request_alias敏感性保持。沿用现有UTF-16键排序序列化，不改为路径码点排序或新增算法。
+- 固定向量：原baseLock规范JSON（无尾换行）shasum -a256为974a68b60908c59c718e3e4e84a9a7f5af2e079337bc0450be529f06fbb64948，原测试期望不改；同内容增加BUILD-20261102T080000-3f9c后独立shasum为b0dfc39447ff3685933c7db596191d9202b9e3c4ea8f86c5515b9d3e25d5bc19。两者写死，不能用生产函数算期待值；本地canonical字节与命令输出保留。
+- File IO / Legacy compatibility：编排器在实现前用真实captureStackLock和三个临时Git仓库产生不含build_id的M3锁；实现后经built readonly读取返回null且bytes/mtime不变，再同环境真实capture必须复用原stack_id、不分配/新增/改写锁文件。不得以只比较两个纯函数返回值冒充真实复用证明。
+- captureStackLock若Environment输出类型报错仅补build_id:null字面值；不改matchingLock/分配/文件安全/构建源。旧解析输出断言必要时仅增加明确的null期待，旧原始fixture/安全/碰撞/回滚断言保持，不能给旧文件补键来保绿。
+- Documentation/生成：registry只补StackLock示例build_id:null；生成器/selftest/schema:check通过；只StackLock的Markdown/JSON Schema改变，其余29份字节不变。
+- Auth/governance、Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：本刀不改审批、权限、配置、并发、发现、事务或依赖；复用原capture只读/排他发布语义，不新增采集入口。
+- 验证：focused stack-lock-schema/fingerprint真实语义RED→GREEN；独立shasum双向量；schema:generate/selftest/typecheck；built public core与真实records读取/复用smoke；full pnpm run check；白盒review和同SHA CI。
+
 ## 2. core：floor 常量、三对象 schema、品牌 id、角色映射、措辞常量、git runner（Critical Path #1/#7）
 
 - [x] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
 - [x] 2.1 依赖 2.3。新增 `ChangeId`/`VerificationId`/`BuildId` 品牌 id（复用 `run-identifiers.ts`）与 `change-request.ts`（含 `floor_categories`、`risk == riskForLevel` refine）、`verification-case.ts`、`build-record.ts`（含 `patch_sha256` iff `change_id`、40 hex `source_commit`）严格 schema（字段与 refine 按 change-requests「ChangeRequest record」、verification-cases「VerificationCase record」、shud-build「BuildRecord record」）；正反例测试；`pnpm run schema:generate` 投影；`index.ts` 导出。
-- [ ] 2.2a 依赖 2.1。`TaskTypeSchema` 增 `code_change`；TaskCard 增 `linked_changes`/`linked_verifications`（`default([])`，排序唯一）与 `source_base_commit`（40 hex 或 null，缺键按 null；refine `code_change` ⇒ 非 null、其它 ⇒ null）；M3 卡片夹具原样可读回归；投影更新。按 task-cards「TaskCard record」「TaskCard generated projection」。
+- [x] 2.2a 依赖 2.1。`TaskTypeSchema` 增 `code_change`；TaskCard 增 `linked_changes`/`linked_verifications`（`default([])`，排序唯一）与 `source_base_commit`（40 hex 或 null，缺键按 null；refine `code_change` ⇒ 非 null、其它 ⇒ null）；M3 卡片夹具原样可读回归；投影更新。按 task-cards「TaskCard record」「TaskCard generated projection」。
 - [ ] 2.2b 依赖 2.1。StackLock 增 nullable `build_id`（非 null 时纳入 `computeStackFingerprint`，null 时指纹与 M3 逐字节相同、旧 lock 仍可复用）；固定向量测试；投影。按 stack-lock「StackLock schema alignment」「Stack fingerprint」。
 - [ ] 2.2c 依赖 2.1。RunJob/RunRecord 增 nullable `build_id`/`threads`（正整数）/`binary_sha256`（缺键按 null；iff `build_id` 的 refine 在默认值之后求值）；M2/M3 夹具原样可读回归；投影。按 run-records「RunJob record」「RunRecord record」「Generated projection」。
 - [ ] 2.2d DataProvenance 增 `sources.external_files`（`{path(绝对), sha256, size_bytes}` 数组，缺键按 `[]`）；M3 夹具回归；投影。按 data-provenance「DataProvenance record」「DataProvenance generated projection」。无依赖。

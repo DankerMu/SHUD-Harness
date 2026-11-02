@@ -202,6 +202,7 @@ export function captureStackLock(config: StackCaptureConfig, llm: StackCaptureLl
       request_alias: config.llm.request_alias,
       response_model: llm.response_model,
     },
+    build_id: null,
     created_at: new Date().toISOString(),
   };
   const directory = lockDirectory(config.cwd);
