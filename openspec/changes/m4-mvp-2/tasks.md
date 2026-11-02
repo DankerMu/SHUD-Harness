@@ -110,6 +110,17 @@
 - Documentation：active fixture记录范围纠正，规范docs已在#516对齐；不改generated schema。旧id在负例及冻结历史可保留，生产role map不再含旧id。
 - 验证：三核心测试真实RED→GREEN与完整allow/deny矩阵；built core公开API oracle验证投影→角色→规则、未知角色/旧工具拒绝与载荷不读取；受影响policy/presets测试；pnpm run check、profile:smoke；三席白盒审查及同SHA CI。
 
+### Issue #525 risk and evidence fixture
+
+本刀仅2.5；2.4由#562合并。常量名称固定CODE_CHANGE_SECTION5_WORDING，内容以evidence-reports规范原文逐字节为准。
+
+- Public API / scientific governance：wording.ts新增as const primitive字符串，现有index.ts wildcard导出自然覆盖；不重复re-export、不增加模板逻辑或运行时配置。
+- 正反例：独立写死spec原文精确比较，包含“不构成并行正确性、性能或模型改进结论”，不同于M3的“本里程碑无指标 artifact，见 limitations”；改变标点/限定词的负控必须被精确oracle检出。
+- Legacy：10条FORBIDDEN_REPORT_PHRASES、4句GOVERNANCE_INVARIANTS及原用例保持原样；新句不加入扫描短语，observations含全文时无命中。全文旁边追加真正禁语仍命中，不引入模板文本豁免。
+- Documentation：active fixture记录唯一来源及下游边界，规范正文已#516对齐。File IO/paths、Config、Schema、Auth/permissions、Concurrency、Resource、Error/rollback、Release/dependencies均不改变；科学措辞护栏风险由精确文本/扫描边界测试覆盖。
+- 验证：focused wording.test真实RED→GREEN；built core公开导出与scanner smoke；所有31生成投影保持不变；pnpm run check（含knip），Critical Path#6白盒审查和同SHA CI。无装配变更，不额外要求profile:smoke。
+- 非目标：报告§5渲染/golden为#533，第14项validator为#541，prompt为#542；不得用本常量测试声称这些运行链已经完成。
+
 ## 2. core：floor 常量、三对象 schema、品牌 id、角色映射、措辞常量、git runner（Critical Path #1/#7）
 
 - [x] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
@@ -118,7 +129,7 @@
 - [x] 2.2b 依赖 2.1。StackLock 增 nullable `build_id`（非 null 时纳入 `computeStackFingerprint`，null 时指纹与 M3 逐字节相同、旧 lock 仍可复用）；固定向量测试；投影。按 stack-lock「StackLock schema alignment」「Stack fingerprint」。
 - [x] 2.2c 依赖 2.1。RunJob/RunRecord 增 nullable `build_id`/`threads`（正整数）/`binary_sha256`（缺键按 null；iff `build_id` 的 refine 在默认值之后求值）；M2/M3 夹具原样可读回归；投影。按 run-records「RunJob record」「RunRecord record」「Generated projection」。
 - [x] 2.2d DataProvenance 增 `sources.external_files`（`{path(绝对), sha256, size_bytes}` 数组，缺键按 `[]`）；M3 夹具回归；投影。按 data-provenance「DataProvenance record」「DataProvenance generated projection」。无依赖。
-- [ ] 2.4 `role-tool-map.ts` 四角色真实 id（coordinator `local` 三委派工具；coder/reviewer/repo_explorer `inherited` 按 agent-presets「Role tool map uses mounted names」）；删除 `harness.memory.propose`、`patch.apply`、`validator.run`、`repo.*`、`git.inspect`；`readCallerPresetId` 映射增 coder/reviewer（policy-gate「Caller role derivation」）；`ROLE_TOOL_IDS` 并集测试；policy-gate-core `role-tool-surface` 表随之更新并附四角色 × 新工具的 deny 正反例（policy-gate「Role tool surface rule」）。无依赖。
+- [x] 2.4 `role-tool-map.ts` 四角色真实 id（coordinator `local` 三委派工具；coder/reviewer/repo_explorer `inherited` 按 agent-presets「Role tool map uses mounted names」）；删除 `harness.memory.propose`、`patch.apply`、`validator.run`、`repo.*`、`git.inspect`；`readCallerPresetId` 映射增 coder/reviewer（policy-gate「Caller role derivation」）；`ROLE_TOOL_IDS` 并集测试；policy-gate-core `role-tool-surface` 表随之更新并附四角色 × 新工具的 deny 正反例（policy-gate「Role tool surface rule」）。无依赖。
 - [ ] 2.5 `governance/wording.ts` 导出 `code_change` §5 固定句常量，正反例测试（逐字、不进扫描短语集）；按 evidence-reports「code_change report wording constant」、engineering-gates「Scientific wording rules are enforced by tested constants」。无依赖。
 - [ ] 2.6 `stack-lock/repository-revision.ts` 扩展导出受控 git runner（env 白名单 `PATH/HOME/LC_ALL=C/GIT_OPTIONAL_LOCKS=0/GIT_CONFIG_NOSYSTEM=1/GIT_CONFIG_GLOBAL=/dev/null/GIT_TERMINAL_PROMPT=0`、`-c core.fsmonitor=false`、realpath == `rev-parse --show-toplevel` 校验、status `-z`、diff `--no-ext-diff --no-textconv --no-color`）；既有 `collectRepositoryRevision` 行为与 StackLock 采集字节不变的回归；子进程看不到 `DMXAPI_KEY` 的断言。按 change-requests「Source change observation」、shud-build「Workspace source checkout validation」。无依赖。
 

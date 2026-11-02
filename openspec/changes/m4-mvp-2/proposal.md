@@ -1,15 +1,14 @@
 # Proposal
 
-## Active issue fixture: #524
+## Active issue fixture: #525
 
-- Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree).
-- Scope: task 2.4; canonical role-tool collections, four-role mapping and authority decisions; required consumer type/test migration only.
-- Selected risk packs: Public API; Auth/permissions; Legacy compatibility; Error handling; Documentation. No new IO/config/concurrency/resource/dependency behavior.
-- Evidence floor: focused semantic RED/GREEN; actual built public-core policy smoke; affected consumer tests, full check/profile smoke, Critical Path #1 review and same-SHA CI.
-- Governing source: agent-presets「Role tool map uses mounted names」and policy-gate「Caller role derivation」「Role tool surface rule」; #523 delivered by #560.
-- Preserve readCallerPresetId attribution verbatim; presetIdToRole alone confers four policy roles. Unknown/standard/repo_explorer/custom remain unknown for policy mapping.
-- Necessary boundary correction: the existing restrict consumer stores a two-role type and its tests treat coder/reviewer as unknown; widen that type from the canonical mapper and migrate stale consumer assertions, without changing binding/lifecycle algorithms.
-- No new presets/prompts/tools, profile installation, change_submit ask rule or restrict lifecycle feature. Existing consumers immediately observe the new core mapping when given coder/reviewer projections; bundled activation remains #543, full restrict evidence #542.
+- Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree: public scientific-governance constant, Critical Path #6).
+- Scope: task 2.5 only; CODE_CHANGE_SECTION5_WORDING exact primitive string and its contract tests.
+- Selected risk packs: Public API; Legacy compatibility; Documentation; scientific wording governance.
+- Evidence floor: exact-byte and scanner semantic RED/GREEN, built public-export smoke, unchanged legacy scanner/invariants, full check and three-seat whitebox review/same-SHA CI.
+- Governing source: evidence-reports「code_change report wording constant」and engineering-gates wording requirement; #524 delivered by #562.
+- Existing index.ts wildcard export is sufficient; no duplicate re-export or new public wrapper. String literal as const needs no Object.freeze allocation.
+- No template/report validator/prompt/profile/schema/generated artifact changes; downstream consumers remain #533/#541/#542. This slice does not deliver code_change report rendering.
 
 ## Why
 
