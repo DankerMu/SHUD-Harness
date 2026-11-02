@@ -9,7 +9,7 @@ kind: architecture
 
 M3 的报告终态需要 PI 明确决定与可关联的审计证据，但钉版 dsh 原生审批卡没有 comment 表单。宿主审批结果 `allowed-once | rejected | cancelled | unavailable` 与报告领域结果 `accepted | rejected | revision_requested` 是两个不同的契约：卡片拒绝不等于报告 rejected，也不自动表示需要修订。
 
-本记录说明 [M3 design D9 候选 (a)](../../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d9-审批接线report_submitreport_decide-与-pigatedecisioncritical-path-3) 的工具侧实现选择。依据为 [#447](https://github.com/DankerMu/SHUD-Harness/issues/447)、[#426 O5 的已审阅结论](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6463590574) 与 [PI 批准的最小 raw 路由扩展](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6525339104)。O5 确认工具公开执行上下文提供 callId，不提供 approval id。这些既有依据不单独构成本 ADR 的接受。此次 accepted 状态转换由 [#517](https://github.com/DankerMu/SHUD-Harness/issues/517) 的 PR 承载，必须在 PI 于该 PR 明确确认后才能合入；接受日期与确认原文以该 PR 的 PI 评论时间为准，工程测试与批量执行授权不替代此确认。未合并的状态迁移提案不改变主分支的 proposed 状态。
+本记录说明 [M3 design D9 候选 (a)](../../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d9-审批接线report_submitreport_decide-与-pigatedecisioncritical-path-3) 的工具侧实现选择。依据为 [#447](https://github.com/DankerMu/SHUD-Harness/issues/447)、[#426 O5 的已审阅结论](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6463590574) 与 [PI 批准的最小 raw 路由扩展](https://github.com/DankerMu/SHUD-Harness/issues/447#issuecomment-6525339104)。O5 确认工具公开执行上下文提供 callId，不提供 approval id。这些既有依据不单独构成本 ADR 的接受。PI 于 2026-11-02 在本次状态转换请求后明确回复“我确认，授权继续执行”，接受 ADR-0011 及其 M3/M4 消费者边界；执行器于 `2026-11-02T13:40:27Z` 将原文登记到 [PR #552 的确认记录](https://github.com/DankerMu/SHUD-Harness/pull/552#issuecomment-6578636242)。该评论是对话授权的转录，不冒充 PI 亲自发布的 GitHub 评论；accepted 状态依据本次明确确认，不依据工程测试或此前批量执行指令。
 
 字段和对话规则的权威源仍为 [PI Decision Comments §7–8](../../03_SPEC/PI_Decision_Comments_Spec.md#7-dsh-审批卡字段) 与 [evidence-reports](../../../openspec/specs/evidence-reports/spec.md)，本记录不另建 schema 或审批服务。
 
@@ -58,4 +58,4 @@ PI 的拒绝理由只经对话由 coordinator 转述给 coder，不写入 Change
 
 伴生测试位于 `packages/dsh-shud-tools/src/report-decisions.test.ts`、`report-decision-contract.test.ts`、`report-decision-publication.test.ts`、`report-decision-ordering.test.ts` 与 `report-decision-raw.test.ts`，使用真实 ToolRuntime、已挂载 policy/raw、宿主 approval 边界 double 与真实工作区文件，覆盖终态、拒绝、身份、部分提交/修复、共享发布顺序和 raw-before-ask。
 
-这些测试不证明真实 Web 卡展示、session-log 持久化或 PI 功能验收；approval double 的入参和 logger buffer 不是持久审计证据。真实端到端审计/PI 验收仍由相应验收切片承担。也不宣称防止 PI 自己用 bash 编辑文件、跨进程竞争或外部文件命名空间替换。接受一份报告不是认可普遍科学结论，本 ADR 的接受也不代表 M4 功能验收通过；状态转换只能依据 #517 PR 的 PI 明确确认，不能依据工程测试成功。
+这些测试不证明真实 Web 卡展示、session-log 持久化或 PI 功能验收；approval double 的入参和 logger buffer 不是持久审计证据。真实端到端审计/PI 验收仍由相应验收切片承担。也不宣称防止 PI 自己用 bash 编辑文件、跨进程竞争或外部文件命名空间替换。接受一份报告不是认可普遍科学结论，本 ADR 的接受也不代表 M4 功能验收通过；本次确认只解除 #517 状态转换门，#549 的 PI Web 验收仍须独立执行。
