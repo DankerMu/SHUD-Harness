@@ -29,6 +29,18 @@ export const DecisionIdSchema = z
   .string()
   .regex(/^DEC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
   .brand<"DecisionId">();
+export const ChangeIdSchema = z
+  .string()
+  .regex(/^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
+  .brand<"ChangeId">();
+export const VerificationIdSchema = z
+  .string()
+  .regex(/^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
+  .brand<"VerificationId">();
+export const BuildIdSchema = z
+  .string()
+  .regex(/^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
+  .brand<"BuildId">();
 
 export type JobRecordId = z.infer<typeof JobRecordIdSchema>;
 export type RunId = z.infer<typeof RunIdSchema>;
@@ -37,6 +49,9 @@ export type StackId = z.infer<typeof StackIdSchema>;
 export type DataId = z.infer<typeof DataIdSchema>;
 export type ReportId = z.infer<typeof ReportIdSchema>;
 export type DecisionId = z.infer<typeof DecisionIdSchema>;
+export type ChangeId = z.infer<typeof ChangeIdSchema>;
+export type VerificationId = z.infer<typeof VerificationIdSchema>;
+export type BuildId = z.infer<typeof BuildIdSchema>;
 
 const identifierSchemas = {
   JOB: JobRecordIdSchema,
@@ -46,6 +61,9 @@ const identifierSchemas = {
   DATA: DataIdSchema,
   REPORT: ReportIdSchema,
   DEC: DecisionIdSchema,
+  CHG: ChangeIdSchema,
+  VC: VerificationIdSchema,
+  BUILD: BuildIdSchema,
 };
 
 export function createBrandedId<Prefix extends keyof typeof identifierSchemas>(

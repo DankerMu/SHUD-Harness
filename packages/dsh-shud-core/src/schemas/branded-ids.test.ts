@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+  BuildIdSchema,
+  ChangeIdSchema,
   createBrandedId,
   DataIdSchema,
   DecisionIdSchema,
@@ -8,6 +10,7 @@ import {
   RunIdSchema,
   StackIdSchema,
   TaskIdSchema,
+  VerificationIdSchema,
 } from "../index.ts";
 
 const newIdentifiers = [
@@ -16,6 +19,9 @@ const newIdentifiers = [
   ["DATA", DataIdSchema, "DATA-20261027T081000-7d2e", "DATA-0001"],
   ["REPORT", ReportIdSchema, "REPORT-20261027T090000-5b10", "REPORT-0001"],
   ["DEC", DecisionIdSchema, "DEC-20261027T093012-c4e7", "DECISION-001"],
+  ["CHG", ChangeIdSchema, "CHG-20261102T093000-4a1f", "CHG-0001"],
+  ["VC", VerificationIdSchema, "VC-20261102T101500-0c3e", "VC-001"],
+  ["BUILD", BuildIdSchema, "BUILD-20261102T100000-7b2d", "BUILD-1"],
 ] as const;
 
 afterEach(() => vi.useRealTimers());
@@ -34,6 +40,14 @@ describe.each(newIdentifiers)("%s identifier", (prefix, schema, valid, legacy) =
           : valid.replace(prefix, "RUN");
     expect(schema.safeParse(invalid).success).toBe(false);
   });
+
+  test.each(["../tasks/x", "nested/../id", "/absolute/id", "\0"])(
+    "rejects path traversal and unsafe identifier %j",
+    (value) => {
+      expect(schema.safeParse(value).success).toBe(false);
+      expect(schema.safeParse(`${valid}/${value}`).success).toBe(false);
+    },
+  );
 });
 
 test("data identifiers reject UUID-era values", () => {

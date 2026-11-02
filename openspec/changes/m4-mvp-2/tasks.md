@@ -10,7 +10,7 @@
 - Suggested fixture level: none - 只读规范文档对齐与 ADR 状态迁移，无产品代码
 - Minimal mergeable slice: 1.1a 首刀（规范与术语自洽可合，无代码依赖）；1.2 为后继（ADR 状态转换需 PI 确认，单独一刀便于 PI 审）
 
-交付记录：1.1a 已由 #551 合并（#516 closed）；1.2 已由 #552 合并（#517 closed），PI 明确确认原文与日期登记在 ADR-0011。共享 change 保持未归档，阶段 PI 验收仍属于 8.1。
+交付记录：1.1a 已由 #551 合并（#516 closed）；1.2 已由 #552 合并（#517 closed），PI 明确确认原文与日期登记在 ADR-0011；2.3 已由 #554 合并（#518 closed），三席白盒审查与同 SHA CI 通过；路由文档漂移 #553 已由 #555 独立合并。共享 change 保持未归档，阶段 PI 验收仍属于 8.1。
 
 ### Issue #518 risk and evidence fixture
 
@@ -28,9 +28,24 @@
 - glob 正反例：input/x.para 与 input/a/b/x.para 均 parameter_default；src/IO.cpp 与 src/a/b/IO.cpp 均 io_format；src/IOdir/file.cpp 不得匹配 IO*、应为默认 numerical_implementation；src/classes/Model_ControlXcpp 不得获得 output_semantics。
 - 公共常量/类型契约用临时 smoke 独立检查七档 ORDER、十一条 FLOORS 与 SemanticLevel 可导入性；永久测试保留消费可见的派生/风险行为，不新增逐字复制常量或导出接线的同义反复测试。focused command: `pnpm exec vitest run packages/dsh-shud-core/src/governance/semantic-level-floor.test.ts`；built smoke 从 `packages/dsh-shud-core/lib/index.js` 导入。
 
+### Issue #519 risk and evidence fixture
+
+本刀只执行 2.1。三份 record requirement 的字段与场景为不可弱化的 oracle；跨文件/磁盘/TaskCard 身份核对属于后继生产者，不在纯 schema 中伪造 IO。
+
+- Public API / Schema：扩展现有 branded-id 注册与公开出口；三个新 schema 均 strict，nested observed 亦拒绝未知键。测试三品牌合法生成、旧格式/大写 hex/错前缀/路径穿越拒绝；不改现有品牌行为或既有测试期望。
+- Auth/governance：CR 直接使用 ORDER 和 riskForLevel；proposed/approved 双向审批字段一致、level ≥ floor、risk 取 semantic_level；五种非法 categories 与抬升级别正例。错误分别指向 semantic_level、risk、floor_categories、approval_ref/approved_at。
+- CR 边界：files_changed 非空、码点排序唯一；路径复用 isRelativePosixPath，含绝对/父穿越/NUL负例及非BMP排序正反例；source_path 固定 repos/SHUD，patch_path 必须与本 change_id 精确绑定；40/64 小写 hex、ISO 时间、严格字段集及 legacy 字段拒绝。
+- VC 边界：保留八种 case_type、五种 expected_result_source（含 agent_proposed）、六态 status；passed 等 sha/null reason，failed 不等 sha/非空 reason；hash 不一致指出 status，reason 不一致指出 failure_reason。artifact_refs 恰两项相对路径，notes 至少一条且每条非空；bundle_id 为非空或null；nested observed 严格且两 digest 为64位小写hex、compared_path相对。不凭空增加其他状态谓词、数组排序唯一或磁盘存在性检查。
+- BR 边界：base 的 change_id/patch_sha256 为null且 dirty_paths为空；candidate 三者全非空。分别测试两向不一致；dirty_paths复用相对路径和码点排序唯一规则；binary/stdout/stderr路径分别绑定本build_id；source_path固定、source_commit40hex、binary_sha25664hex、exit_code0、duration非负、make_argv非空字符串数组、sundials_dir绝对路径。
+- File IO/path safety：仅纯路径字段约束及已有生成器安全写入；不新增文件读取/创建接口。保留生成路径祖先/符号链接保护和registry completeness自证。
+- Legacy compatibility / Documentation：登记三组合法 exampleOverrides（proposed CR、passed VC、base BR），生成三组Markdown+JSON Schema；已有25份生成物（含floor投影）字节不变；新schema与旧对象解析及生成自证共跑，不改旧golden/期望。
+- Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：无新增配置、共享运行状态、文件发现、发布事务、依赖；仅schema解析错误与生成器原有失败边界，明确非目标。
+- RED/GREEN：先由编排器运行focused新测试得到缺实现RED（只证明接线），实现后通过；另外用隔离负控移除CR审批一致性、VC结果一致性、BR三字段关联中的对应约束，合法向量先绿、非法向量在变体中被错误接受导致断言红，恢复原版绿；不改受保护测试/源表来清闸。
+- 命令：四个focused schema/brand测试文件 → `pnpm run schema:generate` / `pnpm run test:schema-generation` → built core index smoke（有效/无效CR、VC、BR及CHG/VC/BUILD生成）→ `pnpm run check` → 三席review与同SHA CI。生成新文件先加入索引再跑schema:check；变更生成物全部来自生成器。
+
 ## 2. core：floor 常量、三对象 schema、品牌 id、角色映射、措辞常量、git runner（Critical Path #1/#7）
 
-- [ ] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
+- [x] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
 - [ ] 2.1 依赖 2.3。新增 `ChangeId`/`VerificationId`/`BuildId` 品牌 id（复用 `run-identifiers.ts`）与 `change-request.ts`（含 `floor_categories`、`risk == riskForLevel` refine）、`verification-case.ts`、`build-record.ts`（含 `patch_sha256` iff `change_id`、40 hex `source_commit`）严格 schema（字段与 refine 按 change-requests「ChangeRequest record」、verification-cases「VerificationCase record」、shud-build「BuildRecord record」）；正反例测试；`pnpm run schema:generate` 投影；`index.ts` 导出。
 - [ ] 2.2a 依赖 2.1。`TaskTypeSchema` 增 `code_change`；TaskCard 增 `linked_changes`/`linked_verifications`（`default([])`，排序唯一）与 `source_base_commit`（40 hex 或 null，缺键按 null；refine `code_change` ⇒ 非 null、其它 ⇒ null）；M3 卡片夹具原样可读回归；投影更新。按 task-cards「TaskCard record」「TaskCard generated projection」。
 - [ ] 2.2b 依赖 2.1。StackLock 增 nullable `build_id`（非 null 时纳入 `computeStackFingerprint`，null 时指纹与 M3 逐字节相同、旧 lock 仍可复用）；固定向量测试；投影。按 stack-lock「StackLock schema alignment」「Stack fingerprint」。

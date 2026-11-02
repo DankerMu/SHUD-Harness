@@ -47,6 +47,32 @@ Stage 1 grill 结论（`.workplans/m4-mvp-2/grill-gate.json`，25 分支 + 3 开
 - 落点：`<cwd>/changes/<change_id>.json`、`patches/<change_id>.patch`、`verifications/<vc_id>.json`、`builds/<build_id>/`；原子写、`lstat` 路径安全与 id 先校验后拼路径全部沿 task-cards「TaskCard workspace file」；新对象以排他创建落盘，id 碰撞时重新分配（≤3 次），不覆盖已有对象。不建索引：查找按 id 定位；TaskCard 的 `linked_changes`/`linked_verifications` 是 closure 的唯一入口（不扫描目录）。
 - 备选 `ctx.storage`、保留 `CHG-NNNN` 顺序号、新增 ReviewNote 对象：grill 均否决（持久化/id/review note 三支）。
 
+#### Issue #519 implementation boundary
+
+Change surface: core schemas/run-identifiers, three new strict record schemas, schema/public exports, existing generator registry and generated documents.
+
+Governing invariant: parsing a new record accepts only its declared closed shape and internally consistent identity/governance/result fields; a valid id is checked before its derived path is accepted.
+
+Must preserve: existing JOB/RUN/TASK/STACK/DATA/REPORT/DEC validation and generation, all prior schema parse semantics, the #518 ORDER/risk single source, Unicode code-point repository ordering, and byte-identical existing generated artifacts.
+
+Must add: CHG/VC/BUILD brands through the existing generator; three schemas and inferred types; schema registry entries with valid examples. No runtime state or compatibility aliases.
+
+Sibling surfaces: schemas/index.ts and core/index.ts; branded-ids.test.ts; relative-posix-path.ts and stack-lock/compare-paths.ts; registry discovery/completeness and generated-paths safe writer; downstream tasks 2.2a–c/3.1 consume these exports only after this slice.
+
+CR: level and floor use the core tuple; risk follows the declared level; all floor_categories are sorted unique and end at floor; approval fields are null exactly for proposed. Fixed patch identity is derived from change_id.
+
+VC: schema keeps the full declared enums, including agent_proposed and nonterminal statuses; M4 producer narrowing is not a schema rule. Passed/failed impose the spec hash/reason invariants; no artifact filesystem checks in parsing.
+
+BR: base versus candidate binds change_id, patch_sha256 and dirty_paths in both directions. All three output paths bind exactly to build_id. Schema cannot verify referenced task commits or actual binary bytes.
+
+Seams under test: source public schema exports, built core index exports, generated examples accepted by their own schemas, and schema drift gate.
+
+Required evidence: task fixture positive/negative vectors and error paths; three independent cross-field semantic negative controls; existing projections unchanged; public built-runtime parsing/id generation; full local gate and same-SHA CI.
+
+Non-goals: task/run/stack/provenance extensions, persistence or build execution, tool/policy integration, source checkout validation, producer enum narrowing, PI approval or M4 acceptance.
+
+Review focus: precise strict shapes and error paths; complete bidirectional predicates; shared validators instead of forks; no discarded legacy behavior; generator examples/projections remain canonical.
+
 ### D2 回放工作区准备契约（脚本/PI 拥有，工具只校验）
 
 - scratch workspace 由 `scripts/runtime/shud-replay-prepare.sh`（`shud:replay` 的前置步骤，也可单独执行供 PI 验收）建立：
