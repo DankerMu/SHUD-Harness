@@ -8,7 +8,7 @@ import {
   writeGeneratedFile,
 } from "./generated-paths.ts";
 import { assertSchemaRegistryComplete, schemaDefinitions } from "./registry.ts";
-import { buildJsonSchema, buildMarkdown } from "./render.ts";
+import { buildJsonSchema, buildMarkdown, buildSemanticLevelFloorMarkdown } from "./render.ts";
 import { runSelfTest } from "./self-test.ts";
 
 async function main(): Promise<void> {
@@ -36,6 +36,11 @@ async function main(): Promise<void> {
       generatedPathContext,
     );
   }
+  await writeGeneratedFile(
+    join(markdownDir, "semantic-level-floor.md"),
+    buildSemanticLevelFloorMarkdown(),
+    generatedPathContext,
+  );
 }
 
 main().catch((error: unknown) => {
