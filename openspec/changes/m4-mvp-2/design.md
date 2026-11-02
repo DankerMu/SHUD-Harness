@@ -178,6 +178,28 @@ Review focus: default application precedes refine; all non-code types reject com
 - StackLock：引用 build 时 `repos.SHUD` = BuildRecord 的 `{source_commit, source_branch, dirty: dirty_paths.length>0, dirty_paths, dirty_paths_truncated:false}`，`build_id` 字段为该 id 并进入指纹；无 build 时 `build_id: null`、`repos.SHUD` 仍采根 submodule。因此 base 与 candidate 运行必然得到两个不同的 StackLock；报告逐 lock 列出。`rSHUD`/`AutoSHUD` 不变。
 - raw-guard：`shud_run` 的三写入根判定不变；`builds/` 是读取源，不纳入写入根。
 
+#### Issue #521 implementation boundary
+
+Change surface: StackLock schema/fingerprint and their tests, registry example, generated projection; minimum captureStackLock build_id:null literal if required by output typing.
+
+Governing invariant: a missing/null build reference preserves the exact M3 fingerprint and reuse identity, while each non-null build reference participates in canonical environment identity.
+
+Must preserve: existing M3 fixed hash/canonical bytes; all prior exclusion/sensitivity rules and UTF-16 object-key ordering; strict schema and canonical repository paths; original legacy file bytes/mtime; capture selection, collision, error and directory-safety behavior.
+
+Must add: BuildId|null defaultnull schema output; conditional null exclusion in fingerprint; input type permits only the additional legacy omission; independent non-null fixed vector.
+
+Sibling surfaces: public core exports and fingerprint callers; records/capture-stack-lock.ts Environment/candidateSchema/matchingLock; records/workspace-records.ts readonly parser; raw stackCase fixture and existing capture/allocation tests; registry/discovery/selftest.
+
+Evidence identity: the M3 fixed vector remains974a68b60908c59c718e3e4e84a9a7f5af2e079337bc0450be529f06fbb64948; the independent build vector isb0dfc39447ff3685933c7db596191d9202b9e3c4ea8f86c5515b9d3e25d5bc19 for BUILD-20261102T080000-3f9c. Neither expectation comes from the production hashing function.
+
+Seams under test: public built schema/fingerprint, true readonly workspace read, and actual capture reuse of a pre-change lock in an unchanged temporary three-repository environment.
+
+Required evidence: null/missing equality and fixed M3 digest; two distinct build IDs and non-null fixed digest; original sensitivity/exclusion regressions; malformed brand field errors; read/reuse without bytes/mtime/file-count changes;29sibling projections unchanged.
+
+Non-goals: BuildRecord-derived repo metadata, job submission, binary validation, tool arguments, report facts, profile or scientific conclusions.
+
+Review focus: null-only exclusion (never unconditional build_id exclusion); no broad input-type weakening; unchanged serialization algorithm; legacy evidence remains raw; capture adaptation is literal-only.
+
 ### D10 DataProvenance 的外部 forcing 引用
 
 - `generateProvenance` 在遍历副本后解析 `<copied input>/<project>.tsd.forc`：第 2 行为 forcing 目录；相对路径按运行目录解析（SHUD 以运行目录为 cwd；ccw 的 `./input/ccw/` 落在副本内）。解析结果（realpath）位于副本目录之内 → `external_files: []`；位于副本外 → 第 3 行起的表格每行最后一列 `Filename` 拼该目录，逐一 `lstat` 为普通文件、计算 sha256 与字节数，按路径排序写入新增字段 `sources.external_files: [{path(绝对), sha256, size_bytes}]`（M3 记录读取时 `default([])`，不改写）。目录不存在、文件缺失、非普通文件或 `tsd.forc` 解析失败 → 提交失败并回滚（不降级为空列表）。这对 ccw 与所有无 build 提交同样生效：是 M4 对无 build 路径唯一的行为变化，Migration 回滚不声称"逐字节不变"。

@@ -43,11 +43,43 @@ function validAlignedStackLock() {
   };
 }
 
+function expectLegacyDefaults(input: unknown) {
+  const { build_id, ...oldFields } = StackLockSchema.parse(input);
+  expect(oldFields).toEqual(input);
+  expect(build_id).toBeNull();
+}
+
 describe("StackLock schema alignment", () => {
   test("parses a minimal aligned StackLock with clean repositories", () => {
     const input = validAlignedStackLock();
-    expect(StackLockSchema.parse(input)).toEqual(input);
+    expectLegacyDefaults(input);
   });
+
+  test.each([null, "BUILD-20261102T080000-3f9c"])(
+    "preserves an explicit build reference: %s",
+    (build_id) => {
+      const input = { ...validAlignedStackLock(), build_id };
+      expect(StackLockSchema.parse(input)).toEqual(input);
+    },
+  );
+
+  test("defaults a missing M3 build reference to null without changing the input", () => {
+    const input = validAlignedStackLock();
+    const before = JSON.stringify(input);
+    expect(input).not.toHaveProperty("build_id");
+    expectLegacyDefaults(input);
+    expect(JSON.stringify(input)).toBe(before);
+    expect(input).not.toHaveProperty("build_id");
+  });
+
+  test.each(["BUILD-0001", "BUILD-20261102T080000-3F9C", "RUN-20261102T080000-3f9c"])(
+    "rejects an invalid BuildId at build_id: %s",
+    (build_id) => {
+      const result = StackLockSchema.safeParse({ ...validAlignedStackLock(), build_id });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((issue) => issue.path)).toContainEqual(["build_id"]);
+    },
+  );
 
   test.each([
     { dirty: false, dirty_paths: ["notes.txt"], dirty_paths_truncated: false },
@@ -107,7 +139,7 @@ describe("StackLock schema alignment", () => {
         },
       },
     };
-    expect(StackLockSchema.parse(input)).toEqual(input);
+    expectLegacyDefaults(input);
   });
 
   test("accepts a dirty truncated revision with no complete paths", () => {
@@ -119,7 +151,7 @@ describe("StackLock schema alignment", () => {
         SHUD: { ...base.repos.SHUD, dirty: true, dirty_paths_truncated: true },
       },
     };
-    expect(StackLockSchema.parse(input)).toEqual(input);
+    expectLegacyDefaults(input);
   });
 
   test.each([
@@ -276,6 +308,6 @@ describe("StackLock schema alignment", () => {
         },
       },
     };
-    expect(StackLockSchema.parse(input)).toEqual(input);
+    expectLegacyDefaults(input);
   });
 });

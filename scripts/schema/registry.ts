@@ -100,6 +100,7 @@ export const schemaDefinitions: SchemaDefinition[] = [
         request_alias: "deepseek-flash-guan",
         response_model: "deepseek-flash-guan",
       },
+      build_id: null,
     },
   },
   {

@@ -40,6 +40,7 @@ Required is evaluated within the immediate parent object.
 | llm.base_url | yes | no | string | minLength=1 |
 | llm.request_alias | yes | no | string | minLength=1 |
 | llm.response_model | yes | no | string | minLength=1 |
+| build_id | no | yes | string \| null | pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | fingerprint | yes | no | string | minLength=1 |
 | created_at | yes | no | string | minLength=1 |
 
@@ -76,6 +77,7 @@ llm:
   base_url: "https://www.dmxapi.cn"
   request_alias: "deepseek-flash-guan"
   response_model: "deepseek-flash-guan"
+build_id: null
 fingerprint: "example"
 created_at: "example"
 ```
@@ -83,7 +85,7 @@ created_at: "example"
 ## Changelog Diff
 
 ```diff
-+ schema StackLock sha256:288041cb0b5d02f1267af88befcd54246435bd0564430cd1b7aba83526f1ffbe
++ schema StackLock sha256:aaebd2891340b9c3899442409ba9ecb6dab71716f7d02e827f4974eac2d210a8
 + field stack_id required=yes nullable=no type=string constraints=pattern=^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field repos required=yes nullable=no type=object constraints=additionalProperties=false
 + field repos.SHUD required=yes nullable=no type=object constraints=additionalProperties=false
@@ -114,6 +116,7 @@ created_at: "example"
 + field llm.base_url required=yes nullable=no type=string constraints=minLength=1
 + field llm.request_alias required=yes nullable=no type=string constraints=minLength=1
 + field llm.response_model required=yes nullable=no type=string constraints=minLength=1
++ field build_id required=no nullable=yes type=string | null constraints=pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field fingerprint required=yes nullable=no type=string constraints=minLength=1
 + field created_at required=yes nullable=no type=string constraints=minLength=1
 ```

@@ -1,14 +1,14 @@
 # Proposal
 
-## Active issue fixture: #520
+## Active issue fixture: #521
 
 - Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree).
-- Scope: task 2.2a only; TaskCard code_change type, defaulted branded links and type-bound source_base_commit, generated projection and minimum typed-writer literals.
-- Selected risk packs: Public API; Schema/field names; File IO/read compatibility; Legacy compatibility; Documentation.
-- Evidence floor: focused semantic RED/GREEN, exact legacy input preservation, real readonly workspace-file smoke, generated projection/drift and unchanged siblings, full check, Critical Path #7 whitebox review and same-SHA CI.
-- Governing source: task-cards「TaskCard record」「TaskCard generated projection」; #519 schema/brand prerequisites delivered by #556. The task-list sorting shorthand is writer responsibility, not a new schema rejection rule.
-- Preserve the #518 floor rule: unmatched paths are numerical_implementation and categories retain all matched entries; prior broad proposal summaries are historical context, not the active oracle.
-- No task_create code_change behavior, HEAD lookup, transition/closure/link-writing behavior, other object extensions, host/config/dependency changes.
+- Scope: task 2.2b only; nullable defaulted StackLock build_id and canonical fingerprint inclusion for non-null builds, fixed vectors, generated projection, minimum capture literal.
+- Selected risk packs: Public API; Schema/field names; File IO/read-reuse compatibility; Legacy compatibility; Documentation.
+- Evidence floor: schema/fingerprint semantic RED/GREEN, independently shasum-computed fixed vectors, real legacy readonly/capture reuse smoke, projection drift and unchanged siblings, full check, Critical Path #7 whitebox review and same-SHA CI.
+- Governing source: stack-lock「StackLock schema alignment」「Stack fingerprint」「StackLock generated projection」; #519 brands delivered by #556, #520 TaskCard delivered by #557.
+- Preserve #518 all-match floor semantics and #520 writer-owned link ordering; prior broad proposal summaries are historical context, not the active oracle.
+- No BuildRecord source capture, jobs/tools/profile/report behavior, other object extensions, host/config/dependency changes.
 
 ## Why
 

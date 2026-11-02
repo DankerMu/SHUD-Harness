@@ -7,14 +7,20 @@ const EXCLUDED_KEYS: ReadonlySet<string> = new Set(["stack_id", "created_at", "f
 /**
  * "sha256:" + hex SHA-256 of canonical JSON excluding root stack_id/created_at/fingerprint
  * and llm.response_model, which is recorded without invalidating the lock (K4).
+ * A null build_id is excluded to preserve M3 fingerprints; non-null build IDs are included.
  * Canonical JSON: object keys sorted by UTF-16 code unit at every level, arrays in order,
  * primitives via JSON.stringify, no whitespace. Input is assumed schema-valid (no undefined).
  */
 export function computeStackFingerprint(
-  lock: Omit<StackLock, "fingerprint"> & { fingerprint?: string },
+  lock: Omit<StackLock, "fingerprint" | "build_id"> & {
+    fingerprint?: string;
+    build_id?: StackLock["build_id"];
+  },
 ): string {
   const content: Record<string, unknown> = Object.fromEntries(
-    Object.entries(lock).filter(([key]) => !EXCLUDED_KEYS.has(key)),
+    Object.entries(lock).filter(
+      ([key, value]) => !EXCLUDED_KEYS.has(key) && !(key === "build_id" && value === null),
+    ),
   );
   content.llm = {
     base_url: lock.llm.base_url,
