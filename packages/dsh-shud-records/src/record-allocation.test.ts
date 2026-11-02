@@ -63,7 +63,9 @@ describe.each(mutableCases)("$kind allocation", (fixture) => {
   const expectedOutput =
     fixture.kind === "task"
       ? { ...fixture.value, linked_changes: [], linked_verifications: [], source_base_commit: null }
-      : fixture.value;
+      : fixture.kind === "data"
+        ? { ...fixture.value, sources: { ...fixture.value.sources, external_files: [] } }
+        : fixture.value;
 
   test("synchronously publishes exactly the supplied fields with one independently generated id", () => {
     const result = allocate(fixture);

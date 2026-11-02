@@ -21,6 +21,10 @@ Required is evaluated within the immediate parent object.
 | sources.files[].path | yes | no | string | minLength=1 |
 | sources.files[].sha256 | yes | no | string | minLength=1 |
 | sources.files[].size_bytes | yes | no | integer | minimum=0; maximum=9007199254740991 |
+| sources.external_files | no | no | array<object> | default=[]; items: additionalProperties=false |
+| sources.external_files[].path | yes | no | string | minLength=1 |
+| sources.external_files[].sha256 | yes | no | string | pattern=^[0-9a-f]{64}$ |
+| sources.external_files[].size_bytes | yes | no | integer | minimum=0; maximum=9007199254740991 |
 | preprocess | yes | no | null | - |
 | uncertainty_notes | yes | no | null | - |
 
@@ -39,6 +43,7 @@ sources:
       path: "ccw.sp.mesh"
       sha256: "sha256:mesh"
       size_bytes: 1024
+  external_files: []
 preprocess: null
 uncertainty_notes: null
 ```
@@ -46,7 +51,7 @@ uncertainty_notes: null
 ## Changelog Diff
 
 ```diff
-+ schema DataProvenance sha256:68c4f0d16d6277af1870542310fcdf6dda395baf73dbbc6f2dde224e8ed36f18
++ schema DataProvenance sha256:a0b3dd30ff9f81f4aede56a70fade803d9ffc0263a5f737c0f31df3c18849287
 + field data_id required=yes nullable=no type=string constraints=pattern=^DATA-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field basin required=yes nullable=no type=string constraints=minLength=1
 + field event_window required=yes nullable=no type=object constraints=additionalProperties=false
@@ -58,6 +63,10 @@ uncertainty_notes: null
 + field sources.files[].path required=yes nullable=no type=string constraints=minLength=1
 + field sources.files[].sha256 required=yes nullable=no type=string constraints=minLength=1
 + field sources.files[].size_bytes required=yes nullable=no type=integer constraints=minimum=0; maximum=9007199254740991
++ field sources.external_files required=no nullable=no type=array<object> constraints=default=[]; items: additionalProperties=false
++ field sources.external_files[].path required=yes nullable=no type=string constraints=minLength=1
++ field sources.external_files[].sha256 required=yes nullable=no type=string constraints=pattern=^[0-9a-f]{64}$
++ field sources.external_files[].size_bytes required=yes nullable=no type=integer constraints=minimum=0; maximum=9007199254740991
 + field preprocess required=yes nullable=no type=null constraints=-
 + field uncertainty_notes required=yes nullable=no type=null constraints=-
 ```

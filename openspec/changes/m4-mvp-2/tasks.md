@@ -83,13 +83,27 @@
 - Auth/governance、Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：不改权限、配置、并发、发现、事务或依赖；原pid/退出分类/时间/资源字段规则保持，仅新增纯字段关系。
 - 验证：focused新行为真实语义RED→GREEN；generator/selftest/typecheck及最小字面值/输出断言适配；built文件读回smoke；full pnpm run check；如触及jobs写入字面值，加既有profile:smoke；白盒review与同SHA CI。
 
+### Issue #523 risk and evidence fixture
+
+本刀仅2.2d；2.2c已由#559合并（#522 closed）。原M3缺sources.external_files的输入与文件字节保持，空数组默认不冒充外部forcing采集已交付。
+
+- Public API / Schema：sources.external_files为strict元素数组default([])；元素path为非空绝对路径、sha256为64位小写hex、size_bytes复用既有非负整数约束。缺字段默认空；显式null/非数组拒绝；每个元素三键必填且未知键拒绝，精确错误路径sources.external_files.<index>.<field>。
+- 正反例：显式[]、绝对路径/有效digest/零及正size成功；相对path、空/短/大写/非hex digest、缺sha256、负/非整数/非数值size、非对象项、未知项字段拒绝。合法项顺序与重复保留，不增加排序、唯一性、磁盘存在性或外部文件读取。
+- Legacy compatibility：保留原DataSourceSchema(files)的相对POSIX路径及非空digest语义（既有"digest"用例合法），不能为复用代码而收紧旧files.sha256为64hex。保留input_root/files必填、各层strict、event_window非空字符串|null、preprocess/uncertainty_notes必填null及terrain/mesh/forcing/observations拒绝。
+- 缺键M3解析得到新的独立[]且原字段/输入不变。旧完整输出断言必要时仅在sources层增加明确external_files:[]期待，原factory、required-field循环、rawdataCase与安全/身份/字节断言不动。
+- File IO/read compatibility：编排器用真实built readWorkspaceRecord(...,"data",id,{readonly:true})读取冻结M3 JSON，结果sources增加[]，全部旧字段、文件bytes/mtime/inventory不变。仅证明metadata读取，不读取forcing文件或运行生成器来伪装采集证明。
+- generateProvenance调用typed createDataProvenance若需要适配，仅sources补external_files:[]字面值；不改目录遍历、hash、排序、tsd.forc或事务。没有新公开helper/schema导出或依赖。
+- Documentation/生成：registry仅DataProvenance示例sources补[]；schema:generate/selftest/check通过；仅DataProvenance两份投影改变，其余29份逐字节不变，投影不出现legacy terrain分类。
+- Auth/governance、Config/setup、Concurrency/shared state、Resource/discovery、Error/rollback、Release/dependencies：无权限、配置、并发、外部发现、回滚或依赖变化；producer新行为明确属于3.4/4.1，不在schema内实现。
+- 验证：focused data-provenance-schema真实语义RED→GREEN；generator/selftest/typecheck与必要最小字面值/输出断言适配；built readonly smoke；full pnpm run check；若触及records producer字面值加既有profile:smoke；白盒review/同SHA CI。
+
 ## 2. core：floor 常量、三对象 schema、品牌 id、角色映射、措辞常量、git runner（Critical Path #1/#7）
 
 - [x] 2.3 `governance/semantic-level-floor.ts`：`SEMANTIC_LEVEL_ORDER`、`SEMANTIC_LEVEL_FLOORS`（Gating §1.1 初值，去 `SHUD/` 前缀）、`deriveSemanticFloor(paths): {floor, categories}`（每路径取全部匹配条目 floor 的最大值，无匹配 → `numerical_implementation`）、`riskForLevel`；正反例：`Makefile`+`src/Model/*` → numerical_implementation、`README.md` → numerical_implementation、`docs/x.md` → pure_engineering、`src/classes/Model_Control.cpp` 双匹配取最大且 categories 含两者、risk 映射；投影到 `docs/generated/`。按 change-requests「Semantic level floor」。无依赖。
 - [x] 2.1 依赖 2.3。新增 `ChangeId`/`VerificationId`/`BuildId` 品牌 id（复用 `run-identifiers.ts`）与 `change-request.ts`（含 `floor_categories`、`risk == riskForLevel` refine）、`verification-case.ts`、`build-record.ts`（含 `patch_sha256` iff `change_id`、40 hex `source_commit`）严格 schema（字段与 refine 按 change-requests「ChangeRequest record」、verification-cases「VerificationCase record」、shud-build「BuildRecord record」）；正反例测试；`pnpm run schema:generate` 投影；`index.ts` 导出。
 - [x] 2.2a 依赖 2.1。`TaskTypeSchema` 增 `code_change`；TaskCard 增 `linked_changes`/`linked_verifications`（`default([])`，排序唯一）与 `source_base_commit`（40 hex 或 null，缺键按 null；refine `code_change` ⇒ 非 null、其它 ⇒ null）；M3 卡片夹具原样可读回归；投影更新。按 task-cards「TaskCard record」「TaskCard generated projection」。
 - [x] 2.2b 依赖 2.1。StackLock 增 nullable `build_id`（非 null 时纳入 `computeStackFingerprint`，null 时指纹与 M3 逐字节相同、旧 lock 仍可复用）；固定向量测试；投影。按 stack-lock「StackLock schema alignment」「Stack fingerprint」。
-- [ ] 2.2c 依赖 2.1。RunJob/RunRecord 增 nullable `build_id`/`threads`（正整数）/`binary_sha256`（缺键按 null；iff `build_id` 的 refine 在默认值之后求值）；M2/M3 夹具原样可读回归；投影。按 run-records「RunJob record」「RunRecord record」「Generated projection」。
+- [x] 2.2c 依赖 2.1。RunJob/RunRecord 增 nullable `build_id`/`threads`（正整数）/`binary_sha256`（缺键按 null；iff `build_id` 的 refine 在默认值之后求值）；M2/M3 夹具原样可读回归；投影。按 run-records「RunJob record」「RunRecord record」「Generated projection」。
 - [ ] 2.2d DataProvenance 增 `sources.external_files`（`{path(绝对), sha256, size_bytes}` 数组，缺键按 `[]`）；M3 夹具回归；投影。按 data-provenance「DataProvenance record」「DataProvenance generated projection」。无依赖。
 - [ ] 2.4 `role-tool-map.ts` 四角色真实 id（coordinator `local` 三委派工具；coder/reviewer/repo_explorer `inherited` 按 agent-presets「Role tool map uses mounted names」）；删除 `harness.memory.propose`、`patch.apply`、`validator.run`、`repo.*`、`git.inspect`；`readCallerPresetId` 映射增 coder/reviewer（policy-gate「Caller role derivation」）；`ROLE_TOOL_IDS` 并集测试；policy-gate-core `role-tool-surface` 表随之更新并附四角色 × 新工具的 deny 正反例（policy-gate「Role tool surface rule」）。无依赖。
 - [ ] 2.5 `governance/wording.ts` 导出 `code_change` §5 固定句常量，正反例测试（逐字、不进扫描短语集）；按 evidence-reports「code_change report wording constant」、engineering-gates「Scientific wording rules are enforced by tested constants」。无依赖。

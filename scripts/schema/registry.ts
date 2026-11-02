@@ -117,6 +117,7 @@ export const schemaDefinitions: SchemaDefinition[] = [
       sources: {
         input_root: "/workspace/input/ccw",
         files: [{ path: "ccw.sp.mesh", sha256: "sha256:mesh", size_bytes: 1024 }],
+        external_files: [],
       },
       preprocess: null,
       uncertainty_notes: null,

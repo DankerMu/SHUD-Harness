@@ -229,6 +229,28 @@ Review focus: defaults before iff; no accidental status gate or threads coupling
 - `generateProvenance` 在遍历副本后解析 `<copied input>/<project>.tsd.forc`：第 2 行为 forcing 目录；相对路径按运行目录解析（SHUD 以运行目录为 cwd；ccw 的 `./input/ccw/` 落在副本内）。解析结果（realpath）位于副本目录之内 → `external_files: []`；位于副本外 → 第 3 行起的表格每行最后一列 `Filename` 拼该目录，逐一 `lstat` 为普通文件、计算 sha256 与字节数，按路径排序写入新增字段 `sources.external_files: [{path(绝对), sha256, size_bytes}]`（M3 记录读取时 `default([])`，不改写）。目录不存在、文件缺失、非普通文件或 `tsd.forc` 解析失败 → 提交失败并回滚（不降级为空列表）。这对 ccw 与所有无 build 提交同样生效：是 M4 对无 build 路径唯一的行为变化，Migration 回滚不声称"逐字节不变"。
 - `external_files` 的路径可能指向 `data/raw` 之外的任意只读目录（keliya 在 `../openMP`）；raw-guard 对 `shud_run` 的 `input_dir` 判定不变，不对外部 forcing 目录做 ask（它不是参数，也不被写入）。
 
+#### Issue #523 implementation boundary
+
+Change surface: DataProvenance schema/focused tests, registry example/generated projections; minimum external_files:[] literal at the existing typed producer.
+
+Governing invariant: legacy missing external metadata parses to an empty array without rewriting evidence; supplied external entries satisfy their absolute-path/digest/byte-size contract without changing existing internal-file semantics.
+
+Must preserve: raw M3 dataCase and files/metadata constraints, required existing keys and strict boundaries, relative POSIX internal paths, historical nonempty internal digest strings, input array order/duplicates, readonly bytes/mtime.
+
+Must add: sources.external_files default([]), strict items with nonempty absolute path, lowercase64 digest, and existing nonnegative integral byte sizes. Reuse size validation, not the old permissive digest constraint unchanged.
+
+Sibling surfaces: DataSourceSchema and ArtifactSchema size primitive; records/generate-provenance.ts typed createDataProvenance call; records/workspace-records.ts readonly data reader and allocation; raw dataCase and existing workspace tests; registry/selftest.
+
+Compatibility boundary: do not populate raw legacy input to hide defaults. Parsed-output assertions may add only sources.external_files:[] while retaining all original values and safety checks.
+
+Seams under test: built public DataProvenance schema and actual readonly data-file reader. No forcing discovery, reads, hashes, directory checks or producer inventory completeness are proved by this slice.
+
+Required evidence: valid/invalid entry/default/strict matrix, legacy read without byte/mtime/inventory changes, independent empty-array defaults, unchanged internal-file acceptance, only two generated artifacts changed, full check and same-SHA CI.
+
+Non-goals: parsing tsd.forc, external inventory/hashing, submission rollback, provenance-set comparison, jobs/profile behavior or scientific interpretation.
+
+Review focus: separate internal/external path+digest contracts; default only the new nested array; no new inventory policy; old evidence and producer algorithm unchanged.
+
 ### D11 角色、preset 与委派（Critical Path #1）
 
 - 新增 `preset-coder`、`preset-reviewer` 两行 `@deepseek-ai/dsh-agent-preset`，子树逐行显式：

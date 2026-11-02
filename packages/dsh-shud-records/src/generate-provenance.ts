@@ -115,7 +115,7 @@ export async function generateProvenance(
   files.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   return createDataProvenance(dirname(dirname(runDir)), {
     basin: project,
-    sources: { input_root: inputDir, files },
+    sources: { input_root: inputDir, files, external_files: [] },
     event_window: { start: null, end: null },
     preprocess: null,
     uncertainty_notes: null,
