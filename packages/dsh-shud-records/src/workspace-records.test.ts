@@ -136,11 +136,16 @@ function identity(target: string) {
 }
 
 describe.each(recordCases)("$kind workspace reads", (fixture) => {
+  const expectedOutput =
+    fixture.kind === "task"
+      ? { ...fixture.value, linked_changes: [], linked_verifications: [], source_base_commit: null }
+      : fixture.value;
+
   test("reads a schema-valid pre-existing object without changing its bytes", () => {
     const text = `  ${JSON.stringify(fixture.value, null, 2)}\n\n`;
     const target = seed(fixture.relative, text);
     const before = identity(target);
-    expect(readWorkspaceRecord(cwd, fixture.kind, fixture.id)).toEqual(fixture.value);
+    expect(readWorkspaceRecord(cwd, fixture.kind, fixture.id)).toEqual(expectedOutput);
     expect(realFs.readFileSync(target, "utf8")).toBe(text);
     expect(identity(target)).toEqual(before);
   });
@@ -263,12 +268,17 @@ test.each(unsafeKinds)("task nested directory rejects %s for reads and writes", 
 });
 
 describe.each(mutableCases)("$kind workspace writes", (fixture) => {
+  const expectedOutput =
+    fixture.kind === "task"
+      ? { ...fixture.value, linked_changes: [], linked_verifications: [], source_base_commit: null }
+      : fixture.value;
+
   test("synchronously creates its layout and publishes only schema-valid JSON", () => {
     expect(writeWorkspaceRecord(cwd, fixture.kind, fixture.value)).toBeUndefined();
     const target = realPath.join(cwd, fixture.relative);
-    expect(JSON.parse(realFs.readFileSync(target, "utf8"))).toEqual(fixture.value);
+    expect(JSON.parse(realFs.readFileSync(target, "utf8"))).toEqual(expectedOutput);
     expect(realFs.readFileSync(target, "utf8").endsWith("\n")).toBe(true);
-    expect(readWorkspaceRecord(cwd, fixture.kind, fixture.id)).toEqual(fixture.value);
+    expect(readWorkspaceRecord(cwd, fixture.kind, fixture.id)).toEqual(expectedOutput);
     expect(realFs.readdirSync(realPath.dirname(target))).toEqual([realPath.basename(target)]);
     expect(realFs.readdirSync(cwd)).toEqual([fixture.directory]);
   });
@@ -276,7 +286,7 @@ describe.each(mutableCases)("$kind workspace writes", (fixture) => {
   test("replaces an existing regular object without leftover temporary files", () => {
     const target = seed(fixture.relative, "prior object bytes\n");
     writeWorkspaceRecord(cwd, fixture.kind, fixture.value);
-    expect(JSON.parse(realFs.readFileSync(target, "utf8"))).toEqual(fixture.value);
+    expect(JSON.parse(realFs.readFileSync(target, "utf8"))).toEqual(expectedOutput);
     expect(realFs.readdirSync(realPath.dirname(target))).toEqual([realPath.basename(target)]);
   });
 
@@ -318,7 +328,7 @@ describe.each(mutableCases)("$kind workspace writes", (fixture) => {
     let temporaryObserved = false;
     vi.mocked(fs.renameSync).mockImplementationOnce((source, destination) => {
       expect(destination).toBe(target);
-      expect(JSON.parse(realFs.readFileSync(source, "utf8"))).toEqual(fixture.value);
+      expect(JSON.parse(realFs.readFileSync(source, "utf8"))).toEqual(expectedOutput);
       expect(realFs.readFileSync(target, "utf8")).toBe("prior object bytes\n");
       temporaryObserved = true;
       throw Object.assign(new Error(secret), { code: "EIO" });

@@ -60,11 +60,16 @@ function allocate(fixture: MutableFixture, fields?: Record<string, unknown>) {
 }
 
 describe.each(mutableCases)("$kind allocation", (fixture) => {
+  const expectedOutput =
+    fixture.kind === "task"
+      ? { ...fixture.value, linked_changes: [], linked_verifications: [], source_base_commit: null }
+      : fixture.value;
+
   test("synchronously publishes exactly the supplied fields with one independently generated id", () => {
     const result = allocate(fixture);
-    expect(result).toEqual(fixture.value);
+    expect(result).toEqual(expectedOutput);
     const target = join(cwd, fixture.relative);
-    expect(JSON.parse(realFs.readFileSync(target, "utf8"))).toEqual(fixture.value);
+    expect(JSON.parse(realFs.readFileSync(target, "utf8"))).toEqual(expectedOutput);
     expect(realFs.readdirSync(dirname(target))).toEqual([basename(target)]);
     expect(entropy.suffixes).toEqual(["abcd", "1234"]);
   });
@@ -76,7 +81,7 @@ describe.each(mutableCases)("$kind allocation", (fixture) => {
     const before = realFs.statSync(target, { bigint: true });
     const result = allocate(fixture);
     const secondId = `${fixture.id.slice(0, -4)}abcd`;
-    expect(result).toEqual({ ...fixture.value, [`${fixture.kind}_id`]: secondId });
+    expect(result).toEqual({ ...expectedOutput, [`${fixture.kind}_id`]: secondId });
     expect(entropy.suffixes).toEqual(["1234"]);
     expect(realFs.readFileSync(target, "utf8")).toBe("existing evidence bytes\n");
     expect(realFs.statSync(target, { bigint: true }).mtimeNs).toBe(before.mtimeNs);
@@ -141,7 +146,13 @@ test("an empty pre-existing task id directory is still a collision", () => {
   const original = join(cwd, "tasks", taskCase.id);
   realFs.mkdirSync(original, { recursive: true });
   const before = realFs.statSync(original, { bigint: true });
-  expect(allocate(taskCase)).toEqual({ ...taskCase.value, task_id: "TASK-20261027T080005-abcd" });
+  expect(allocate(taskCase)).toEqual({
+    ...taskCase.value,
+    task_id: "TASK-20261027T080005-abcd",
+    linked_changes: [],
+    linked_verifications: [],
+    source_base_commit: null,
+  });
   expect(realFs.readdirSync(original)).toEqual([]);
   expect(realFs.statSync(original, { bigint: true }).ino).toBe(before.ino);
   expect(entropy.suffixes).toEqual(["1234"]);

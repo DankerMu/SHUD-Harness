@@ -11,7 +11,7 @@ Required is evaluated within the immediate parent object.
 | Field | Required | Nullable | Type | Constraints / values |
 |---|---|---|---|---|
 | task_id | yes | no | string | pattern=^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
-| type | yes | no | enum<string> | values: `engineering`, `science_assist`, `ops` |
+| type | yes | no | enum<string> | values: `engineering`, `science_assist`, `ops`, `code_change` |
 | status | yes | no | enum<string> | values: `created`, `planned`, `running`, `parked`, `reporting`, `awaiting_pi`, `done`, `cancelled`, `blocked` |
 | runtime_phase | no | yes | enum<string> \| null | values: `running_local`, `submitted_job`, `waiting_for_job`, `collecting` |
 | title | yes | no | string | minLength=1 |
@@ -28,6 +28,9 @@ Required is evaluated within the immediate parent object.
 | inference_budget.reviewer_enabled | no | no | boolean | - |
 | linked_jobs | yes | no | array<string> | items: pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | linked_reports | yes | no | array<string> | items: pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| linked_changes | no | no | array<string> | default=[]; items: pattern=^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| linked_verifications | no | no | array<string> | default=[]; items: pattern=^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| source_base_commit | no | yes | string \| null | pattern=^[0-9a-f]{40}$ |
 | created_at | yes | no | string | minLength=1 |
 | updated_at | yes | no | string | minLength=1 |
 | theory_bundle_ids | no | no | array<string> | items: minLength=1 |
@@ -36,7 +39,7 @@ Required is evaluated within the immediate parent object.
 
 | Field | Values |
 |---|---|
-| type | `engineering`, `science_assist`, `ops` |
+| type | `engineering`, `science_assist`, `ops`, `code_change` |
 | status | `created`, `planned`, `running`, `parked`, `reporting`, `awaiting_pi`, `done`, `cancelled`, `blocked` |
 | runtime_phase | `running_local`, `submitted_job`, `waiting_for_job`, `collecting` |
 | inference_budget.mode | `cheap`, `normal`, `deep` |
@@ -64,6 +67,9 @@ linked_jobs:
   - "JOB-20261027T081000-0123"
 linked_reports:
   - "REPORT-20261027T090000-5b10"
+linked_changes: []
+linked_verifications: []
+source_base_commit: null
 created_at: "example"
 updated_at: "example"
 theory_bundle_ids:
@@ -73,9 +79,9 @@ theory_bundle_ids:
 ## Changelog Diff
 
 ```diff
-+ schema TaskCard sha256:cad96eaf530af14760a06fec3715e8c8486c29571079efd5868ddabe6ef9f96e
++ schema TaskCard sha256:1b8d5c5510633a570371ce5e95fea28545d3de204de9a5fdc13f2ae4a4cd704d
 + field task_id required=yes nullable=no type=string constraints=pattern=^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
-+ field type required=yes nullable=no type=enum<string> constraints=values: `engineering`, `science_assist`, `ops`
++ field type required=yes nullable=no type=enum<string> constraints=values: `engineering`, `science_assist`, `ops`, `code_change`
 + field status required=yes nullable=no type=enum<string> constraints=values: `created`, `planned`, `running`, `parked`, `reporting`, `awaiting_pi`, `done`, `cancelled`, `blocked`
 + field runtime_phase required=no nullable=yes type=enum<string> | null constraints=values: `running_local`, `submitted_job`, `waiting_for_job`, `collecting`
 + field title required=yes nullable=no type=string constraints=minLength=1
@@ -92,6 +98,9 @@ theory_bundle_ids:
 + field inference_budget.reviewer_enabled required=no nullable=no type=boolean constraints=-
 + field linked_jobs required=yes nullable=no type=array<string> constraints=items: pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field linked_reports required=yes nullable=no type=array<string> constraints=items: pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field linked_changes required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field linked_verifications required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field source_base_commit required=no nullable=yes type=string | null constraints=pattern=^[0-9a-f]{40}$
 + field created_at required=yes nullable=no type=string constraints=minLength=1
 + field updated_at required=yes nullable=no type=string constraints=minLength=1
 + field theory_bundle_ids required=no nullable=no type=array<string> constraints=items: minLength=1

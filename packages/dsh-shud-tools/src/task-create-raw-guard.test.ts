@@ -116,6 +116,9 @@ test("task_create with disjoint data/raw publishes a planned card without changi
       data_id: null,
       linked_jobs: [],
       linked_reports: [],
+      linked_changes: [],
+      linked_verifications: [],
+      source_base_commit: null,
     });
     expect(updated_at).toBe(created_at);
     expect(await treeOrAbsent(raw)).toEqual(rawBefore);

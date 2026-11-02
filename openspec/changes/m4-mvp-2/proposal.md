@@ -1,14 +1,14 @@
 # Proposal
 
-## Active issue fixture: #519
+## Active issue fixture: #520
 
 - Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree).
-- Scope: task 2.1 only; three strict core record schemas, three branded identifiers, registry examples and generated projections.
-- Selected risk packs: Public API; Schema/field names; Auth/governance; File IO/path safety; Legacy compatibility; Documentation.
-- Evidence floor: schema/brand positive and semantic-negative cases, generator self-test and drift gate, built public-export parse/id smoke, full `pnpm run check`, independent review and same-SHA CI.
-- Governing sources: change-requests, verification-cases and shud-build identifier/record/generated-projection requirements; engineering-gates registry coverage. Existing task 2.3 is delivered by #554.
-- Preserve the #518 floor rule: unmatched paths are numerical_implementation, and categories retain all matched entries; the older broad proposal summary below is not the active oracle.
-- No task/run/stack/provenance schema extensions, filesystem record APIs, tools, profile, runtime configuration, new dependencies or host changes.
+- Scope: task 2.2a only; TaskCard code_change type, defaulted branded links and type-bound source_base_commit, generated projection and minimum typed-writer literals.
+- Selected risk packs: Public API; Schema/field names; File IO/read compatibility; Legacy compatibility; Documentation.
+- Evidence floor: focused semantic RED/GREEN, exact legacy input preservation, real readonly workspace-file smoke, generated projection/drift and unchanged siblings, full check, Critical Path #7 whitebox review and same-SHA CI.
+- Governing source: task-cards「TaskCard record」「TaskCard generated projection」; #519 schema/brand prerequisites delivered by #556. The task-list sorting shorthand is writer responsibility, not a new schema rejection rule.
+- Preserve the #518 floor rule: unmatched paths are numerical_implementation and categories retain all matched entries; prior broad proposal summaries are historical context, not the active oracle.
+- No task_create code_change behavior, HEAD lookup, transition/closure/link-writing behavior, other object extensions, host/config/dependency changes.
 
 ## Why
 

@@ -156,6 +156,9 @@ test("task_create publishes the exact planned card through the closed ToolRuntim
     data_id: null,
     linked_jobs: [],
     linked_reports: [],
+    linked_changes: [],
+    linked_verifications: [],
+    source_base_commit: null,
     created_at: "2026-10-27T08:00:05.987Z",
     updated_at: "2026-10-27T08:00:05.987Z",
   });

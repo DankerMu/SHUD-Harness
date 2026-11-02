@@ -13,7 +13,8 @@
       "enum": [
         "engineering",
         "science_assist",
-        "ops"
+        "ops",
+        "code_change"
       ]
     },
     "status": {
@@ -129,6 +130,34 @@
         "type": "string",
         "pattern": "^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
       }
+    },
+    "linked_changes": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
+    "linked_verifications": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
+    "source_base_commit": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "created_at": {
       "type": "string",

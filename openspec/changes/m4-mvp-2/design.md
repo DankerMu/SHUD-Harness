@@ -141,6 +141,28 @@ Required evidence: semantic positive/negative vectors and seven risk mappings in
   5. 既有 `science_assist` 的运行子句对 `linked_jobs` 同样求值（全部 `collected` 且 RunRecord `stack_id/data_id` 非 null；失败/取消/收集耗尽阻塞）。
   不成立时 `report_generate` 返回点名子句的错误、不写报告、不改卡。`engineering` 谓词不动（本 change 不实现，保持无生产者）。
 
+#### Issue #520 implementation boundary
+
+Change surface: TaskCard schema, focused schema tests, TaskCard registry example and generated projection; minimum literal additions at existing typed writers only where required.
+
+Governing invariant: parsing old M3 cards supplies new nullable/array fields without changing stored evidence; after defaults, source_base_commit is present exactly for code_change.
+
+Must preserve: old raw input fixtures, read-only file bytes/mtime, all prior TaskCard field constraints, optional fields and root/nested unknown-key stripping. Schema link arrays validate brands but preserve input order and duplicates.
+
+Must add: code_change enum member; ChangeId/VerificationId links defaulting to fresh empty arrays; lowercase40 source_base_commit defaulting to null; post-default type/commit equivalence with field-specific error.
+
+Sibling surfaces: core public index and run-identifiers types; records/test-harness.ts legacy taskCase; records/workspace-records.ts readonly parser; records/createTaskCard and tools/task-create.ts typed writes; generator registry/self-test; existing lifecycle/reconcile/closure tests.
+
+Output migration: legacy input bytes remain frozen, while parsed output intentionally gains three defaults. Update broken output-only assertions to check preserved old values plus new defaults; never modify disk fixtures or weaken path/identity/security checks to hide this change.
+
+Seams under test: source TaskCardSchema and built public core index; actual built readWorkspaceRecord readonly path; existing task_create's science_assist-only behavior remains unchanged.
+
+Required evidence: task fixture boundary matrix, positive legacy missing-key parse, semantic failing-before/passing-after tests, real scratch file unchanged after readonly parse, generator changes limited to two TaskCard files, full check and same-SHA CI.
+
+Non-goals: task_create code_change/HEAD pinning, links writer sorting, TaskCard transitions/closure, other object fields, filesystem migration/rewrite, host or profile behavior.
+
+Review focus: default application precedes refine; all non-code types reject commits; arrays retain order/duplicates and reject bad brands; old evidence not rewritten; typed-writer changes are literal-only.
+
 ### D8 `verification_run` 工具契约与交叉校验
 
 - 参数：`task_id`、`base_run_id`、`candidate_run_id`、`reviewer_notes`（非空字符串数组）、`compatibility_verdict`（`compatible|incompatible|unknown`）。

@@ -41,8 +41,17 @@ for (const fixture of recordCases) {
     native.mkdirSync(dirname(path), { recursive: true });
     native.writeFileSync(path, JSON.stringify(fixture.value));
     const before = native.statSync(path, { bigint: true });
+    const expectedOutput =
+      fixture.kind === "task"
+        ? {
+            ...fixture.value,
+            linked_changes: [],
+            linked_verifications: [],
+            source_base_commit: null,
+          }
+        : fixture.value;
     expect(readWorkspaceRecord(cwd, fixture.kind, fixture.id, { readonly: true })).toEqual(
-      fixture.value,
+      expectedOutput,
     );
     expect(native.statSync(path, { bigint: true }).mtimeNs).toBe(before.mtimeNs);
     expect(fs.mkdirSync).not.toHaveBeenCalled();
