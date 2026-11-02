@@ -292,6 +292,24 @@ Review focus: clean identity/authorization separation; consumer compatibility wi
 - §5 对 `code_change` 固定写："本里程碑无指标 artifact；验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。"（该句进入 `wording.ts` 常量并由模板逐字渲染）。§7 另列 `status: failed` 的 VC。
 - `report_validate` 增至 15 项：(14) `code_change` §5 固定句；(15) `verification_ids` 中每个 VC 的 `artifact_refs` 两项均为会话 cwd 下的普通文件且 sha256 分别等于 `observed.base_sha256`/`candidate_sha256`（frozen `Verification_Case_Spec.md` 的"passed 需 artifact"在 M4 的落地：`verification_run` 写入时两个 artifact 刚被比较器读过、必然存在，第 (15) 项在报告校验时复核它们仍存在且未改；Review 2 P1-7）。其余 10 节、7 态水印、四句不变式、禁语与密钥扫描不变；`Report_Generation_Spec.md` 的"13 项"改为 15 项。
 
+#### Issue #525 implementation boundary
+
+Change surface: wording.ts constant and wording.test.ts; existing core wildcard export needs no duplicate statement.
+
+Governing invariant: scientific qualification text is one immutable, exact public literal, independent of model-text phrase scanning.
+
+Must preserve: ten forbidden phrases, four invariants, scanner field/order/substrings and no template whitelist; M3 rendering remains untouched.
+
+Must add: CODE_CHANGE_SECTION5_WORDING as const, byte-exact normative text with no whitespace/punctuation normalization.
+
+Sibling surfaces: core index wildcard, existing wording scanner/tests, future records template/validator and preset prompts.
+
+Required evidence: exact independent literal equality and mutation negative control; observation full sentence no hits but appended forbidden phrase still detected; built export/scanner smoke and full check.
+
+Non-goals: template/rendered JSON/Markdown, validator rule14, prompts, profile config, new scanning exemptions, generated schema changes.
+
+Review focus: exact scientific limits and punctuation, exported primitive, no scanner changes or premature downstream claims.
+
 ### D13 回放脚本与验收门
 
 - `pnpm run shud:replay <scratch-workspace>`（`scripts/runtime/shud-replay.sh` → `shud-replay.ts`，复用 `shud-web-driver.ts` 与首任务脚本的会话/审批驱动）：前置 `DMXAPI_KEY`、`SHUD_BIN`（安装器仍需）、`SUNDIALS_ROOT`、`SHUD_REPLAY_KELIYA`；执行 D2 准备；安装独立 Web profile；单提示启动 coordinator；对两次 `approval/asked`（`change_submit`、`report_submit`）自动 Allow once（工程证据，不是 PI 验收）；等待 worker/reviewer 子会话结束。
