@@ -1,15 +1,16 @@
 # Proposal
 
-## Active issue fixture: #574
+## Active issue fixture: #532
 
-- Issue type: refactor; Fixture level: expanded; no upstream level supplied, public shared entrypoint and existing path-safety consumers trigger expanded. Routed prerequisite #574 unblocks #532 without reversing records→jobs dependency; #531 merged as PR #573.
-- Scope: move the existing string predicate isProjectComponent into core, export it once, migrate both jobs consumers, retain behavioral tests and update active OpenSpec/DAG. No comparator, schema, dependencies, configuration or runtime protocol changes.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Legacy compatibility / examples; Documentation / migration notes. Other risk packs explicitly unchanged in tasks.
-- Preserve the exact accepted string set: reject empty, exactly dot/dotdot, slash, backslash or NUL; retain spaces, newlines, Unicode, shell punctuation and embedded dotdot. No trim, normalization, new type guard, schema tightening or compatibility re-export.
-- Governing invariant: jobs and future records consumers use one canonical core predicate with identical old runtime results; prepareInput/collect validation ordering, errors and side effects stay unchanged.
-- Verification mode: Equivalence, Light assurance profile for an exact pure-expression relocation. Frozen old callable reference passes 830 inputs and 21 named boundaries; disposable unsafe-backslash and overrestrictive mutants are rejected by 142 and 227 inputs, then reference restoration passes. No production mutation or artificial semantic-RED claim for the move.
-- Evidence floor: focused behavior tests before cutover, candidate equality to all frozen reference outputs, existing submit/collect safety suites and actual registry smoke, built public-core import from records context, unchanged schema projections, full check/profile smoke/strict OpenSpec/three-seat review/same-SHA CI.
-- Non-goals: #532 comparator, new project syntax, rejecting all embedded '..', changing RunJobSchema.project, binary/solver behavior, scientific conclusions or PI acceptance. Parent owns the small mechanical relocation/test edit under the no-small-delegation rule; independent fixture/code reviews remain mandatory.
+- Issue type: feature; Fixture level: expanded; upstream level retained for a public filesystem comparator, bounded hashing and final-target safety. #519 and routed #574 (PR #575) are merged.
+- Scope: records compare-rivqdown.ts/public export/tests and extraction of the existing private hashDescriptor into one internal module shared with verifyBuildBinary. No core/jobs/tools/schema/config/dependency changes.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes.
+- Synchronous compareRivqdown(baseRunDir,candidateRunDir,project) validates absolute string roots and the canonical core project component before IO, then returns exactly compared_path/base_sha256/candidate_sha256/equal for raw rivqdown bytes.
+- Preflight both final targets with lstat as ordinary files; descriptor-bound no-follow/nonblocking opens and fstat identity/type checks precede bounded hashing. Close the first descriptor before the second; no files/directories/records are created or changed.
+- Preserve caller-supplied physical root traversal; root/ancestor aliases remain caller-owned, not a new recursive path policy. Reject final target symlinks/special files and missing/unreadable evidence; never return unequal for a collection error.
+- Reuse the existing 64KiB descriptor hash loop without changing verifyBuildBinary permission, identity, error or cleanup behavior. No duplicate hash algorithm, whole-file buffers, numerical parsing, tolerance, logs or other-artifact discovery.
+- Evidence floor: tests first plus independently qualified system-shasum oracle (candidate-ignored and missing-as-unequal mutants rejected), exact binary/equality/error vectors, bounded read/close/fault evidence, unchanged binary verifier regressions, built public API smoke, full check/profile smoke/strict OpenSpec/31 generated unchanged/three-seat review/same-SHA CI.
+- Non-goals: VerificationCase/tool wiring (#540), caller run-id/task/build checks, arbitrary concurrent-input snapshot isolation, solver statistics/performance/scientific conclusions or PI acceptance. New public export initially absent is a setup RED, not a fabricated production semantic counterexample.
 
 ## Why
 
