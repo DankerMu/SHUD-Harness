@@ -2,9 +2,10 @@ import { defineTool, ToolArgsError, type ToolDefinition } from "@deepseek-ai/dsh
 import { readCallerPresetId } from "@shud-harness/dsh-shud-core";
 import { strictTool } from "./strict-tool.ts";
 import { createTaskCard } from "@shud-harness/dsh-shud-records";
+import { readSourceCheckout } from "./source-checkout.ts";
 
 const parameters = {
-  type: { type: "string", const: "science_assist", required: true },
+  type: { type: "string", enum: ["science_assist", "code_change"], required: true },
   title: { type: "string", required: true, description: "Nonempty task title." },
   question_or_goal: {
     type: "string",
@@ -17,7 +18,7 @@ export function createTaskCreateTool(): ToolDefinition {
   const tool = defineTool({
     name: "task_create",
     description:
-      "Create a planned science-assistance TaskCard in the calling session workspace. Does not start runs or link reports.",
+      "Create a planned science-assistance or code-change TaskCard in the calling session workspace. Code changes pin repos/SHUD HEAD. Does not start runs or link reports.",
     parameters,
     output: {
       schema: {
@@ -32,7 +33,7 @@ export function createTaskCreateTool(): ToolDefinition {
         return [{ type: "text", text: JSON.stringify(value) }];
       },
     },
-    execute(args, exec) {
+    async execute(args, exec) {
       for (const field of ["title", "question_or_goal"] as const) {
         if (args[field].length === 0) throw new ToolArgsError([`${field} must be nonempty`]);
       }
@@ -41,6 +42,8 @@ export function createTaskCreateTool(): ToolDefinition {
         throw new Error("task_create requires the calling session's cwd (workspace)");
       }
       const owner = readCallerPresetId(exec.agent);
+      const sourceBaseCommit =
+        args.type === "code_change" ? (await readSourceCheckout(cwd)).head : null;
       const now = new Date().toISOString();
       const card = createTaskCard(cwd, {
         ...args,
@@ -54,13 +57,13 @@ export function createTaskCreateTool(): ToolDefinition {
         linked_reports: [],
         linked_changes: [],
         linked_verifications: [],
-        source_base_commit: null,
+        source_base_commit: sourceBaseCommit,
         stack_id: null,
         data_id: null,
         created_at: now,
         updated_at: now,
       });
-      return Promise.resolve({ task_id: card.task_id, status: "planned" as const });
+      return { task_id: card.task_id, status: "planned" as const };
     },
   });
   return strictTool(tool, parameters);

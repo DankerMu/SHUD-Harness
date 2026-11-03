@@ -22,7 +22,7 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/report_generate/report_validate/report_submit/report_decide
+    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/report_generate/report_validate/report_submit/report_decide
     dsh-shud-records/               # 已实现四对象文件层、StackLock/provenance 采集、报告渲染/校验/状态机；非 Cordis 插件
       templates/                   # 已用于报告渲染的 Markdown 模板，仅此一个落点
     dsh-shud-policy-gate/           # 已挂载全局 tools/pre-execute，角色 deny + 报告 ask
@@ -95,6 +95,32 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 
 2026-10-24 实测边界：built ToolRuntime 的真实 ccw30 运行先拒绝运行中收集，退出 0 后经会话控制服务 seam 完成一次唤醒并移至完成索引，另一会话/cwd 通过两种 id 重复取得不可变记录。已安装 headless profile 的实际模型在两个新会话/不同 cwd 分别用两种 id 调用，canonical request/header/tool/call/tool/result 与落盘记录一致；该路径使用活动索引，通知仍为 pending/0、等待会话服务。两次运行各 45 个源/副本输入 hash 不变；不据此宣称 Web/PI 验收（#316–318）。
 
+### 已挂载的 `task_create` / `change_create`
+
+同一 `shud-tools` 插件已支持代码变更建卡与提案发布；无需新增 profile 行。以下是模型工具参数示例，不是 shell 命令。先调用 `task_create`：
+
+```json
+{"type":"code_change","title":"调整已跟踪源码","question_or_goal":"生成绑定当前源码基线的变更证据"}
+```
+
+`type` 只接受 `science_assist` / `code_change`，`title` 与 `question_or_goal` 必须非空；未知参数拒绝。工作区只取调用会话 cwd，源检出固定为 `repos/SHUD`，不接受路径参数、不代建或修改源仓库。`code_change` 在创建任务目录前验证真实目录、物理 Git 根与完整 40 位小写十六进制 HEAD，将其钉定为 `source_base_commit`；成功返回 `task_id` 与 `status: planned`，卡片初始链接为空。`science_assist` 保持空 pin，完全不访问 `repos/`。
+
+修改该独立检出内的已跟踪文件后调用 `change_create`；下例 `task_id` 须替换为实际建卡返回值：
+
+```json
+{"task_id":"TASK-20261103T080005-a001","semantic_level":"pure_engineering","description":"记录已跟踪源码的改动"}
+```
+
+`task_id` 必填；`semantic_level` 为可选七档声明，`description` 为可选一行文本，未知参数拒绝。工具只接受 `planned` / `running` 的 `code_change` 卡；先只读校验卡片，再经 core 受控 Git runner 核对 HEAD 与 pin，一致后才观测 status/diff。空观测、新增、删除、重命名及其它不支持的状态拒绝，不发布变更对象。源文件、index 与 HEAD 不被工具改写。
+
+工具复用 records 根入口的 `observeSourceChanges`、`deriveChangeRequest`、`ensureDirectory`、`createChangeRequest`、`writeChangePatch` 及卡片读写/状态机：观测后只派生一次 floor、categories、risk 与精确 patch 摘要，再预检 changes、patches、tasks 父目录及确切任务目录。低于 floor 的声明自动抬升并在结果说明；缺省取 floor，高于 floor 的声明保留。预检失败不公开或占有内存候选 id，也不写 CR、patch 或卡片。
+
+发布顺序为排他 CR JSON → 精确 patch → 新鲜 TaskCard，发布段不让出执行；CR 始终为 `proposed`、审批字段为空。碰撞后以 records 返回的实际 `change_id` 驱动 patch 路径、结果与卡片链接。新鲜卡仍须符合类型、状态与原 pin；保留其它字段及全部既有链接，`linked_changes` 合并排序去重，`planned` 进入 `running/running_local`，已 `running` 的 phase 保持。CR 提交后的失败保留已提交证据，受控错误携带实际 id（含 publisher 已提交但清理失败的 id）；不回滚，也不伪造成功链接。
+
+raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json（非法/缺失 id 回退 tasks）及 `repos/SHUD`：目标落入 raw 即拒绝，不读取卡片内容；`task_create` 仍只检查 tasks。两工具不调用 LLM、不发起审批、不自行批准变更，也不承诺外部 Git 并发写入者之间的快照隔离。
+
+工具注册不等于完整 M4 角色链路已交付：当前 profile 仍挂载 coordinator/worker，coder/reviewer 的角色工具映射不代表其 presets 已挂载；本切片未挂载 M4 coder/reviewer presets，亦未交付 `change_submit` / `shud_build`。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
+
 ### 本机 Web 重启验收
 
 在已安装 workspace 依赖、Node 24+ 与 pnpm 的本机，环境中提供非空 `DMXAPI_KEY` 后执行：
@@ -128,15 +154,15 @@ $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指
   reports/<report_id>.json          # M3 规范 EvidenceReport 对象
   reports/<report_id>.md            # 同名 JSON 的确定性 Markdown 投影
   runs/<run_id>/                    # M2 运行记录、输入副本、日志、pid/退出码与 output 产物
-  repos/SHUD/                      # M4 目标：scratch 内独立本地 clone，不是 git worktree
-  changes/<change_id>.json          # M4 目标：ChangeRequest
-  patches/<change_id>.patch         # M4 目标：确定性 patch
+  repos/SHUD/                      # 调用方准备的 scratch 独立检出；code_change 建卡钉定 HEAD
+  changes/<change_id>.json          # change_create 已发布的 proposed ChangeRequest
+  patches/<change_id>.patch         # change_create 已发布的精确 patch
   verifications/<vc_id>.json        # M4 目标：VerificationCase
   builds/<build_id>/                # M4 目标：build-record.json、shud、make.stdout.log、make.stderr.log
 <data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```
 
-M4 新目录由 [m4-mvp-2](../../openspec/changes/m4-mvp-2/design.md) 分项实现；本文不预先链接未生成的 schema 或未创建的测试。源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写。九个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
+M4 新目录由 [m4-mvp-2](../../openspec/changes/m4-mvp-2/design.md) 分项实现；本文不预先链接未生成的 schema 或未创建的测试。M4 回放源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写；通用 `task_create(code_change)` 钉定的是调用方检出的当前有效 HEAD。九个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
 
 ## 3. 与 dsh 的边界
 

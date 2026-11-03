@@ -166,6 +166,75 @@ test("task_create publishes the exact planned card through the closed ToolRuntim
   expect(h.registry.indexes.read()).toEqual({ active: [], completed: [] });
 });
 
+test("task_create pins code_change to checkout HEAD without changing source or index", async () => {
+  const source = join(h.cwd, "repos", "SHUD");
+  await io.mkdir(source, { recursive: true });
+  const git = (...argv: string[]) =>
+    execFileSync("git", ["-C", source, ...argv], {
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        LC_ALL: "C",
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    });
+  git("init", "-q", "--object-format=sha1");
+  const tracked = join(source, "Makefile");
+  await io.writeFile(tracked, "all:\n\t@echo base\n");
+  git("add", "Makefile");
+  git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "-qm",
+    "base",
+  );
+  await io.writeFile(tracked, "all:\n\t@echo staged\n");
+  git("add", "Makefile");
+  await io.writeFile(tracked, "all:\n\t@echo working\n");
+
+  const head = git("rev-parse", "HEAD").replace(/\n$/u, "");
+  expect(head).toMatch(/^[0-9a-f]{40}$/u);
+  const index = join(source, ".git", "index");
+  const headPath = join(source, ".git", "HEAD");
+  const sourceBytes = await io.readFile(tracked);
+  const sourceMtime = (await io.stat(tracked, { bigint: true })).mtimeNs;
+  const indexBytes = await io.readFile(index);
+  const indexMtime = (await io.stat(index, { bigint: true })).mtimeNs;
+  const headBytes = await io.readFile(headPath);
+  const headMtime = (await io.stat(headPath, { bigint: true })).mtimeNs;
+
+  const result = await call({ ...args, type: "code_change" });
+
+  expect(result).toMatchObject({ isError: false, value: { task_id: firstId, status: "planned" } });
+  expect(await readCard()).toMatchObject({
+    ...args,
+    type: "code_change",
+    task_id: firstId,
+    status: "planned",
+    runtime_phase: null,
+    source_base_commit: head,
+    linked_jobs: [],
+    linked_reports: [],
+    linked_changes: [],
+    linked_verifications: [],
+  });
+  expect(await io.readdir(join(h.cwd, "tasks", firstId))).toEqual(["task.json"]);
+  expect(await io.readFile(tracked)).toEqual(sourceBytes);
+  expect((await io.stat(tracked, { bigint: true })).mtimeNs).toBe(sourceMtime);
+  expect(await io.readFile(index)).toEqual(indexBytes);
+  expect((await io.stat(index, { bigint: true })).mtimeNs).toBe(indexMtime);
+  expect(await io.readFile(headPath)).toEqual(headBytes);
+  expect((await io.stat(headPath, { bigint: true })).mtimeNs).toBe(headMtime);
+  expect(git("rev-parse", "HEAD").replace(/\n$/u, "")).toBe(head);
+});
+
 const invalid = [
   ...[null, [], "task", 7, false].map((input) => ({ input, message: /object/iu })),
   ...["type", "title", "question_or_goal"].flatMap((field) =>
