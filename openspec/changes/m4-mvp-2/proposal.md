@@ -1,15 +1,15 @@
 # Proposal
 
-## Active issue fixture: #526
+## Active issue fixture: #527
 
-- Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree: child-process secrets/path boundary, Critical Path #5).
-- Scope: task 2.6 only; async runGit in repository-revision.ts, Buffer stdout, fixed environment/command hardening/root checks and controlled failures.
-- Selected risk packs: Public API; Auth/secrets; File IO/path safety; Resource limits; Error handling; Legacy compatibility; test prerequisite/dependencies; Documentation.
-- Evidence floor: real temporary git repositories and native env shim RED/GREEN, unchanged legacy collector/captured lock bytes, built runner smoke including archive/apply, full check and whitebox/same-SHA CI.
-- Live issue #526 and normative specs prevail over stale local issue draft: collectRepositoryRevision SHALL NOT call the new runner; its source, four calls, inherited env, normal-untracked behavior and errors remain unchanged.
-- New runner owns root checks before status/diff/archive; apply has only a named ceiling-directory exception, not arbitrary env or generic skip-root knobs. Status/diff mandatory flags precede pathspec separator.
-- Actual pinned SHUD tar is 18,636,800 bytes; bounded 64 MiB default maxBuffer plus explicit per-call maxBuffer supports archive without unbounded memory or partial-output success.
-- No observer/CR/build orchestration, new HEAD helper, extra environment variables, pathspec rewriting or legacy refactor. Existing index wildcard exports the new API.
+- Issue type: feature; Fixture level: expanded; upstream suggested level: expanded (agree). This slice selects actual file-publication/path-safety/schema-consumer risks (Critical Path #2/#7), not the phase-wide closure/report-wording #6 wording copied into the issue.
+- Scope: task 3.1 only, records package source/tests/public exports; extend the existing reader to change/verification/build, add exclusive first publication, companion patch IO, existing-CR rewrite, whole-build-directory publication and binary identity verification.
+- Selected risk packs: Public API; File IO/path safety; Persistence/data integrity; Concurrency/shared ownership; Error/rollback; Resource lifetime; Legacy compatibility; Documentation. Core schemas/generation, jobs/tools/raw-guard/profile, approval and scientific decision logic are unchanged.
+- Evidence floor: tests-only RED before implementation, real temporary filesystem positive/adversarial/collision cases, old-record compatibility, built records public-API smoke, full check, Critical Path whitebox review and same-SHA CI.
+- First file publication uses same-directory temporary bytes plus link-to-final no-clobber; existing CR updates alone reuse state-files tmp+rename. Four candidates maximum means initial allocation plus at most three reallocations; derived paths follow the chosen id.
+- Builds reserve .tmp-<id> with exclusive nonrecursive mkdir and publish by whole-directory rename. Preexisting final directories, including empty ones, are collisions, never replacement targets. No read creates builds/<id>.
+- Preserve the existing trusted single-user workspace boundary and cooperating-publication protocol; do not claim arbitrary external namespace-swap atomicity. No new runtime dependency, native rename helper, persistent lock/index, scanning, retry service or file-store framework.
+- Source observation/CR derivation (#528), closure (#529), archive/apply/make (#537), consumers (#534/#540), governance roots (#535), and schema changes remain outside this slice.
 
 ## Why
 

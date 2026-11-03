@@ -1,9 +1,17 @@
 /**
  * Core-and-Node workspace file layer. Atomic primitives retain their low-level diagnostics;
  * workspace reads/writes expose controlled errors and never repair invalid object evidence.
- * Opt-in readonly workspace reads bind identity without mkdir. Safe Markdown facades share
- * managed-path guards and the canonical atomic byte writer; report allocation protects both siblings.
- * Stack capture exclusively creates or reuses immutable locks; generic writers cannot modify them.
+ * Seven-kind reads always bind change/verification/build identities; readonly also binds legacy
+ * identities without mkdir. Build metadata reads never create a published build directory.
+ * Safe Markdown facades share managed-path guards and the canonical atomic byte writer;
+ * report allocation protects both siblings. Stack capture exclusively creates or reuses locks.
+ * Generic overwrite remains limited to task/data/report.
+ * Change/verification first publication and companion patches use exclusive link commits;
+ * only existing valid ChangeRequests can be rewritten through the atomic replacement writer.
+ * Patch reads are non-creating byte reads; publication binds the stored CR and its patch digest.
+ * Build publication reserves an owned temporary directory and commits by whole-directory rename.
+ * Binary consumers explicitly verify effective execute permissions and descriptor-bound SHA256;
+ * metadata reads neither execute nor implicitly verify binaries.
  * Provenance inventories prepared input bytes before allocation. Task transition,
  * reconciliation and closure helpers are pure; callers own evidence reads, approval,
  * report augmentation and persistence. Reconciliation identity signals no write.
@@ -50,6 +58,13 @@ export {
   writeReportMarkdown,
   createDataProvenance,
   createEvidenceReport,
+  createChangeRequest,
+  createVerificationCase,
+  writeChangePatch,
+  readChangePatch,
+  rewriteChangeRequest,
+  publishBuildDirectory,
+  verifyBuildBinary,
   WorkspaceRecordError,
 } from "./workspace-records.ts";
 export type {
@@ -58,4 +73,5 @@ export type {
   MutableWorkspaceRecordKind,
   WorkspaceRecordStage,
   WorkspaceReadOptions,
+  BuildDirectoryProducer,
 } from "./workspace-records.ts";

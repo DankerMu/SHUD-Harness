@@ -156,7 +156,23 @@
 
 ## 3. records：文件层、观测/派生、closure、provenance、StackLock、报告模板、比较器
 
-- [ ] 3.1 依赖 2.1。三对象文件层：`changes/`、`patches/`、`verifications/` 原子写（排他创建、EEXIST 重分配 id ≤3 次）与读取校验，`builds/<id>/` 临时目录（排他 `mkdir`）rename 发布与消费者 sha256 校验（change-requests「ChangeRequest workspace files」、verification-cases「VerificationCase workspace files」、shud-build「Build workspace files」、task-cards「TaskCard workspace file」扩展的 id/目录/排他创建与目录级 rename 例外）；路径安全复用 `workspace-paths.ts`；符号链接/非目录 fail-closed 正反例。
+### Issue #527 risk and evidence fixture
+
+本刀仅3.1，依赖#519已完成；#526/#561已合并。expanded实际风险为文件发布、路径安全及schema消费（CriticalPath#2/#7），不提前实现closure或报告措辞。
+
+- Public API/legacy：七类共用既有reader；change/verification/build强制文件内id绑定，VC字段为vc_id；旧四类语义/原始fixture字节不改。generic overwrite只允许task/data/report，新增三类JS/TS调用均拒绝。保持WorkspaceRecordStage以免report-inputs穷尽类型破坏。
+- File IO：每个入口非法id（../tasks/x、旧短id、大写hex、错品牌）先于join/lstat/读写拒绝；changes/patches/verifications/builds根及build子目录的链接、文件、特殊目标fail-closed，外部sentinel字节/inode/mtime不变。损坏JSON/schema/id不符不修复；readonly不mkdir，任何模式都不创建builds/<id>。
+- 首次文件发布：同目录wx临时文件完整写入/fsync/close→link最终路径→仅删除自有temp。可见最终文件只能完整且schema合法；预存regular目标与link时EEXIST均不覆盖。临时文件EEXIST不是对象id碰撞，不删除foreign temp。
+- 分配预算：首次+最多3次重分配，分别覆盖1/2/3次冲突后成功及连续4次冲突失败；不取第5个id，不留新对象/patch/build临时目录，旧对象bytes/mtime不变。重分配同步派生patch_path与build三条最终路径，不以修改id后放宽schema。
+- CR/patch：createChangeRequest持久化CR；writeChangePatch经已存CR核对hash且同id排他发布，hash不符零patch写，伴随EEXIST错误含id、CR/原patch保留，不重分配。rewriteChangeRequest仅已有合法身份记录可更新；缺失/损坏不复活；沿state-files唯一tmp+rename。patch读沿共享WorkspaceReadOptions：缺省/readonly:false创建缺失patches根，readonly:true不创建，均不补patch文件；三种选项均有正反例，不能接收后忽略选项。
+- Build：先检查final与.tmp占用，非递归mkdir占有.tmp后才调用producer；空/非空foreign final及foreign tmp均保留。producer获实际id、写binary/logs并返回相同id及最终路径metadata；build-record.json在tmp直接写，不额外rename单文件；最终整目录rename才commit。
+- 并发/清理：两个同id协作producer不能共享tmp；producer await中final被创建则拒绝发布且保留它。parent/tmp身份被替换则拒绝访问/删除foreign替代物；producer/schema/record-write/rename故障清理仍属己的tmp，清理故障保留主因与受控阶段。没有foreign final的失败用例final必须不存在；有foreign目标的故障不能以“清理”删除它。遵守既有单用户namespace边界，不把lstat+rename称为任意外部进程的原子no-replace。
+- Commit/error：link成功后unlink失败保留已提交对象，错误指出id、不再分配；close/cleanup/rename等注入故障不能泄漏原始载荷或留下未关闭descriptor。错误明确collision及合法id，非collision错误不能消耗重分配预算。
+- Binary：verifyBuildBinary在无mkdir的安全目录下检查普通且有执行位的shud，以已验证descriptor计算sha256；合法成功；单字节篡改、链接/悬空链接、目录/FIFO、无执行位、不可读和hash读失败均拒绝且不改文件、关闭fd。校验结果不宣称防止之后的外部篡改。
+- Schema/config/auth/release：复用已交付core schema，无字段/生成物/依赖/host/profile/角色审批/科学判定变化。无索引、扫描、ctx.storage、额外计时器或生产重试服务；只实现规范的有限id分配。
+- 验证顺序：API/typecheck及filesystem新行为tests-only真实RED→实现GREEN；已有records兼容套件；built records实际CR+patch/VC/build发布读回、旧文件只读字节证据及tamper拒绝；pnpm run check、strict OpenSpec、三席白盒与同SHA CI。31generated保持。无host seam变化，不用profile smoke冒充文件层证明。
+
+- [x] 3.1 依赖 2.1。三对象文件层：`changes/`、`patches/`、`verifications/` 原子写（排他创建、EEXIST 重分配 id ≤3 次）与读取校验，`builds/<id>/` 临时目录（排他 `mkdir`）rename 发布与消费者 sha256 校验（change-requests「ChangeRequest workspace files」、verification-cases「VerificationCase workspace files」、shud-build「Build workspace files」、task-cards「TaskCard workspace file」扩展的 id/目录/排他创建与目录级 rename 例外）；路径安全复用 `workspace-paths.ts`；符号链接/非目录 fail-closed 正反例。
 - [ ] 3.2 依赖 2.3、2.6、3.1。`observeSourceChanges(sourceDir)`（经 2.6 runner：porcelain `-z` 解析、忽略路径不计、untracked/删除/重命名拒绝、realpath ≠ toplevel 拒绝）与 ChangeRequest 生成纯函数（floor/categories 派生、申报抬升、patch 固定命令、sha256、`base_commit` 40 hex）；以真实临时 git 仓库测试（change-requests「Source change observation」）。
 - [ ] 3.3 依赖 2.2a、3.1。`code_change` 状态进入（`change_create` → running/running_local）与 `codeChangeClosure(card, loaders)` 六子句（0 输入非空、1 approved CR 属本卡且 patch sha 匹配、2 终态 VC 属本卡且其两个 run 的 RunJob ∈ `linked_jobs`、3/4 schema 保证、5 既有运行子句）正反例，不合格对象按不可读处理；`task-closure.ts` 分派按 `type`；`CONTEXT.md` 增"code_change closure 不以 LLM 为据"不变量并指向本测试（task-cards「code_change state entry」「code_change closure predicate」）。
 - [ ] 3.4 依赖 2.2d。`generateProvenance` 解析 `<project>.tsd.forc` 第 2 行与 Filename 列，副本内无外部文件、副本外逐一哈希为 `external_files`，缺失/非普通文件/解析失败抛错（data-provenance「Provenance generation at submission」）；ccw（得 `[]`）与构造的绝对 forcing 两类夹具。

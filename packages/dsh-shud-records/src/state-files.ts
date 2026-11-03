@@ -80,3 +80,67 @@ export async function writeBytes(path: string, bytes: string | Uint8Array): Prom
     throw error;
   }
 }
+
+type ExclusivePublicationPhase = "open" | "write" | "sync" | "close" | "link" | "cleanup";
+
+/** Internal publication facts; workspace facades must not expose the underlying IO payloads. */
+export class ExclusivePublicationError extends Error {
+  constructor(
+    readonly phase: ExclusivePublicationPhase,
+    readonly committed: boolean,
+    readonly collision: boolean,
+    readonly cleanupErrors: readonly unknown[],
+    cause: unknown,
+  ) {
+    super(`Exclusive publication ${phase} failed`, { cause });
+    this.name = "ExclusivePublicationError";
+  }
+}
+
+/**
+ * Publish complete bytes without replacing an existing name. Successful link is the commit point.
+ * An exclusive-open failure owns nothing; cleanup never removes an unowned temporary or the final.
+ */
+export function writeExclusiveBytesSync(path: string, bytes: string | Uint8Array): void {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  let phase: ExclusivePublicationPhase = "open";
+  let fd: number | undefined;
+  let open = false;
+  let committed = false;
+  try {
+    fd = fs.openSync(temporary, "wx", 0o600);
+    open = true;
+    phase = "write";
+    fs.writeFileSync(fd, bytes);
+    phase = "sync";
+    fs.fsyncSync(fd);
+    phase = "close";
+    fs.closeSync(fd);
+    open = false;
+    phase = "link";
+    fs.linkSync(temporary, path);
+    committed = true;
+    phase = "cleanup";
+    fs.unlinkSync(temporary);
+  } catch (error) {
+    const cleanupErrors: unknown[] = [];
+    if (open && fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch (cleanup) {
+        cleanupErrors.push(cleanup);
+      }
+    }
+    // Do not retry a failed post-commit unlink, and never unlink after a failed exclusive open.
+    if (fd !== undefined && !committed) {
+      try {
+        fs.unlinkSync(temporary);
+      } catch (cleanup) {
+        cleanupErrors.push(cleanup);
+      }
+    }
+    const collision =
+      phase === "link" && error instanceof Error && "code" in error && error.code === "EEXIST";
+    throw new ExclusivePublicationError(phase, committed, collision, cleanupErrors, error);
+  }
+}
