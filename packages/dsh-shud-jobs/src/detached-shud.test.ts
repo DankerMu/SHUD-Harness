@@ -1,5 +1,5 @@
 import { mkdirSync } from "node:fs";
-import { readFile, readdir, rename } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, expect, test, vi } from "vitest";
 import type * as NodeChild from "node:child_process";
@@ -193,13 +193,12 @@ test("two concurrent submissions return running while both independent wrapper g
 }, 15000);
 
 test("configured binary and project metacharacters remain literal positional arguments", async () => {
-  const h = await submissionFixture();
+  const project = "tiny; touch PROJECT_INJECTION";
+  const h = await submissionFixture(undefined, "held", "absent", project);
   const execution = detachedProducer();
   const binary = join(h.root, "solver '; touch BINARY_INJECTION; #");
-  const project = "tiny; touch PROJECT_INJECTION";
   let pending: Promise<RunJob> | undefined;
   try {
-    await rename(join(h.inputDir, "tiny.cfg.para"), join(h.inputDir, `${project}.cfg.para`));
     await installFakeShud(binary, 0);
     await h.apply(ShudJobRegistry, { ...h.config, shudBin: binary });
     pending = actualRegistry(h.ctx).submitShud({ ...h.request, project }, execution.start);

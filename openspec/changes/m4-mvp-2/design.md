@@ -313,6 +313,26 @@ Review focus: defaults before iff; no accidental status gate or threads coupling
 - `generateProvenance` 在遍历副本后解析 `<copied input>/<project>.tsd.forc`：第 2 行为 forcing 目录；相对路径按运行目录解析（SHUD 以运行目录为 cwd；ccw 的 `./input/ccw/` 落在副本内）。解析结果（realpath）位于副本目录之内 → `external_files: []`；位于副本外 → 第 3 行起的表格每行最后一列 `Filename` 拼该目录，逐一 `lstat` 为普通文件、计算 sha256 与字节数，按路径排序写入新增字段 `sources.external_files: [{path(绝对), sha256, size_bytes}]`（M3 记录读取时 `default([])`，不改写）。目录不存在、文件缺失、非普通文件或 `tsd.forc` 解析失败 → 提交失败并回滚（不降级为空列表）。这对 ccw 与所有无 build 提交同样生效：是 M4 对无 build 路径唯一的行为变化，Migration 回滚不声称"逐字节不变"。
 - `external_files` 的路径可能指向 `data/raw` 之外的任意只读目录（keliya 在 `../openMP`）；raw-guard 对 `shud_run` 的 `input_dir` 判定不变，不对外部 forcing 目录做 ask（它不是参数，也不被写入）。
 
+#### Routed issue #569 implementation boundary
+
+Change surface: jobs submit-shud/test-harness.ts, the existing submit-shud-capture exact inventory oracle, and detached-shud.test.ts custom-project setup. No production module changes.
+
+Governing invariant: every successful synthetic submission has a project-matching manifest whose sole forcing reference resolves inside its prepared input copy, while all original input/argv/security assertions retain their meaning.
+
+Must preserve: existing helper positional arguments/defaults, three original file bytes, END rewrites, exact source/copy inventories and input_bytes, physical symlink-parent path tests, shell-metacharacter project/argv and injection canaries, existing cleanup/collection/cancellation behavior.
+
+Must add: optional trailing project = "tiny" parameters to writeInputTree and submissionFixture; one canonical single-station manifest template with Filename last, ./input/<project>/nested and forcing.dat; project-specific cfg/manifest names constructed from the start. The custom metacharacter case passes its original project into the shared fixture rather than leaving obsolete tiny files through post-hoc renaming. The capture test keeps an independent literal manifest oracle alongside its unchanged three original entries.
+
+Sibling surfaces: direct writeInputTree callers in submit-shud-paths, submit-shud-runs-case and submit-shud-validation tests; submissionFixture consumers in submit/detached suites; poll-shud/test-harness.ts pollFixture and downstream poll/collect/kill/cleanup/list-run-jobs lifecycle tests. Their calls keep default tiny semantics and automatically inherit the manifest. shud-end fixture.cfg.para is not a submitted tree and remains outside scope.
+
+Seams under test: existing exact capture/inventory assertions and the actual registry submission path using detached script fixtures. The standalone oracle validates manifest shape, run-cwd resolution, sole reference containment, source bytes/mtime and literal custom argv; it is not the future records parser.
+
+Required evidence: exact four-entry capture expectation RED before helper change, GREEN afterward; standalone missing-manifest ENOENT before migration, then normal/custom successful submissions with four copied files and unchanged source; focused consumer tests and full check; strict OpenSpec; unchanged 31 projections and all production/config bytes; three-seat review and same-SHA full CI.
+
+Non-goals: #530 parsing/validation/harvesting, #534 production integration/rollback, real/raw forcing inputs, fallback behavior, new dependency, changed host/profile/policy or PI acceptance.
+
+Review focus: no removed oracle, positional API compatibility, one template shared across project names, no obsolete tiny manifest in the custom case, actual run-root-relative containment rather than a string-only path assertion, and no production/config diff.
+
 #### Issue #523 implementation boundary
 
 Change surface: DataProvenance schema/focused tests, registry example/generated projections; minimum external_files:[] literal at the existing typed producer.
