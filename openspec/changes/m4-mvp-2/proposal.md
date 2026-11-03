@@ -1,15 +1,15 @@
 # Proposal
 
-## Active issue fixture: #536
+## Active issue fixture: #586
 
-- Issue type: feature; Fixture level: expanded (agree upstream), tool contracts and governed filesystem publication. Dependencies #520/#526/#528/#529 and routed #582 are merged.
-- Scope: tools task_create extension, change_create registration/implementation and focused tests; raw-guard change_create targets and tests. No core/records/jobs/policy/presets/profile changes.
-- Selected risk packs: Public API / CLI / script entry; Config / project setup; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes.
-- Governing invariant: a code_change card pins a validated checkout HEAD before creation; each proposed CR and exact patch bind that pin, and only successful publication enters the fresh TaskCard link/state boundary.
-- Reuse core runGit/id/semantic schemas and records observeSourceChanges/deriveChangeRequest/ensureDirectory/createChangeRequest/writeChangePatch/transitionTask/record APIs; no second Git runner, floor derivation, directory guard or writer.
-- Preserve science_assist zero repos access, strict unknown/root argument rejection, source/index/HEAD bytes, raw priority and exact-target containment, all prior job/report tools and historical records.
-- Evidence floor: real ToolRuntime tracer RED→GREEN, real temporary Git + filesystem success/error/partial-publication/fresh-card matrices, raw pre-execute no-execute/no-approval matrices, independent runtime smoke, full check/profile/raw probes/strict OpenSpec/generated equality/three-seat review/exact-head CI.
-- Non-goals: builds/approvals/verification/report closure, new source mutation or snapshot transaction, automatic rollback of committed CR/patch, model calls, solver execution, coder presets or PI acceptance.
+- Issue type: build prerequisite; Fixture level: compact. #537's actual default check reaches Knip and rejects required system make as unlisted; root control-plane declarations are outside that tool issue's boundary.
+- Scope: exact make entry in the existing knip.json ignoreBinaries list, canonical system-tool prerequisite in instructions/agents/shared.md, normal rendered instruction projections. No business/runtime source, dependency manifest, lockfile, threshold or command substitution.
+- Selected risk packs: Public API / CLI / script entry; Config / project setup; Release / packaging / dependency compatibility; Legacy compatibility / examples; Documentation / migration notes.
+- Governing invariant: only the explicitly required system make executable is declared external; unrelated unlisted binaries remain errors and all existing gate rules remain enabled.
+- Evidence: real Knip negative/positive/unknown-binary controls, actual system make fixture, instructions render/check, full default check and strict fixture, compact correctness+test-evidence review, exact-head CI. Restore the saved #537 slice after merge and run its complete default check before closing #586.
+- Other packs/domain runtime risks not selected: no scientific algorithm, object/schema, approval, raw path, job lifecycle, subprocess implementation, concurrency or resource behavior changes. Generated instruction prose is not a core schema projection.
+- Mechanical execution: the two narrow configuration/prose edits use the existing convention directly; parent owns rendering/verification, with independent review. No permanent wiring-only tests or generic ignore patterns.
+- This standalone prerequisite does not deliver shud_build or replay; shared M4 OpenSpec remains active through #549 PI acceptance.
 
 ## Why
 
