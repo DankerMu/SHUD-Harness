@@ -71,6 +71,29 @@ Error/API compatibility: retain the existing WorkspaceRecordStage union so repor
 
 Verification/containment: real filesystem suites cover read/identity/path rejection, four-candidate allocation, atomic visibility/no-clobber, patch mismatch/collision, update-only CR, build ownership/publish/failure cleanup and binary tampering. Freeze old M3 records for built readback with unchanged bytes/mtime. Built public-API smoke creates/reads/rewrites new records, publishes an executable fixture build and rejects a flipped byte; it is file-layer proof, not a SHUD build or PI acceptance. Until downstream wiring these APIs have no host seam effect; rollback is the normal PR revert, never a parallel store or alias.
 
+#### Routed issue #582 implementation boundary
+
+Change surface: records/src/index.ts exports the already implemented workspace-paths.ts ensureDirectory and adds concise public API documentation. The helper body, all internal callers, package exports map and dependencies remain byte-identical.
+
+Governing invariant: root public entry and current internal records paths execute one identical implementation; exposing it must not change directory, readonly, error or object-store semantics.
+
+Return behavior: existing real directory returns false without mutation; missing path with readonly=true returns false without creating ancestors; writable missing path recursively creates and returns true; later calls return false.
+
+Path boundary: final lstat rejects symlink, dangling link, ordinary file and special file in either mode. This is the existing per-directory primitive, not a recursive ancestor/traversal guard or atomic authorization. Trusted callers must validate each managed ancestor and branded path components in their existing order.
+
+Error boundary: retain existing label/path errors and native filesystem failures. This primitive does not sanitize arbitrary caller labels or errno payloads; tools own controlled model-facing mapping. Do not introduce a synonymous facade or error hierarchy.
+
+Sibling surfaces: workspace-records managedDirectory, task-card allocation and capture-stack-lock continue importing the same internal implementation; future change_create uses the root public seam only after this issue. No existing caller migration is needed because the implementation is not moved or duplicated. Existing capture, task-card and workspace directory regressions remain part of the full gate.
+
+Runtime/type evidence: freeze existing internal helper behavior through a temporary filesystem oracle, record missing public export as entry absence (not a semantic helper failure), then run the same oracle through built package root. Check existing-directory inode/mtime, readonly no creation, writable recursive creation and final link/file/FIFO rejection with sentinel bytes/mtime unchanged. Verify emitted root declaration permits a boolean result without exposing private subpaths.
+
+Verification: existing workspace readonly and unsafe-directory tests plus full check, build/profile smoke, strict OpenSpec, generated-file equality, independent review and exact-head CI. No permanent test that merely asserts an export exists; reuse behavior coverage and keep temporary entrypoint proof local.
+
+Implementation mechanics: the one-line re-export and API comment may be applied inline by the orchestrator under the mechanical-edit rule, as with routed #574; disclose this without weakening fixture review, independent code review or checks.
+
+Non-goals: #536's three-directory sequencing or TaskCard writes, new directory layout, stronger ancestor policy, retries, descriptors, concurrency controls, approval authority, source checkout access or scientific/PI acceptance.
+
+
 
 #### Issue #519 implementation boundary
 

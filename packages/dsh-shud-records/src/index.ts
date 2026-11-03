@@ -34,6 +34,8 @@
  * are pure; tools own missing-link/status repair, prerequisites and atomic publication.
  */
 export { readJson, writeJsonSync, writeJson, writeBytes } from "./state-files.ts";
+/** Final-directory preflight only; callers validate ancestors and sanitize low-level errors. */
+export { ensureDirectory } from "./workspace-paths.ts";
 export { createTaskCard } from "./task-card-file.ts";
 export { captureStackLock } from "./capture-stack-lock.ts";
 export type { StackCaptureConfig, StackCaptureLlm } from "./capture-stack-lock.ts";

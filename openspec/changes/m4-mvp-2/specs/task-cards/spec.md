@@ -34,6 +34,12 @@ TaskCard SHALL 持久化为会话 cwd 下的 `tasks/<task_id>/task.json`，每�
 
 本 requirement 同时是 TaskCard、StackLock、DataProvenance、EvidenceReport、ChangeRequest（含其 patch）、VerificationCase 与 BuildRecord 七类工作区对象共用的工作区文件安全规则（其它 spec 以一句引用）：(1) 对象 id SHALL 在任何路径拼接之前经对应品牌 schema（`TaskId`、`StackId`、`DataId`、`ReportId`、`ChangeId`、`VerificationId`、`BuildId`）校验，未通过即返回错误、不访问文件系统；工具与 policy-gate 插件 SHALL NOT 由原始字符串构造工作区路径，只由通过校验的品牌 id 构造。(2) 会话 cwd 下的 `tasks`、`stacks`、`provenance`、`reports`、`changes`、`patches`、`verifications`、`builds` 目录（以及 `tasks/<task_id>/`）不存在时 SHALL 以 `mkdir -p` 创建；已存在时 SHALL 先 `lstat`，凡不是真实目录（符号链接、普通文件、特殊文件）一律 fail-closed 返回指出该路径的错误，SHALL NOT 跟随链接。(3) 目标文件在读或写之前 SHALL 先 `lstat`，符号链接与特殊文件 fail-closed。(4) M4 新增的对象首次落盘 SHALL 以排他创建占有其 id：`builds/.tmp-<build_id>/` 以排他 `mkdir`（非递归、目标已存在即 EEXIST）创建；`changes/<change_id>.json`、`patches/<change_id>.patch`、`verifications/<vc_id>.json` 以 `wx` 语义发布——同目录临时文件写完后以不覆盖目标的方式发布（目标已存在即 EEXIST），SHALL NOT 以 `rename` 覆盖已有对象。id 由该对象首个落盘的文件或目录占有：该首个排他创建返回 EEXIST 时 SHALL 重新分配 id 并重试，同一次调用至多重新分配 3 次，仍冲突即返回指出 id 冲突的错误且不写入；同一 id 的后续伴随文件（`patches/<change_id>.patch`）同样排他创建，EEXIST 时 SHALL 返回含该 id 的错误，SHALL NOT 覆盖已有文件。任何情况下 SHALL NOT 覆盖、截断或改写不属于本次调用的已有对象。M3 既有对象（TaskCard、StackLock、DataProvenance、EvidenceReport）的首次写入规则不变（报告 id 碰撞的处理见 evidence-reports「report_generate」）。已有对象的更新（TaskCard 回写、ChangeRequest/报告状态转换等）SHALL 为同目录临时文件加 `rename`，由 records 包的文件层 `state-files.ts` 实现（M3 已自 jobs 迁入 records，仓库中只有一份；本 change 不再描述该迁移）；另有两项例外：StackLock 以排他创建写入且其 EEXIST 按指纹复用处理、不重新分配 id（见 stack-lock「Deterministic capture at shud_run submission」）；`builds/<build_id>/` 以同一 `builds/` 下的临时目录（`builds/.tmp-<build_id>/`）构建完成后整体 `rename` 发布，是本规则的目录级例外——目录内文件（`build-record.json`、`shud`、日志）SHALL NOT 再单独以临时文件加 rename 写入，发布前 `builds/<build_id>/` SHALL NOT 存在，发布失败时临时目录 SHALL 被删除。
 
+records 包根 SHALL 公开既有 `ensureDirectory(path, label, readonly = false): boolean`，供对象写入前复用同一目录预检实现，不复制目录策略或开放私有模块子路径。已有真实目录返回 `false`；缺失路径在 readonly 模式返回 `false` 且不创建，否则递归创建并返回 `true`。最终路径为符号链接（含悬空链接）、普通文件或特殊文件时两种模式均拒绝；既有错误语义保持。该低层函数不替调用方校验全部祖先或品牌 id、不发布对象、不提供事务或模型诊断脱敏；调用方仍拥有这些边界。
+
+#### Scenario: public directory preflight reuses the canonical implementation
+- **WHEN** 从 records built 包根调用 ensureDirectory，分别检查已有目录、readonly 缺失路径、可写缺失嵌套路径与最终链接/普通文件/FIFO
+- **THEN** 返回值、错误与文件系统效果和既有内部 helper 一致；readonly 不创建路径，拒绝项不改变其目标内容，根入口声明提供同一个 boolean 返回 API，既有对象读写行为不变
+
 #### Scenario: card written atomically
 - **WHEN** `task_create` 成功返回 `task_id`
 - **THEN** 会话 cwd 下存在 `tasks/<task_id>/task.json`，内容通过 TaskCard schema 校验，且该目录不残留临时文件

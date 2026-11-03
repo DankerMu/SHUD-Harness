@@ -1,15 +1,15 @@
 # Proposal
 
-## Active issue fixture: #535
+## Active issue fixture: routed #582
 
-- Issue type: feature; Fixture level: expanded (agree upstream); Critical Paths #2/#3, shared pre-execute permission boundary.
-- Scope: raw-guard decide.ts and new focused tests; fixed nine governance roots, no configuration, tools/policy/presets/profile or host changes.
-- Selected risk packs: Public API / CLI / script entry; Config / project setup; File IO / path safety / overwrite; Auth / permissions / secrets; Concurrency / shared state / ordering; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes.
-- Governing invariant: model file/shell writes recognized by the existing raw classifiers cannot mutate governance roots through approval or role selection; prior raw deny/ask wins, otherwise downstream runs exactly once.
-- Preserve raw classifiers, ancestor protection, path identity/error behavior, specialized domain-tool targets and public middleware return/audit contracts.
-- File tools resolve relative targets from session cwd, ignoring unsupported workdir; shell uses its existing effective workdir. This corrects the earlier delta against observed pinned-host execution, not a new tool API.
-- Evidence floor: tests-first semantic RED, nine-root/path/tool/role/precedence matrices, real Cordis audit and waterfall, built plugin smoke, raw probes, full check/profile smoke/strict OpenSpec/31 generated unchanged/three-seat white-box review/same-SHA CI.
-- Non-goals: governance ancestor detection, stronger shell parser/sandbox, persistent-cd tracking, repos/.git protection, new tool output rules (#536–540), schema changes or PI acceptance.
+- Issue type: feature (public entry exposure); Fixture level: expanded because a public filesystem API is exposed, although its implementation is unchanged.
+- Scope: records root index re-exports the existing ensureDirectory helper and documents its boundary; no helper, writer, tool, schema or package-map change.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Error handling / rollback / partial outputs; Legacy compatibility / examples; Release / packaging / dependency compatibility; Documentation / migration notes.
+- Governing invariant: public and existing internal callers use the same directory policy with identical return values, errors and filesystem effects; no copied guard or wrapper.
+- Preserve existing-directory false, readonly-missing false/no creation, writable-missing recursive creation/true, final symlink/non-directory rejection and unchanged raw filesystem errors.
+- This is the records prerequisite for #536's all-directory preflight; the caller still owns trusted ancestors, branded path construction, call ordering and controlled tool diagnostics.
+- Evidence floor: existing internal reference smoke GREEN and observed public-entry absence, built public runtime/type proof, existing readonly/unsafe-directory regressions, full check/profile/strict OpenSpec/31 generated unchanged and independent exact-head review/CI.
+- Non-goals: consumer wiring, new path policy, object publication, transaction/rollback/retry, new namespaces, private subpath exports, permanent export-wiring tests or PI acceptance.
 
 ## Why
 
