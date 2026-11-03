@@ -47,7 +47,7 @@ core SHALL 提供唯一的纯函数 `isProjectComponent(project: string): boolea
 - **THEN** 返回 true；这不授权 shell 插值或改变求解器语法，仅保留原路径分量接受集合
 
 ### Requirement: Rivqdown comparator
-records SHALL 提供确定性函数 `compareRivqdown(baseRunDir, candidateRunDir, project)`：对两个运行目录的 `output/<project>.out/<project>.rivqdown.dat` 分别 `lstat` 确认为普通文件、计算 sha256，返回 `{ compared_path, base_sha256, candidate_sha256, equal }`。任一文件缺失、为符号链接或特殊文件 SHALL 抛出受控错误（缺证据不是 `failed`）。SHALL NOT 读取数值、SHALL NOT 使用容差、SHALL NOT 比较其它产物、SHALL NOT 读取日志内容。
+records SHALL 提供确定性的同步函数 `compareRivqdown(baseRunDir, candidateRunDir, project)`：先验证两个运行根为绝对路径字符串、project符合core共享路径分量语法，再构造相对运行根的POSIX路径 `output/<project>.out/<project>.rivqdown.dat`。对两个最终目标分别 `lstat` 确认为普通文件后，通过no-follow/nonblocking打开及描述符普通类型/身份校验，有界读取原始字节计算sha256，依次关闭描述符，返回且仅返回 `{ compared_path, base_sha256, candidate_sha256, equal }`。任一文件缺失、为符号链接或特殊文件，以及读取/关闭失败 SHALL 抛出含相关路径的受控错误，不包含原始异常载荷或文件内容（缺证据不是 `failed`）；SHALL NOT 返回部分判定。调用方拥有运行根身份与ancestor namespace；比较器保持原始绝对根的物理路径遍历语义，不新增递归ancestor策略或文件写入。SHALL NOT 读取数值、SHALL NOT 使用容差、SHALL NOT 比较其它产物、SHALL NOT 读取日志内容。
 
 #### Scenario: identical outputs compare equal
 - **WHEN** 两个运行目录的 rivqdown 文件字节相同
@@ -60,6 +60,18 @@ records SHALL 提供确定性函数 `compareRivqdown(baseRunDir, candidateRunDir
 #### Scenario: missing output is an error
 - **WHEN** 候选运行目录没有 `output/keliya.out/keliya.rivqdown.dat`
 - **THEN** 函数抛出指明路径的错误，不返回判定
+
+#### Scenario: unsafe project is rejected before filesystem access
+- **WHEN** project是空字符串、`.`、`..`、含路径分隔符或NUL，或者任一运行根不是绝对路径字符串
+- **THEN** 比较器在构造目标路径与任何lstat/open/read之前拒绝，不创建或修改文件
+
+#### Scenario: final links and non-files cannot supply evidence
+- **WHEN** 任一rivqdown最终目标为符号链接、目录、FIFO或其它非普通文件，或者打开后的描述符类型/身份与预检不符
+- **THEN** 抛出含目标路径的受控错误，不读取不安全目标、不返回equal判定
+
+#### Scenario: byte evidence and descriptor lifecycle remain exact
+- **WHEN** 两个普通文件字节不相等，即使文本数值可解释为相同，且所有读取与关闭成功
+- **THEN** 返回equal:false及各自原始字节的SHA256；读取内存有界，第一文件描述符关闭后才打开第二个，文件bytes/mtime不变
 
 ### Requirement: verification_run
 `verification_run` SHALL 由 `dsh-shud-tools` 以闭合 schema 挂载，参数：`task_id`、`base_run_id`、`candidate_run_id`（均必填，品牌校验）、`reviewer_notes`（非空字符串数组，至少一条）、`compatibility_verdict`（`compatible|incompatible|unknown`）；未知键拒绝。交叉校验（任一失败即工具错误、零写入）：卡存在、通过 schema 校验且 `type: code_change`、`status: running`；两个运行的 RunJob SHALL 取自注册表只读 `listRunJobsByTask(task_id)`（不轮询、不收集、不写文件或索引），`base_run_id` 与 `candidate_run_id` 均 SHALL 出现在其结果中（因而 RunJob `task_id` 等于参数 `task_id`），下文 RunJob 的 `job_id`、`run_dir`、`build_id`、`threads`、`binary_sha256` 均取自该结果；两个运行经注册表 `collectShud(id, {readonly: true})` 只读取得已有 RunRecord（SHALL NOT 触发收集、失败记账、状态投影或通知；未 collected 的运行即拒绝），均 `status: succeeded`、`project` 相同；两个 RunRecord 的 `task_id` SHALL 等于参数 `task_id`，且其 `job_id` SHALL 属于卡片 `linked_jobs`；两个运行的 RunJob `run_dir` 的 realpath SHALL 等于 `realpath(<session cwd>/runs/<run_id>)`（运行属于本会话工作区，`artifact_refs` 才能在会话 cwd 下解析），否则拒绝；候选 RunJob 的 `build_id` 非 `null`，其 BuildRecord `change_id` 非 `null`、该 CR `status: approved` 且 `task_id` 相同；base RunJob 的 `build_id` 非 `null`，其 BuildRecord `change_id: null`、`rhs_openmp: false`（serial baseline），且 `source_commit` 等于候选 BuildRecord 的 `source_commit`；两个 BuildRecord 的 `task_id` SHALL 等于参数 `task_id`，`source_commit` SHALL 等于卡片 `source_base_commit`；两个 RunJob 的 `threads` 均为 `1`；两个 RunJob 的 `binary_sha256` 分别等于各自 BuildRecord 的 `binary_sha256`；两个运行的 DataProvenance `files` 与 `sources.external_files` 的 `(path, sha256)` 集合相等；`reviewer_notes` 任一条命中 core `wording.ts` 禁止用语时 SHALL 返回错误（它们会渲染进报告，与模型撰写节同一护栏）。校验通过后调用「Rivqdown comparator」，`equal` → `status: passed`，否则 `status: failed` 且 `failure_reason` 为受控文本（含两 sha）；比较器错误 → 工具错误、零写入。持久化：分配 `vc_id`，以排他创建原子写 `verifications/<vc_id>.json`（EEXIST 时按 task-cards「TaskCard workspace file」规则 (4) 重新分配 id，SHALL NOT 覆盖已有 VC；字段：`change_id` 取自候选 BuildRecord 的 `change_id`（不是工具参数）、`case_type: regression`、`expected_result_source: baseline_regression`、`bundle_id: null`、`target_code_targets` = 该 CR `files_changed`、`expected_result` 与 `pass_criteria` 为固定文本、`artifact_refs` 恰为相对会话 cwd 的 `runs/<base_run_id>/output/<project>.out/<project>.rivqdown.dat` 与 `runs/<candidate_run_id>/output/<project>.out/<project>.rivqdown.dat` 两项（依此顺序）、`reviewed_by` = 调用者当前 preset 投影），再回写 TaskCard `linked_verifications`（追加排序去重，不改状态）；回写失败返回含 `vc_id` 的错误并保留 VC 文件。同一对运行可重复调用生成新 VC，SHALL NOT 改写旧 VC。结果 SHALL 含 `vc_id`、`status`、`observed` 与 `failure_reason`。

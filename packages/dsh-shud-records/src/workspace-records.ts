@@ -9,7 +9,6 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  readSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -50,6 +49,7 @@ import {
   writeJsonSync,
 } from "./state-files.ts";
 import { ensureDirectory, regularTarget } from "./workspace-paths.ts";
+import { hashDescriptor } from "./hash-descriptor.ts";
 
 export interface WorkspaceRecordMap {
   task: TaskCard;
@@ -641,17 +641,6 @@ export async function publishBuildDirectory(
       }
       throw primary;
     }
-  }
-}
-
-/** Hash only the verified descriptor, reusing one bounded buffer for the complete binary. */
-function hashDescriptor(fd: number): string {
-  const hash = createHash("sha256");
-  const buffer = Buffer.allocUnsafe(64 * 1024);
-  for (;;) {
-    const count = readSync(fd, buffer, 0, buffer.length, null);
-    if (count === 0) return hash.digest("hex");
-    hash.update(count === buffer.length ? buffer : buffer.subarray(0, count));
   }
 }
 

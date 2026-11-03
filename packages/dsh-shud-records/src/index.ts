@@ -18,6 +18,8 @@
  * Build publication reserves an owned temporary directory and commits by whole-directory rename.
  * Binary consumers explicitly verify effective execute permissions and descriptor-bound SHA256;
  * metadata reads neither execute nor implicitly verify binaries.
+ * Rivqdown comparison preflights both final files, then compares descriptor-bound raw-byte
+ * SHA256 without writes or numerical tolerance; missing/unsafe evidence is an error, not unequal.
  * Provenance inventories prepared input bytes before allocation. Task transition,
  * reconciliation and closure helpers are pure; callers own evidence reads, approval,
  * report augmentation and persistence. Reconciliation identity signals no write.
@@ -36,6 +38,7 @@ export { createTaskCard } from "./task-card-file.ts";
 export { captureStackLock } from "./capture-stack-lock.ts";
 export type { StackCaptureConfig, StackCaptureLlm } from "./capture-stack-lock.ts";
 export { generateProvenance } from "./generate-provenance.ts";
+export { compareRivqdown } from "./compare-rivqdown.ts";
 export { observeSourceChanges } from "./observe-source-changes.ts";
 export { deriveChangeRequest } from "./derive-change-request.ts";
 export { transitionTask, TaskTransitionError } from "./task-transition.ts";

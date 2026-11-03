@@ -250,6 +250,17 @@
 - Cutover：core唯一实现及导出；prepareInput/collect直接import core，旧jobs定义/导出删除，不留shim。消费者位置/错误/文件效果不改；不实现compareRivqdown、不动schema或依赖。
 - 验证：built core从records解析可导入且对830冻结输入完全相等；throwaway检查旧jobs导出不存在；既有submit-shud-paths与collect-shud-safety正反例和真实registry/detached-script smoke通过；fullcheck/profile:smoke/strictOpenSpec/31generated不变、三席审查及同SHA CI。小型机械实现由编排器执行并披露，不降低独立审查。
 
+### Issue #532 risk and evidence fixture
+
+- Selected：Public API / CLI / script entry（records同步比较器）；File IO / path safety / overwrite（final lstat/descriptor绑定/只读）；Schema / columns / units / field names（精确四字段、POSIX路径/hex摘要）；Auth / permissions / secrets（受控错误无原始异常/内容）；Resource limits / large input / discovery（64KiB有界读取、逐fd关闭、不读其它产物）；Legacy compatibility / examples（既有verifyBuildBinary私有hash抽取不变）；Error handling / rollback / partial outputs（任何证据或关闭失败不返回判定）；Documentation / migration notes（D8/API）。
+- Not selected：Config / project setup、Concurrency / shared state / ordering、Release / packaging / dependency compatibility——无新配置/并发服务/依赖/发布机制；不承诺跨文件或外部并发写入的快照隔离，caller拥有run根身份，普通build/smoke验证新公开导出。
+- Inputs：绝对string根+core项目名谓词先于路径构造/任何IO；非法空/dot/dotdot/分隔符/NUL项目拒绝，保留a..b/Unicode/空格/标点。compared_path严格为output/<project>.out/<project>.rivqdown.dat，不与collector的output-root-relative清单混淆。
+- Bytes/result：空/ASCII/非UTF8/large固定向量；相同true、一字节或仅数字文本拼写不同false、同路径合法；四字段精确，独立SHA，不读数值/日志/其它artifact，不写输入/新对象，bytes/mtime不变。
+- Files：base/candidate缺失、symlink/dangling/directory/FIFO分别失败且含目标路径；先完整target预检再hash；root别名及alias/..保留物理语义，无额外递归ancestor策略。open nofollow/nonblock后fstat普通类型/dev/ino绑定，替换或I/O错误不降级。
+- Resources/errors：一fd关闭后开下一fd、64KiB读取上界、无需全文件Buffer；open/fstat/read错误且cleanup成功时断言已关闭/无泄漏。持续primary-close或cleanup-close失败时只要求受控stage/path错误、无部分判定/原始cause、primary错误保留；fd状态/所有权未知，禁止断言已关闭或无泄漏，test harness后续回收不算生产关闭证据。已有binary verifier权限/身份/关闭/篡改tests不改弱。
+- Oracle：独立system-shasum reference GREEN→candidate-ignored/missing-as-unequal两个mutant语义RED→restoration GREEN已冻结；API未存在的初始testsetup RED与语义oracle资格化分开记录，不先写生产stub。新增tests-only交接后再实现。
+- 验证：focused新比较器+既有workspace-build-binary tests、built公开API真实文件smoke、fullcheck/profile:smoke/strictOpenSpec/31generated不变、三席白盒及同SHA CI；#540拥有tool/交叉校验，无真实SHUD/PI声明。
+
 - [x] 3.1 依赖 2.1。三对象文件层：`changes/`、`patches/`、`verifications/` 原子写（排他创建、EEXIST 重分配 id ≤3 次）与读取校验，`builds/<id>/` 临时目录（排他 `mkdir`）rename 发布与消费者 sha256 校验（change-requests「ChangeRequest workspace files」、verification-cases「VerificationCase workspace files」、shud-build「Build workspace files」、task-cards「TaskCard workspace file」扩展的 id/目录/排他创建与目录级 rename 例外）；路径安全复用 `workspace-paths.ts`；符号链接/非目录 fail-closed 正反例。
 - [x] 3.2 依赖 2.3、2.6、3.1。`observeSourceChanges(sourceDir)`（经 2.6 runner：porcelain `-z` 解析、忽略路径不计、untracked/删除/重命名拒绝、realpath ≠ toplevel 拒绝）与 ChangeRequest 生成纯函数（floor/categories 派生、申报抬升、patch 固定命令、sha256、`base_commit` 40 hex）；以真实临时 git 仓库测试（change-requests「Source change observation」）。
 - [x] 3.3 依赖 2.2a、3.1。`code_change` 状态进入（`change_create` → running/running_local）与 `codeChangeClosure(card, loaders)` 六子句（0 输入非空、1 approved CR 属本卡且 patch sha 匹配、2 终态 VC 属本卡且其两个 run 的 RunJob ∈ `linked_jobs`、3/4 schema 保证、5 既有运行子句）正反例，不合格对象按不可读处理；`task-closure.ts` 分派按 `type`；`CONTEXT.md` 增"code_change closure 不以 LLM 为据"不变量并指向本测试（task-cards「code_change state entry」「code_change closure predicate」）。
@@ -258,7 +269,7 @@
 - [x] 3.5 依赖 2.2b。`captureStackLock` 接受可选 build 源：`repos.SHUD` 取 BuildRecord 源修订（`dirty_paths` 原样、`dirty_paths_truncated: false`）、`build_id` 写入并进指纹；无 build 时逐字节不变的回归（stack-lock「Deterministic capture at shud_run submission」）。
 - [ ] 3.6 依赖 2.5、3.3。报告：`.json` 增 `change_ids`/`verification_ids`（`default([])`）与生成投影；`.md` 事实表增 ChangeRequest 段（含 `floor_categories`）、VerificationCase 段、BuildRecord 段，StackLock 表增 `build_id`；§5 由 2.5 常量逐字渲染；§7 列 failed VC；golden 更新只限新增段；M3 报告渲染字节不变回归（evidence-reports「EvidenceReport record」「Deterministic facts table」「Report template」「EvidenceReport generated projection」「code_change report wording constant」）。
 - [x] R574 在3.7之前，将isProjectComponent唯一实现迁入core并迁移prepareInput/collect消费者，保持字符串语法和schema，去掉jobs兼容路径；按verification-cases「Shared project component grammar」与本节等价证据验证。
-- [ ] 3.7 依赖 2.1及路由前置R574（#574）。`compareRivqdown(baseRunDir, candidateRunDir, project)`：`lstat` 普通文件、sha256、`equal`；缺失/链接/特殊文件抛错；相同/不同/缺失正反例（verification-cases「Rivqdown comparator」）。
+- [x] 3.7 依赖 2.1及路由前置R574（#574）。`compareRivqdown(baseRunDir, candidateRunDir, project)`：`lstat` 普通文件、sha256、`equal`；缺失/链接/特殊文件抛错；相同/不同/缺失正反例（verification-cases「Rivqdown comparator」）。
 
 - Suggested fixture level: expanded - 持久化文件格式与路径安全、分级派生、closure 谓词、报告措辞护栏（Critical Path #6/#7）
 - Minimal mergeable slice: 3.1 首刀（文件层无消费者，可独立保绿）；3.2、3.3 依赖 3.1 且彼此独立；3.4、3.5、3.7 只依赖 core、互不依赖、可并行；3.6 依赖 3.3
