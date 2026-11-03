@@ -60,7 +60,7 @@
 ### Requirement: Governance roots are write-protected from model file and shell tools
 raw-guard SHALL 把会话 cwd 下一组固定、不可配置的治理根视为模型文件/shell 工具的写保护目标：`tasks`、`stacks`、`provenance`、`reports`、`runs`、`changes`、`patches`、`verifications`、`builds`（共九个，相对调用 session cwd 解析；不经 rawDirs 或任何 profile/运行时配置增删）。`repos/` 不在集合内：coder 必须经 `edit`/`bash` 修改 `repos/SHUD`。治理对象只能经对应工具写入：`task_create`、`shud_run`、`change_create`、`change_submit`、`shud_build`、`verification_run`、`report_generate`/`report_validate`/`report_submit`/`report_decide`；本要求不改变这些工具自身的判定。
 
-文件工具：`write`、`edit`（参数 `file_path`）以及 `str_replace_editor` 的非 `view` 命令（参数 `path`），目标等于或位于任一治理根内时 SHALL 返回 `deny`，`code` 为 `governance-immutable`，`reason` 含 `immutable` 并说明治理对象只能经上列对应工具写入；SHALL NOT 提供审批路径。路径身份与 raw 相同：相对路径按 `workdir`（缺省 session cwd）解析，复用 realpath/最近存在祖先、物理别名（符号链接与本机大小写别名）与路径包含规则；兄弟前缀（如 `tasks-old`、`changes.bak`）SHALL NOT 视为同一根。`str_replace_editor` 的 `view` 命令与 `read` 工具 SHALL 委托下一个监听器（治理文件不是敏感数据，读取不 ask）。
+文件工具：`write`、`edit`（参数 `file_path`）以及 `str_replace_editor` 的非 `view` 命令（参数 `path`），目标等于或位于任一治理根内时 SHALL 返回 `deny`，`code` 为 `governance-immutable`，`reason` 含 `immutable` 并说明治理对象只能经上列对应工具写入；SHALL NOT 提供审批路径。路径身份与 raw 相同：文件工具相对路径按 session cwd 解析；额外的 `workdir` 参数不改变目标（钉版宿主文件工具不消费该参数）。复用 realpath/最近存在祖先、物理别名（符号链接与本机大小写别名）与路径包含规则；兄弟前缀（如 `tasks-old`、`changes.bak`）SHALL NOT 视为同一根。`str_replace_editor` 的 `view` 命令与 `read` 工具 SHALL 委托下一个监听器（治理文件不是敏感数据，读取不 ask）。
 
 shell 工具：对 `bash`（含 persistent 变体）与 `pwsh`，"触及治理根" SHALL 复用「Shell command touches raw」的全部规则，把每个治理根当作一个配置项（配置原文为根名、解析后绝对路径为 session cwd 下该根的 canonical 路径），即字面文本与解析后绝对路径的边界匹配、路径等价规范化、去引号/续行副本、pwsh `\` 语境、`..` 词法折叠、本机大小写不敏感判定，以及有效工作目录 `realpath(workdir ?? session cwd)` 位于治理根内。触及任一治理根且按「Shell write under raw is denied」的写 denylist（写动词、工具形态含 `python -c` 等解释器一行程序、`>`/`>>` 等重定向、tar 解包与写归档规则、pwsh cmdlet，以及同样的 `/dev/null` 丢弃型重定向剥除）判为写时 SHALL 返回 `deny`，`code` 为 `governance-immutable`，`reason` 同文件工具；只读触及（无写判定）SHALL 委托下一个监听器恰好一次，SHALL NOT ask。根名作为普通词出现在写命令中（如 `grep -rn runs src > out.txt`）也判 `deny`，属已接受的 deny 方向误报；「Shell command touches raw」所列漏报（persistent `cd` 后相对写入、短于根名的 glob 前缀、名字中段的 glob/brace、经符号链接或前导 `..` 的回溯、ANSI-C 引号等）同样适用于治理根，且「Shell write to a raw ancestor is denied」的祖先规则 SHALL NOT 扩展到治理根（如 `rm -rf .`、`rm -rf *` 不经本要求识别）。治理根位于 workspace 内、没有沙箱兜底，这些漏报是登记于 design D15 的残余风险。
 
@@ -101,3 +101,7 @@ shell 工具：对 `bash`（含 persistent 变体）与 `pwsh`，"触及治理�
 #### Scenario: raw judgment takes precedence
 - **WHEN** rawDirs 为 `changes`，coder 调用 `write`，`file_path` 为 `changes/x.json`；或默认 rawDirs 下调用 `bash`，`command` 为 `cat data/raw/obs.csv > tasks/x`；或 `command` 为 `cat data/raw/obs.csv; ls tasks`
 - **THEN** 前两者决策为 `deny`，`code` 为 `raw-immutable`（不是 `governance-immutable`）；第三者按 raw 判定为 `ask`，不因治理根改为 `deny` 或委托
+
+#### Scenario: unsupported file workdir cannot redirect the guard
+- **WHEN** 调用 `write` 或 `edit`，`file_path` 为 `changes/x.json` 且额外 `workdir` 为 `repos/SHUD`；另一次调用 `file_path` 为 `repos/SHUD/x` 且额外 `workdir` 为 `changes`
+- **THEN** 第一项 deny `governance-immutable`，第二项返回下一个监听器的结果；两者均按 session cwd 解析真实文件目标。shell 的有效 workdir 规则不变

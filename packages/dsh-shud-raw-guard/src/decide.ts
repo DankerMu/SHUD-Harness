@@ -16,6 +16,23 @@ const DENY: RawGuardDecision = {
   reason:
     "Raw data is immutable. Use the read tool to read raw data; write derived data in the workspace.",
 };
+const GOVERNANCE_ROOTS = [
+  "tasks",
+  "stacks",
+  "provenance",
+  "reports",
+  "runs",
+  "changes",
+  "patches",
+  "verifications",
+  "builds",
+] as const;
+const GOVERNANCE_DENY: RawGuardDecision = {
+  kind: "deny",
+  code: "governance-immutable",
+  reason:
+    "Governance records are immutable through file and shell tools. Write them only through task_create, shud_run, change_create, change_submit, shud_build, verification_run, report_generate, report_validate, report_submit or report_decide.",
+};
 const NEXT: RawGuardDecision = { kind: "next", code: "unrelated" };
 export const RAW_READ_PROVENANCE_REASON =
   "Reading raw data requires PI approval (provenance rule).";
@@ -440,9 +457,15 @@ export function caseInsensitiveRoot(root: string): boolean {
   }
 }
 
+/**
+ * Raw deny/ask decisions take precedence over fixed session governance roots.
+ * Governance shares file/shell classifiers but has no read approval or ancestor rule.
+ * File targets use session cwd (not unsupported workdir); shell workdir stays effective.
+ */
 export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
   try {
-    return decideKnownRawAccess(call, options);
+    const raw = decideKnownRawAccess(call, options);
+    return raw.kind === "next" ? decideFileShellAccess(call, GOVERNANCE_ROOTS, true) : raw;
   } catch (error) {
     if (!(error instanceof PathUnavailable)) throw error;
     return {
@@ -489,6 +512,14 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
     const input = canonical(inputDir, cwd);
     return rawRoots.some((raw) => containsRawPath(raw, input)) ? ASK : NEXT;
   }
+  return decideFileShellAccess(call, options.rawDirs, false);
+}
+
+function decideFileShellAccess(
+  call: RawGuardCall,
+  roots: readonly string[],
+  governance: boolean,
+): RawGuardDecision {
   const args = call.arguments;
   if (!args || typeof args !== "object" || Array.isArray(args)) return NEXT;
   const fields = args as Record<string, unknown>;
@@ -501,13 +532,23 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
         : undefined;
   if (
     typeof target === "string" &&
-    options.rawDirs.some((raw) => containsRawPath(canonical(raw, cwd), canonical(target, cwd)))
+    roots.some((root) => containsRawPath(canonical(root, cwd), canonical(target, cwd)))
   )
-    return DENY;
+    return governance ? GOVERNANCE_DENY : DENY;
   if ((call.name === "bash" || call.name === "pwsh") && typeof fields.command === "string") {
     const command = fields.command;
-    const workdir = canonical(typeof fields.workdir === "string" ? fields.workdir : cwd, cwd);
+    const plain = unquote(command);
     const pwsh = call.name === "pwsh" || PWSH_COMMAND.test(command);
+    const writes =
+      [command, plain].some((text) => {
+        const checked = text.replace(DISCARD_REDIRECT, " ");
+        return WRITE_VERBS.test(checked) || tarExtracts(checked);
+      }) ||
+      (pwsh && PWSH_WRITES.test(command));
+    const archives = new Set([command, plain].flatMap(tarArchives));
+    // Governance reads do not need path identity or approval.
+    if (governance && !writes && archives.size === 0) return NEXT;
+    const workdir = canonical(typeof fields.workdir === "string" ? fields.workdir : cwd, cwd);
     // Each spelling also gets an unquoted copy; pwsh alone also reads \ as a
     // separator (bash sub\x is subx).
     const bases = pwsh ? [command, command.replace(/\\/g, "/")] : [command];
@@ -517,29 +558,26 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
         const normalized = normalizeCommandPaths(text);
         return [text, normalized, foldParentSegments(normalized)];
       });
-    for (const raw of options.rawDirs) {
-      const rawPath = canonical(raw, cwd);
-      const root = rawPath.text;
+    for (const dir of roots) {
+      const protectedPath = canonical(dir, cwd);
+      const root = protectedPath.text;
       const flags = caseInsensitiveRoot(root) ? "i" : "";
-      const mentioned = [raw, normalizeCommandPaths(raw), root].some((text) => {
+      const mentioned = [dir, normalizeCommandPaths(dir), root].some((text) => {
         const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        // Any non-path-name character after raw text (glob, brace, backtick) is a mention.
+        // Any non-path-name character after root text (glob, brace, backtick) is a mention.
         const pattern = new RegExp(`${escaped}(?![A-Za-z0-9._-])`, flags);
         return texts.some((candidate) => pattern.test(candidate));
       });
-      if (!mentioned && !containsRawPath(rawPath, workdir)) continue;
-      const writes = [command, unquote(command)].some((text) => {
-        const checked = text.replace(DISCARD_REDIRECT, " ");
-        return WRITE_VERBS.test(checked) || tarExtracts(checked);
-      });
-      const archives = new Set([command, unquote(command)].flatMap(tarArchives));
-      const roots = archives.size > 0 ? options.rawDirs.map((dir) => canonical(dir, cwd)) : [];
+      if (!mentioned && !containsRawPath(protectedPath, workdir)) continue;
+      const archiveRoots = archives.size > 0 ? roots.map((dir) => canonical(dir, cwd)) : [];
       const writesArchive = [...archives].some((archive) => {
         const target = canonical(archive, workdir.text);
-        return roots.some((other) => containsRawPath(other, target));
+        return archiveRoots.some((other) => containsRawPath(other, target));
       });
-      return writes || writesArchive || (pwsh && PWSH_WRITES.test(command)) ? DENY : ASK;
+      if (writes || writesArchive) return governance ? GOVERNANCE_DENY : DENY;
+      return governance ? NEXT : ASK;
     }
+    if (governance) return NEXT;
     // Second pass, only when no raw dir is touched: a destructive verb naming an
     // ancestor. Ancestors come from the configured spelling, the canonical root and
     // the literal cwd join (a symlinked cwd), each up to RAW_ANCESTOR_LEVELS.
@@ -548,7 +586,7 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
       (pwsh && PWSH_ANCESTOR_DESTRUCTIVE.test(command))
     ) {
       const unchdired = texts.map((text) => text.replace(CHDIR_OPERAND, "$1"));
-      for (const raw of options.rawDirs) {
+      for (const raw of roots) {
         const root = canonical(raw, cwd).text;
         const flags = caseInsensitiveRoot(root) ? "i" : "";
         const spelled = normalizeCommandPaths(raw);
