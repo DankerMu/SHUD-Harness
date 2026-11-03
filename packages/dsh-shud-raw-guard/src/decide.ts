@@ -508,6 +508,24 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
       };
     }
   }
+  if (call.name === "shud_build") {
+    try {
+      const cwd = call.cwd ?? process.cwd();
+      const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
+      for (const target of ["builds", "repos/SHUD"]) {
+        const output = canonical(target, cwd);
+        if (rawRoots.some((raw) => containsRawPath(raw, output))) return DENY;
+      }
+      return NEXT;
+    } catch (error) {
+      if (error instanceof PathUnavailable) throw error;
+      return {
+        kind: "deny",
+        code: "raw-target-unavailable",
+        reason: "Build targets cannot be safely resolved; execution denied.",
+      };
+    }
+  }
   if (
     call.name === "report_generate" ||
     call.name === "report_validate" ||

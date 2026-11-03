@@ -1,15 +1,15 @@
 # Proposal
 
-## Active issue fixture: #586
+## Active issue fixture: #537
 
-- Issue type: build prerequisite; Fixture level: compact. #537's actual default check reaches Knip and rejects required system make as unlisted; root control-plane declarations are outside that tool issue's boundary.
-- Scope: exact make entry in the existing knip.json ignoreBinaries list, canonical system-tool prerequisite in instructions/agents/shared.md, normal rendered instruction projections. No business/runtime source, dependency manifest, lockfile, threshold or command substitution.
-- Selected risk packs: Public API / CLI / script entry; Config / project setup; Release / packaging / dependency compatibility; Legacy compatibility / examples; Documentation / migration notes.
-- Governing invariant: only the explicitly required system make executable is declared external; unrelated unlisted binaries remain errors and all existing gate rules remain enabled.
-- Evidence: real Knip negative/positive/unknown-binary controls, actual system make fixture, instructions render/check, full default check and strict fixture, compact correctness+test-evidence review, exact-head CI. Restore the saved #537 slice after merge and run its complete default check before closing #586.
-- Other packs/domain runtime risks not selected: no scientific algorithm, object/schema, approval, raw path, job lifecycle, subprocess implementation, concurrency or resource behavior changes. Generated instruction prose is not a core schema projection.
-- Mechanical execution: the two narrow configuration/prose edits use the existing convention directly; parent owns rendering/verification, with independent review. No permanent wiring-only tests or generic ignore patterns.
-- This standalone prerequisite does not deliver shud_build or replay; shared M4 OpenSpec remains active through #549 PI acceptance.
+- Issue type: feature; Fixture level: expanded (agree upstream), archived-source build identity, subprocess secrets and governed filesystem publication. Dependencies #526/#527/#536 and routed #586 are merged; the root make declaration remains owned by #586.
+- Scope: tools shud_build implementation/registration/tests and existing source-checkout reuse; raw-guard shud_build fixed targets/tests; CONTEXT invariant and existing tool documentation. No core/records/jobs/policy/presets/profile changes.
+- Selected risk packs: Public API / CLI / script entry; Config / project setup; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility.
+- Governing invariant: a published executable is built only from the task-pinned commit archive plus the exact approved patch, never ignored working-tree inputs or a stale binary; TaskCard and source checkout remain unchanged.
+- Reuse core runGit/brands/BuildRecord schema, tools readSourceCheckout/strictTool, records observeSourceChanges/readonly readers/readChangePatch/publishBuildDirectory. No second Git runner, allocator, metadata writer or directory commit protocol.
+- Preserve source/index/HEAD bytes and mtimes, existing task/change/job/report tools, raw priority and physical containment, historical records and current role/preset policy.
+- Evidence floor: real ToolRuntime base-build tracer RED→GREEN, then approved-patch/raw tracers and complete real Git/make/tar failure matrix; independent built-tool executable smoke; full check/profile/raw probes/guardrails/strict/generated equality/three-seat review/exact-head CI.
+- Non-goals: actual SHUD compilation or solver/scientific claims, change approval, shud_run argument integration, new role/preset configuration, external hostile-writer transaction guarantees, retries or alternative build backends.
 
 ## Why
 
