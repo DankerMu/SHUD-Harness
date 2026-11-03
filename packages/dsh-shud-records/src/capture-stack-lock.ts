@@ -7,6 +7,7 @@ import {
   createBrandedId,
   StackIdSchema,
   StackLockSchema,
+  type BuildRecord,
   type StackId,
   type StackLock,
 } from "@shud-harness/dsh-shud-core";
@@ -178,16 +179,32 @@ function createLock(path: string, lock: StackLock): boolean {
 
 /**
  * Capture configured repositories and runtime, reusing the smallest matching immutable lock.
+ * An already-validated build supplies build_id and SHUD source metadata instead of collecting
+ * configured SHUD Git state. Configured paths still require absolute strings; other repositories
+ * are always collected. This does not read or validate build records, binaries or task ownership.
  * Every existing entry is validated before reuse. Fingerprints describe revision metadata,
  * not dirty-file contents; reused locks retain their original response model and timestamps.
  * New locks use private exclusive creation, with at most three id attempts. Failed writes
  * clean up only their owned output; this is not crash-atomic or cross-process snapshot isolation.
  */
-export function captureStackLock(config: StackCaptureConfig, llm: StackCaptureLlm): StackLock {
+export function captureStackLock(
+  config: StackCaptureConfig,
+  llm: StackCaptureLlm,
+  build?: BuildRecord,
+): StackLock {
   validateConfig(config, llm);
   const environment: Environment = {
     repos: {
-      SHUD: repository(config.stackRepos.SHUD),
+      SHUD:
+        build === undefined
+          ? repository(config.stackRepos.SHUD)
+          : {
+              commit: build.source_commit,
+              branch: build.source_branch,
+              dirty: build.dirty_paths.length > 0,
+              dirty_paths: build.dirty_paths,
+              dirty_paths_truncated: false,
+            },
       rSHUD: repository(config.stackRepos.rSHUD),
       AutoSHUD: repository(config.stackRepos.AutoSHUD),
     },
@@ -202,7 +219,7 @@ export function captureStackLock(config: StackCaptureConfig, llm: StackCaptureLl
       request_alias: config.llm.request_alias,
       response_model: llm.response_model,
     },
-    build_id: null,
+    build_id: build === undefined ? null : build.build_id,
     created_at: new Date().toISOString(),
   };
   const directory = lockDirectory(config.cwd);

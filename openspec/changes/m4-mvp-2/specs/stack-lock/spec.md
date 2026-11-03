@@ -103,6 +103,14 @@
 - **WHEN** 提供 `build_id` 提交 `shud_run`，而 `stackRepos.rSHUD` 指向一个未初始化 submodule 的空目录
 - **THEN** 工具返回指明该路径的错误，不提交作业，不留下运行目录，`stacks/` 不新增文件
 
+#### Scenario: build source bypasses only the configured SHUD revision
+- **WHEN** `captureStackLock(config, llm, build)` 接收已校验的 BuildRecord，配置 SHUD 为有效绝对路径但不是 Git 仓库，rSHUD/AutoSHUD 为有效仓库
+- **THEN** 采集成功，SHUD 修订仅取该构建源，不读取 `builds/` 或配置 SHUD 仓库；配置路径形状验证和其它两仓库采集保持不变
+
+#### Scenario: different builds with identical source observations retain distinct identities
+- **WHEN** 同一环境以两份仅 build_id 及其绑定产物路径不同、源修订观测相同的已校验 BuildRecord 分别采集
+- **THEN** 两个 StackLock 的 build_id、fingerprint 与 stack_id 不同；再次以同一 build 采集复用对应旧 lock 且不改其字节或修改时间
+
 #### Scenario: no build keeps the M3 capture
 - **WHEN** 不传 `build_id` 提交 `shud_run`
 - **THEN** `repos.SHUD` 为对 `stackRepos.SHUD` 执行仓库修订采集的结果，lock 除 `build_id: null` 外与 M3 的采集规则逐字段一致

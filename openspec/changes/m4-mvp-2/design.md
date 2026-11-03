@@ -262,6 +262,26 @@ Review focus: default application precedes refine; all non-code types reject com
 - StackLock：引用 build 时 `repos.SHUD` = BuildRecord 的 `{source_commit, source_branch, dirty: dirty_paths.length>0, dirty_paths, dirty_paths_truncated:false}`，`build_id` 字段为该 id 并进入指纹；无 build 时 `build_id: null`、`repos.SHUD` 仍采根 submodule。因此 base 与 candidate 运行必然得到两个不同的 StackLock；报告逐 lock 列出。`rSHUD`/`AutoSHUD` 不变。
 - raw-guard：`shud_run` 的三写入根判定不变；`builds/` 是读取源，不纳入写入根。
 
+#### Issue #531 implementation boundary
+
+Change surface: extend the existing synchronous captureStackLock(config, llm, build?: BuildRecord) in place. Add focused build-source cases in a separate test file because the existing capture suite is already 664 lines. No production caller change until #534; the existing two-argument API remains its own no-build path, not a compatibility shim.
+
+Governing invariant: a build-backed lock identifies the exact supplied BuildRecord build_id and source observation while preserving the unchanged runtime, harness, LLM, other repositories and immutable lock-store semantics.
+
+Ownership: the optional third argument is already schema-validated by its caller. Do not read builds/, parse BuildRecord again, check task ownership or binary bytes, or collect configured SHUD Git metadata when it is supplied. Existing configuration validation still requires all configured repository paths to be absolute strings; a valid absolute configured SHUD path need not exist or be a Git repository in build mode. rSHUD/AutoSHUD are always collected normally and retain path-bearing controlled failures.
+
+Projection: build_id is build.build_id; repos.SHUD is exactly {commit:source_commit, branch:source_branch, dirty:dirty_paths.length>0, dirty_paths, dirty_paths_truncated:false}. Do not sort, truncate, mutate, substitute current HEAD or infer dirty contents. The schema-valid output is detached through the existing StackLock validation. Other BuildRecord fields are deliberately not copied into the lock.
+
+Publication: keep existing candidate/full StackLock validation, core fingerprint, matching-lock scan, smallest-id selection, existing-entry validation, wx write/fsync/close and three-total-attempt allocation unchanged. Invalid projected values fail before a new lock file is published; directory creation and entropy ordering remain existing behavior, not a newly promised side-effect-free preflight. Repository collection failures precede lock-directory creation as before.
+
+Compatibility: no build means build_id:null and unchanged three-repository collection/runtime/harness/LLM fields. Core already excludes null build_id from the M3 fingerprint. A persisted M3 lock lacking the field parses to null and must be reused without rewriting bytes/mtime, retaining original response_model/created_at. Same build and environment reuse; distinct build IDs distinguish locks even when all source metadata is identical.
+
+Sibling surfaces: records public index and StackCaptureConfig/StackCaptureLlm; jobs registry Config inheritance and shud-submissions.ts two-argument call; submit-shud-capture/faults tests; records package-boundary consumer; core BuildRecord/StackLock schemas, repository collector and computeStackFingerprint; unchanged workspace-records/path/state ownership. LSP references were attempted and unavailable; targeted reference search identifies these consumers.
+
+Required evidence: base clean and candidate full dirty-path projections; same-source different IDs give distinct fingerprints, repeated same build reuses bytes/mtime, configured SHUD missing/dirty/invalid repository is not inspected in build mode, other two repositories still fail closed. Include caller-input immutability, full lists beyond small fixtures, invalid projected id/path rejection with no new lock, prior corrupt lock and smallest matching id through build mode; existing collision/cleanup/resource tests remain intact. Frozen actual old-built no-build/M3-shape reuse and independent canonical digest replay; built public API captures both builds and reads persisted locks without a builds directory; full check, unchanged generated files, runtime profile smoke, strict fixture, white-box review and same-SHA CI.
+
+Non-goals and rollback: no build/schema/fingerprint/config redesign or producer transaction, no solver run/PI assertion, no new cross-process safety guarantee. Revert the PR normally if needed; do not preserve duplicate implementations. Active fixture/API comment document the narrow contract; existing D9 is the decision record.
+
 #### Issue #521 implementation boundary
 
 Change surface: StackLock schema/fingerprint and their tests, registry example, generated projection; minimum captureStackLock build_id:null literal if required by output typing.

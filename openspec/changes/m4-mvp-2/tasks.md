@@ -227,12 +227,24 @@
 - Legacy调整：records成功fixture补有效manifest；空copy成功用例已被新契约淘汰，删除而不伪造默认；只删除总读取字节数等实现偶然断言，保留完整hash/文件清单、chunk上界、peak stream=1、关闭、路径和原子发布断言。jobs fixtures已由#569迁移，本刀不触及jobs/core/raw-guard/config。
 - Runtime/docs：变更前真实built ccw已冻结45项/6,933,713bytes，变更后sources完全相同、新data_id；built external/per-file-path/invalid-reference smoke证明新行为。Minimal_Schemas外部forcing段与API注释同步；31generated不变。focused RED→GREEN、full pnpm run check、strict OpenSpec、三席白盒与同SHA CI；无真实keliya/SHUD运行或PI声明，#534拥有提交集成回滚。
 
+### Issue #531 risk and evidence fixture
+
+本刀仅3.5；#521 schema/fingerprint已合并。旧issue概述“lock无build_id”已被#521的null字段适配取代；以当前两参数行为及冻结built基线为准。
+
+- Selected：Public API / CLI / script entry（可选第三BuildRecord参数）；Schema / columns / units / field names（精确源身份投影与输出schema）；File IO / path safety / overwrite（沿既有immutable lock存储）；Legacy compatibility / examples（无build及旧缺键lock）；Error handling / rollback / partial outputs（采集/schema/旧证据失败不新增lock）；Auth / permissions / secrets（不复制无关BuildRecord/异常载荷）；Documentation / migration notes（API与D9）。
+- Not selected：Config / project setup、Concurrency / shared state / ordering、Resource limits / large input / discovery、Release / packaging / dependency compatibility——没有新配置/并发/资源协议/依赖；既有配置验证、同步资源清理、三次分配及存储并发边界保持，完整dirty_paths不截断。
+- 新行为：base空dirty、candidate多路径原顺序/完整值、dirty_paths_truncated:false；build_id写入且同源不同id也有不同指纹；同build同环境复用旧bytes/mtime。输入BuildRecord不被改写，返回对象经既有schema与调用方输入脱离。
+- 路由边界：build是已校验对象而非id/路径；不读builds、不重验BR/二进制/任务。有效绝对配置SHUD路径不存在或非repo时build模式仍成功，证明不采其修订；不传build仍按原错误路径失败。rSHUD/AutoSHUD采集仍真实，任一空repo/错误均指明路径且不新增lock。
+- 输出与存储负例：无效投影id/path经既有StackLock验证失败而不发布新lock；build模式同指纹多lock仍取最小id且不重写，损坏旧lock仍fail-closed。原capture suite的wx碰撞三次、IO清理、路径/权限、安全诊断保持，不新增第二存储实现。
+- Legacy：固定内容独立SHA向量不变；真实oldbuilt三repo基线和缺build_id文件已冻结于本地证据，变更后重放全字段/指纹相同、复用id、旧bytes/mtime不变。仅原有null字段，不改core生成。
+- 验证：新独立test文件tests-only RED→GREEN；既有capture/package-boundary/jobs capture回归；built API实写base/candidate并读回、同build复用且无builds目录；31generated不变、fullcheck/profile:smoke/strictOpenSpec/三席白盒/同SHA CI。无需真实SHUD或PI判断；#534另有集成事务证据。
+
 - [x] 3.1 依赖 2.1。三对象文件层：`changes/`、`patches/`、`verifications/` 原子写（排他创建、EEXIST 重分配 id ≤3 次）与读取校验，`builds/<id>/` 临时目录（排他 `mkdir`）rename 发布与消费者 sha256 校验（change-requests「ChangeRequest workspace files」、verification-cases「VerificationCase workspace files」、shud-build「Build workspace files」、task-cards「TaskCard workspace file」扩展的 id/目录/排他创建与目录级 rename 例外）；路径安全复用 `workspace-paths.ts`；符号链接/非目录 fail-closed 正反例。
 - [x] 3.2 依赖 2.3、2.6、3.1。`observeSourceChanges(sourceDir)`（经 2.6 runner：porcelain `-z` 解析、忽略路径不计、untracked/删除/重命名拒绝、realpath ≠ toplevel 拒绝）与 ChangeRequest 生成纯函数（floor/categories 派生、申报抬升、patch 固定命令、sha256、`base_commit` 40 hex）；以真实临时 git 仓库测试（change-requests「Source change observation」）。
 - [x] 3.3 依赖 2.2a、3.1。`code_change` 状态进入（`change_create` → running/running_local）与 `codeChangeClosure(card, loaders)` 六子句（0 输入非空、1 approved CR 属本卡且 patch sha 匹配、2 终态 VC 属本卡且其两个 run 的 RunJob ∈ `linked_jobs`、3/4 schema 保证、5 既有运行子句）正反例，不合格对象按不可读处理；`task-closure.ts` 分派按 `type`；`CONTEXT.md` 增"code_change closure 不以 LLM 为据"不变量并指向本测试（task-cards「code_change state entry」「code_change closure predicate」）。
 - [x] R569 在3.4之前，为jobs共享提交输入补充单站点`tiny.tsd.forc`，同步精确provenance四项清单和自定义metacharacter project的manifest名称/目录行；不改生产代码、不删除旧三项或放宽复制/输入字节/注入断言。对应data-provenance「Provenance generation at submission」的有效输入前置，expanded fixture。
 - [x] 3.4 依赖 2.2d及路由前置R569（#569）。`generateProvenance` 解析 `<project>.tsd.forc` 与路径型Filename，逐个普通引用文件按规范物理路径归类，副本外逐一哈希为 `external_files`，缺失/链接/非普通文件/解析失败抛错（data-provenance「Provenance generation at submission」）；ccw（得 `[]`）、32/34外部forcing与跨副本边界路径正反例。
-- [ ] 3.5 依赖 2.2b。`captureStackLock` 接受可选 build 源：`repos.SHUD` 取 BuildRecord 源修订（`dirty_paths` 原样、`dirty_paths_truncated: false`）、`build_id` 写入并进指纹；无 build 时逐字节不变的回归（stack-lock「Deterministic capture at shud_run submission」）。
+- [x] 3.5 依赖 2.2b。`captureStackLock` 接受可选 build 源：`repos.SHUD` 取 BuildRecord 源修订（`dirty_paths` 原样、`dirty_paths_truncated: false`）、`build_id` 写入并进指纹；无 build 时逐字节不变的回归（stack-lock「Deterministic capture at shud_run submission」）。
 - [ ] 3.6 依赖 2.5、3.3。报告：`.json` 增 `change_ids`/`verification_ids`（`default([])`）与生成投影；`.md` 事实表增 ChangeRequest 段（含 `floor_categories`）、VerificationCase 段、BuildRecord 段，StackLock 表增 `build_id`；§5 由 2.5 常量逐字渲染；§7 列 failed VC；golden 更新只限新增段；M3 报告渲染字节不变回归（evidence-reports「EvidenceReport record」「Deterministic facts table」「Report template」「EvidenceReport generated projection」「code_change report wording constant」）。
 - [ ] 3.7 依赖 2.1。`compareRivqdown(baseRunDir, candidateRunDir, project)`：`lstat` 普通文件、sha256、`equal`；缺失/链接/特殊文件抛错；相同/不同/缺失正反例（verification-cases「Rivqdown comparator」）。
 
