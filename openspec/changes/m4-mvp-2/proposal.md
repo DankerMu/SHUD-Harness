@@ -1,14 +1,15 @@
 # Proposal
 
-## Active issue fixture: routed #569
+## Active issue fixture: #530
 
-- Issue type: test; Fixture level: expanded (revised from compact after fixture review: shared fixture entrypoints, path identity and legacy compatibility trigger expanded even without production changes). This is a bounded prerequisite for records-only #530, not the #534 jobs integration.
-- Scope: jobs submit-shud test helper and affected test oracles/custom-project setup only, plus this workflow fixture. Shared writeInputTree gains a one-station self-contained tiny.tsd.forc pointing to ./input/tiny/nested and forcing.dat; the existing forcing bytes remain unchanged.
-- Selected risk packs: Public API / CLI / script entry (shared test entrypoints); File IO / path safety / overwrite; Schema / columns / units / field names (fixture format only); Legacy compatibility / examples; Documentation / migration notes. Other packs are explicitly not selected in tasks.md; production behavior stays unchanged.
-- Preserve all three original copied files and exact hashes, END-update behavior, original-input immutability, complete input_bytes/inventory checks, path-alias tests, and the literal metacharacter project/argv security regression. The custom project must have its own manifest filename and matching directory line, with no obsolete tiny manifest left behind.
-- No parser, fallback, source change, extra dependency or real/raw forcing data. The manifest format is the existing data-provenance requirement, validated by an independent temporary runtime oracle; do not create a second production parser or permanent tests that merely echo a fixture constant.
-- Evidence floor: update existing exact provenance expectations first and observe missing-manifest RED; apply the mechanical fixture migration; focused jobs tests, actual standalone submission/manifest-path smoke, full check, strict OpenSpec and expanded three-seat review; same-SHA full CI and normal protected merge.
-- DAG: #569 must merge before #530. The shared M4 change stays active; this prerequisite does not complete task 3.4 or change #549 PI acceptance.
+- Issue type: feature; Fixture level: expanded; upstream level retained for parser, readonly path safety and provenance publication (actual Critical Path #2). #523 and routed #569 are merged.
+- Scope: generate-provenance.ts and its tests; one Minimal_Schemas.md paragraph plus active OpenSpec describe the user-authorized per-file classification. No jobs/core/raw-guard/profile/schema/config changes.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes. No new configuration, concurrency service or dependency.
+- User explicitly chose “支持路径，逐文件归类”: Filename paths are resolved component-by-component under SHUD directory + "/" + Filename semantics; each canonical file is classified against the physical copied-input root. Never infer an empty external inventory from the forcing directory alone.
+- Preserve original-copy inventory/hash/order, original-input metadata-only treatment, one active stream with close awaited, allocation only after complete evidence, atomic publication and controlled diagnostics. Canonical external paths are deduplicated and codepoint-sorted; internal files retain their existing ordering.
+- Parse the required manifest after inventory, validate count/header/rows and referenced ordinary files, reject final/intermediate links and special files before hashing them. Relative directories use run cwd, not manifest location or rSHUD fallback; no tilde/environment expansion.
+- Evidence floor: tests-only semantic RED, real 32-of-34 external fixture and path/parse/resource negatives, unchanged external bytes/mtime, actual old-built ccw 45-file baseline replay, built public generator smoke, full check, strict OpenSpec, three-seat Critical Path review and same-SHA CI.
+- Non-goals: new schema, solver/R parser changes, arbitrary concurrent-file snapshot isolation, approvals, #534 submission/build integration, real keliya data or PI acceptance. Invalid manifest-less synthetic fixtures are not preserved as successes; #569 already migrated jobs inputs without weakening their tests.
 
 ## Why
 
@@ -19,7 +20,7 @@ Stage 1 压测结论（`.workplans/m4-mvp-2/grill-gate.json`，25 分支 + 3 开
 ## What Changes
 
 - `@shud-harness/dsh-shud-core`：新增 ChangeRequest、VerificationCase、BuildRecord 三个 Zod schema 与品牌 id `CHG-/VC-/BUILD-<UTC>-xxxx`（复用 run-identifiers 生成器）；`TaskTypeSchema` 增加 `code_change`，TaskCard 增加 `linked_changes`、`linked_verifications`；StackLock 增加 nullable `build_id`（引用 build 时 `repos.SHUD` 记构建源，`build_id` 进指纹）；RunJob/RunRecord 增加 nullable `build_id` 与 `threads`；新增 `governance/semantic-level-floor.ts`（Gating §1.1 初值的 path→floor 表，未匹配路径为 `numerical_implementation`，仓库内常量、无运行时覆写，与 `wording.ts` 同一模式）与 level→risk 确定性映射；`role-tool-map` 的 coder/reviewer/repo_explorer 改为真实挂载名、coordinator `local` 扩为三个委派工具、删除 `harness.memory.propose`（K11）。`pnpm run schema:generate` 刷新 `docs/generated/`。
-- `@shud-harness/dsh-shud-records`：三对象工作区文件层（`changes/<change_id>.json`、`patches/<change_id>.patch`、`verifications/<vc_id>.json`、`builds/<build_id>/{build-record.json,shud}`，复用既有原子写与路径安全）；观测工作区 `repos/SHUD` 的 `git status --porcelain` → floor 派生 → ChangeRequest 生成的纯函数；`code_change` closure 谓词与状态转换；DataProvenance 对 `tsd.forc` 第 2 行引用的运行目录外 forcing 文件按绝对路径哈希为 `external_files`；StackLock 采集接受 build 源；EvidenceReport 模板为 `code_change` 报告增加 ChangeRequest 与 VerificationCase 事实表。
+- `@shud-harness/dsh-shud-records`：三对象工作区文件层（`changes/<change_id>.json`、`patches/<change_id>.patch`、`verifications/<vc_id>.json`、`builds/<build_id>/{build-record.json,shud}`，复用既有原子写与路径安全）；观测工作区 `repos/SHUD` 的 `git status --porcelain` → floor 派生 → ChangeRequest 生成的纯函数；`code_change` closure 谓词与状态转换；DataProvenance 解析 `tsd.forc` 目录与每个 Filename 路径，按规范物理路径逐文件归类，将输入副本外引用文件哈希为 `external_files`；StackLock 采集接受 build 源；EvidenceReport 模板为 `code_change` 报告增加 ChangeRequest 与 VerificationCase 事实表。
 - `@shud-harness/dsh-shud-jobs`：`shud_run` 提交接受可选 `build_id`（以 `builds/<build_id>/shud` 替代配置 `shudBin`，校验 BuildRecord 与二进制 sha256）与可选 `threads`（包装进程环境 `OMP_NUM_THREADS`/`SHUD_RHS_THREADS`），RunJob 记录两者；DataProvenance 生成含外部 forcing 文件。
 - `@shud-harness/dsh-shud-tools`：新增 `change_create`（coder：观测 diff、派生 level/risk、落 CR(`proposed`) + patch、回写 TaskCard）、`change_submit(change_id)`（coder：高风险 level 由 policy-gate ask，allowed-once → `approved`）、`shud_build`（coder：校验工作区 `repos/SHUD` 检出的 commit 与 dirty，无 CR 要求干净树，有 CR 要求 `approved` 且观测 diff 与 patch 一致；执行 `make shud SUNDIALS_DIR=<sundialsRoot> [SHUD_ENABLE_OPENMP_RHS=1]`，产 BuildRecord 与二进制）、`verification_run`（reviewer：比较 base run 与 candidate run 的 `output/<project>.out/<project>.rivqdown.dat` SHA256，写 VerificationCase 终态与 reviewer 字段）；`shud_run` 增加 `build_id`、`threads`；`task_create` 与 `report_generate` 接受 `code_change` 卡。
 - `@shud-harness/dsh-shud-policy-gate`：角色推导识别 coder/reviewer preset；`change_submit` 在 CR 的 `semantic_level` 属 gate matrix 高风险集合（`output_semantics` 及以上）时无条件 ask，`displayReason` 含 change_id、level、files_changed 与 patch 路径；M4 偏离登记：卡片 allowed-once 即批准、不要求 PI comment；拒绝不落盘、PI 的话经对话给 coder；不新增 decide 工具。raw-guard 为四个新写入根（`changes`、`patches`、`verifications`、`builds`）沿 task_create/report 工具的固定输出根保护。
@@ -42,7 +43,7 @@ Stage 1 压测结论（`.workplans/m4-mvp-2/grill-gate.json`，25 分支 + 3 开
 - `task-cards`: `type` 增加 `code_change`；TaskCard 增加 `linked_changes`/`linked_verifications`；`code_change` 的状态进入与 closure 谓词；`task_create` 接受 `code_change`。
 - `stack-lock`: 增加 nullable `build_id`；引用 build 时 `repos.SHUD` 采自构建源、`build_id` 进指纹。
 - `run-records`: RunJob/RunRecord 增加 nullable `build_id`、`threads` 与 `binary_sha256`（M2/M3 记录缺键按 `null` 解析）。
-- `data-provenance`: 对运行目录外的 forcing 引用文件生成 `external_files`。
+- `data-provenance`: 对输入副本外的 forcing 引用文件生成 `external_files`，逐文件归类而非按目录直接判空。
 - `shud-run-tools`: `shud_run` 增加可选 `build_id`、`threads`；新增 `change_create`、`change_submit`、`shud_build`、`verification_run` 由 `dsh-shud-tools` 挂载。
 - `shud-run-jobs`: 提交时以 build 二进制替代配置 `shudBin`、包装进程线程环境变量，RunJob 记录 `build_id`/`threads`。
 - `evidence-reports`: `code_change` 报告的 ChangeRequest/VerificationCase 事实表、§5 固定措辞与 closure 入口。

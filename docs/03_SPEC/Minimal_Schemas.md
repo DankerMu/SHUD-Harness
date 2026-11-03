@@ -141,7 +141,7 @@ uncertainty_notes: null
 
 **M3 对齐处置（#431）：** `data_id` 复用 `DataIdSchema`，拒绝旧 `DATA-NNNN`、`DATA-<UUID>` 与大写 hex。删除 `sources.terrain` / `mesh` / `forcing` / `observations` 分类，改为 `input_root` + `files`；删除 `preprocess` 对象及其开放 `params`，不保留兼容分支。旧 `event_window` 数组、无 sha256 的文件条目和已删除字段均拒绝。此刀仅交付 schema/type 与生成文档投影，不交付输入遍历、hash 计算、持久化或提交接线。
 
-**M4 外部 forcing：** `sources.external_files` 条目为 `{path, sha256, size_bytes}`，`path` 必须为绝对路径，摘要与非负整数字节数沿用 `files` 约束。提交解析副本 `<project>.tsd.forc` 的站点数、目录与 Filename 列；目录按运行 cwd 解析并 realpath 后位于输入副本内则为 `[]`，副本外仅哈希实际引用的普通文件，去重并按绝对路径码点升序记录，不复制或修改外部文件。缺文件、链接/特殊文件、站点数不符或解析失败均使提交失败并回滚，不能降级为空清单。此规则也作用于无 build 提交；ccw 的 forcing 位于副本内，keliya 回放引用外部 32 个文件。详见 [M4 provenance 契约](../../openspec/changes/m4-mvp-2/specs/data-provenance/spec.md)。
+**M4 外部 forcing：** `sources.external_files` 条目为 `{path, sha256, size_bytes}`，`path` 必须为规范绝对路径，摘要与非负整数字节数沿用 `files` 约束。生成器在副本清单完成后增量解析必需的 `<project>.tsd.forc`：严格 UTF-8，支持 LF、CRLF 与无末尾换行；首行首 token 为完整非负安全十进制整数，后续首行字段不作日期或科学校验；第二整行去除首尾空白后为目录，保留内部空格；第三行末列必须为 `Filename`，非空数据行列数与表头一致，原始行数在去重前必须等于站点数。零站点仍须有合法目录与表头且无数据行。相对目录从运行 cwd 按物理遍历解析，再以 native realpath 规范化；目录根别名可解析，但随后每个路径型 `Filename` 按 SHUD 的目录 + `/` + 文件名拼接逐组件检查，保留 `..` 遍历语义，拒绝中间或末尾链接、缺失及非普通文件，不作 rSHUD fallback、tilde/环境展开或前导 `/` 覆盖目录。每个规范文件路径分别与物理副本根比较：内部引用由 `files` 覆盖，内部目录越出副本的引用必须计入外部，外部目录引用回副本的文件不得重复；只有所有引用均在副本内或引用集合为空时才为 `[]`。全部引用通过预检后，仅流式哈希被引用的外部普通文件，按实际读取字节计数、规范路径去重及码点升序记录，不扫描外部目录、不复制或修改文件、不新增审批。解析或路径/读取失败均使提交失败，由既有调用方回滚，不能降级为空或部分清单；诊断只含受控阶段与相关路径，不携带原始异常或 manifest 载荷。副本哈希、解析与外部哈希共用逐文件关闭的流生命周期，全部成功前不分配或发布 provenance，已有证据不变；不承诺外部并发修改的快照隔离。此规则也作用于无 build 提交；ccw 的 forcing 位于副本内，keliya 回放引用外部 32 个文件。详见 [M4 provenance 契约](../../openspec/changes/m4-mvp-2/specs/data-provenance/spec.md)。
 
 ---
 
