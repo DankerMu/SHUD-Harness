@@ -15,6 +15,7 @@ import type { StateIndexStore } from "./state-indexes.ts";
 import { captureStackLock, generateProvenance, writeJson } from "@shud-harness/dsh-shud-records";
 import { stdoutSource } from "./file-output.ts";
 import { updateEnd } from "./shud-end.ts";
+import { BuildOwnershipError, prepareBuild, type PreparedBuild } from "./shud-build.ts";
 import {
   copyInput,
   existingPath,
@@ -162,6 +163,7 @@ export class ShudSubmissions {
     let created = false;
     let indexed = false;
     let provenance: OwnedProvenance | undefined;
+    let preparedBuild: PreparedBuild | undefined;
     const execution: {
       value?: ShudExecution;
       startup?: Promise<{ identity: ShudProcessIdentity } | { error: unknown }>;
@@ -201,7 +203,15 @@ export class ShudSubmissions {
       await io.writeFile(join(reservation.runDir, "stdout.log"), "", { flag: "wx" });
       await io.writeFile(join(reservation.runDir, "stderr.log"), "", { flag: "wx" });
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
-      const stack = captureStackLock({ ...this.config, cwd: input.cwd }, input.llm);
+      preparedBuild =
+        input.buildId === null
+          ? undefined
+          : await prepareBuild(input.cwd, input.buildId, input.taskId, reservation.runDir, () =>
+              verifyRun(input.runsDir, location.parent, reservation.runDir, location.directory),
+            );
+      const build = preparedBuild?.record;
+      verifyRun(input.runsDir, parent, reservation.runDir, owned);
+      const stack = captureStackLock({ ...this.config, cwd: input.cwd }, input.llm, build);
       const data = await generateProvenance(reservation.runDir, input.project, input.inputDir);
       // Record the returned path before ownership checks: inability to prove ownership
       // must fail closed during rollback, never authorize deletion of a replacement.
@@ -221,13 +231,21 @@ export class ShudSubmissions {
         task_id: input.taskId,
         stack_id: stack.stack_id,
         data_id: data.data_id,
+        build_id: input.buildId,
+        binary_sha256: build?.binary_sha256 ?? null,
+        threads: input.threads,
         backend: "local_job",
         status: "created",
         project: input.project,
         label: input.label,
         input_dir: input.inputDir,
         run_dir: reservation.runDir,
-        command: [this.config.shudBin, "-o", `output/${input.project}.out`, input.project],
+        command: [
+          build ? join(reservation.runDir, "bin", "shud") : this.config.shudBin,
+          "-o",
+          `output/${input.project}.out`,
+          input.project,
+        ],
         end_days: input.endDays,
         owner_session: input.ownerSession,
         dsh_job_id: null,
@@ -323,12 +341,15 @@ export class ShudSubmissions {
         }
         if (registered) await removeSettledRegistration(this.registry, registered, this.waitMs);
         if (indexed) await this.indexes.removeActive(reservation.run_id);
+        if (error instanceof BuildOwnershipError)
+          throw new Error("Cannot remove run with an unowned binary destination", { cause: error });
         if (created && existingPath(reservation.runDir)) {
           if (!parent || !owned)
             throw new Error("Cannot verify ownership of newly claimed run directory", {
               cause: error,
             });
           verifyRun(input.runsDir, parent, reservation.runDir, owned);
+          preparedBuild?.assertRollbackSafe();
           await io.rm(reservation.runDir, { recursive: true });
         }
         if (provenance) await removeProvenance(provenance);

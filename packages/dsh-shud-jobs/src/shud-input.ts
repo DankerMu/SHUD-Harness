@@ -2,10 +2,12 @@ import { constants, lstatSync, readdirSync, realpathSync, type Stats } from "nod
 import * as io from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
+  BuildIdSchema,
   containsPath,
   isProjectComponent,
   RunJobSchema,
   TaskIdSchema,
+  type BuildId,
   type RunJob,
   type TaskId,
 } from "@shud-harness/dsh-shud-core";
@@ -15,6 +17,10 @@ export interface SubmitShudRequest {
   input_dir: string;
   project: string;
   task_id?: TaskId;
+  /** Execute a verified run-local copy of this workspace build; never fall back on failure. */
+  build_id?: BuildId;
+  /** Independent positive safe integer; omitted threads inherit the host environment. */
+  threads?: number;
   end_days?: RunJob["end_days"];
   label?: RunJob["label"];
   owner_session: RunJob["owner_session"];
@@ -32,6 +38,8 @@ export interface PreparedInput {
   runsDir: string;
   project: string;
   taskId: TaskId | null;
+  buildId: BuildId | null;
+  threads: number | null;
   endDays: RunJob["end_days"];
   label: RunJob["label"];
   ownerSession: RunJob["owner_session"];
@@ -59,6 +67,13 @@ export function prepareInput(request: SubmitShudRequest, stateDir: string): Prep
   const task = request.task_id === undefined ? null : TaskIdSchema.safeParse(request.task_id);
   if (task !== null && !task.success) throw new Error("task_id must be a valid TaskId");
   const taskId = task === null ? null : task.data;
+  const build = request.build_id === undefined ? null : BuildIdSchema.safeParse(request.build_id);
+  if (build !== null && !build.success) throw new Error("build_id must be a valid BuildId");
+  const buildId = build === null ? null : build.data;
+  const parsedThreads = RunJobSchema.shape.threads.safeParse(request.threads);
+  if (!parsedThreads.success || (request.threads !== undefined && parsedThreads.data === null))
+    throw new Error("threads must be a positive safe integer");
+  const threads = parsedThreads.data;
   const project = RunJobSchema.shape.project.parse(request.project);
   if (!isProjectComponent(project)) {
     throw new Error("project must be one contained path component");
@@ -117,7 +132,20 @@ export function prepareInput(request: SubmitShudRequest, stateDir: string): Prep
     }
   }
   visit("");
-  return { cwd, inputDir, runsDir, project, taskId, endDays, label, ownerSession, llm, items };
+  return {
+    cwd,
+    inputDir,
+    runsDir,
+    project,
+    taskId,
+    buildId,
+    threads,
+    endDays,
+    label,
+    ownerSession,
+    llm,
+    items,
+  };
 }
 
 export async function copyInput(input: PreparedInput, runDir: string): Promise<number> {

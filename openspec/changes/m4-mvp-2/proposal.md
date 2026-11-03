@@ -1,15 +1,15 @@
 # Proposal
 
-## Active issue fixture: #533
+## Active issue fixture: #534
 
-- Issue type: feature; Fixture level: expanded; upstream level retained for persisted report schema, readonly evidence loading and Critical Paths #6/#7. Dependencies #525/#529 are merged.
-- Scope: EvidenceReport references/projections, canonical records renderer/input loader/template and tests; only the live issue's narrow creation-input, parsed-output, registry-example and existing validator-call adaptations.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Release / packaging / dependency compatibility; Documentation / migration notes.
-- Governing invariant: schema/id-validated cited JSON alone supplies ordered facts; template-owned §5 cannot be rewritten by authored text, and missing references never produce a partial report.
-- Preserve M3 Markdown bytes, raw missing-key JSON, readonly bytes/mtime, trusted section origins, seven watermarks, existing thirteen validator checks and all branded creation inputs.
-- Add defaulted unique change_ids/verification_ids, three §3 fact sections, non-null StackLock build_id rows and failed-VC §7 entries; no cross-object decision, patch/binary/log reads or JSON injection.
-- Evidence floor: tests-only semantic RED before implementation; field/order/null/error vectors, two frozen built M3 baselines, built public render/validate smoke, generated changes limited to two EvidenceReport files, full check/strict OpenSpec/three-seat review/same-SHA CI.
-- Non-goals: tools/policy/jobs, report_generate closure/link population, validator checks 14/15 or failed-VC validation expansion (#541), scientific conclusions and PI acceptance.
+- Issue type: feature; Fixture level: expanded; upstream atomic transaction retained. Dependencies #522/#527/#530/#531 are merged; records group is complete.
+- Scope: jobs request/preflight, submission-local binary preparation, detached environment, collector field propagation and integration tests. Consume existing records APIs; no core/records/tools/raw-guard changes.
+- Selected risk packs: Public API / CLI / script entry; Config / project setup; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes.
+- Governing invariant: a build-referenced created RunJob already binds the verified run-local executable, source StackLock, provenance and requested threads; no producer starts before that binding is complete.
+- Preserve existing submission ownership/drain/rollback, detached process identity/cancellation/exit evidence and immutable locks; builds and original/external inputs remain readonly.
+- Add optional branded build_id and independent positive-integer threads, validated before any filesystem operation. No build selects configured shudBin without accessing builds or creating bin; supplied threads still apply independently.
+- Evidence floor: tests-first semantic RED, real registry/detached-script success/fault/rollback/collect matrices, bounded binary-copy resources, built public smoke, real shud:tiny and shud:first-task, full check/profile smoke/strict OpenSpec/31 generated unchanged/three-seat white-box review/same-SHA CI.
+- Non-goals: build production, tool parameters (#539), raw-guard changes, verification_run cross-checks, new recovery/cancellation protocols, hostile concurrent-writer snapshot isolation or PI/scientific acceptance.
 
 ## Why
 
