@@ -5,6 +5,10 @@ import type {
   StackLock,
   DataProvenance,
   EvidenceReport,
+  ChangeRequest,
+  VerificationCase,
+  BuildRecord,
+  BuildId,
   PiGateDecision,
   RunJob,
   RunRecord,
@@ -13,6 +17,14 @@ import type {
 import {
   readWorkspaceRecord,
   writeWorkspaceRecord,
+  createChangeRequest,
+  createVerificationCase,
+  writeChangePatch,
+  readChangePatch,
+  rewriteChangeRequest,
+  publishBuildDirectory,
+  verifyBuildBinary,
+  type BuildDirectoryProducer,
   transitionTask,
   reconcileTaskCard,
   evaluateClosure,
@@ -36,6 +48,7 @@ import {
   type ClosureDraft,
   type ClosureFailure,
   type ClosureResult,
+  type MutableWorkspaceRecordKind,
 } from "./index.ts";
 
 declare const cwd: string;
@@ -45,16 +58,122 @@ const task: TaskCard = readWorkspaceRecord(cwd, "task", id);
 const stack: StackLock = readWorkspaceRecord(cwd, "stack", id);
 const data: DataProvenance = readWorkspaceRecord(cwd, "data", id);
 const report: EvidenceReport = readWorkspaceRecord(cwd, "report", id);
+const change: ChangeRequest = readWorkspaceRecord(cwd, "change", id);
+const verification: VerificationCase = readWorkspaceRecord(cwd, "verification", id);
+const build: BuildRecord = readWorkspaceRecord(cwd, "build", id);
+const readonlyChange: ChangeRequest = readWorkspaceRecord(cwd, "change", id, { readonly: true });
+const readonlyVerification: VerificationCase = readWorkspaceRecord(cwd, "verification", id, {
+  readonly: true,
+});
+const readonlyBuild: BuildRecord = readWorkspaceRecord(cwd, "build", id, { readonly: true });
 const written: void = writeWorkspaceRecord(cwd, "task", value);
 writeWorkspaceRecord(cwd, "data", value);
 writeWorkspaceRecord(cwd, "report", value);
 // @ts-expect-error StackLocks have no mutable write API.
 writeWorkspaceRecord(cwd, "stack", value);
-// @ts-expect-error The file layer has four fixed record kinds, not arbitrary path plugins.
+// @ts-expect-error ChangeRequests use a dedicated update API, not generic overwrite.
+writeWorkspaceRecord(cwd, "change", value);
+// @ts-expect-error VerificationCases cannot be overwritten.
+writeWorkspaceRecord(cwd, "verification", value);
+// @ts-expect-error BuildRecords are published as whole directories, not generic overwrites.
+writeWorkspaceRecord(cwd, "build", value);
+declare const mutableKind: MutableWorkspaceRecordKind;
+const legacyMutableKind: "task" | "data" | "report" = mutableKind;
+// @ts-expect-error The file layer has seven fixed record kinds, not arbitrary path plugins.
 readWorkspaceRecord(cwd, "custom", id);
 // @ts-expect-error Kind-specific reads must not erase their domain result type.
 const crossed: TaskCard = readWorkspaceRecord(cwd, "report", id);
 void [task, stack, data, report, written, crossed];
+// @ts-expect-error A change read must retain its ChangeRequest result.
+const crossedChange: VerificationCase = readWorkspaceRecord(cwd, "change", id);
+// @ts-expect-error A verification read must retain its VerificationCase result.
+const crossedVerification: BuildRecord = readWorkspaceRecord(cwd, "verification", id);
+// @ts-expect-error A build read must retain its BuildRecord result.
+const crossedBuild: ChangeRequest = readWorkspaceRecord(cwd, "build", id);
+void [
+  change,
+  verification,
+  build,
+  readonlyChange,
+  readonlyVerification,
+  readonlyBuild,
+  legacyMutableKind,
+  crossedChange,
+  crossedVerification,
+  crossedBuild,
+];
+
+declare const changeFields: Omit<ChangeRequest, "change_id" | "patch_path">;
+declare const verificationFields: Omit<VerificationCase, "vc_id">;
+const createdChange: ChangeRequest = createChangeRequest(cwd, changeFields);
+const createdVerification: VerificationCase = createVerificationCase(cwd, verificationFields);
+const patchWritten: void = writeChangePatch(cwd, change.change_id, Buffer.from("abc"));
+writeChangePatch(cwd, change.change_id, "abc");
+writeChangePatch(cwd, change.change_id, new Uint8Array([97, 98, 99]));
+const patchRead: Buffer = readChangePatch(cwd, change.change_id);
+const readonlyPatch: Buffer = readChangePatch(cwd, change.change_id, { readonly: true });
+const rewrittenChange: void = rewriteChangeRequest(cwd, change);
+// @ts-expect-error Creation takes complete domain fields, not unknown JSON.
+createChangeRequest(cwd, value);
+// @ts-expect-error Verification creation takes complete domain fields.
+createVerificationCase(cwd, value);
+// @ts-expect-error The allocator owns change_id.
+createChangeRequest(cwd, { ...changeFields, change_id: change.change_id });
+// @ts-expect-error The allocator derives patch_path.
+createChangeRequest(cwd, { ...changeFields, patch_path: change.patch_path });
+// @ts-expect-error The allocator owns vc_id.
+createVerificationCase(cwd, { ...verificationFields, vc_id: verification.vc_id });
+// @ts-expect-error Patch publication takes a ChangeId, not a VerificationId.
+writeChangePatch(cwd, verification.vc_id, "abc");
+// @ts-expect-error Patch publication accepts bytes, not arbitrary objects.
+writeChangePatch(cwd, change.change_id, { content: "abc" });
+// @ts-expect-error Patch reads take a ChangeId, not a BuildId.
+readChangePatch(cwd, build.build_id);
+// @ts-expect-error Change rewrite requires a complete ChangeRequest.
+rewriteChangeRequest(cwd, value);
+// @ts-expect-error VerificationCases have no ChangeRequest rewrite API.
+rewriteChangeRequest(cwd, verification);
+// @ts-expect-error Creation is synchronous.
+const asynchronousChange: Promise<ChangeRequest> = createChangeRequest(cwd, changeFields);
+// @ts-expect-error Patch reads preserve bytes rather than decoding to a string.
+const decodedPatch: string = readChangePatch(cwd, change.change_id);
+void [
+  createdChange,
+  createdVerification,
+  patchWritten,
+  patchRead,
+  readonlyPatch,
+  rewrittenChange,
+  asynchronousChange,
+  decodedPatch,
+];
+
+declare const buildProducer: BuildDirectoryProducer;
+const publishedBuild: Promise<BuildRecord> = publishBuildDirectory(cwd, buildProducer);
+void publishBuildDirectory(cwd, async (temporaryDirectory, buildId) => {
+  const directory: string = temporaryDirectory;
+  const selectedId: BuildId = buildId;
+  void [directory, selectedId];
+  return Promise.resolve(build);
+});
+const verifiedBuild: void = verifyBuildBinary(cwd, build);
+// @ts-expect-error Publication requires an explicit producer.
+void publishBuildDirectory(cwd);
+// @ts-expect-error Publication consumes a producer, not already built metadata.
+void publishBuildDirectory(cwd, build);
+// @ts-expect-error The producer returns complete BuildRecord metadata.
+void publishBuildDirectory(cwd, async () => Promise.resolve(value));
+// @ts-expect-error The producer contract is asynchronous.
+void publishBuildDirectory(cwd, () => build);
+// @ts-expect-error Publication returns a promise, not synchronous metadata.
+const synchronousBuild: BuildRecord = publishBuildDirectory(cwd, buildProducer);
+// @ts-expect-error Verification requires a complete BuildRecord, not only an id.
+verifyBuildBinary(cwd, build.build_id);
+// @ts-expect-error Unparsed records must pass the core schema first.
+verifyBuildBinary(cwd, value);
+// @ts-expect-error Binary verification is synchronous.
+const asynchronousBinary: Promise<void> = verifyBuildBinary(cwd, build);
+void [publishedBuild, verifiedBuild, synchronousBuild, asynchronousBinary];
 
 const transitioned: TaskCard = transitionTask(task, { type: "shud_run" });
 transitionTask(task, { type: "report_decide", disposition: "revision_requested" }, new Date());
