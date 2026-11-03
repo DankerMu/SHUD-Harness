@@ -21,6 +21,7 @@ interface ToolHarnessOptions {
   mode?: "held" | "immediate" | "resistant";
   code?: number;
   pumpPollMs?: number;
+  sundialsRoot?: string;
 }
 
 export async function createToolHarness(options: ToolHarnessOptions = {}) {
@@ -42,6 +43,7 @@ export async function createToolHarness(options: ToolHarnessOptions = {}) {
     const registryFiber = await h.apply(ShudJobRegistry, {
       ...h.config,
       pumpPollMs: options.pumpPollMs ?? 10,
+      ...(options.sundialsRoot === undefined ? {} : { sundialsRoot: options.sundialsRoot }),
     });
     let registryDisposed = false;
     await h.apply(ToolRuntime, { mode: "native" });

@@ -22,7 +22,7 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/report_generate/report_validate/report_submit/report_decide
+    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/shud_build/report_generate/report_validate/report_submit/report_decide
     dsh-shud-records/               # 已实现四对象文件层、StackLock/provenance 采集、报告渲染/校验/状态机；非 Cordis 插件
       templates/                   # 已用于报告渲染的 Markdown 模板，仅此一个落点
     dsh-shud-policy-gate/           # 已挂载全局 tools/pre-execute，角色 deny + 报告 ask
@@ -119,7 +119,29 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 
 raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json（非法/缺失 id 回退 tasks）及 `repos/SHUD`：目标落入 raw 即拒绝，不读取卡片内容；`task_create` 仍只检查 tasks。两工具不调用 LLM、不发起审批、不自行批准变更，也不承诺外部 Git 并发写入者之间的快照隔离。
 
-工具注册不等于完整 M4 角色链路已交付：当前 profile 仍挂载 coordinator/worker，coder/reviewer 的角色工具映射不代表其 presets 已挂载；本切片未挂载 M4 coder/reviewer presets，亦未交付 `change_submit` / `shud_build`。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
+工具注册不等于完整 M4 角色链路已交付：当前 profile 仍挂载 coordinator/worker，coder/reviewer 的角色工具映射不代表其 presets 已挂载；`shud_build` 已挂载（见下节），M4 coder/reviewer presets 与 `change_submit` 仍未交付。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
+
+### 已挂载的 `shud_build`
+
+同一 `shud-tools` 插件提供同步构建工具，无需新增 profile 行。以下是模型工具参数，不是 shell 命令；id 须替换为实际记录的返回值。base 构建：
+
+```json
+{"task_id":"TASK-20261103T080005-a001"}
+```
+
+候选构建须已有同任务、同 base 的 approved CR；`shud_build` 不批准 `proposed` CR，也不替代尚未交付的 `change_submit` 审批链路：
+
+```json
+{"task_id":"TASK-20261103T080005-a001","change_id":"CHG-20261103T080100-b002","rhs_openmp":true}
+```
+
+- **配置与准入**：只接受必填 `task_id`、可选 `change_id` 和布尔 `rhs_openmp`（缺省 `false`），未知键拒绝。工作区取调用 session cwd，源固定为 `repos/SHUD`，卡须为 `planned` / `running` 的 `code_change`。`sundialsRoot` 只取实际挂载的 `shud-jobs` provider 配置；缺失在任何写入前失败，不从工具参数、环境变量或默认目录猜测。源须为真实独立 Git 检出且 HEAD 等于卡的 pin。base 要求工作树观测为空；候选要求 CR 已批准、task/base 一致、观测路径集合精确匹配，且观测 diff 与普通持久 patch 文件的 SHA-256 均等于 CR 摘要。
+- **构建输入**：在排他的 `builds/.tmp-<build_id>/src/` 内解包钉定 commit 的 archive，核对条目路径、类型及 blob 身份与 `ls-tree` 一致；不复制工作树，忽略文件和陈旧 `shud` 不进入输入，未跟踪修改在准入时拒绝。候选只应用准入时已校验并保留的 patch 字节；受控 Git ceiling 防止发现外层仓库，并验证每个变更文件实际生效。同步运行 `make -C builds/.tmp-<build_id>/src shud SUNDIALS_DIR=<sundialsRoot>`，OpenMP 为真时追加 `SHUD_ENABLE_OPENMP_RHS=1`；环境只传 `PATH`、`HOME`、`SUNDIALS_DIR`，构建不静默，stdout 保留回显命令。独立的 CXX 探测记录实际编译器 `--version` 首行。
+- **结果与失败**：成功由 records 的规范 publisher 整目录 rename 为 `builds/<build_id>/`，恰含 `build-record.json`、`shud`、`make.stdout.log`、`make.stderr.log`，无源码树或探测文件。公开结果含 `build_id`、nullable `change_id` / `patch_sha256`、`source_commit`、`rhs_openmp`、`binary_sha256` 与 `duration_seconds`。发布前失败不生成成功 BuildRecord；受控错误保留阶段、已观测的退出事实及最多 40 行日志尾部，脱敏环境值和已删除临时路径。规范 publisher 清理自有临时目录；清理失败或目录所有权不确定时保留证据并报告清理失败，不冒称已全部删除。发布完成后不回滚已提交目录。
+- **只读与权限边界**：`shud_build` 不改写 `repos/SHUD` 的文件、Git index/HEAD，也不改变 TaskCard 的状态、phase 或链接。raw-guard 在执行前按物理路径保护固定的 `builds` 与 `repos/SHUD`；policy-gate 允许 coder，拒绝 worker/reviewer/coordinator，不由构建处理器自行审批。工具注册不使当前 profile 自动具备 coder/reviewer presets，也不扩展 `shud_run` 的 `build_id` 参数面（另属 #539）。
+- **可信命名空间边界**：临时目录排他分配、等待后的目录身份复核与规范清理保护协作构建；所有权变化时拒绝继续写入或删除外来目录。这不是对任意敌对外部写入者的原子快照或 rename-no-replace 保证。工程集成使用真实 ToolRuntime/Git/tar/make/编译器探测及假 Makefile 生成的脚本可执行文件，不据此宣称真实 SHUD 求解器已编译、真实 Web 链路已验收或 PI 已批准。
+
+伴生测试入口：`packages/dsh-shud-tools/src/shud-build.test.ts`；完整契约见 [shud_build](../../openspec/changes/m4-mvp-2/specs/shud-build/spec.md#requirement-shud_build)。
 
 ### 本机 Web 重启验收
 
@@ -158,7 +180,7 @@ $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指
   changes/<change_id>.json          # change_create 已发布的 proposed ChangeRequest
   patches/<change_id>.patch         # change_create 已发布的精确 patch
   verifications/<vc_id>.json        # M4 目标：VerificationCase
-  builds/<build_id>/                # M4 目标：build-record.json、shud、make.stdout.log、make.stderr.log
+  builds/<build_id>/                # shud_build 整目录发布：build-record.json、shud、make.stdout.log、make.stderr.log
 <data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```
 

@@ -57,6 +57,8 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 
 16. **code_change closure 不以 LLM 为据**：仅以卡片链接的同任务、同身份 CR/VC 与全部关联运行证据裁决；approved CR 必须绑定精确 patch 哈希，passed/failed 终态 VC 均可作为见证。损坏、身份不符或跨任务的链接证据不能被有效兄弟记录掩盖；合法但不能充当见证的候选不否决另一有效见证。输入与文件不改写，仍复用 science_assist 的 authored-array/运行/收集耗尽规则；伴生测试：`packages/dsh-shud-records/src/code-change-closure.test.ts`。
 
+17. **候选二进制 ⇔ 钉定 commit + 已批 patch**：`shud_build` 的构建输入仅为 TaskCard 钉定 `source_base_commit` 的 Git archive，以及同任务、同 base 的 approved ChangeRequest 所绑定的精确 patch；工作树观测路径集合必须匹配 CR 的 `files_changed`，观测 diff 与持久 patch 的 SHA-256 均须匹配 `patch_sha256`，归档路径/类型/blob 与对象树一致，应用 patch 后每个变更文件必须实际生效。base 构建不带 patch 且要求工作树观测为空；忽略文件与陈旧 checkout 二进制不进入构建。工具不批准 CR、不改写 `repos/SHUD` 或 TaskCard，仅由规范 publisher 整目录发布二进制、日志与 BuildRecord。伴生集成测试：`packages/dsh-shud-tools/src/shud-build.test.ts`（真实 ToolRuntime、临时 Git 与假 Makefile 的 base/candidate tracer）；异常、raw、配置/角色与发布边界另由同目录 `shud-build-*.test.ts` 矩阵覆盖。该工程证据不等于真实 SHUD 求解器编译、Web 链路或 PI 功能验收。
+
 ## Forbidden Logic
 
 - Agent 陈述科学结论；"单流域指标提升 = 模型改进"；"校准结果 = 结构验证"；"模型机制已验证"；"普遍改进"。
