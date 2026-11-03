@@ -1,15 +1,15 @@
 # Proposal
 
-## Active issue fixture: #530
+## Active issue fixture: #531
 
-- Issue type: feature; Fixture level: expanded; upstream level retained for parser, readonly path safety and provenance publication (actual Critical Path #2). #523 and routed #569 are merged.
-- Scope: generate-provenance.ts and its tests; one Minimal_Schemas.md paragraph plus active OpenSpec describe the user-authorized per-file classification. No jobs/core/raw-guard/profile/schema/config changes.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes. No new configuration, concurrency service or dependency.
-- User explicitly chose “支持路径，逐文件归类”: Filename paths are resolved component-by-component under SHUD directory + "/" + Filename semantics; each canonical file is classified against the physical copied-input root. Never infer an empty external inventory from the forcing directory alone.
-- Preserve original-copy inventory/hash/order, original-input metadata-only treatment, one active stream with close awaited, allocation only after complete evidence, atomic publication and controlled diagnostics. Canonical external paths are deduplicated and codepoint-sorted; internal files retain their existing ordering.
-- Parse the required manifest after inventory, validate count/header/rows and referenced ordinary files, reject final/intermediate links and special files before hashing them. Relative directories use run cwd, not manifest location or rSHUD fallback; no tilde/environment expansion.
-- Evidence floor: tests-only semantic RED, real 32-of-34 external fixture and path/parse/resource negatives, unchanged external bytes/mtime, actual old-built ccw 45-file baseline replay, built public generator smoke, full check, strict OpenSpec, three-seat Critical Path review and same-SHA CI.
-- Non-goals: new schema, solver/R parser changes, arbitrary concurrent-file snapshot isolation, approvals, #534 submission/build integration, real keliya data or PI acceptance. Invalid manifest-less synthetic fixtures are not preserved as successes; #569 already migrated jobs inputs without weakening their tests.
+- Issue type: feature; Fixture level: expanded; upstream level retained for build-source identity, immutable StackLock reuse and fail-closed publication. Dependency #521 is merged; #530 is merged as PR #572.
+- Scope: existing capture-stack-lock.ts, a separate focused build-source test file, API documentation and active OpenSpec. No jobs/core/tools/schema/generated/config changes.
+- Selected risk packs: Public API / CLI / script entry; Schema / columns / units / field names; File IO / path safety / overwrite; Legacy compatibility / examples; Error handling / rollback / partial outputs; Auth / permissions / secrets; Documentation / migration notes. Existing configuration shape, resource protocol, concurrency boundary and dependencies remain unchanged.
+- Add an optional third already-schema-validated BuildRecord argument. Only build_id and repos.SHUD projection change; do not read builds, verify binaries, reparse BuildRecord or collect configured SHUD revision when supplied. Keep absolute configuration validation and rSHUD/AutoSHUD collection.
+- Preserve full dirty_paths and order, dirty_paths_truncated:false; complete StackLock validation and existing fingerprint determine fail-closed publication/reuse. Missing argument keeps build_id:null and exact existing capture behavior.
+- Preserve three total allocation attempts, exclusive wx creation, smallest matching id, corrupt-entry rejection, controlled errors and existing file bytes/mtime; no alternate storage or rollback algorithm.
+- Evidence floor: tests-only semantic RED, base/candidate/same-build identity and failure vectors, independent M3 fingerprint and legacy no-build_id reuse, frozen actual old-built no-build replay, built public API smoke, existing capture/integration regressions, full check, strict OpenSpec, three-seat review and same-SHA CI.
+- Non-goals: #534 caller build parsing/task binding/binary verification or submission wiring, schema/fingerprint changes, build execution, arbitrary filesystem concurrency transactions, scientific conclusions or PI acceptance.
 
 ## Why
 
