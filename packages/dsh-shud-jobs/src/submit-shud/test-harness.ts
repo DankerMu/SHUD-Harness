@@ -17,11 +17,15 @@ export async function writeInputTree(
   inputDir: string,
   parameter = "# synthetic input\r\nSTART\t0\r\nEND\t7\r\nOTHER\t17\r\n",
   marker = "original forcing bytes\n",
+  project = "tiny",
 ) {
   const files = {
-    "tiny.cfg.para": Buffer.from(parameter),
+    [`${project}.cfg.para`]: Buffer.from(parameter),
     "nested/forcing.dat": Buffer.from(marker),
     "binary.dat": Buffer.from([0, 255, 1, 128, 10]),
+    [`${project}.tsd.forc`]: Buffer.from(
+      `1 20000101\n./input/${project}/nested\nID Lon Lat X Y Z Filename\n1 0 0 0 0 0 forcing.dat\n`,
+    ),
   };
   await mkdir(join(inputDir, "nested", "empty"), { recursive: true });
   for (const [name, bytes] of Object.entries(files)) await writeFile(join(inputDir, name), bytes);
@@ -54,6 +58,7 @@ export async function submissionFixture(
   parameter?: string,
   execution: "held" | "immediate" = "held",
   sessionController: "available" | "absent" = "absent",
+  project = "tiny",
 ) {
   // Submission/lifecycle fixtures retain pending notifications unless delivery is under test.
   const h = await createHarness(undefined, sessionController);
@@ -77,7 +82,7 @@ export async function submissionFixture(
       );
     }
     const inputDir = join(h.root, "input");
-    const originals = await writeInputTree(inputDir, parameter);
+    const originals = await writeInputTree(inputDir, parameter, undefined, project);
     const llm = {
       response_model: "explicit-test-model",
       response_model_source: "configured",
@@ -89,7 +94,7 @@ export async function submissionFixture(
       request: {
         cwd: h.cwd,
         input_dir: inputDir,
-        project: "tiny",
+        project,
         owner_session: h.ownerId,
         llm,
       },

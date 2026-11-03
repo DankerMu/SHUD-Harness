@@ -1,16 +1,14 @@
 # Proposal
 
-## Active issue fixture: #529
+## Active issue fixture: routed #569
 
-- Issue type: feature; Fixture level: expanded; upstream level retained. Actual Critical Path #1: deterministic code_change closure and state transitions. No schema, report-language, approval or host changes.
-- Scope: task 3.3, records task-closure/task-transition/code-change-closure modules and tests, minimal public index/typecheck migration, and one CONTEXT.md invariant pointing to the new closure tests.
-- Selected risk packs: Public API; State/invariants; Evidence identity; Schema consumption; File IO/error boundaries via injected readers; Legacy compatibility; Documentation. No new configuration, dependency, concurrency service, retry or resource lifecycle.
-- Keep evaluateClosure's synchronous four-argument science_assist contract and exact output/legacy predicates. Add code_change dispatch with an explicit optional fifth object-loader contract; code_change without loaders fails closed. A shared internal task-closure module owns clauses 0/5 once, rather than copying run checks or fabricating a science_assist card.
-- New synchronous codeChangeClosure(card, loaders) consumes branded linked-object readers, a caller-preloaded task-job snapshot with explicit collect-attempt counts, RunRecords and authored arrays. It owns no filesystem discovery/write, async backend call, logging, clock or mutation; #541 owns readonly adapters and asynchronous evidence preparation.
-- All linked CR/VC records are schema/identity/task checked even after a qualifying pair exists. Clause 1 verifies approved CR patches; clause 2 remains existential and accepts passed or failed VC. Invalid linked files fail closed; valid nonterminal/proposed alternatives do not veto a qualifying pair. All linked jobs still satisfy the unchanged run rules.
-- change_create is the only added transition event: code_change planned enters running_local, running preserves status/phase. shud_build/change_submit/verification_run remain outside the transition-event domain, never synthetic no-op events. Existing shud_run/reconcile/report transitions stay unchanged.
-- Evidence floor: tests-only RED; all thirteen closure and five entry scenarios; identity/patch/run-binding and existential-alternative negatives; actual readonly file adapters preserve bytes/mtime/inventory; frozen built M3 outputs unchanged; built code_change smoke; full check, strict OpenSpec, Critical Path review and same-SHA CI.
-- Non-goals: tools and publication order (#536/#540/#541), report references/rendering (#533), schema/runner/jobs behavior, approvals, Web/LLM/SHUD or PI acceptance. Shared M4 change remains active.
+- Issue type: test; Fixture level: expanded (revised from compact after fixture review: shared fixture entrypoints, path identity and legacy compatibility trigger expanded even without production changes). This is a bounded prerequisite for records-only #530, not the #534 jobs integration.
+- Scope: jobs submit-shud test helper and affected test oracles/custom-project setup only, plus this workflow fixture. Shared writeInputTree gains a one-station self-contained tiny.tsd.forc pointing to ./input/tiny/nested and forcing.dat; the existing forcing bytes remain unchanged.
+- Selected risk packs: Public API / CLI / script entry (shared test entrypoints); File IO / path safety / overwrite; Schema / columns / units / field names (fixture format only); Legacy compatibility / examples; Documentation / migration notes. Other packs are explicitly not selected in tasks.md; production behavior stays unchanged.
+- Preserve all three original copied files and exact hashes, END-update behavior, original-input immutability, complete input_bytes/inventory checks, path-alias tests, and the literal metacharacter project/argv security regression. The custom project must have its own manifest filename and matching directory line, with no obsolete tiny manifest left behind.
+- No parser, fallback, source change, extra dependency or real/raw forcing data. The manifest format is the existing data-provenance requirement, validated by an independent temporary runtime oracle; do not create a second production parser or permanent tests that merely echo a fixture constant.
+- Evidence floor: update existing exact provenance expectations first and observe missing-manifest RED; apply the mechanical fixture migration; focused jobs tests, actual standalone submission/manifest-path smoke, full check, strict OpenSpec and expanded three-seat review; same-SHA full CI and normal protected merge.
+- DAG: #569 must merge before #530. The shared M4 change stays active; this prerequisite does not complete task 3.4 or change #549 PI acceptance.
 
 ## Why
 

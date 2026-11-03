@@ -95,6 +95,9 @@ test.each([false, true])(
               "tiny.cfg.para": Buffer.from(
                 "# synthetic input\r\nSTART\t0\r\nEND\t30\r\nOTHER\t17\r\n",
               ),
+              "tiny.tsd.forc": Buffer.from(
+                "1 20000101\n./input/tiny/nested\nID Lon Lat X Y Z Filename\n1 0 0 0 0 0 forcing.dat\n",
+              ),
             };
             expect(data.sources.files).toEqual(
               Object.entries(bytes).map(([path, content]) => ({
