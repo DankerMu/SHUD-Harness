@@ -580,6 +580,33 @@ Review focus: exact scientific limits and punctuation, exported primitive, no sc
 - 其它层的复核：policy-gate ask 前与 `change_submit` 执行时复核 patch sha（D5）；`shud_build` 从对象库 + 已批 patch 构建（D3）；closure 复核 patch sha（D7）；`shud_run`/`verification_run` 复核二进制 sha（D8/D9）。
 - 已知边界：raw-guard 的 bash 判定是启发式（同 raw 的漏报清单），且 `repos/SHUD/.git` 不受保护——coder 用 bash 篡改对象库不在 M4 威胁模型内（与 coder 本就可以写任意源码同一信任级别）；登记 D15(9)。
 
+#### Issue #535 implementation boundary
+
+Change surface: decideRawAccess/decideKnownRawAccess and existing internal file/shell classifiers in raw-guard/decide.ts; new test files because decide.test.ts is already near its size bound. index.ts keeps its existing configuration, waterfall and audit adapter. No second copy of command/path classifiers or new configurable roots.
+
+Governing invariant: prior raw deny/ask remains authoritative; only raw NEXT permits governance classification. Recognized file/shell writes into fixed session governance roots deny with governance-immutable, without calling next or asking; reads/unrelated calls return the exact downstream result once.
+
+Path contract correction: pinned tool-fs write/edit execute relative file_path through session workingDirectory, not args.workdir. Its open root parameter schema accepts an extra workdir but parseWriteArgs ignores it. The actual validateArgs probe accepted the bypass-shaped request; therefore file target identity uses session cwd, while shell keeps effective workdir. Live #535 and this delta explicitly align; host/raw behavior is not changed.
+
+Reuse boundary: file containment, canonical/nearest-ancestor identity, shell normalization/unquote/parent folding/case/workdir, write verbs, tar and pwsh predicates remain one implementation. Raw ancestor detection remains raw-only, never governance. A small internal extraction is permitted to share classifiers without rerunning specialized task/report/shud_run rules against governance roots.
+
+Sibling surfaces: write/edit/str_replace_editor mutation and read/view; bash persistent same id and pwsh (including pwsh-in-bash); raw file/shell/ancestor and specialized domain-tool targets; plugin fieldsOf session extraction, exactly-once next, error propagation, per-decision audit, unload. No role-specific branch.
+
+Required evidence: nine roots with existing/missing targets and roots, direct/absolute/session-symlink/root-symlink/native-case aliases, sibling prefixes; bash/pwsh writes/reads/workdir and representative classifier spellings; raw ask/deny precedence, malformed inputs, extra permission/workdir fields, all four roles plus unknown at the real Cordis seam. Assert protected bytes/mtime unchanged and no approval/downstream on deny; reads preserve downstream identity/error once, audit excludes paths/content.
+
+Resource/errors: preserve bounded namespace probes and no new recursive discovery/cache/state. Existing PathUnavailable fail-closed diagnostics remain controlled. Missing/malformed arguments do not trigger new throws; unrelated/read paths avoid needless governance filesystem work. Existing path-error regressions stay, no new retry.
+
+Governance-specific identity failures: deterministic OS-boundary fixtures exercise missing changes with file target CHANGES/x.json and shell workdir CHANGES. Proven-insensitive namespaces deny governance-immutable for writes; proven-sensitive distinct namespaces delegate once. Empty/unreadable/changing plausible-case namespaces deny raw-path-unavailable with zero downstream/approval and path-free audit. Assert bounded enumeration, directory close, fresh next-decision evidence, no probe writes and no sensitivity cache. Existing raw-consumer tests alone are insufficient.
+
+Precedence controls: rawDirs data/raw with bash rm -rf data tasks returns raw-ancestor-write and audits that code, never governance-immutable. With unrelated raw configuration, governance-only rm -rf . and rm -rf * delegate once; no new ancestor protection is claimed.
+
+Evidence limits: built Cordis smoke proves middleware and logger routing, not host executor or PI action; real raw probes preserve T1–T5 engineering checks and raw bytes. Native case evidence is platform-dependent; deterministic existing OS-boundary tests remain. Full check/profile/strict fixture and three white-box seats gate merge.
+
+Non-goals: fixed roots do not protect ancestors such as rm -rf . or rm -rf *; inherited heuristic false negatives and ordinary-word false positives remain D15(9). No new shell parser, persistent state, sandbox, approvals ledger, repos/.git protection, domain-tool output checks, profile changes or scientific acceptance.
+
+Review focus: raw precedence cannot collapse ask into next; governance cannot inherit raw ancestor deny; file workdir cannot redirect identity; shared classifiers retain tar/discard/pwsh semantics; no new global allow, configurable roots, secret/path audit or role bypass.
+
+
 ### Sketch seams under test
 
 - `tools/pre-execute` 监听（policy-gate）以真实 Cordis `Context` + `@deepseek-ai/dsh-tools` 注册的假 `change_submit`：高风险 ask / 低风险 next / 角色 deny / 文件缺失仍 ask / patch sha 不符 deny / allowed-once 才执行 / danger-full-access 仍 ask——最高的已有 seam，M3 范式直接复用。
