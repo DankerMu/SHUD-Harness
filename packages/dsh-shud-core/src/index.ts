@@ -38,4 +38,5 @@ export * from "./governance/semantic-level-floor.ts";
 export * from "./stack-lock/fingerprint.ts";
 export * from "./stack-lock/repository-revision.ts";
 export { containsPath } from "./path-containment.ts";
+export { isProjectComponent } from "./project-component.ts";
 export { readCallerPresetId, presetIdToRole } from "./caller-preset.ts";

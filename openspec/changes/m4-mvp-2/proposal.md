@@ -1,15 +1,15 @@
 # Proposal
 
-## Active issue fixture: #531
+## Active issue fixture: #574
 
-- Issue type: feature; Fixture level: expanded; upstream level retained for build-source identity, immutable StackLock reuse and fail-closed publication. Dependency #521 is merged; #530 is merged as PR #572.
-- Scope: existing capture-stack-lock.ts, a separate focused build-source test file, API documentation and active OpenSpec. No jobs/core/tools/schema/generated/config changes.
-- Selected risk packs: Public API / CLI / script entry; Schema / columns / units / field names; File IO / path safety / overwrite; Legacy compatibility / examples; Error handling / rollback / partial outputs; Auth / permissions / secrets; Documentation / migration notes. Existing configuration shape, resource protocol, concurrency boundary and dependencies remain unchanged.
-- Add an optional third already-schema-validated BuildRecord argument. Only build_id and repos.SHUD projection change; do not read builds, verify binaries, reparse BuildRecord or collect configured SHUD revision when supplied. Keep absolute configuration validation and rSHUD/AutoSHUD collection.
-- Preserve full dirty_paths and order, dirty_paths_truncated:false; complete StackLock validation and existing fingerprint determine fail-closed publication/reuse. Missing argument keeps build_id:null and exact existing capture behavior.
-- Preserve three total allocation attempts, exclusive wx creation, smallest matching id, corrupt-entry rejection, controlled errors and existing file bytes/mtime; no alternate storage or rollback algorithm.
-- Evidence floor: tests-only semantic RED, base/candidate/same-build identity and failure vectors, independent M3 fingerprint and legacy no-build_id reuse, frozen actual old-built no-build replay, built public API smoke, existing capture/integration regressions, full check, strict OpenSpec, three-seat review and same-SHA CI.
-- Non-goals: #534 caller build parsing/task binding/binary verification or submission wiring, schema/fingerprint changes, build execution, arbitrary filesystem concurrency transactions, scientific conclusions or PI acceptance.
+- Issue type: refactor; Fixture level: expanded; no upstream level supplied, public shared entrypoint and existing path-safety consumers trigger expanded. Routed prerequisite #574 unblocks #532 without reversing records→jobs dependency; #531 merged as PR #573.
+- Scope: move the existing string predicate isProjectComponent into core, export it once, migrate both jobs consumers, retain behavioral tests and update active OpenSpec/DAG. No comparator, schema, dependencies, configuration or runtime protocol changes.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Legacy compatibility / examples; Documentation / migration notes. Other risk packs explicitly unchanged in tasks.
+- Preserve the exact accepted string set: reject empty, exactly dot/dotdot, slash, backslash or NUL; retain spaces, newlines, Unicode, shell punctuation and embedded dotdot. No trim, normalization, new type guard, schema tightening or compatibility re-export.
+- Governing invariant: jobs and future records consumers use one canonical core predicate with identical old runtime results; prepareInput/collect validation ordering, errors and side effects stay unchanged.
+- Verification mode: Equivalence, Light assurance profile for an exact pure-expression relocation. Frozen old callable reference passes 830 inputs and 21 named boundaries; disposable unsafe-backslash and overrestrictive mutants are rejected by 142 and 227 inputs, then reference restoration passes. No production mutation or artificial semantic-RED claim for the move.
+- Evidence floor: focused behavior tests before cutover, candidate equality to all frozen reference outputs, existing submit/collect safety suites and actual registry smoke, built public-core import from records context, unchanged schema projections, full check/profile smoke/strict OpenSpec/three-seat review/same-SHA CI.
+- Non-goals: #532 comparator, new project syntax, rejecting all embedded '..', changing RunJobSchema.project, binary/solver behavior, scientific conclusions or PI acceptance. Parent owns the small mechanical relocation/test edit under the no-small-delegation rule; independent fixture/code reviews remain mandatory.
 
 ## Why
 

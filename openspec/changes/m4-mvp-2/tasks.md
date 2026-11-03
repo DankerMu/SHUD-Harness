@@ -4,6 +4,8 @@
 
 路由前置：#569 为3.4/#530之前的jobs测试夹具迁移，先提供有效自包含tsd.forc；#530仍限定records解析，#534仍拥有生产jobs集成。
 
+路由前置：#574 在3.7/#532之前把既有project component谓词迁入core并清除jobs副本，既有语法与消费者效果不变；live #532已补Depends on #574。
+
 ## 1. 实现组之前的规范文档对齐（design D14、D15）
 
 - [x] 1.1a `docs/03_SPEC/Minimal_Schemas.md` 全部受影响节：TaskCard（`type` 增 `code_change`、`linked_changes`/`linked_verifications`、`source_base_commit`）、StackLock（`build_id`）、RunJob/RunRecord（`build_id`/`threads`/`binary_sha256`）、DataProvenance（`sources.external_files`）、EvidenceReport（`change_ids`/`verification_ids`，注明报告字段名为 `verification_ids` 而非 Theory_to_Code 的 `verification_case_ids`）、§8 按 change-requests「ChangeRequest record」改写（品牌 id、`floor_categories`、删除无生产者字段）、新增 VerificationCase 与 BuildRecord 节（含 `patch_sha256`）；`Verification_Case_Spec.md` 增 "M4 实现范围" 节（`bundle_id` nullable、`id`→`vc_id`、`run_job_ids/run_record_ids`→base/candidate 两对引用、`target_equations` 不保留、只生产 regression/baseline_regression/passed|failed）；`Scientific_Change_Gating_Spec.md` §1.1 落点改为仓库内受测常量模块（规则 2/6 原文不动，注明"全部匹配取最大、未匹配 → numerical_implementation、产出 floor_categories"）、§2/§6/§7 增 M4 bundle 门免除、§4 增 M4 `change_submit` ask 与 patch 不符 deny 规则、§5 增 M4 批准无 comment 偏离；`Report_Generation_Spec.md` 的 `report_validate` 13 项改 15 项（含 (14) §5 固定句、(15) VC artifact 存在与哈希）；`Roles_and_Boundaries.md` §6（patch 形态、无 interface_impact、"worktree"→scratch workspace 内 `repos/SHUD` 本地 clone、coder 不得改治理目录）与 `Agent_Architecture.md` §4.4a（M4 以 PI 卡替代 bundle 三步路由）/§7（`code_change` 谓词按 task-cards「code_change closure predicate」措辞、review note → VerificationCase 字段）；`docs/adr/implemented/0002-*.md` 开放项 1 加注（M4 pin `9a422e5`，理由：重导出需 base 在切片前）；`Workspace_Conventions.md` 增 `repos/ changes/ patches/ verifications/ builds/` 与治理根写保护；`Phased_Plan.md` §4 验收门措辞对齐 known-answer-replay「Replay acceptance criteria」并把"worktree 内改代码"改为 scratch workspace 内 `repos/SHUD` 本地 clone（§4 唯一 owner）与 §6 记本轮跳过 `chore(dsh-upgrade)` 的理由；`Repository_Layout.md` 新目录与 `shud_run` 的 `build_id`/`threads` 参数说明（D15(3)）；`openspec/glossary.md` 增 BuildRecord、semantic level floor、floor_categories、base/known answer、治理根、`shud:replay`。不改 `CONTEXT.md`（两条不变量随 3.3 与 5.2 的伴生测试落地）。`pnpm run docs:check` 绿。
@@ -239,6 +241,15 @@
 - Legacy：固定内容独立SHA向量不变；真实oldbuilt三repo基线和缺build_id文件已冻结于本地证据，变更后重放全字段/指纹相同、复用id、旧bytes/mtime不变。仅原有null字段，不改core生成。
 - 验证：新独立test文件tests-only RED→GREEN；既有capture/package-boundary/jobs capture回归；built API实写base/candidate并读回、同build复用且无builds目录；31generated不变、fullcheck/profile:smoke/strictOpenSpec/三席白盒/同SHA CI。无需真实SHUD或PI判断；#534另有集成事务证据。
 
+### Routed issue #574 risk and evidence fixture
+
+- Selected：Public API / CLI / script entry（core公开共享入口）；File IO / path safety / overwrite（既有提交/收集guard保持）；Legacy compatibility / examples（原字符串接受集合）；Documentation / migration notes（DAG及唯一所有权）。
+- Not selected：Config / project setup、Schema / columns / units / field names、Auth / permissions / secrets、Concurrency / shared state / ordering、Resource limits / large input / discovery、Error handling / rollback / partial outputs、Release / packaging / dependency compatibility——无配置/schema/权限/状态/资源/错误/依赖变更；既有RunJobSchema非空规则、consumer错误/回滚顺序、core构建发布配置保持，分别由31生成文件不变、现有集成回归和built公开import验证。
+- Equivalence/Light：先冻结现有可调用谓词830输入GREEN（含21人工正反例）；丢失反斜杠检查的mutant142例RED、过度收窄空白/标点/内嵌dotdot的mutant227例RED，再恢复reference GREEN。生产不注入变异；本地证据不进永久测试、不改写已消费字节。
+- 永久测试先行：紧凑边界表先针对旧谓词跑GREEN，机械迁移后改为core公开import再GREEN；拒绝空/dot/dotdot/两分隔符/NUL，保留空白/换行/Unicode/semicolon/embedded dotdot。不能把missing-export setup失败冒充语义RED；同一语义由已资格化mutant覆盖。
+- Cutover：core唯一实现及导出；prepareInput/collect直接import core，旧jobs定义/导出删除，不留shim。消费者位置/错误/文件效果不改；不实现compareRivqdown、不动schema或依赖。
+- 验证：built core从records解析可导入且对830冻结输入完全相等；throwaway检查旧jobs导出不存在；既有submit-shud-paths与collect-shud-safety正反例和真实registry/detached-script smoke通过；fullcheck/profile:smoke/strictOpenSpec/31generated不变、三席审查及同SHA CI。小型机械实现由编排器执行并披露，不降低独立审查。
+
 - [x] 3.1 依赖 2.1。三对象文件层：`changes/`、`patches/`、`verifications/` 原子写（排他创建、EEXIST 重分配 id ≤3 次）与读取校验，`builds/<id>/` 临时目录（排他 `mkdir`）rename 发布与消费者 sha256 校验（change-requests「ChangeRequest workspace files」、verification-cases「VerificationCase workspace files」、shud-build「Build workspace files」、task-cards「TaskCard workspace file」扩展的 id/目录/排他创建与目录级 rename 例外）；路径安全复用 `workspace-paths.ts`；符号链接/非目录 fail-closed 正反例。
 - [x] 3.2 依赖 2.3、2.6、3.1。`observeSourceChanges(sourceDir)`（经 2.6 runner：porcelain `-z` 解析、忽略路径不计、untracked/删除/重命名拒绝、realpath ≠ toplevel 拒绝）与 ChangeRequest 生成纯函数（floor/categories 派生、申报抬升、patch 固定命令、sha256、`base_commit` 40 hex）；以真实临时 git 仓库测试（change-requests「Source change observation」）。
 - [x] 3.3 依赖 2.2a、3.1。`code_change` 状态进入（`change_create` → running/running_local）与 `codeChangeClosure(card, loaders)` 六子句（0 输入非空、1 approved CR 属本卡且 patch sha 匹配、2 终态 VC 属本卡且其两个 run 的 RunJob ∈ `linked_jobs`、3/4 schema 保证、5 既有运行子句）正反例，不合格对象按不可读处理；`task-closure.ts` 分派按 `type`；`CONTEXT.md` 增"code_change closure 不以 LLM 为据"不变量并指向本测试（task-cards「code_change state entry」「code_change closure predicate」）。
@@ -246,7 +257,8 @@
 - [x] 3.4 依赖 2.2d及路由前置R569（#569）。`generateProvenance` 解析 `<project>.tsd.forc` 与路径型Filename，逐个普通引用文件按规范物理路径归类，副本外逐一哈希为 `external_files`，缺失/链接/非普通文件/解析失败抛错（data-provenance「Provenance generation at submission」）；ccw（得 `[]`）、32/34外部forcing与跨副本边界路径正反例。
 - [x] 3.5 依赖 2.2b。`captureStackLock` 接受可选 build 源：`repos.SHUD` 取 BuildRecord 源修订（`dirty_paths` 原样、`dirty_paths_truncated: false`）、`build_id` 写入并进指纹；无 build 时逐字节不变的回归（stack-lock「Deterministic capture at shud_run submission」）。
 - [ ] 3.6 依赖 2.5、3.3。报告：`.json` 增 `change_ids`/`verification_ids`（`default([])`）与生成投影；`.md` 事实表增 ChangeRequest 段（含 `floor_categories`）、VerificationCase 段、BuildRecord 段，StackLock 表增 `build_id`；§5 由 2.5 常量逐字渲染；§7 列 failed VC；golden 更新只限新增段；M3 报告渲染字节不变回归（evidence-reports「EvidenceReport record」「Deterministic facts table」「Report template」「EvidenceReport generated projection」「code_change report wording constant」）。
-- [ ] 3.7 依赖 2.1。`compareRivqdown(baseRunDir, candidateRunDir, project)`：`lstat` 普通文件、sha256、`equal`；缺失/链接/特殊文件抛错；相同/不同/缺失正反例（verification-cases「Rivqdown comparator」）。
+- [x] R574 在3.7之前，将isProjectComponent唯一实现迁入core并迁移prepareInput/collect消费者，保持字符串语法和schema，去掉jobs兼容路径；按verification-cases「Shared project component grammar」与本节等价证据验证。
+- [ ] 3.7 依赖 2.1及路由前置R574（#574）。`compareRivqdown(baseRunDir, candidateRunDir, project)`：`lstat` 普通文件、sha256、`equal`；缺失/链接/特殊文件抛错；相同/不同/缺失正反例（verification-cases「Rivqdown comparator」）。
 
 - Suggested fixture level: expanded - 持久化文件格式与路径安全、分级派生、closure 谓词、报告措辞护栏（Critical Path #6/#7）
 - Minimal mergeable slice: 3.1 首刀（文件层无消费者，可独立保绿）；3.2、3.3 依赖 3.1 且彼此独立；3.4、3.5、3.7 只依赖 core、互不依赖、可并行；3.6 依赖 3.3
