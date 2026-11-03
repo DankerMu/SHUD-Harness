@@ -6,6 +6,7 @@ import { inspect } from "node:util";
 import type * as NodeCrypto from "node:crypto";
 import {
   ChangeRequestSchema,
+  createBrandedId,
   VerificationCaseSchema,
   type ChangeId,
   type ChangeRequest,
@@ -171,10 +172,9 @@ function expectNoPathOrIO(): void {
   expect(fs.readFileSync).not.toHaveBeenCalled();
   expectNoWrites();
 }
-function changeFields(): Omit<ChangeRequest, "change_id" | "patch_path"> {
-  const { change_id, patch_path, ...fields } = change;
-  void [change_id, patch_path];
-  return fields;
+function changeCandidate(): ChangeRequest {
+  const change_id = createBrandedId("CHG");
+  return { ...change, change_id, patch_path: `patches/${change_id}.patch` };
 }
 function verificationFields(): Omit<VerificationCase, "vc_id"> {
   const { vc_id, ...fields } = verification;
@@ -184,9 +184,9 @@ function verificationFields(): Omit<VerificationCase, "vc_id"> {
 const allocations = [
   {
     ...changeCase,
-    create: (directory: string) => createChangeRequest(directory, changeFields()),
+    create: (directory: string) => createChangeRequest(directory, changeCandidate()),
     invalid: (directory: string) =>
-      createChangeRequest(directory, { ...changeFields(), risk: "high" }),
+      createChangeRequest(directory, { ...changeCandidate(), risk: "high" }),
     expected: (id: string) => ({
       ...changeCase.value,
       change_id: id,
@@ -473,7 +473,7 @@ test("record write and descriptor cleanup failure retain controlled facts withou
   vi.mocked(fs.writeFileSync).mockImplementationOnce(() => fault());
   vi.mocked(fs.closeSync).mockImplementation(() => fault("EACCES"));
 
-  const error = failure(() => createChangeRequest(cwd, changeFields()), "write");
+  const error = failure(() => createChangeRequest(cwd, changeCandidate()), "write");
 
   expect(error.message).toContain(change.change_id);
   expect(error.message).toMatch(/publication/iu);
@@ -485,6 +485,56 @@ test("record write and descriptor cleanup failure retain controlled facts withou
   expect(descriptors).toHaveLength(1);
   expect(fs.closeSync).toHaveBeenCalledExactlyOnceWith(descriptors[0]);
   // Close is deliberately unavailable; afterEach restores it and releases the tracked descriptor.
+});
+
+describe("supplied ChangeRequest candidate", () => {
+  test("preserves the supplied id, path and metadata without drawing another id", () => {
+    const candidate = {
+      ...structuredClone(change),
+      change_id: ChangeRequestSchema.shape.change_id.parse("CHG-20261001T010203-dead"),
+      patch_path: "patches/CHG-20261001T010203-dead.patch",
+    };
+    const before = structuredClone(candidate);
+    const remaining = [...entropy.suffixes];
+
+    expect(createChangeRequest(cwd, candidate)).toEqual(before);
+
+    expect(candidate).toEqual(before);
+    expect(entropy.suffixes).toEqual(remaining);
+    expect(readWorkspaceRecord(cwd, "change", candidate.change_id, { readonly: true })).toEqual(
+      before,
+    );
+    expect(native.readdirSync(cwd)).toEqual(["changes"]);
+    expect(native.readdirSync(nativePath.join(cwd, "changes"))).toEqual([
+      `${candidate.change_id}.json`,
+    ]);
+  });
+
+  test.each([
+    { label: "missing id", field: "change_id", value: undefined },
+    { label: "traversal id", field: "change_id", value: "../tasks/private" },
+    { label: "legacy id", field: "change_id", value: "CHG-0001" },
+    { label: "uppercase id", field: "change_id", value: "CHG-20261102T090000-A1B2" },
+    { label: "wrong brand", field: "change_id", value: "VC-20261102T090000-a1b2" },
+    { label: "missing path", field: "patch_path", value: undefined },
+    {
+      label: "mismatched path",
+      field: "patch_path",
+      value: "patches/CHG-20261102T090000-abcd.patch",
+    },
+    { label: "traversal path", field: "patch_path", value: "../outside.patch" },
+    { label: "invalid schema", field: "base_commit", value: "short" },
+    { label: "inconsistent risk", field: "risk", value: "high" },
+  ])("rejects $label before path construction, entropy or IO", ({ field, value }) => {
+    const candidate: Record<string, unknown> = { ...change, [field]: value };
+    if (value === undefined) delete candidate[field];
+    const remaining = [...entropy.suffixes];
+    // Deliberately bypass only the static type, never the production schema validator.
+    expect(() => createChangeRequest(cwd, candidate as ChangeRequest)).toThrow();
+    expectNoPathOrIO();
+    expect(entropy.suffixes).toEqual(remaining);
+    expect(native.readdirSync(cwd)).toEqual([]);
+  });
 });
 
 describe("change patch companion", () => {
