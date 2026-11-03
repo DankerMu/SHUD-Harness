@@ -3,6 +3,7 @@ import { ShudJobRegistry } from "@shud-harness/dsh-shud-jobs";
 import { createShudRunTool } from "./shud-run.ts";
 import { createShudCollectTool } from "./shud-collect.ts";
 import { createTaskCreateTool } from "./task-create.ts";
+import { createChangeCreateTool } from "./change-create.ts";
 import { createReportGenerateTool } from "./report-generate.ts";
 import { createReportValidateTool } from "./report-validate.ts";
 import { createReportSubmitTool, createReportDecideTool } from "./report-decision.ts";
@@ -17,6 +18,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register(createShudRunTool(ctx.jobs));
   ctx.tools.register(createShudCollectTool(ctx.jobs));
   ctx.tools.register(createTaskCreateTool());
+  ctx.tools.register(createChangeCreateTool());
   ctx.tools.register(createReportGenerateTool(ctx.jobs));
   ctx.tools.register(createReportValidateTool());
   ctx.tools.register(createReportSubmitTool());

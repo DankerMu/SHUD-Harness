@@ -482,6 +482,32 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
     const tasks = canonical("tasks", cwd);
     return options.rawDirs.some((raw) => containsRawPath(canonical(raw, cwd), tasks)) ? DENY : NEXT;
   }
+  if (call.name === "change_create") {
+    try {
+      const cwd = call.cwd ?? process.cwd();
+      const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
+      const args = call.arguments;
+      const fields =
+        args && typeof args === "object" && !Array.isArray(args)
+          ? (args as Record<string, unknown>)
+          : {};
+      const taskId = TaskIdSchema.safeParse(fields.task_id);
+      const taskTarget = taskId.success ? `tasks/${taskId.data}/task.json` : "tasks";
+      // Metadata-only fixed targets: neither card bytes nor description text affect admission.
+      for (const target of ["changes", "patches", taskTarget, "repos/SHUD"]) {
+        const output = canonical(target, cwd);
+        if (rawRoots.some((raw) => containsRawPath(raw, output))) return DENY;
+      }
+      return NEXT;
+    } catch (error) {
+      if (error instanceof PathUnavailable) throw error;
+      return {
+        kind: "deny",
+        code: "raw-target-unavailable",
+        reason: "Change targets cannot be safely resolved; execution denied.",
+      };
+    }
+  }
   if (
     call.name === "report_generate" ||
     call.name === "report_validate" ||

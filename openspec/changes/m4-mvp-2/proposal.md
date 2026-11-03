@@ -1,15 +1,15 @@
 # Proposal
 
-## Active issue fixture: routed #582
+## Active issue fixture: #536
 
-- Issue type: feature (public entry exposure); Fixture level: expanded because a public filesystem API is exposed, although its implementation is unchanged.
-- Scope: records root index re-exports the existing ensureDirectory helper and documents its boundary; no helper, writer, tool, schema or package-map change.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Error handling / rollback / partial outputs; Legacy compatibility / examples; Release / packaging / dependency compatibility; Documentation / migration notes.
-- Governing invariant: public and existing internal callers use the same directory policy with identical return values, errors and filesystem effects; no copied guard or wrapper.
-- Preserve existing-directory false, readonly-missing false/no creation, writable-missing recursive creation/true, final symlink/non-directory rejection and unchanged raw filesystem errors.
-- This is the records prerequisite for #536's all-directory preflight; the caller still owns trusted ancestors, branded path construction, call ordering and controlled tool diagnostics.
-- Evidence floor: existing internal reference smoke GREEN and observed public-entry absence, built public runtime/type proof, existing readonly/unsafe-directory regressions, full check/profile/strict OpenSpec/31 generated unchanged and independent exact-head review/CI.
-- Non-goals: consumer wiring, new path policy, object publication, transaction/rollback/retry, new namespaces, private subpath exports, permanent export-wiring tests or PI acceptance.
+- Issue type: feature; Fixture level: expanded (agree upstream), tool contracts and governed filesystem publication. Dependencies #520/#526/#528/#529 and routed #582 are merged.
+- Scope: tools task_create extension, change_create registration/implementation and focused tests; raw-guard change_create targets and tests. No core/records/jobs/policy/presets/profile changes.
+- Selected risk packs: Public API / CLI / script entry; Config / project setup; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes.
+- Governing invariant: a code_change card pins a validated checkout HEAD before creation; each proposed CR and exact patch bind that pin, and only successful publication enters the fresh TaskCard link/state boundary.
+- Reuse core runGit/id/semantic schemas and records observeSourceChanges/deriveChangeRequest/ensureDirectory/createChangeRequest/writeChangePatch/transitionTask/record APIs; no second Git runner, floor derivation, directory guard or writer.
+- Preserve science_assist zero repos access, strict unknown/root argument rejection, source/index/HEAD bytes, raw priority and exact-target containment, all prior job/report tools and historical records.
+- Evidence floor: real ToolRuntime tracer RED→GREEN, real temporary Git + filesystem success/error/partial-publication/fresh-card matrices, raw pre-execute no-execute/no-approval matrices, independent runtime smoke, full check/profile/raw probes/strict OpenSpec/generated equality/three-seat review/exact-head CI.
+- Non-goals: builds/approvals/verification/report closure, new source mutation or snapshot transaction, automatic rollback of committed CR/patch, model calls, solver execution, coder presets or PI acceptance.
 
 ## Why
 

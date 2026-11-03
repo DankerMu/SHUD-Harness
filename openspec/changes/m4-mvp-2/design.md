@@ -151,6 +151,37 @@ Review focus: precise strict shapes and error paths; complete bidirectional pred
 - 持久化顺序：CR JSON（`proposed`）→ patch → TaskCard 回写（`linked_changes` 追加；卡 `planned` 时转 `running`、`runtime_phase: running_local`；已 `running` 不变）；任一步失败返回含 `change_id` 的错误，已写文件保留（与 M3 `shud_run` 回写失败"运行已 durable"同一语义）。
 - `change_create` 不 ask：它只生成对象（对应 `report_generate`）。备选"单一 change_submit 一次完成"被 pre-execute 顺序否决：ask 先于执行，被拒即无 durable 记录。
 
+#### Issue #536 implementation boundary
+
+Goal/scope: implement task_create(code_change) and change_create in tools, plus only change_create's fixed raw targets. Existing core/records APIs and routed #582 are prerequisites, not implementation targets. Keep the issue's atomic tool/publication boundary; no build, approval, verification or preset work.
+
+What exists: strictTool closes model and captured runtime parameter validation; readCallerPresetId owns current preset identity; records owns schema/id-safe reads, deterministic observation/derivation, exclusive CR/patch publication and TaskCard transitions. ensureDirectory is now public and remains the sole directory primitive.
+
+Source checkout helper: a small internal tools helper shared by both entrypoints validates fixed repos/SHUD with lstat, resolves its physical identity, calls core runGit for --show-toplevel and HEAD, compares native realpaths and validates exactly40 lowercase hex. runGit does not automatically root-check rev-parse; callers must perform this explicit check. Strip only Git's trailing newline from path output, not arbitrary path whitespace. No collectRepositoryRevision, shell Git wrapper, source creation or writes.
+
+Task creation phase: closed type enum science_assist|code_change and existing nonempty fields/workspace checks precede IO. For code_change, complete checkout validation/HEAD observation before createTaskCard can mkdir; absent/link/file/nonrepo/nested/unborn/invalid HEAD errors leave no task/output directories. science_assist retains null pin and does not inspect even a broken repos path.
+
+Change admission phase: validate closed task_id/optional semantic_level/one-line description before tool IO; fixed source path is not a parameter. Read the canonical readonly TaskCard and require code_change plus planned|running. Compare captured HEAD to its pin before status/diff; drift error contains both validated commits, no writes or observation. Empty observation rejects; unsupported paths retain the canonical observer's diagnostic paths.
+
+Derivation/preflight phase: deriveChangeRequest is the sole floor/categories/risk/hash constructor. Its explicit in-memory candidate id is not an occupied object (existing #528 composition); it may be generated for pure derivation before directory checks, but is never exposed or published on preflight failure. Claim/public allocation occurs at exclusive CR publication. No dummy id, duplicate floor computation, second constructor or new records API. All changes/patches/tasks-parent/task-directory checks complete before any object write, using ensureDirectory with controlled caller-side errors.
+
+Publication/state phase: after awaited Git work, freshly reread/validate the card and its captured source pin; then derive/preflight/publish CR→patch→fresh synchronous card transition/link union without an await between the final card read and write. Preserve unrelated current fields and all existing links; planned enters running_local, running retains its phase. Collision returns the actual new id/path from createChangeRequest, which must drive patch/result/link writes.
+
+Failure boundary: no rollback of successfully committed CR or patch. After CR publication, patch/card failures return a controlled stage and the actual change_id, preserving committed bytes and not adding a false TaskCard link. A records publisher's controlled committed-cleanup error already carries its id and must not be replaced by an id-less error. No raw exception payloads from native directory/card failures.
+
+Raw phase: before generic model file/shell classification, change_create checks changes, patches, validated exact task.json (invalid/missing id falls back to tasks), and repos/SHUD using existing canonical containment only. Target inside raw denies before Git/execute/approval; a raw descendant of a target or another task does not blanket-deny. Do not read object contents. task_create(code_change) still checks only tasks; #535 governance and all previous raw paths remain unchanged.
+
+Sibling surfaces: two task types, current preset attribution, strictTool/runtime registration, source helper plus observer's independent protected-verb checks, readonly TaskCard identity, exclusive collision/partial commit behavior, transitionTask and concurrent link/state writers, raw fixed/exact targets and generic governance classifier. No new global queue, cache or mutable policy.
+
+Phases/verification: first real ToolRuntime code_change pin tracer RED→GREEN; next change_create+raw tracer RED→GREEN; then focused adversarial/compatibility matrices. Full check/profile/raw probes/strict fixture/generated equality and three white-box seats gate the complete issue. Existing source-plugin ToolRuntime smoke is labeled as such; final built-tool execution must be exercised separately, without pretending a boundary double is Web/LLM or PI proof.
+
+Constraints/assumptions: trusted session cwd as in existing tools; canonical id/path readers and controlled runner remain authority. External writers can change the checkout between Git commands; no new snapshot isolation or retry is promised. In-process awaited TaskCard updates must not be lost. File-side effects begin only after valid card/head/observation/derivation.
+
+Rollback/containment: before publication, reject with no objects; preflight may create empty managed directories. After exclusive CR commit, preserve evidence on later failure and report its id. Deployment rollback is a normal PR revert, not a second tool version or storage shim.
+
+Next step: fixture review and strict validation, then one implementer with parent-owned RED/GREEN gates. Open decisions: none after applying existing candidate-versus-owned identity composition; reviewer must check that distinction against the observable no-public-id-on-preflight-failure criterion.
+
+
 #### Issue #528 implementation boundary
 
 Observation API: observeSourceChanges(sourceDir) returns Promise<{files_changed: string[], patch: Buffer}>. lstat first rejects missing/non-directory/symlink source roots; status and diff are invoked only through core runGit, which owns physical-root validation and environment/argument hardening. Nested ordinary directories fail before target status/diff. No TaskCard read, source mutation, staging, ask, model call or workspace-record publication occurs in the observer.
