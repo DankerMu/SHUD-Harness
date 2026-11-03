@@ -525,7 +525,9 @@ function decideFileShellAccess(
   const fields = args as Record<string, unknown>;
   const cwd = call.cwd ?? process.cwd();
   const target =
-    call.name === "str_replace_editor" && fields.command !== "view"
+    call.name === "str_replace_editor" &&
+    fields.command !== "view" &&
+    (!governance || typeof fields.command === "string")
       ? fields.path
       : call.name === "write" || call.name === "edit"
         ? fields.file_path

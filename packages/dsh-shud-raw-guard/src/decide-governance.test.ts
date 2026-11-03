@@ -224,12 +224,26 @@ test.each<[string, unknown]>([
   ["write", {}],
   ["write", { file_path: false }],
   ["str_replace_editor", { command: "insert", path: 7 }],
+  ["str_replace_editor", { path: "changes/x.json" }],
+  ["str_replace_editor", { command: null, path: "changes/x.json" }],
+  ["str_replace_editor", { command: 7, path: "changes/x.json" }],
   ["bash", { command: false, workdir: "changes" }],
   ["pwsh", { workdir: "changes" }],
   ["read", { file_path: "changes/x.json" }],
   ["unrelated", { command: "rm changes", file_path: "changes/x.json" }],
 ])("%s ignores absent or inapplicable target %j", (name, args) => {
   expect(decide(name, args)).toEqual(delegated);
+});
+
+test.each([
+  { path: "changes/x.json" },
+  { command: null, path: "changes/x.json" },
+  { command: 7, path: "changes/x.json" },
+])("raw overlap still denies malformed editor arguments %j", (args) => {
+  expect(decide("str_replace_editor", args, ["changes"])).toMatchObject({
+    kind: "deny",
+    code: "raw-immutable",
+  });
 });
 
 test("governance denial names the domain tools rather than offering file write approval", () => {

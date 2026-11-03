@@ -203,3 +203,65 @@ test("real waterfall preserves raw write, read and ancestor decisions before gov
     await runtime.close();
   }
 });
+
+test.each([
+  { path: "changes/x.json" },
+  { command: null, path: "changes/x.json" },
+  { command: 7, path: "changes/x.json" },
+])("malformed editor arguments preserve downstream decisions and errors: %j", async (args) => {
+  const runtime = await governanceRuntime(["/unrelated-raw"]);
+  try {
+    const downstream: PreToolDecision = { kind: "cancel" };
+    const next = vi.fn(() => Promise.resolve(downstream));
+    expect(await runtime.decide("str_replace_editor", args, next)).toBe(downstream);
+    expect(next).toHaveBeenCalledTimes(1);
+    const failure = new Error("downstream editor validation failed");
+    const reject = vi.fn(() => Promise.reject(failure));
+    await expect(runtime.decide("str_replace_editor", args, reject)).rejects.toBe(failure);
+    expect(reject).toHaveBeenCalledTimes(1);
+    expect(runtime.audit).toEqual([]);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test.each([
+  { path: "changes/x.json" },
+  { command: null, path: "changes/x.json" },
+  { command: 7, path: "changes/x.json" },
+])("raw overlap blocks downstream for malformed editor arguments: %j", async (args) => {
+  const runtime = await governanceRuntime(["changes"]);
+  try {
+    const next = vi.fn(() => Promise.resolve<PreToolDecision>({ kind: "cancel" }));
+    const result = await runtime.decide("str_replace_editor", args, next);
+    expect(result.kind).toBe("deny");
+    expect(next).not.toHaveBeenCalled();
+    expect(runtime.audit).toEqual([["deny str_replace_editor raw-immutable"]]);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test("editor string mutations still deny while view preserves the downstream result", async () => {
+  const runtime = await governanceRuntime(["/unrelated-raw"]);
+  try {
+    const downstream: PreToolDecision = { kind: "cancel" };
+    const next = vi.fn(() => Promise.resolve(downstream));
+    const result = await runtime.decide(
+      "str_replace_editor",
+      { command: "insert", path: "changes/x.json" },
+      next,
+    );
+    expect(result.kind).toBe("deny");
+    expect(next).not.toHaveBeenCalled();
+    expect(runtime.audit).toEqual([["deny str_replace_editor governance-immutable"]]);
+    runtime.audit.length = 0;
+    expect(
+      await runtime.decide("str_replace_editor", { command: "view", path: "changes/x.json" }, next),
+    ).toBe(downstream);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(runtime.audit).toEqual([]);
+  } finally {
+    await runtime.close();
+  }
+});

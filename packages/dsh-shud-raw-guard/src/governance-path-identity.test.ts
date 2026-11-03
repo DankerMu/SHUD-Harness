@@ -230,3 +230,18 @@ test("read, view and missing argument calls perform no identity discovery", () =
   expect(fs.opendirSync).not.toHaveBeenCalled();
   expect(fs.lstatSync).not.toHaveBeenCalled();
 });
+
+test.each([
+  { path: "CHANGES/x.json" },
+  { command: null, path: "CHANGES/x.json" },
+  { command: 7, path: "CHANGES/x.json" },
+])("malformed editor arguments skip governance namespace discovery: %j", (args) => {
+  namespace("insensitive");
+  const options = normalizeRawDirs({ rawDirs: ["unrelated-raw"] });
+  expect(decideRawAccess({ name: "str_replace_editor", arguments: args, cwd }, options)).toEqual({
+    kind: "next",
+    code: "unrelated",
+  });
+  // Legacy raw containment still resolves paths; governance must not probe this alias.
+  expect(fs.opendirSync).not.toHaveBeenCalled();
+});
