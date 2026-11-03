@@ -75,6 +75,12 @@ core SHALL 导出 `SEMANTIC_LEVEL_ORDER`（七档偏序，`pure_engineering < io
 
 records SHALL 提供确定性函数 `observeSourceChanges(sourceDir)`：经该 runner 执行 `git status --porcelain -z --untracked-files=all`（忽略路径不计，按 NUL 分隔解析，路径不做引号转义还原），返回已跟踪文件的修改路径集合（码点升序）。存在 untracked 路径、删除或重命名 SHALL 使观测失败并列出路径（M4 不接受新文件）；`sourceDir` 不是真实目录、不是 git 工作树或未通过 (c) SHALL 失败；观测为空 SHALL 由调用方视为"无改动"。patch SHALL 经该 runner 以固定命令 `git diff HEAD --no-ext-diff --no-textconv --no-color -- <files...>`（files 为排序后的观测集合）生成，字节原样保存。
 
+`<files...>` 表示上述真实路径身份：每个 Git pathspec 操作数 SHALL 用 `:(literal)<path>` 编码，SHALL NOT 把文件名中的 glob 或 exclusion magic 当作选择规则；返回的 `files_changed` SHALL 保持原名。M4 只接受已跟踪路径的 index/worktree `M` 与空白组合（至少一侧 `M`）；新增 `A`（含 intent-to-add）、copy、未合并、类型变化或其它未支持状态 SHALL 失败并列出路径，而不是当作普通修改继续生成记录。
+
+#### Scenario: literal pathspec names cannot suppress tracked changes
+- **WHEN** `normal.cpp` 与名为 `:(exclude)normal.cpp` 的两个已跟踪文件均被修改
+- **THEN** 观测保留两个真实路径，patch 包含两个文件的改动；exclusion 名称不会把另一个文件从 diff 中排除
+
 #### Scenario: tracked modifications observed
 - **WHEN** 临时 git 仓库中修改两个已跟踪文件并新增一个被 `.gitignore` 忽略的文件后调用 `observeSourceChanges`
 - **THEN** 返回恰为两个已跟踪路径（码点升序）

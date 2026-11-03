@@ -18,6 +18,8 @@ import {
   readWorkspaceRecord,
   writeWorkspaceRecord,
   createChangeRequest,
+  observeSourceChanges,
+  deriveChangeRequest,
   createVerificationCase,
   writeChangePatch,
   readChangePatch,
@@ -103,9 +105,51 @@ void [
   crossedBuild,
 ];
 
+const observation: Promise<{ files_changed: string[]; patch: Buffer }> = observeSourceChanges(cwd);
+const derivationInput = {
+  change_id: change.change_id,
+  task_id: change.task_id,
+  base_commit: change.base_commit,
+  files_changed: change.files_changed,
+  created_by: change.created_by,
+  created_at: change.created_at,
+  patch: new Uint8Array([97, 98, 99]),
+};
+const derived = deriveChangeRequest(derivationInput);
+const derivedRecord: ChangeRequest = derived.record;
+const adjustment: {
+  declared: ChangeRequest["semantic_level"];
+  effective: ChangeRequest["semantic_level"];
+} | null = derived.level_adjustment;
+deriveChangeRequest({
+  ...derivationInput,
+  semantic_level: "physical_equation",
+  description: "Detail",
+});
+// @ts-expect-error Source observation is asynchronous.
+const synchronousObservation: { files_changed: string[]; patch: Buffer } =
+  observeSourceChanges(cwd);
+// @ts-expect-error Observation needs a source directory, not arbitrary JSON.
+void observeSourceChanges(value);
+// @ts-expect-error Pure derivation requires explicit identity and time, not only domain fields.
+deriveChangeRequest({
+  task_id: change.task_id,
+  base_commit: change.base_commit,
+  files_changed: change.files_changed,
+  created_by: change.created_by,
+  patch: Buffer.from("abc"),
+});
+// @ts-expect-error Hashing consumes exact bytes, not a decoded string.
+deriveChangeRequest({ ...derivationInput, patch: "abc" });
+// @ts-expect-error Declarations belong to the closed semantic level domain.
+deriveChangeRequest({ ...derivationInput, semantic_level: "arbitrary" });
+// @ts-expect-error Derivation is synchronous and pure.
+const asynchronousDerivation: Promise<unknown> = deriveChangeRequest(derivationInput);
+void [observation, derivedRecord, adjustment, synchronousObservation, asynchronousDerivation];
+
 declare const changeFields: Omit<ChangeRequest, "change_id" | "patch_path">;
 declare const verificationFields: Omit<VerificationCase, "vc_id">;
-const createdChange: ChangeRequest = createChangeRequest(cwd, changeFields);
+const createdChange: ChangeRequest = createChangeRequest(cwd, change);
 const createdVerification: VerificationCase = createVerificationCase(cwd, verificationFields);
 const patchWritten: void = writeChangePatch(cwd, change.change_id, Buffer.from("abc"));
 writeChangePatch(cwd, change.change_id, "abc");
@@ -113,13 +157,15 @@ writeChangePatch(cwd, change.change_id, new Uint8Array([97, 98, 99]));
 const patchRead: Buffer = readChangePatch(cwd, change.change_id);
 const readonlyPatch: Buffer = readChangePatch(cwd, change.change_id, { readonly: true });
 const rewrittenChange: void = rewriteChangeRequest(cwd, change);
-// @ts-expect-error Creation takes complete domain fields, not unknown JSON.
+// @ts-expect-error Creation takes a complete candidate, not unknown JSON.
 createChangeRequest(cwd, value);
 // @ts-expect-error Verification creation takes complete domain fields.
 createVerificationCase(cwd, value);
-// @ts-expect-error The allocator owns change_id.
+// @ts-expect-error The candidate must supply both its id and bound patch path.
+createChangeRequest(cwd, changeFields);
+// @ts-expect-error The candidate must supply its bound patch path.
 createChangeRequest(cwd, { ...changeFields, change_id: change.change_id });
-// @ts-expect-error The allocator derives patch_path.
+// @ts-expect-error The candidate must supply its id.
 createChangeRequest(cwd, { ...changeFields, patch_path: change.patch_path });
 // @ts-expect-error The allocator owns vc_id.
 createVerificationCase(cwd, { ...verificationFields, vc_id: verification.vc_id });
@@ -134,7 +180,7 @@ rewriteChangeRequest(cwd, value);
 // @ts-expect-error VerificationCases have no ChangeRequest rewrite API.
 rewriteChangeRequest(cwd, verification);
 // @ts-expect-error Creation is synchronous.
-const asynchronousChange: Promise<ChangeRequest> = createChangeRequest(cwd, changeFields);
+const asynchronousChange: Promise<ChangeRequest> = createChangeRequest(cwd, change);
 // @ts-expect-error Patch reads preserve bytes rather than decoding to a string.
 const decodedPatch: string = readChangePatch(cwd, change.change_id);
 void [

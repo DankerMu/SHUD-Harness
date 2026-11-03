@@ -8,6 +8,10 @@
  * Generic overwrite remains limited to task/data/report.
  * Change/verification first publication and companion patches use exclusive link commits;
  * only existing valid ChangeRequests can be rewritten through the atomic replacement writer.
+ * CR publication preserves a complete candidate's id/path unless an actual collision reallocates it.
+ * Source observation returns literal tracked modification paths and exact HEAD diff bytes through
+ * core's controlled Git runner. Pure CR derivation consumes explicit identity/time and core floors;
+ * callers own TaskCard/base checks and the subsequent record/patch publication sequence.
  * Patch reads in default/readonly:false mode may create only the missing managed patches root;
  * readonly:true creates no paths, and no mode creates or repairs a patch. Publication binds the
  * stored CR and its patch digest.
@@ -29,6 +33,8 @@ export { createTaskCard } from "./task-card-file.ts";
 export { captureStackLock } from "./capture-stack-lock.ts";
 export type { StackCaptureConfig, StackCaptureLlm } from "./capture-stack-lock.ts";
 export { generateProvenance } from "./generate-provenance.ts";
+export { observeSourceChanges } from "./observe-source-changes.ts";
+export { deriveChangeRequest } from "./derive-change-request.ts";
 export { transitionTask, TaskTransitionError } from "./task-transition.ts";
 export type { TaskEvent } from "./task-transition.ts";
 export { reconcileTaskCard, TaskReconcileError } from "./task-reconcile.ts";

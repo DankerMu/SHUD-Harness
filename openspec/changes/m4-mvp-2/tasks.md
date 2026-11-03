@@ -172,8 +172,23 @@
 - Schema/config/auth/release：复用已交付core schema，无字段/生成物/依赖/host/profile/角色审批/科学判定变化。无索引、扫描、ctx.storage、额外计时器或生产重试服务；只实现规范的有限id分配。
 - 验证顺序：API/typecheck及filesystem新行为tests-only真实RED→实现GREEN；已有records兼容套件；built records实际CR+patch/VC/build发布读回、旧文件只读字节证据及tamper拒绝；pnpm run check、strict OpenSpec、三席白盒与同SHA CI。31generated保持。无host seam变化，不用profile smoke冒充文件层证明。
 
+### Issue #528 risk and evidence fixture
+
+本刀仅3.2，#518/#526/#527均已合并。expanded实际覆盖CriticalPath#1/#5及必需的records内创建输入切换，不提前做closure、工具或报告。
+
+- API/路径：observeSourceChanges返回原始files_changed与Buffer patch；sourceDir先lstat拒绝缺失/链接/文件/FIFO，再仅消费runGit。最终链接的尾部`/`、`/.`及组合不得绕过检查；真实目录同类拼写仍合法，父级符号链接后`..`保持物理遍历语义，不以normalize/resolve替换。真实外层repo中的普通子目录拒绝且trace无status/diff；core负责realpath根检查，不复制runner。
+- Porcelain：NUL边界、两字节XY与分隔空格严格解析；正常M/空白组合、staged/unstaged/MM成功；??、A（含git add -N）、D、R/C、U及T/未知状态拒绝并列出路径，不进入diff。rename/copy两路径均正确消费。损坏终止符/缺路径/非法UTF8/重复非法路径失败，不猜测或丢弃记录。
+- 原名/顺序：空格、换行、引号、反斜线、前导BOM和astral-vs-BMP路径保持；排序用已验证UTF8 byte views的Buffer.compare，最终经core公开files_changed字段校验，不另写码点比较器或改core出口。无变更返回[]/空Buffer，且不执行空pathspec的全树diff。
+- Patch：固定HEAD diff通过runner产生，返回字节原样；操作数以:(literal)编码真实路径，逻辑files_changed不改。真实[:(*)?]、冒号/exclude路径负控必须证明不丢改动、不匹配错误名字；保留既有空格/换行场景。原工作树、HEAD、index字节/mtime不改；不新增--binary或apply验证。
+- 秘钥/config：既有native C recorder编译在测试临时目录，trace真实git子进程，假DMXAPI_KEY/GIT_DIR不存在；真实local diff.external/textconv/fsmonitor marker不执行，color.ui=always仍无颜色。复用现有cc前置/C文件，不改core/scripts或复制trace parser；环境七键细则仍由既有core测试拥有。
+- 纯派生：显式candidate change_id与created_at，输入task_id/base_commit/files_changed/可选申报和description/created_by/patch bytes；不取时钟、随机id或文件。core shape字段校验及最终ChangeRequestSchema成功；status proposed、approval_ref/approved_at null、updated_at=created_at、patch_path绑定id、sha256独立固定向量。
+- floor/说明：Makefile+src/Model→numerical/high；docs/scripts→pure/low；Model_Control多匹配categories保留；申报缺失/低于/等于/高于floor分别覆盖，低于仅抬升并返回{declared,effective}，其余adjustment null。坏level不能当作最低档，输入空/重复/乱序/越界路径、坏id/commit/time/patch类型拒绝；输入和patch不修改，不读取TaskCard。
+- 创建接口clean cutover：createChangeRequest从fields-only切为完整候选记录，首次保留candidate id/path而不另抽id；真实EEXIST后最多3次重分配并更新path。所有仓内调用与typecheck迁移，不保留双接口；缺id/错path/坏schema在IO前拒绝。旧碰撞/late-link/unsafe/cleanup/patch/mutable-ban测试不弱化，VC/build/M3接口及行为不变。
+- 错误/资源：保留runner受控错误及缓冲失败，解析错误不回显原始stdout/私有载荷；路径错误可列真实路径。没有新增重试、缓存、索引、审批或依赖；无任意Git配置/attribute确定性、外部并发快照或patch可应用性承诺。HEAD==卡base和后续工具零写入边界仍归#536，build复核归#537。
+- 证据顺序：tests-only实际RED→实现GREEN；真实Git+pure输出向量；创建输入迁移的原文件层回归；built observe→derive→create/patch→readonly smoke（非SHUD构建/PI）；pnpm run check、strict OpenSpec、31generated不变、三席审查和同SHA CI。
+
 - [x] 3.1 依赖 2.1。三对象文件层：`changes/`、`patches/`、`verifications/` 原子写（排他创建、EEXIST 重分配 id ≤3 次）与读取校验，`builds/<id>/` 临时目录（排他 `mkdir`）rename 发布与消费者 sha256 校验（change-requests「ChangeRequest workspace files」、verification-cases「VerificationCase workspace files」、shud-build「Build workspace files」、task-cards「TaskCard workspace file」扩展的 id/目录/排他创建与目录级 rename 例外）；路径安全复用 `workspace-paths.ts`；符号链接/非目录 fail-closed 正反例。
-- [ ] 3.2 依赖 2.3、2.6、3.1。`observeSourceChanges(sourceDir)`（经 2.6 runner：porcelain `-z` 解析、忽略路径不计、untracked/删除/重命名拒绝、realpath ≠ toplevel 拒绝）与 ChangeRequest 生成纯函数（floor/categories 派生、申报抬升、patch 固定命令、sha256、`base_commit` 40 hex）；以真实临时 git 仓库测试（change-requests「Source change observation」）。
+- [x] 3.2 依赖 2.3、2.6、3.1。`observeSourceChanges(sourceDir)`（经 2.6 runner：porcelain `-z` 解析、忽略路径不计、untracked/删除/重命名拒绝、realpath ≠ toplevel 拒绝）与 ChangeRequest 生成纯函数（floor/categories 派生、申报抬升、patch 固定命令、sha256、`base_commit` 40 hex）；以真实临时 git 仓库测试（change-requests「Source change observation」）。
 - [ ] 3.3 依赖 2.2a、3.1。`code_change` 状态进入（`change_create` → running/running_local）与 `codeChangeClosure(card, loaders)` 六子句（0 输入非空、1 approved CR 属本卡且 patch sha 匹配、2 终态 VC 属本卡且其两个 run 的 RunJob ∈ `linked_jobs`、3/4 schema 保证、5 既有运行子句）正反例，不合格对象按不可读处理；`task-closure.ts` 分派按 `type`；`CONTEXT.md` 增"code_change closure 不以 LLM 为据"不变量并指向本测试（task-cards「code_change state entry」「code_change closure predicate」）。
 - [ ] 3.4 依赖 2.2d。`generateProvenance` 解析 `<project>.tsd.forc` 第 2 行与 Filename 列，副本内无外部文件、副本外逐一哈希为 `external_files`，缺失/非普通文件/解析失败抛错（data-provenance「Provenance generation at submission」）；ccw（得 `[]`）与构造的绝对 forcing 两类夹具。
 - [ ] 3.5 依赖 2.2b。`captureStackLock` 接受可选 build 源：`repos.SHUD` 取 BuildRecord 源修订（`dirty_paths` 原样、`dirty_paths_truncated: false`）、`build_id` 写入并进指纹；无 build 时逐字节不变的回归（stack-lock「Deterministic capture at shud_run submission」）。

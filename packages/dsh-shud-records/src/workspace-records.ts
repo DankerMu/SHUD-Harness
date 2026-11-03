@@ -414,29 +414,28 @@ function changePatchPath(cwd: string, id: string, readonly: boolean): string {
 function createExclusiveRecord<K extends "change" | "verification">(
   cwd: string,
   kind: K,
-  fields: Omit<ChangeRequest, "change_id" | "patch_path"> | Omit<VerificationCase, "vc_id">,
+  candidate: WorkspaceRecordMap[K],
 ): WorkspaceRecordMap[K] {
   const definition = recordTypes[kind];
+  let record = parseRecord(kind, candidate);
   for (let reallocations = 0; ; reallocations += 1) {
-    const id = createBrandedId(definition.prefix);
-    const record = parseRecord(kind, {
-      ...fields,
-      [definition.field]: id,
-      ...(kind === "change" ? { patch_path: patchRelativePath(id) } : {}),
-    });
+    const id = "vc_id" in record ? record.vc_id : record.change_id;
     const path = workspacePath(cwd, kind, id);
     if (publishExclusive(path, id, `${JSON.stringify(record)}\n`)) return record;
     // The first candidate plus at most three reallocations; never draw a fifth id.
     if (reallocations === 3) throw publicationFailure(path, id, "collision");
+    const replacement = createBrandedId(definition.prefix);
+    record = parseRecord(kind, {
+      ...record,
+      [definition.field]: replacement,
+      ...(kind === "change" ? { patch_path: patchRelativePath(replacement) } : {}),
+    });
   }
 }
 
-/** Allocate and exclusively publish a CR; the caller supplies every field except its id/patch path. */
-export function createChangeRequest(
-  cwd: string,
-  fields: Omit<ChangeRequest, "change_id" | "patch_path">,
-): ChangeRequest {
-  return createExclusiveRecord(cwd, "change", fields);
+/** Publish the complete CR candidate unchanged; only a collision reallocates its id/patch path. */
+export function createChangeRequest(cwd: string, candidate: ChangeRequest): ChangeRequest {
+  return createExclusiveRecord(cwd, "change", candidate);
 }
 
 /** Allocate and exclusively publish caller-supplied verification evidence without changing its verdict. */
@@ -444,7 +443,10 @@ export function createVerificationCase(
   cwd: string,
   fields: Omit<VerificationCase, "vc_id">,
 ): VerificationCase {
-  return createExclusiveRecord(cwd, "verification", fields);
+  return createExclusiveRecord(cwd, "verification", {
+    ...fields,
+    vc_id: createBrandedId("VC"),
+  });
 }
 
 /** Bind an existing CR and its digest before exclusively publishing the companion patch bytes. */
