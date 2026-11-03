@@ -176,7 +176,7 @@ test.each([
     multiword: "cc -O0",
     missing: "no-such-shud-compiler",
     nonzero: "false",
-    "empty-version": "true",
+    "empty-version": "./compiler",
     "blank-first-line": "./compiler",
     "probe-nonzero": "cc",
   }[kind];
@@ -191,7 +191,10 @@ test.each([
         (kind === "probe-nonzero"
           ? `\nprint-cxx: probe-failure\nprobe-failure:\n\t@printf '%s\\n' '${PRIVATE}' >&2\n\t@exit 7\n`
           : ""),
-      compiler: "#!/bin/sh\nprintf '\\nsecond line\\n'\n",
+      compiler:
+        kind === "empty-version"
+          ? "#!/bin/sh\nexit 0\n"
+          : "#!/bin/sh\nprintf '\\nsecond line\\n'\n",
     },
   });
   await h.preserve(async () => {
@@ -202,6 +205,195 @@ test.each([
     noBuilds(h);
   });
 });
+
+function compilerProbeFiles(action: string, phase: "selection" | "version") {
+  const makefile = MAKEFILE.replace("CXX := cc", "CXX := ./compiler").replace(
+    "chmod 755 shud",
+    "chmod 755 shud compiler",
+  );
+  return {
+    ...BASE_FILES,
+    Makefile:
+      makefile +
+      (phase === "selection"
+        ? `\n.PHONY: probe-output\nprint-cxx: probe-output\nprobe-output:\n\t@${action}\n`
+        : ""),
+    compiler:
+      `#!/bin/sh\n${phase === "version" ? `${action}\n` : ""}` +
+      "printf '%s\\n' 'fixture compiler 1.0'\n",
+  };
+}
+
+test("extra main-make output cannot expand the exact published build inventory", async () => {
+  await h.dispose();
+  h = await buildFixture({
+    files: {
+      ...BASE_FILES,
+      Makefile: `${MAKEFILE}\tprintf '%s\\n' auxiliary-build-note > ../build-note.txt\n`,
+    },
+  });
+  await h.preserve(async () => {
+    const result = await h.build();
+    if (result.isError) {
+      const message = expectToolError(result, /inventory|entry|publication|build/iu);
+      expect(message).not.toContain(".tmp-");
+      noBuilds(h);
+    } else {
+      const value = valueOf(result);
+      const id = BuildIdSchema.parse(value.build_id);
+      const directory = join(h.cwd, "builds", id);
+      expect(fs.readdirSync(directory).sort()).toEqual([
+        "build-record.json",
+        "make.stderr.log",
+        "make.stdout.log",
+        "shud",
+      ]);
+      const record = readWorkspaceRecord(h.cwd, "build", id, { readonly: true });
+      expect(
+        childProcess.execFileSync(join(h.cwd, record.binary_path), [], { encoding: "utf8" }),
+      ).toBe("base-matrix\n");
+    }
+  });
+});
+
+test("compiler version probing cannot publish a mutation of the initially hashed binary", async () => {
+  await h.dispose();
+  h = await buildFixture({
+    files: {
+      ...BASE_FILES,
+      Makefile: MAKEFILE.replace("CXX := cc", "CXX := ./compiler").replace(
+        "chmod 755 shud",
+        "chmod 755 shud compiler",
+      ),
+      compiler:
+        "#!/bin/sh\nprintf '%s\\n' '# compiler-probe mutation' >> ../shud\nprintf '%s\\n' 'fixture compiler 1.0'\n",
+    },
+  });
+  await h.preserve(async () => {
+    const message = expectToolError(await h.build(), /binary|digest|integrity/iu);
+    expect(message).not.toContain(".tmp-");
+    noBuilds(h);
+  });
+});
+
+test.each([
+  { build: "base", phase: "selection" },
+  { build: "candidate", phase: "main" },
+  { build: "candidate", phase: "selection" },
+] as const)(
+  "$build build rejects extra producer files from $phase make",
+  async ({ build, phase }) => {
+    await h.dispose();
+    const action = "printf '%s\\n' auxiliary-build-note > ../build-note.txt";
+    h = await buildFixture({
+      files:
+        phase === "selection"
+          ? compilerProbeFiles(action, phase)
+          : { ...BASE_FILES, Makefile: `${MAKEFILE}\t${action}\n` },
+    });
+    const id = build === "candidate" ? await candidate(h) : undefined;
+    await h.preserve(async () => {
+      const message = expectToolError(
+        await h.build(id === undefined ? {} : { change_id: id }),
+        /publication inventory/iu,
+      );
+      expect(message).not.toContain(".tmp-");
+      noBuilds(h);
+    });
+  },
+);
+
+test.each([
+  { build: "base", phase: "selection", mutation: "contents" },
+  { build: "candidate", phase: "selection", mutation: "contents" },
+  { build: "candidate", phase: "version", mutation: "contents" },
+  { build: "base", phase: "selection", mutation: "permissions" },
+  { build: "candidate", phase: "version", mutation: "permissions" },
+  { build: "base", phase: "version", mutation: "type" },
+  { build: "candidate", phase: "selection", mutation: "type" },
+  { build: "base", phase: "selection", mutation: "effective-permission" },
+  { build: "candidate", phase: "version", mutation: "effective-permission" },
+] as const)(
+  "$build build rejects copied-binary $mutation changed by compiler $phase",
+  async ({ build, phase, mutation }) => {
+    await h.dispose();
+    const action =
+      mutation === "contents"
+        ? "printf '%s\\n' '# late copied-binary mutation' >> ../shud"
+        : mutation === "permissions"
+          ? "chmod 000 ../shud"
+          : mutation === "effective-permission"
+            ? "chmod 650 ../shud"
+            : phase === "selection"
+              ? "rm -f ../shud; mkdir ../shud"
+              : "rm -f ../shud; ln -s make.stdout.log ../shud";
+    h = await buildFixture({ files: compilerProbeFiles(action, phase) });
+    const id = build === "candidate" ? await candidate(h) : undefined;
+    let denied = false;
+    if (mutation === "effective-permission") {
+      vi.mocked(fs.accessSync).mockImplementation((path, mode) => {
+        const target = String(path);
+        if (
+          mode !== undefined &&
+          (mode & fs.constants.X_OK) !== 0 &&
+          target.startsWith(`${join(h.cwd, "builds")}/`) &&
+          target.endsWith("/shud") &&
+          (nativeFs.lstatSync(target).mode & 0o777) === 0o650
+        ) {
+          denied = true;
+          throw Object.assign(new Error(PRIVATE), { code: "EACCES" });
+        }
+        return nativeFs.accessSync(path, mode);
+      });
+    }
+    await h.preserve(async () => {
+      const message = expectToolError(
+        await h.build(id === undefined ? {} : { change_id: id }),
+        /binary|executable|publication/iu,
+      );
+      expect(message).not.toContain(PRIVATE);
+      expect(message).not.toContain(".tmp-");
+      if (mutation === "effective-permission") expect(denied).toBe(true);
+      noBuilds(h);
+    });
+  },
+);
+
+test.each([
+  { build: "base", phase: "selection", entry: "make.stdout.log", replacement: "missing" },
+  { build: "candidate", phase: "version", entry: "make.stderr.log", replacement: "missing" },
+  { build: "base", phase: "version", entry: "shud", replacement: "missing" },
+  { build: "candidate", phase: "selection", entry: "make.stdout.log", replacement: "directory" },
+  { build: "base", phase: "version", entry: "make.stderr.log", replacement: "symlink" },
+  { build: "candidate", phase: "selection", entry: "make.stderr.log", replacement: "fifo" },
+] as const)(
+  "$build build rejects $replacement $entry after compiler $phase",
+  async ({ build, phase, entry, replacement }) => {
+    await h.dispose();
+    const target = `../${entry}`;
+    const action =
+      `rm -f ${target}` +
+      (replacement === "missing"
+        ? ""
+        : replacement === "directory"
+          ? `; mkdir ${target}`
+          : replacement === "symlink"
+            ? `; ln -s shud ${target}`
+            : `; mkfifo ${target}`);
+    h = await buildFixture({ files: compilerProbeFiles(action, phase) });
+    const id = build === "candidate" ? await candidate(h) : undefined;
+    await h.preserve(async () => {
+      // A real FIFO has no writer: completion proves rejected log diagnostics
+      // cannot block while opening a nonordinary producer entry.
+      const message = expectToolError(
+        await h.build(id === undefined ? {} : { change_id: id }),
+        /publication|inventory/iu,
+      );
+      expect(message).not.toContain(".tmp-");
+      noBuilds(h);
+    });
+  },
+);
 
 test.each(["PATH", "HOME"])("missing host %s fails before output effects", async (key) => {
   vi.stubEnv(key, undefined);

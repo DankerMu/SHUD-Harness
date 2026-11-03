@@ -90,6 +90,14 @@
 - **WHEN** 以 `approved` CR 与 `rhs_openmp: true` 调用 `shud_build`，工作树 diff 与 patch 一致，假 `Makefile` 把 `src/Model/f.cpp` 的内容嵌入产出的 `shud`
 - **THEN** 记录 `change_id` 为该 CR、`patch_sha256` 等于 CR 的值、`dirty_paths` 等于 `files_changed`、`make_argv` 含 `SHUD_ENABLE_OPENMP_RHS=1`、`rhs_openmp: true`；`builds/<build_id>/shud` 含 patch 之后的 `f.cpp` 内容
 
+#### Scenario: unexpected publication entries fail closed
+- **WHEN** 主构建或编译器选择探测在 `<tmp>` 顶层留下额外条目，或替换、删除应发布的日志或可执行文件
+- **THEN** 工具在写 BuildRecord 与整目录发布前拒绝；失败清理自有临时目录，不改变源检出或 TaskCard；规范发布器不承担工具专属的文件清单校验
+
+#### Scenario: compiler probing cannot change the hashed executable
+- **WHEN** 初次复制与 sha256 计算成功后，编译器选择 make 或 `<cxx> --version` 改写 `<tmp>/shud` 的内容或使其不再是普通且对当前进程可执行的文件
+- **THEN** 工具在发布前复核文件类型、有效执行权限及与初次计算值相同的 sha256，拒绝变化并清理自有临时目录，不把变化后的二进制重新认定为有效构建；源检出与 TaskCard 不变
+
 #### Scenario: ignored file in the working tree does not reach the build
 - **WHEN** `repos/SHUD` 中存在被 `.gitignore`（`shud.*`）忽略的未跟踪文件 `src/Model/shud.extra.cpp`，假 `Makefile` 以 shell glob `SRC = src/*/*.cpp` 编译并回显全部源文件，分别做 base 构建与候选构建
 - **THEN** 两次校验均通过（忽略文件不计入观测），`make.stdout.log` 不含 `shud.extra.cpp`，`builds/<build_id>/shud` 不含该文件的内容；`repos/SHUD/src/Model/shud.extra.cpp` 字节不变

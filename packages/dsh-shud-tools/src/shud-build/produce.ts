@@ -12,10 +12,15 @@ import {
   extractBuildSource,
 } from "./archive.ts";
 
+const PRODUCER_FILES = ["make.stderr.log", "make.stdout.log", "shud"] as const;
+
 function logTail(path: string): string {
   let fd: number | undefined;
   try {
-    fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    fd = fs.openSync(
+      path,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+    );
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) return "";
     const size = Math.min(stat.size, 16_384);
@@ -67,6 +72,37 @@ async function hashBinary(path: string): Promise<string> {
   }
 }
 
+function validatePublicationFiles(temporary: string) {
+  const names = fs.readdirSync(temporary).sort();
+  if (
+    names.length !== PRODUCER_FILES.length ||
+    names.some((name, index) => name !== PRODUCER_FILES[index])
+  ) {
+    throw new BuildFailure(
+      "build publication inventory must contain exactly shud and two make logs",
+    );
+  }
+  for (const name of PRODUCER_FILES) {
+    const path = join(temporary, name);
+    const stat = fs.lstatSync(path);
+    if (!stat.isFile()) {
+      throw new BuildFailure(`build publication ${name} is not an ordinary file`);
+    }
+    if (name === "shud") {
+      if ((stat.mode & 0o111) === 0) {
+        throw new BuildFailure(
+          "make exited 0 but copied shud is not executable before publication",
+        );
+      }
+      try {
+        fs.accessSync(path, fs.constants.X_OK);
+      } catch {
+        throw new BuildFailure("make exited 0 but copied shud executable permission denied");
+      }
+    }
+  }
+}
+
 export function buildProducer(input: {
   cwd: string;
   source: string;
@@ -91,7 +127,8 @@ export function buildProducer(input: {
     const stdout = join(temporary, "make.stdout.log");
     const stderr = join(temporary, "make.stderr.log");
     let stage = "build directory preparation";
-    let assertOwned = directoryOwnership([dirname(temporary), temporary]);
+    const assertPublicationOwned = directoryOwnership([dirname(temporary), temporary]);
+    let assertOwned = assertPublicationOwned;
     try {
       fs.mkdirSync(src);
       assertOwned = directoryOwnership([dirname(temporary), temporary, src]);
@@ -224,6 +261,17 @@ export function buildProducer(input: {
       fs.unlinkSync(probe);
       if (input.change !== null) fs.unlinkSync(join(temporary, "change.patch"));
       fs.rmSync(src, { recursive: true });
+      // Keep the original parent/reservation identities; src is intentionally gone.
+      assertOwned = assertPublicationOwned;
+      assertOwned();
+      stage = "build publication validation";
+      validatePublicationFiles(temporary);
+      const finalSha = await hashBinary(copiedBinary);
+      assertOwned();
+      validatePublicationFiles(temporary);
+      if (finalSha !== binarySha) {
+        throw new BuildFailure("copied binary changed after its initial digest");
+      }
       return {
         build_id: buildId,
         task_id: input.taskId,
