@@ -42,5 +42,5 @@
       "project": ["src/**/*.ts"]
     }
   },
-  "ignoreBinaries": ["gitleaks", "semgrep", "mkfifo", "cc"]
+  "ignoreBinaries": ["gitleaks", "semgrep", "mkfifo", "cc", "make"]
 }

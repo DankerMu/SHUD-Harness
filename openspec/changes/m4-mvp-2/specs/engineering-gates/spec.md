@@ -36,6 +36,21 @@ The same wording module SHALL also export, as a single constant, the fixed `code
 
 ## ADDED Requirements
 
+### Requirement: System make is declared as a build prerequisite
+
+The repository SHALL declare the exact external binary `make` in the existing Knip `ignoreBinaries` list for M4 shud_build and its real-Makefile integration tests. It SHALL document system make as a non-npm prerequisite in canonical agent instruction sources and generate the instruction projections through the existing renderer. It SHALL NOT replace the actual make command, install an npm substitute, disable the unlisted-binary check, or add broad ignore patterns.
+
+#### Scenario: Required system make is recognized without hiding unrelated binaries
+
+- **WHEN** Knip analyzes the registered make invocation with the repository's external-binary declaration
+- **THEN** make is not reported as unlisted, while an unrelated undeclared executable still fails the same check
+
+#### Scenario: Tool prerequisite is documented and rendered
+
+- **WHEN** instructions:render and the instruction drift check run
+- **THEN** the canonical prerequisite and both generated instruction files state that shud_build and its integration tests require system make, not an npm dependency
+
+
 ### Requirement: Replay local gate is registered
 
 The repository SHALL provide `pnpm run shud:replay <scratch-workspace>`, a local blocking gate for the known-answer replay. It SHALL take the scratch workspace path as an explicit argument; a missing argument SHALL exit nonzero before any session starts. It SHALL require `DMXAPI_KEY`, `SHUD_BIN`, `SUNDIALS_ROOT` and `SHUD_REPLAY_KELIYA`; any missing prerequisite SHALL exit nonzero before workspace preparation and before any session starts, naming the missing item, and SHALL NOT skip. Its pass and fail criteria SHALL be taken from the session log and workspace files, not from model text.
