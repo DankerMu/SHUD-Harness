@@ -35,6 +35,7 @@ vi.mock("node:fs", async (original) => {
   const actual = await original<typeof fs>();
   return {
     ...actual,
+    lstatSync: vi.fn(actual.lstatSync),
     mkdirSync: vi.fn(actual.mkdirSync),
     openSync: vi.fn(actual.openSync),
     writeFileSync: vi.fn(actual.writeFileSync),
@@ -56,6 +57,7 @@ let cwd: string;
 let descriptors: number[];
 
 beforeEach(() => {
+  vi.mocked(fs.lstatSync).mockReset().mockImplementation(native.lstatSync);
   vi.mocked(fs.mkdirSync).mockReset().mockImplementation(native.mkdirSync);
   vi.mocked(fs.writeFileSync).mockReset().mockImplementation(native.writeFileSync);
   vi.mocked(fs.closeSync).mockReset().mockImplementation(native.closeSync);
@@ -591,3 +593,164 @@ test("reservation permission failure rejects without producer invocation, reallo
   expect(native.readdirSync(managed)).toEqual([]);
   expect(entropy.suffixes).toEqual(["abcd", "1234", "5678", "9999"]);
 });
+
+test.each(["cleans", "commits"] as const)(
+  "a winner that %s after native reservation EEXIST does not prevent second-id publication",
+  async (outcome) => {
+    const foreign = reserve("foreign-build");
+    const sentinel = join(foreign, "sentinel");
+    const sentinelBefore = identity(sentinel);
+    const temporary = join(cwd, "builds", `.tmp-${firstId}`);
+    const winnerFinal = join(cwd, "builds", firstId);
+    let winnerBefore: unknown;
+    let collisions = 0;
+    vi.mocked(fs.mkdirSync).mockImplementation((directory, options) => {
+      if (String(directory) !== temporary) return native.mkdirSync(directory, options);
+      // The winner reserves after our precheck, then retires its reservation before reinspection.
+      native.mkdirSync(directory);
+      native.writeFileSync(join(temporary, "build-record.json"), JSON.stringify(buildCase.value));
+      native.writeFileSync(join(temporary, "sentinel"), "winner bytes\n");
+      try {
+        return native.mkdirSync(directory, options);
+      } catch (error) {
+        expect(error).toMatchObject({ code: "EEXIST" });
+        collisions += 1;
+        if (outcome === "cleans") {
+          native.rmSync(temporary, { recursive: true });
+        } else {
+          native.renameSync(temporary, winnerFinal);
+          winnerBefore = {
+            directory: identity(winnerFinal),
+            sentinel: identity(join(winnerFinal, "sentinel")),
+            metadata: identity(join(winnerFinal, "build-record.json")),
+          };
+        }
+        throw error;
+      }
+    });
+    const producer = vi.fn(async (directory: string, id: BuildId) =>
+      Promise.resolve(populate(directory, id)),
+    );
+
+    expect(await publishBuildDirectory(cwd, producer)).toEqual(metadata(secondId));
+
+    expect(collisions).toBe(1);
+    expect(producer).toHaveBeenCalledExactlyOnceWith(
+      join(cwd, "builds", `.tmp-${secondId}`),
+      secondId,
+    );
+    expect(readWorkspaceRecord(cwd, "build", secondId)).toEqual(metadata(secondId));
+    expect(native.existsSync(temporary)).toBe(false);
+    expect(identity(sentinel)).toEqual(sentinelBefore);
+    expect(native.readFileSync(sentinel, "utf8")).toBe("foreign directory bytes\n");
+    expect(native.readdirSync(join(cwd, "builds")).sort()).toEqual(
+      (outcome === "commits"
+        ? ["foreign-build", firstId, secondId]
+        : ["foreign-build", secondId]
+      ).sort(),
+    );
+    if (outcome === "commits") {
+      expect({
+        directory: identity(winnerFinal),
+        sentinel: identity(join(winnerFinal, "sentinel")),
+        metadata: identity(join(winnerFinal, "build-record.json")),
+      }).toEqual(winnerBefore);
+      expect(native.readFileSync(join(winnerFinal, "sentinel"), "utf8")).toBe("winner bytes\n");
+      expect(native.readFileSync(join(winnerFinal, "build-record.json"), "utf8")).toBe(
+        JSON.stringify(buildCase.value),
+      );
+    }
+    expect(fs.rmSync).not.toHaveBeenCalled();
+    expect(entropy.suffixes).toEqual(["1234", "5678", "9999"]);
+    expectClosed();
+  },
+);
+
+test("four native reservation collisions still exhaust the budget when every winner removes its reservation", async () => {
+  const foreign = reserve("foreign-build");
+  const sentinel = join(foreign, "sentinel");
+  const sentinelBefore = identity(sentinel);
+  const attempted: string[] = [];
+  const temporaryPaths = candidates.map((id) => join(cwd, "builds", `.tmp-${id}`));
+  vi.mocked(fs.mkdirSync).mockImplementation((directory, options) => {
+    const target = String(directory);
+    if (!temporaryPaths.includes(target)) return native.mkdirSync(directory, options);
+    native.mkdirSync(directory);
+    try {
+      return native.mkdirSync(directory, options);
+    } catch (error) {
+      expect(error).toMatchObject({ code: "EEXIST" });
+      attempted.push(target);
+      native.rmSync(directory, { recursive: true });
+      throw error;
+    }
+  });
+  const producer = vi.fn(async (directory: string, id: BuildId) =>
+    Promise.resolve(populate(directory, id)),
+  );
+
+  const error = await failure(publishBuildDirectory(cwd, producer), "write");
+
+  expect(error.message).toContain(fourthId);
+  expect(error.message).toMatch(/collision/iu);
+  expect(attempted).toEqual(temporaryPaths);
+  expect(producer).not.toHaveBeenCalled();
+  expect(fs.rmSync).not.toHaveBeenCalled();
+  expect(fs.renameSync).not.toHaveBeenCalled();
+  expect(native.readdirSync(join(cwd, "builds"))).toEqual(["foreign-build"]);
+  expect(identity(sentinel)).toEqual(sentinelBefore);
+  expect(native.readFileSync(sentinel, "utf8")).toBe("foreign directory bytes\n");
+  expect(entropy.suffixes).toEqual(["9999"]);
+});
+
+test.each(["parent", "temporary"] as const)(
+  "post-reservation %s inspection failure reports incomplete cleanup without guessing ownership",
+  async (location) => {
+    const foreign = reserve("foreign-build");
+    const sentinel = join(foreign, "sentinel");
+    const sentinelBefore = identity(sentinel);
+    const managed = join(cwd, "builds");
+    const temporary = join(managed, `.tmp-${firstId}`);
+    const inspection = location === "parent" ? managed : temporary;
+    let reserved = false;
+    let injected = false;
+    let reservationBefore: unknown;
+    vi.mocked(fs.mkdirSync).mockImplementation((directory, options) => {
+      const result = native.mkdirSync(directory, options);
+      if (String(directory) === temporary) {
+        reservationBefore = identity(temporary);
+        reserved = true;
+      }
+      return result;
+    });
+    vi.mocked(fs.lstatSync).mockImplementation((target, options) => {
+      if (reserved && !injected && String(target) === inspection) {
+        injected = true;
+        fault();
+      }
+      return native.lstatSync(target, options);
+    });
+    const producer = vi.fn(async (directory: string, id: BuildId) =>
+      Promise.resolve(populate(directory, id)),
+    );
+
+    const error = await failure(publishBuildDirectory(cwd, producer), "directory");
+
+    expect(reserved).toBe(true);
+    expect(injected).toBe(true);
+    expect(error.message).toContain(firstId);
+    expect(error.message).toMatch(/directory/iu);
+    expect(error.message).toMatch(/cleanup.*(?:failed|incomplete)/iu);
+    expect(producer).not.toHaveBeenCalled();
+    expect(fs.rmSync).not.toHaveBeenCalled();
+    expect(fs.renameSync).not.toHaveBeenCalled();
+    expect(fs.openSync).not.toHaveBeenCalled();
+    expect(identity(temporary)).toEqual(reservationBefore);
+    expect(native.readdirSync(temporary)).toEqual([]);
+    expect(native.existsSync(join(managed, firstId))).toBe(false);
+    expect(native.readdirSync(managed).sort()).toEqual([`.tmp-${firstId}`, "foreign-build"].sort());
+    expect(identity(sentinel)).toEqual(sentinelBefore);
+    expect(native.readFileSync(sentinel, "utf8")).toBe("foreign directory bytes\n");
+    expect(entropy.suffixes).toEqual(["abcd", "1234", "5678", "9999"]);
+  },
+);

@@ -8,7 +8,9 @@
  * Generic overwrite remains limited to task/data/report.
  * Change/verification first publication and companion patches use exclusive link commits;
  * only existing valid ChangeRequests can be rewritten through the atomic replacement writer.
- * Patch reads are non-creating byte reads; publication binds the stored CR and its patch digest.
+ * Patch reads in default/readonly:false mode may create only the missing managed patches root;
+ * readonly:true creates no paths, and no mode creates or repairs a patch. Publication binds the
+ * stored CR and its patch digest.
  * Build publication reserves an owned temporary directory and commits by whole-directory rename.
  * Binary consumers explicitly verify effective execute permissions and descriptor-bound SHA256;
  * metadata reads neither execute nor implicitly verify binaries.

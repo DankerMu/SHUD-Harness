@@ -588,17 +588,18 @@ export async function publishBuildDirectory(
       const collision = error instanceof Error && "code" in error && error.code === "EEXIST";
       if (collision) {
         requireDirectoryIdentity(root, parent);
-        if (buildDirectory(temporary)) {
-          if (reallocations === 3) throw publicationFailure(temporary, id, "collision");
-          continue;
-        }
+        // EEXIST proves a collision even if the winner already removed or committed its reservation.
+        buildDirectory(temporary);
+        if (reallocations === 3) throw publicationFailure(temporary, id, "collision");
+        continue;
       }
       throw publicationFailure(temporary, id, "publication");
     }
-    requireDirectoryIdentity(root, parent);
-    const owned = buildDirectory(temporary);
-    if (!owned) throw new WorkspaceRecordError("directory", temporary);
+    let owned: DirectoryIdentity | undefined;
     try {
+      requireDirectoryIdentity(root, parent);
+      owned = buildDirectory(temporary);
+      if (!owned) throw new WorkspaceRecordError("directory", temporary);
       let value: unknown;
       try {
         value = await producer(temporary, id);
@@ -625,6 +626,11 @@ export async function publishBuildDirectory(
         error instanceof WorkspaceRecordError
           ? error
           : publicationFailure(temporary, id, "publication");
+      if (!owned) {
+        // No initial identity was captured: a later lstat cannot establish ownership retroactively.
+        primary.message += `: cleanup incomplete (${id})`;
+        throw primary;
+      }
       try {
         requireBuildOwnership(root, parent, temporary, owned);
         rmSync(temporary, { recursive: true, force: true });
