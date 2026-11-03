@@ -8,7 +8,7 @@ import { submissionFixture } from "../submit-shud/test-harness.ts";
 
 // Real executable bytes, independent of the production digest/copy helpers.
 export const binaryBytes = Buffer.from(
-  '#!/bin/sh\nprintf \'%s\\n\' "$0" > invoked-path\nprintf \'%s\\n\' "${OMP_NUM_THREADS-unset}" "${SHUD_RHS_THREADS-unset}" "${SHUD_BUILD_TEST_MARKER-unset}" > thread-receipt\nprintf \'%s\\n\' "$@" > argv-receipt\nwhile [ ! -f allow-exit ]; do sleep 0.02; done\nexit 0\n',
+  '#!/bin/sh\nprintf \'%s\\n\' "$0" > invoked-path\nprintf \'%s\\n\' "${OMP_NUM_THREADS-unset}" "${SHUD_RHS_THREADS-unset}" "${SHUD_BUILD_TEST_MARKER-unset}" > thread-receipt\nprintf \'%s\\n\' "$@" > argv-receipt.tmp\nmv argv-receipt.tmp argv-receipt\nwhile [ ! -f allow-exit ]; do sleep 0.02; done\nexit 0\n',
 );
 export const binarySha256 = createHash("sha256").update(binaryBytes).digest("hex");
 

@@ -17,6 +17,13 @@ export class BuildOwnershipError extends AggregateError {
   }
 }
 
+/** Internal transaction capability; retained until submission succeeds or rollback completes. */
+export interface PreparedBuild {
+  readonly record: BuildRecord;
+  /** Authorize recursive rollback only while every observed binary destination remains owned. */
+  readonly assertRollbackSafe: () => void;
+}
+
 function buildFailure(id: BuildId, stage: string, error?: unknown): Error {
   const code =
     error instanceof WorkspaceRecordError
@@ -30,14 +37,15 @@ function buildFailure(id: BuildId, stage: string, error?: unknown): Error {
   return new Error(`Build ${id}: ${stage} failed${code ? ` (${code})` : ""}`);
 }
 
-/** Read only the selected build. Verification is not a snapshot: the copier reacquires safely. */
+/** Read only the selected build and retain its binary ownership through the submission transaction.
+ * Verification is not a snapshot: the copier reacquires safely. */
 export async function prepareBuild(
   cwd: string,
   id: BuildId,
   taskId: TaskId | null,
   runDir: string,
   verifyOwnership: () => void,
-): Promise<BuildRecord> {
+): Promise<PreparedBuild> {
   let record: BuildRecord;
   try {
     record = readWorkspaceRecord(cwd, "build", id, { readonly: true });
@@ -50,8 +58,8 @@ export async function prepareBuild(
   } catch (error) {
     throw buildFailure(id, "source sha256/executable verification", error);
   }
-  await copyBinary(cwd, record, runDir, verifyOwnership);
-  return record;
+  const assertRollbackSafe = await copyBinary(cwd, record, runDir, verifyOwnership);
+  return { record, assertRollbackSafe };
 }
 
 /** One bounded buffer, sequential descriptor I/O, and exactly one close attempt per owned handle. */
@@ -60,7 +68,7 @@ async function copyBinary(
   record: BuildRecord,
   runDir: string,
   verifyOwnership: () => void,
-): Promise<void> {
+): Promise<() => void> {
   const id = record.build_id;
   const buildRoot = join(cwd, "builds");
   const buildDir = join(buildRoot, id);
@@ -86,7 +94,7 @@ async function copyBinary(
       throw new BuildOwnershipError(id, []);
     }
   }
-  function failPreparation(): never {
+  function assertRollbackSafe(): void {
     // Recursive run rollback is permitted only while every observed binary child is ours.
     // Acquisition errors may leave an observed foreign entry without any captured identity.
     try {
@@ -120,7 +128,15 @@ async function copyBinary(
         }
       }
     } catch {
-      failures.push(new BuildOwnershipError(id, []));
+      throw new BuildOwnershipError(id, []);
+    }
+  }
+  function failPreparation(): never {
+    try {
+      assertRollbackSafe();
+    } catch (error) {
+      if (!(error instanceof BuildOwnershipError)) throw error;
+      failures.push(error);
     }
     if (failures.some((error) => error instanceof BuildOwnershipError))
       throw new BuildOwnershipError(id, failures);
@@ -247,4 +263,5 @@ async function copyBinary(
     );
     failPreparation();
   }
+  return assertRollbackSafe;
 }

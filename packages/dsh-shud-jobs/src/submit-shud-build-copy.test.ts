@@ -138,19 +138,27 @@ function observeCopy(sourcePath: string, phase = "success") {
 }
 
 test.each([
-  "source-open",
-  "destination-open",
-  "source-read",
-  "destination-write",
-  "write-no-progress",
-  "chmod",
-  "copied-read",
-  "copied-hash",
-  "source-close",
-  "destination-close",
+  { phase: "source-open", operation: /source.*(?:open|acqui)/iu, ioFailure: true },
+  {
+    phase: "destination-open",
+    operation: /(?:destination|temporar|cop(?:y|ied)).*(?:open|acqui)/iu,
+    ioFailure: true,
+  },
+  { phase: "source-read", operation: /(?:source|copy).*read/iu, ioFailure: true },
+  { phase: "destination-write", operation: /(?:destination|copy).*write/iu, ioFailure: true },
+  {
+    phase: "write-no-progress",
+    operation: /(?:copy|binary).*(?:write|progress)/iu,
+    ioFailure: false,
+  },
+  { phase: "chmod", operation: /chmod|permission.*(?:set|chang)/iu, ioFailure: true },
+  { phase: "copied-read", operation: /copied.*(?:read|sha256|hash)/iu, ioFailure: true },
+  { phase: "copied-hash", operation: /copied.*(?:sha256|hash)/iu, ioFailure: false },
+  { phase: "source-close", operation: /source.*clos/iu, ioFailure: true },
+  { phase: "destination-close", operation: /(?:destination|copy).*clos/iu, ioFailure: true },
 ])(
-  "copier %s failure closes every other resource once and rolls back before capture",
-  async (phase) => {
+  "copier $phase failure closes every other resource once and rolls back before capture",
+  async ({ phase, operation, ioFailure }) => {
     const h = await buildFixture();
     const execution = submissionProducer();
     const observed = observeCopy(h.source, phase);
@@ -169,6 +177,8 @@ test.each([
       if (!(outcome instanceof Error)) throw new Error("Copy failure unexpectedly executed");
       expect(outcome.message).toContain(h.build.build_id);
       expect(outcome.message).not.toContain("private copier IO payload");
+      expect(outcome.message).toMatch(operation);
+      if (ioFailure) expect(outcome.message).toMatch(/\bEIO\b/u);
       if (phase === "copied-hash") expect(outcome.message).toMatch(/copied.*sha256/iu);
       expect(observed.faults).toBe(1);
       expect(publications).toBe(0);

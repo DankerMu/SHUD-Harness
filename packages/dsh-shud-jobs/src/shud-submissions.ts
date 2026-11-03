@@ -15,7 +15,7 @@ import type { StateIndexStore } from "./state-indexes.ts";
 import { captureStackLock, generateProvenance, writeJson } from "@shud-harness/dsh-shud-records";
 import { stdoutSource } from "./file-output.ts";
 import { updateEnd } from "./shud-end.ts";
-import { BuildOwnershipError, prepareBuild } from "./shud-build.ts";
+import { BuildOwnershipError, prepareBuild, type PreparedBuild } from "./shud-build.ts";
 import {
   copyInput,
   existingPath,
@@ -163,6 +163,7 @@ export class ShudSubmissions {
     let created = false;
     let indexed = false;
     let provenance: OwnedProvenance | undefined;
+    let preparedBuild: PreparedBuild | undefined;
     const execution: {
       value?: ShudExecution;
       startup?: Promise<{ identity: ShudProcessIdentity } | { error: unknown }>;
@@ -202,12 +203,13 @@ export class ShudSubmissions {
       await io.writeFile(join(reservation.runDir, "stdout.log"), "", { flag: "wx" });
       await io.writeFile(join(reservation.runDir, "stderr.log"), "", { flag: "wx" });
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
-      const build =
+      preparedBuild =
         input.buildId === null
           ? undefined
           : await prepareBuild(input.cwd, input.buildId, input.taskId, reservation.runDir, () =>
               verifyRun(input.runsDir, location.parent, reservation.runDir, location.directory),
             );
+      const build = preparedBuild?.record;
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
       const stack = captureStackLock({ ...this.config, cwd: input.cwd }, input.llm, build);
       const data = await generateProvenance(reservation.runDir, input.project, input.inputDir);
@@ -347,6 +349,7 @@ export class ShudSubmissions {
               cause: error,
             });
           verifyRun(input.runsDir, parent, reservation.runDir, owned);
+          preparedBuild?.assertRollbackSafe();
           await io.rm(reservation.runDir, { recursive: true });
         }
         if (provenance) await removeProvenance(provenance);

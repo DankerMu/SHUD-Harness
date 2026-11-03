@@ -48,9 +48,12 @@ async function collectAfterRelease(
   return result;
 }
 
-test.each(["edit", "delete"] as const)(
-  "first created binds executable and lineage before producer; source %s cannot change execution",
-  async (mutation) => {
+test.each([
+  { mutation: "edit", threads: 1, receipt: "1\n1\npreserved\n" },
+  { mutation: "delete", threads: 2, receipt: "2\n2\npreserved\n" },
+] as const)(
+  "first created binds executable and lineage before producer; source $mutation, threads $threads",
+  async ({ mutation, threads, receipt }) => {
     const h = await buildFixture("tiny; touch PROJECT_INJECTION");
     const execution = settlingProducer();
     const publications: RunJob[] = [];
@@ -67,7 +70,7 @@ test.each(["edit", "delete"] as const)(
             task_id: h.build.task_id,
             build_id: h.build.build_id,
             binary_sha256: binarySha256,
-            threads: 2,
+            threads,
             command: [
               join(record.run_dir, "bin", "shud"),
               "-o",
@@ -118,7 +121,7 @@ test.each(["edit", "delete"] as const)(
         await actualIo.rename(source, target);
       });
       const job = await registry.submitShud(
-        { ...h.buildRequest, threads: 2, end_days: 30 },
+        { ...h.buildRequest, threads, end_days: 30 },
         (record, handle, cadence) => {
           expect(publications.map((value) => value.status)).toEqual(["created", "submitted"]);
           return execution.start(record, handle, cadence);
@@ -138,9 +141,7 @@ test.each(["edit", "delete"] as const)(
       expect(await io.readFile(join(job.run_dir, "invoked-path"), "utf8")).toBe(
         `${join(job.run_dir, "bin", "shud")}\n`,
       );
-      expect(await io.readFile(join(job.run_dir, "thread-receipt"), "utf8")).toBe(
-        "2\n2\npreserved\n",
-      );
+      expect(await io.readFile(join(job.run_dir, "thread-receipt"), "utf8")).toBe(receipt);
       expect(await io.readFile(join(job.run_dir, "argv-receipt"), "utf8")).toBe(
         `-o\noutput/${h.request.project}.out\n${h.request.project}\n`,
       );
@@ -157,7 +158,7 @@ test.each(["edit", "delete"] as const)(
         exit_code: 0,
         build_id: h.build.build_id,
         binary_sha256: binarySha256,
-        threads: 2,
+        threads,
         task_id: h.build.task_id,
         stack_id: job.stack_id,
         data_id: job.data_id,

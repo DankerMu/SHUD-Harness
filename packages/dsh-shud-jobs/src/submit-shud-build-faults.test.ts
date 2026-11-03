@@ -58,9 +58,19 @@ test.each(["bin-directory", "binary-rename"])(
         }
         await actualIo.rename(source, target);
       });
-      await expect(registry.submitShud(h.buildRequest, execution.start)).rejects.toThrow(
-        h.build.build_id,
+      const outcome: unknown = await registry
+        .submitShud(h.buildRequest, execution.start)
+        .catch((error: unknown) => error);
+      expect(outcome).toBeInstanceOf(Error);
+      if (!(outcome instanceof Error)) throw new Error("Expected binary preparation failure");
+      expect(outcome.message).toContain(h.build.build_id);
+      expect(outcome.message).toMatch(
+        phase === "bin-directory"
+          ? /(?:bin|destination|director).*(?:creat|mkdir)/iu
+          : /(?:binary|copy).*(?:rename|publish|publication)/iu,
       );
+      expect(outcome.message).toMatch(/\bEACCES\b/u);
+      expect(outcome.message).not.toContain("injected binary");
       expect(failures).toBe(1);
       expect(execution.handles).toEqual([]);
       expect(registry.indexes.read()).toEqual({ active: [], completed: [] });
