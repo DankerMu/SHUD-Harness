@@ -12,6 +12,8 @@ function pathBytes(status: Buffer, start: number, end: number): Buffer {
 
 /**
  * Observe modifications of existing tracked files at a real source directory root.
+ * Terminal slash/dot aliases cannot bypass the source-entry symlink check; ancestor
+ * traversal, including '..', remains physical and Git receives the original spelling.
  * Core runGit owns root validation, child environment and Git hardening. No source,
  * index or workspace record is written. Unsupported states fail before diff.
  * Returned names are literal, codepoint-sorted paths; patch is the exact HEAD diff stdout.
@@ -20,8 +22,11 @@ function pathBytes(status: Buffer, start: number, end: number): Buffer {
 export async function observeSourceChanges(
   sourceDir: string,
 ): Promise<{ files_changed: string[]; patch: Buffer }> {
+  // POSIX lstat follows a final symlink when '/'/'.' suffixes force directory traversal.
+  // Strip only that suffix for the entry check; retain root spellings and empty input.
+  const sourceEntry = sourceDir.replace(/(?:\/\.?)+$/u, "") || sourceDir;
   try {
-    if (!lstatSync(sourceDir).isDirectory()) throw new Error();
+    if (!lstatSync(sourceEntry).isDirectory()) throw new Error();
   } catch {
     throw new Error("Source directory must be an existing real directory, not a symlink");
   }

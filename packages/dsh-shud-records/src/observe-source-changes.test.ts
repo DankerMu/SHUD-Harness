@@ -277,6 +277,61 @@ describe("observeSourceChanges with real Git", () => {
     },
   );
 
+  test.each(["/", "/.", "/./", "//.//."])(
+    "rejects a symlink source root with terminal suffix %j before any Git process",
+    async (suffix) => {
+      const repo = sourceRepo(root);
+      const link = join(root, "source-link");
+      symlinkSync(repo, link, "dir");
+
+      await expect(observeSourceChanges(`${link}${suffix}`)).rejects.toThrow();
+
+      expect(readFileSync(tracePath)).toEqual(Buffer.alloc(0));
+    },
+  );
+
+  test.each(["/", "/.", "/./", "//.//."])(
+    "observes a real source root with terminal suffix %j",
+    async (suffix) => {
+      const repo = sourceRepo(root);
+      putSource(repo, "model.cpp", "after\n");
+
+      const result = await observeSourceChanges(`${repo}${suffix}`);
+
+      expect(result.files_changed).toEqual(["model.cpp"]);
+      expect(result.patch).toEqual(expectedPatch(repo, ["model.cpp"]));
+      expect(traceFields()).toContain("status");
+      expect(traceFields()).toContain("diff");
+    },
+  );
+
+  test("rejects an empty source root before any Git process", async () => {
+    await expect(observeSourceChanges("")).rejects.toThrow();
+    expect(readFileSync(tracePath)).toEqual(Buffer.alloc(0));
+  });
+
+  test.each(["", "/", "/.", "/./", "//.//."])(
+    "preserves physical symlink-ancestor parent traversal with terminal suffix %j",
+    async (suffix) => {
+      const repo = sourceRepo(root);
+      const nested = join(repo, "nested");
+      mkdirSync(nested);
+      const ancestor = join(root, "ancestor-link");
+      symlinkSync(nested, ancestor, "dir");
+      putSource(repo, "model.cpp", "after\n");
+      // Physical '..' reaches repo; lexical collapse would reach the nonrepository root.
+      // Do not use join here: it would erase the traversal before the observer receives it.
+      const source = `${ancestor}/..${suffix}`;
+
+      const result = await observeSourceChanges(source);
+
+      expect(result.files_changed).toEqual(["model.cpp"]);
+      expect(result.patch).toEqual(expectedPatch(repo, ["model.cpp"]));
+      expect(traceFields()).toContain("status");
+      expect(traceFields()).toContain("diff");
+    },
+  );
+
   test.each(["nonrepository", "nested directory", "foreign git directory"] as const)(
     "rejects a %s root before target status or diff",
     async (kind) => {

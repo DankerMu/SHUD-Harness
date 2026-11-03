@@ -176,7 +176,7 @@
 
 本刀仅3.2，#518/#526/#527均已合并。expanded实际覆盖CriticalPath#1/#5及必需的records内创建输入切换，不提前做closure、工具或报告。
 
-- API/路径：observeSourceChanges返回原始files_changed与Buffer patch；sourceDir先lstat拒绝缺失/链接/文件/FIFO，再仅消费runGit。真实外层repo中的普通子目录拒绝且trace无status/diff；core负责realpath根检查，不复制runner。
+- API/路径：observeSourceChanges返回原始files_changed与Buffer patch；sourceDir先lstat拒绝缺失/链接/文件/FIFO，再仅消费runGit。最终链接的尾部`/`、`/.`及组合不得绕过检查；真实目录同类拼写仍合法，父级符号链接后`..`保持物理遍历语义，不以normalize/resolve替换。真实外层repo中的普通子目录拒绝且trace无status/diff；core负责realpath根检查，不复制runner。
 - Porcelain：NUL边界、两字节XY与分隔空格严格解析；正常M/空白组合、staged/unstaged/MM成功；??、A（含git add -N）、D、R/C、U及T/未知状态拒绝并列出路径，不进入diff。rename/copy两路径均正确消费。损坏终止符/缺路径/非法UTF8/重复非法路径失败，不猜测或丢弃记录。
 - 原名/顺序：空格、换行、引号、反斜线、前导BOM和astral-vs-BMP路径保持；排序用已验证UTF8 byte views的Buffer.compare，最终经core公开files_changed字段校验，不另写码点比较器或改core出口。无变更返回[]/空Buffer，且不执行空pathspec的全树diff。
 - Patch：固定HEAD diff通过runner产生，返回字节原样；操作数以:(literal)编码真实路径，逻辑files_changed不改。真实[:(*)?]、冒号/exclude路径负控必须证明不丢改动、不匹配错误名字；保留既有空格/换行场景。原工作树、HEAD、index字节/mtime不改；不新增--binary或apply验证。
