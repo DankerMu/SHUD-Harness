@@ -3,6 +3,7 @@ import type { TaskCard, TaskRuntimePhase, TaskStatus } from "@shud-harness/dsh-s
 /** Facts established by the caller, not approval credentials or closure evidence. */
 export type TaskEvent =
   | { type: "task_create" }
+  | { type: "change_create" }
   | { type: "shud_run" }
   | { type: "reconcile" }
   | { type: "report_generate" }
@@ -11,18 +12,20 @@ export type TaskEvent =
 
 /** Controlled diagnostics deliberately exclude card text and untrusted event payloads. */
 export class TaskTransitionError extends Error {
-  constructor(readonly reason: "invalid_event" | "invalid_transition") {
+  constructor(readonly reason: "invalid_event" | "invalid_transition" | "invalid_task_type") {
     super(`Task transition failed: ${reason}`);
     this.name = "TaskTransitionError";
   }
 }
 
 /**
- * Apply the M3 transition table without IO or input mutation. Creation starts from an
- * in-memory created card; no event produces a persisted transient/forbidden state.
+ * Apply task transitions without IO or input mutation. Creation starts from an
+ * in-memory created card; change_create enters only code_change cards into running_local.
  * Callers own successful submission, closure and allowed-once approval prerequisites,
  * link updates and persistence. Only status, runtime_phase and updated_at change here.
  * An explicit Date is used verbatim; otherwise the clock is read only after acceptance.
+ * A later change_create preserves the running card's phase, including an absent phase.
+ * Build, approval and verification publication are not transition events.
  */
 export function transitionTask(card: TaskCard, event: TaskEvent, now?: Date): TaskCard {
   if (event === null || typeof event !== "object" || Array.isArray(event)) {
@@ -31,9 +34,20 @@ export function transitionTask(card: TaskCard, event: TaskEvent, now?: Date): Ta
 
   let status: TaskStatus | undefined;
   let runtime_phase: TaskRuntimePhase | null = null;
+  let preserveRuntimePhase = false;
   switch (event.type) {
     case "task_create":
       if (card.status === "created") status = "planned";
+      break;
+    case "change_create":
+      if (card.type !== "code_change") throw new TaskTransitionError("invalid_task_type");
+      if (card.status === "planned") {
+        status = "running";
+        runtime_phase = "running_local";
+      } else if (card.status === "running") {
+        status = "running";
+        preserveRuntimePhase = true;
+      }
       break;
     case "shud_run":
       if (card.status === "planned" || card.status === "running") status = "running";
@@ -64,5 +78,7 @@ export function transitionTask(card: TaskCard, event: TaskEvent, now?: Date): Ta
   }
 
   if (status === undefined) throw new TaskTransitionError("invalid_transition");
-  return { ...card, status, runtime_phase, updated_at: (now ?? new Date()).toISOString() };
+  const result = { ...card, status, updated_at: (now ?? new Date()).toISOString() };
+  if (!preserveRuntimePhase) result.runtime_phase = runtime_phase;
+  return result;
 }

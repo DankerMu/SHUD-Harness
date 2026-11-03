@@ -1,15 +1,16 @@
 # Proposal
 
-## Active issue fixture: #528
+## Active issue fixture: #529
 
-- Issue type: feature; Fixture level: expanded; upstream level retained. Actual risks are deterministic floor/record derivation and controlled Git observation (Critical Path #1/#5), plus the necessary new-CR creation-input cutover; closure/report rendering are not part of this slice.
-- Scope: task 3.2, records source/tests/exports only. observeSourceChanges returns canonical raw paths and exact patch bytes; deriveChangeRequest returns a schema-valid proposed record and structured declaration-raising facts. No core/runner/schema/tools/policy/profile changes.
-- Selected risk packs: Public API; Auth/secrets; File IO/path safety; Parsing/data integrity; Error/resource handling; Legacy compatibility; Documentation. Existing file publication/concurrency guarantees must survive the composition change; no new concurrency service or dependency.
-- Pure derivation takes explicit candidate ChangeId and created_at, not a hidden clock/random generator. The existing createChangeRequest cleanly changes from fields-only input to a complete candidate; it claims that first id through exclusive publication and draws new ids only on collision. Migrate every repository caller/typecheck, retain four-candidate/no-clobber behavior, no dual interface or preview-id allocation.
-- Literal Git pathspec encoding is required at the diff operand boundary: a real repo with :(exclude)normal.cpp and normal.cpp produced an empty patch with raw operands, but both changes with literal operands. Return original path strings; do not add environment variables or alter core hardening.
-- Reuse core floor/order/risk and public schema field definitions. Core's private path comparator is not re-exported; native Buffer.compare on validated UTF-8 path bytes supplies code-point ordering without duplicating it. No new Zod dependency or copied schema model.
-- Evidence floor: tests-only RED, real Git repositories and native environment recorder, real special-path/unsafe-state cases, pure deterministic metadata vectors, migrated creation/collision regressions, built observe→derive→persist smoke, full check, Critical Path review and same-SHA CI.
-- HEAD/card equality, TaskCard reads/writes, output-directory preflight and approval/tool integration remain #536; actual build/apply/reverification remains #537. No arbitrary Git-config/attributes determinism or transactional external-worktree snapshot claim.
+- Issue type: feature; Fixture level: expanded; upstream level retained. Actual Critical Path #1: deterministic code_change closure and state transitions. No schema, report-language, approval or host changes.
+- Scope: task 3.3, records task-closure/task-transition/code-change-closure modules and tests, minimal public index/typecheck migration, and one CONTEXT.md invariant pointing to the new closure tests.
+- Selected risk packs: Public API; State/invariants; Evidence identity; Schema consumption; File IO/error boundaries via injected readers; Legacy compatibility; Documentation. No new configuration, dependency, concurrency service, retry or resource lifecycle.
+- Keep evaluateClosure's synchronous four-argument science_assist contract and exact output/legacy predicates. Add code_change dispatch with an explicit optional fifth object-loader contract; code_change without loaders fails closed. A shared internal task-closure module owns clauses 0/5 once, rather than copying run checks or fabricating a science_assist card.
+- New synchronous codeChangeClosure(card, loaders) consumes branded linked-object readers, a caller-preloaded task-job snapshot with explicit collect-attempt counts, RunRecords and authored arrays. It owns no filesystem discovery/write, async backend call, logging, clock or mutation; #541 owns readonly adapters and asynchronous evidence preparation.
+- All linked CR/VC records are schema/identity/task checked even after a qualifying pair exists. Clause 1 verifies approved CR patches; clause 2 remains existential and accepts passed or failed VC. Invalid linked files fail closed; valid nonterminal/proposed alternatives do not veto a qualifying pair. All linked jobs still satisfy the unchanged run rules.
+- change_create is the only added transition event: code_change planned enters running_local, running preserves status/phase. shud_build/change_submit/verification_run remain outside the transition-event domain, never synthetic no-op events. Existing shud_run/reconcile/report transitions stay unchanged.
+- Evidence floor: tests-only RED; all thirteen closure and five entry scenarios; identity/patch/run-binding and existential-alternative negatives; actual readonly file adapters preserve bytes/mtime/inventory; frozen built M3 outputs unchanged; built code_change smoke; full check, strict OpenSpec, Critical Path review and same-SHA CI.
+- Non-goals: tools and publication order (#536/#540/#541), report references/rendering (#533), schema/runner/jobs behavior, approvals, Web/LLM/SHUD or PI acceptance. Shared M4 change remains active.
 
 ## Why
 

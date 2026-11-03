@@ -55,6 +55,8 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 
 15. **报告终态只在审批卡 `allowed-once` 分支写入**：已安装的 raw→policy→host 链先保护确切报告/TaskCard 目标、判定当前角色，再由宿主审批准入；`report_submit`/`report_decide` 不自行审批。拒绝、取消、不可用、缺服务/Agent 均不得执行终态写入；`approval_ref` 精确取本次 `exec.callId`，被拒 submit 卡不产生领域决定。报告 JSON 是权威提交点，卡片/Markdown 后续失败保留已提交决定，下一次调用修复但不重复决定；四个报告工具共用物理 cwd/report_id 的单进程发布顺序，不能让迟到 DRAFT 覆盖终态水印。伴生断言：`packages/dsh-shud-tools/src/report-decisions.test.ts`（真实 ToolRuntime + policy + approval 边界 double）、`report-decision-contract.test.ts`、`report-decision-publication.test.ts`、`report-decision-ordering.test.ts`、`report-decision-raw.test.ts`；对话转述与二次确认选择见 [ADR-0011（accepted）](docs/adr/implemented/0011-pi-comment-conversation-carrier.md)。这些工程测试不等于真实 Web/session-log 持久化证据或 PI 功能验收。
 
+16. **code_change closure 不以 LLM 为据**：仅以卡片链接的同任务、同身份 CR/VC 与全部关联运行证据裁决；approved CR 必须绑定精确 patch 哈希，passed/failed 终态 VC 均可作为见证。损坏、身份不符或跨任务的链接证据不能被有效兄弟记录掩盖；合法但不能充当见证的候选不否决另一有效见证。输入与文件不改写，仍复用 science_assist 的 authored-array/运行/收集耗尽规则；伴生测试：`packages/dsh-shud-records/src/code-change-closure.test.ts`。
+
 ## Forbidden Logic
 
 - Agent 陈述科学结论；"单流域指标提升 = 模型改进"；"校准结果 = 结构验证"；"模型机制已验证"；"普遍改进"。

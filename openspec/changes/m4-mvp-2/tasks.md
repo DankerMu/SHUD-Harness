@@ -187,9 +187,24 @@
 - 错误/资源：保留runner受控错误及缓冲失败，解析错误不回显原始stdout/私有载荷；路径错误可列真实路径。没有新增重试、缓存、索引、审批或依赖；无任意Git配置/attribute确定性、外部并发快照或patch可应用性承诺。HEAD==卡base和后续工具零写入边界仍归#536，build复核归#537。
 - 证据顺序：tests-only实际RED→实现GREEN；真实Git+pure输出向量；创建输入迁移的原文件层回归；built observe→derive→create/patch→readonly smoke（非SHUD构建/PI）；pnpm run check、strict OpenSpec、31generated不变、三席审查和同SHA CI。
 
+### Issue #529 risk and evidence fixture
+
+本刀仅3.3，#520/#527均已合并；#528已由#567交付。expanded实际覆盖CriticalPath#1，不提前接入工具/报告渲染或修改schema。
+
+- Public API/兼容：evaluateClosure既有四参数同步结果与science_assist全部期望不变；code_change第五参数只注入对象reader，缺失明确fail-closed。公开codeChangeClosure(card, loaders)同步；listRunJobsByTask只调用一次、返回已有快照的ClosureRunJob包装，RunRecord/draft显式传入。index/typecheck做最小契约迁移，无新宿主依赖/异步双接口。
+- 单源/旧行为：抽取共有0/5子句而不复制或伪造card.type；science_assist未知type/错误顺序/metric_fact/automatic_limitation保持。代码路径0/1/2/5失败标号明确，3/4由core schema保证；engineering/ops仍unsupported。新结果不代替报告或审批。
+- 状态：planned code_change经change_create→running/running_local；running各合法phase保持；shud_run先到/后到仍submitted_job；reconcile/report退出路径不变。science_assist/engineering/ops拒绝change_create，非planned/running拒绝；仅新增这一个事件。shud_build/change_submit/verification_run仍invalid_event且不读clock/不变card，不增加假no-op转换。接受的change_create只更新既有状态/phase/time，不写links。
+- 身份/读取：仅按去重后的linked_changes/linked_verifications请求品牌id；所有链接CR/VC都读、schema与embedded id/task绑定。任一缺失/损坏/非法schema/错id/foreign task即受控失败点名id，不因另一有效对而隐藏；reviewer_notes空/reviewed_by空是读取错误非clause3。未链接合格文件不发现。reader异常不带原cause/文本/敏感载荷。
+- Clause0：linked_jobs和三原始数组各非空；不先插automatic_limitation、不分类LLM文本，分别负例。Clause1：至少一个approved CR；proposed记录仍校验但不读其patch；所有approved候选均读取原bytes校验sha，任何必需patch缺失/类型错误/不匹配给clause1+change_id并阻塞。哈希覆盖Uint8Array view、不改bytes。
+- Clause2：至少一个passed或failed VC指向同一个合格approved CR；failed有效不阻塞。空链接、proposed/unlinked CR、四个非terminal状态给clause2；有效非terminal/无关候选不能否决另一有效witness。base/candidate分别验证run_id唯一对应task-owned RunJob且job_id被card链接，缺失/foreign/ambiguous/unlinked均有vc_id/run_id及可得job_id。任何linked文件读取错误仍全局阻塞。
+- Clause5：复用全部linked job的旧规则，不仅witness两运行；running/failed/cancelled、RunRecord failed/cancelled/lost、无record/null stack/data、duplicate/foreign job/record、非法/耗尽attempts均阻塞并点名job_id。已成功record不能掩盖耗尽ledger；无关未链接job仍忽略。旧science_assist测试期望不改。
+- 文件/资源边界：谓词无直接FS/目录扫描/写/日志/时钟；注入既有readonly workspace readers的真实文件测试覆盖JSON损坏/schema-invalid/缺失/链接/非普通目标/ID不符，拒绝后bytes/mtime/inventory不变；纯对象测试冻结card/snapshots/返回值，不调用不需要的unlinked reader。无重试/缓存/并发发布/额外资源生命周期。
+- 文档：CONTEXT.md新增一条code_change closure不以LLM为据的不变量，指向code-change-closure.test.ts；API注释与active design同步；31生成投影不变。配置、release/dependencies、审批/密钥/科学语言内容不改，不做工具/宿主smoke冒充本刀证据。
+- 验证：tests-only新行为真实RED→实现GREEN；13closure+5entry场景及上述组合边界；变更前冻结M3 built结果，变更后逐项相等；built direct/facade closure+transition+readonly文件smoke；pnpm run check、strict OpenSpec、三席白盒与同SHA CI。#536/#540/#541负责工具写入与真实report入口，#549PI gate不变。
+
 - [x] 3.1 依赖 2.1。三对象文件层：`changes/`、`patches/`、`verifications/` 原子写（排他创建、EEXIST 重分配 id ≤3 次）与读取校验，`builds/<id>/` 临时目录（排他 `mkdir`）rename 发布与消费者 sha256 校验（change-requests「ChangeRequest workspace files」、verification-cases「VerificationCase workspace files」、shud-build「Build workspace files」、task-cards「TaskCard workspace file」扩展的 id/目录/排他创建与目录级 rename 例外）；路径安全复用 `workspace-paths.ts`；符号链接/非目录 fail-closed 正反例。
 - [x] 3.2 依赖 2.3、2.6、3.1。`observeSourceChanges(sourceDir)`（经 2.6 runner：porcelain `-z` 解析、忽略路径不计、untracked/删除/重命名拒绝、realpath ≠ toplevel 拒绝）与 ChangeRequest 生成纯函数（floor/categories 派生、申报抬升、patch 固定命令、sha256、`base_commit` 40 hex）；以真实临时 git 仓库测试（change-requests「Source change observation」）。
-- [ ] 3.3 依赖 2.2a、3.1。`code_change` 状态进入（`change_create` → running/running_local）与 `codeChangeClosure(card, loaders)` 六子句（0 输入非空、1 approved CR 属本卡且 patch sha 匹配、2 终态 VC 属本卡且其两个 run 的 RunJob ∈ `linked_jobs`、3/4 schema 保证、5 既有运行子句）正反例，不合格对象按不可读处理；`task-closure.ts` 分派按 `type`；`CONTEXT.md` 增"code_change closure 不以 LLM 为据"不变量并指向本测试（task-cards「code_change state entry」「code_change closure predicate」）。
+- [x] 3.3 依赖 2.2a、3.1。`code_change` 状态进入（`change_create` → running/running_local）与 `codeChangeClosure(card, loaders)` 六子句（0 输入非空、1 approved CR 属本卡且 patch sha 匹配、2 终态 VC 属本卡且其两个 run 的 RunJob ∈ `linked_jobs`、3/4 schema 保证、5 既有运行子句）正反例，不合格对象按不可读处理；`task-closure.ts` 分派按 `type`；`CONTEXT.md` 增"code_change closure 不以 LLM 为据"不变量并指向本测试（task-cards「code_change state entry」「code_change closure predicate」）。
 - [ ] 3.4 依赖 2.2d。`generateProvenance` 解析 `<project>.tsd.forc` 第 2 行与 Filename 列，副本内无外部文件、副本外逐一哈希为 `external_files`，缺失/非普通文件/解析失败抛错（data-provenance「Provenance generation at submission」）；ccw（得 `[]`）与构造的绝对 forcing 两类夹具。
 - [ ] 3.5 依赖 2.2b。`captureStackLock` 接受可选 build 源：`repos.SHUD` 取 BuildRecord 源修订（`dirty_paths` 原样、`dirty_paths_truncated: false`）、`build_id` 写入并进指纹；无 build 时逐字节不变的回归（stack-lock「Deterministic capture at shud_run submission」）。
 - [ ] 3.6 依赖 2.5、3.3。报告：`.json` 增 `change_ids`/`verification_ids`（`default([])`）与生成投影；`.md` 事实表增 ChangeRequest 段（含 `floor_categories`）、VerificationCase 段、BuildRecord 段，StackLock 表增 `build_id`；§5 由 2.5 常量逐字渲染；§7 列 failed VC；golden 更新只限新增段；M3 报告渲染字节不变回归（evidence-reports「EvidenceReport record」「Deterministic facts table」「Report template」「EvidenceReport generated projection」「code_change report wording constant」）。
