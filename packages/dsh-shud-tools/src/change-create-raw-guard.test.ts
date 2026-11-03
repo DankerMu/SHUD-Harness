@@ -2,7 +2,12 @@ import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
-import { TaskIdSchema, type TaskId } from "@shud-harness/dsh-shud-core";
+import {
+  ChangeIdSchema,
+  ChangeRequestSchema,
+  TaskIdSchema,
+  type TaskId,
+} from "@shud-harness/dsh-shud-core";
 import * as rawGuard from "@shud-harness/dsh-shud-raw-guard";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { expectToolError, treeOrAbsent } from "./task-linked/test-harness.ts";
@@ -71,6 +76,48 @@ test.each([
   expect(logs.join("\n")).not.toContain(h.cwd);
   expect(await treeOrAbsent(h.cwd)).toEqual(before);
 });
+
+test.each([
+  { rawTarget: "tasks", missingAncestor: "tasks" },
+  { rawTarget: "task-directory", missingAncestor: "tasks" },
+  { rawTarget: "task-file", missingAncestor: "tasks" },
+  { rawTarget: "task-directory", missingAncestor: "task-directory" },
+  { rawTarget: "task-file", missingAncestor: "task-directory" },
+])(
+  "absent $missingAncestor still protects raw $rawTarget before card admission",
+  async ({ rawTarget, missingAncestor }) => {
+    const tasks = join(h.cwd, "tasks");
+    const directory = join(tasks, id);
+    const missing = missingAncestor === "tasks" ? tasks : directory;
+    fs.rmSync(missing, { recursive: true });
+    const raw =
+      rawTarget === "tasks" ? tasks : rawTarget === "task-directory" ? directory : taskPath(h, id);
+    expect(fs.existsSync(missing)).toBe(false);
+    expect(fs.existsSync(raw)).toBe(false);
+    const logs: string[] = [];
+    h.ctx.logger.exporter({
+      export(message) {
+        logs.push(message.args.map(String).join(" "));
+      },
+    });
+    await h.apply(rawGuard, { rawDirs: [raw] });
+    const seen = await admission(h);
+    const before = await treeOrAbsent(h.cwd);
+    vi.mocked(childProcess.execFile).mockClear();
+    vi.mocked(fs.readFileSync).mockClear();
+
+    expectToolError(await h.invoke("change_create", { task_id: id }), /immutable/iu);
+
+    expect(seen.preExecutions).toBe(0);
+    expect(seen.executions).toBe(0);
+    expect(seen.approvals).toEqual([]);
+    expect(childProcess.execFile).not.toHaveBeenCalled();
+    expect(fs.readFileSync).not.toHaveBeenCalled();
+    expect(logs.some((line) => line.includes("deny change_create raw-immutable"))).toBe(true);
+    expect(fs.existsSync(missing)).toBe(false);
+    expect(await treeOrAbsent(h.cwd)).toEqual(before);
+  },
+);
 
 test.each([{}, { task_id: "../escape" }, { task_id: "TASK-20261102T093000-A001" }])(
   "invalid or missing task identity still protects the tasks fallback: %j",
@@ -172,6 +219,61 @@ test("missing differently cased patches follows actual native namespace identity
   }
   expect(seen.approvals).toEqual([]);
 });
+
+test.each([
+  { raw: "REPOS", physical: "repos" },
+  { raw: "repos/shud", physical: "repos/SHUD" },
+])(
+  "source case spelling $raw follows independently observed native identity",
+  async ({ raw, physical }) => {
+    const rawPath = join(h.cwd, raw);
+    const physicalPath = join(h.cwd, physical);
+    const original = fs.lstatSync(physicalPath, { bigint: true });
+    const alternate = fs.lstatSync(rawPath, { bigint: true, throwIfNoEntry: false });
+    // The real filesystem, not the guard or OS name, determines whether this spelling aliases.
+    // An unexpected existing distinct entry is a fixture failure, never a skipped case.
+    if (alternate !== undefined) {
+      expect(alternate.isDirectory()).toBe(true);
+      expect([alternate.dev, alternate.ino]).toEqual([original.dev, original.ino]);
+    }
+    await h.apply(rawGuard, { rawDirs: [raw] });
+    const seen = await admission(h);
+    const before = await treeOrAbsent(h.cwd);
+    const sourceBefore = await treeOrAbsent(h.source);
+    vi.mocked(childProcess.execFile).mockClear();
+    vi.mocked(fs.readFileSync).mockClear();
+
+    const result = await h.invoke("change_create", { task_id: id });
+
+    if (alternate !== undefined) {
+      expectToolError(result, /immutable/iu);
+      expect(seen.preExecutions).toBe(0);
+      expect(seen.executions).toBe(0);
+      expect(childProcess.execFile).not.toHaveBeenCalled();
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+      expect(await treeOrAbsent(h.cwd)).toEqual(before);
+    } else {
+      const published = valueOf(result);
+      const changeId = ChangeIdSchema.parse(published.change_id);
+      expect(published).toMatchObject({
+        status: "proposed",
+        patch_path: `patches/${changeId}.patch`,
+      });
+      expect(seen.preExecutions).toBe(1);
+      expect(seen.executions).toBe(1);
+      expect(childProcess.execFile).toHaveBeenCalled();
+      const record = ChangeRequestSchema.parse(
+        JSON.parse(fs.readFileSync(join(h.cwd, "changes", `${changeId}.json`), "utf8")),
+      );
+      expect(record).toMatchObject({ change_id: changeId, task_id: id, status: "proposed" });
+      expect(fs.statSync(join(h.cwd, `patches/${changeId}.patch`)).isFile()).toBe(true);
+      expect(readCard(h, id).linked_changes).toEqual([changeId]);
+      expect(fs.existsSync(rawPath)).toBe(false);
+    }
+    expect(seen.approvals).toEqual([]);
+    expect(await treeOrAbsent(h.source)).toEqual(sourceBefore);
+  },
+);
 
 for (const evidence of ["missing", "corrupt"]) {
   test.each(["disjoint", "task-file", "source"])(
