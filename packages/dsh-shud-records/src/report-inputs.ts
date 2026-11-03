@@ -1,6 +1,15 @@
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { RunRecordSchema, type RunId, type RunRecord } from "@shud-harness/dsh-shud-core";
+import {
+  RunRecordSchema,
+  type BuildId,
+  type BuildRecord,
+  type ChangeRequest,
+  type EvidenceReport,
+  type RunId,
+  type RunRecord,
+  type VerificationCase,
+} from "@shud-harness/dsh-shud-core";
 import {
   readWorkspaceRecord,
   WorkspaceRecordError,
@@ -9,7 +18,7 @@ import {
 import { regularTarget } from "./workspace-paths.ts";
 import { ReportRenderError } from "./report-render-error.ts";
 
-type ReportInputKind = "report" | "stack" | "data";
+type ReportInputKind = "report" | "stack" | "data" | "change" | "verification" | "build";
 
 /** Reuse non-creating workspace reads, including schema, path safety and cited identity binding. */
 export function readReportInput<K extends ReportInputKind>(
@@ -29,6 +38,45 @@ export function readReportInput<K extends ReportInputKind>(
     }
     throw new ReportRenderError("read");
   }
+}
+
+/** Required canonical facts, retaining each VC's own ordered build pair for display. */
+export interface ReportCodeChangeFacts {
+  readonly changes: readonly ChangeRequest[];
+  readonly verifications: readonly {
+    readonly record: VerificationCase;
+    readonly baseBuild: BuildRecord;
+    readonly candidateBuild: BuildRecord;
+  }[];
+}
+
+/**
+ * Read cited JSON only, without following StackLock build ids or VC change ids.
+ * Shared builds are read once per projection but remain present in every VC pair.
+ * This validates file/schema/identity safety, not task, approval or hash relationships.
+ */
+export function readReportCodeChangeFacts(
+  cwd: string,
+  report: EvidenceReport,
+): ReportCodeChangeFacts {
+  const changes = report.change_ids.map((id) => readReportInput(cwd, "change", id));
+  const builds = new Map<BuildId, BuildRecord>();
+  const readBuild = (id: BuildId): BuildRecord => {
+    const cached = builds.get(id);
+    if (cached !== undefined) return cached;
+    const build = readReportInput(cwd, "build", id);
+    builds.set(id, build);
+    return build;
+  };
+  const verifications = report.verification_ids.map((id) => {
+    const record = readReportInput(cwd, "verification", id);
+    return {
+      record,
+      baseBuild: readBuild(record.base_build_id),
+      candidateBuild: readBuild(record.candidate_build_id),
+    };
+  });
+  return { changes, verifications };
 }
 
 function requireRunDirectory(path: string): void {

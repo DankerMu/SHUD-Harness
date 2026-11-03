@@ -1,14 +1,23 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+  CODE_CHANGE_SECTION5_WORDING,
   GOVERNANCE_INVARIANTS,
   ReportIdSchema,
+  type BuildRecord,
+  type ChangeRequest,
   type EvidenceReport,
   type DataProvenance,
   type RunRecord,
   type StackLock,
+  type VerificationCase,
 } from "@shud-harness/dsh-shud-core";
-import { readReportInput, readReportRun } from "./report-inputs.ts";
+import {
+  readReportCodeChangeFacts,
+  readReportInput,
+  readReportRun,
+  type ReportCodeChangeFacts,
+} from "./report-inputs.ts";
 import { ReportRenderError } from "./report-render-error.ts";
 import { reportWatermark } from "./report-watermark.ts";
 import { regularTarget } from "./workspace-paths.ts";
@@ -63,6 +72,7 @@ function renderStack(stack: StackLock): string {
     `- request_alias: ${metadata(stack.llm.request_alias)}`,
     `- response_model: ${metadata(stack.llm.response_model)}`,
   );
+  if (stack.build_id !== null) details.push(`- build_id: ${metadata(stack.build_id)}`);
   return `### StackLock ${metadata(stack.stack_id)}\n\n${revisions}\n\n${details.join("\n")}`;
 }
 
@@ -78,6 +88,62 @@ function renderData(data: DataProvenance): string {
     data.sources.files.map((file) => [file.path, file.sha256, file.size_bytes]),
   );
   return `### DataProvenance ${metadata(data.data_id)}\n\n${details}\n\n${files}`;
+}
+
+function renderChange(change: ChangeRequest): string {
+  const details = [
+    `- change_id: ${metadata(change.change_id)}`,
+    `- base_commit: ${metadata(change.base_commit)}`,
+    `- semantic_level: ${metadata(change.semantic_level)}`,
+    `- semantic_floor: ${metadata(change.semantic_floor)}`,
+    `- risk: ${metadata(change.risk)}`,
+    ...change.files_changed.map((path, index) => `- files_changed[${index}]: ${metadata(path)}`),
+    ...change.floor_categories.map(
+      (category, index) => `- floor_categories[${index}]: ${metadata(category)}`,
+    ),
+    `- patch_path: ${metadata(change.patch_path)}`,
+    `- patch_sha256: ${metadata(change.patch_sha256)}`,
+    `- status: ${metadata(change.status)}`,
+    `- approval_ref: ${metadata(change.approval_ref ?? "null")}`,
+  ];
+  return `### ChangeRequest ${metadata(change.change_id)}\n\n${details.join("\n")}`;
+}
+
+function renderVerification(verification: VerificationCase): string {
+  const details = [
+    `- vc_id: ${metadata(verification.vc_id)}`,
+    `- case_type: ${metadata(verification.case_type)}`,
+    `- expected_result_source: ${metadata(verification.expected_result_source)}`,
+    `- pass_criteria: ${metadata(verification.pass_criteria)}`,
+    `- base_run_id: ${metadata(verification.base_run_id)}`,
+    `- candidate_run_id: ${metadata(verification.candidate_run_id)}`,
+    `- base_build_id: ${metadata(verification.base_build_id)}`,
+    `- candidate_build_id: ${metadata(verification.candidate_build_id)}`,
+    `- observed.base_sha256: ${metadata(verification.observed.base_sha256)}`,
+    `- observed.candidate_sha256: ${metadata(verification.observed.candidate_sha256)}`,
+    `- status: ${metadata(verification.status)}`,
+    `- failure_reason: ${metadata(verification.failure_reason ?? "null")}`,
+    `- reviewed_by: ${metadata(verification.reviewed_by)}`,
+    `- compatibility_verdict: ${metadata(verification.compatibility_verdict)}`,
+    ...verification.reviewer_notes.map(
+      (note, index) => `- reviewer_notes[${index}]: ${metadata(note)}`,
+    ),
+  ];
+  return `### VerificationCase ${metadata(verification.vc_id)}\n\n${details.join("\n")}`;
+}
+
+function renderBuild(build: BuildRecord): string {
+  const details = [
+    `- build_id: ${metadata(build.build_id)}`,
+    `- change_id: ${metadata(build.change_id ?? "null")}`,
+    `- source_commit: ${metadata(build.source_commit)}`,
+    `- rhs_openmp: ${metadata(build.rhs_openmp)}`,
+    ...build.make_argv.map((argument, index) => `- make_argv[${index}]: ${metadata(argument)}`),
+    `- compiler: ${metadata(build.compiler)}`,
+    `- patch_sha256: ${metadata(build.patch_sha256 ?? "null")}`,
+    `- binary_sha256: ${metadata(build.binary_sha256)}`,
+  ];
+  return `### BuildRecord ${metadata(build.build_id)}\n\n${details.join("\n")}`;
 }
 
 function artifactBytes(run: RunRecord): bigint {
@@ -231,8 +297,10 @@ function projectTemplate(fields: Readonly<Record<string, string>>): ReportDocume
 /**
  * Synchronously project fresh, schema-validated same-workspace evidence into Markdown.
  * Routing and embedded identities are checked; arrays keep their declared order. Only
- * report/stack/provenance/run JSON and the module-relative packaged template are read.
- * No TaskCard, logs, artifacts, raw inputs, clock, model calls or Markdown reads occur.
+ * cited report/stack/provenance/run/change/verification/build JSON and the module-relative
+ * packaged template are read. No TaskCard, patches, logs, binaries, output artifacts,
+ * raw inputs, clock, model calls or Markdown reads occur. Build pairs stay in VC order;
+ * StackLock build ids are displayed without discovering additional build records.
  * Source records/status/timestamps are unchanged; missing managed directories are never
  * created or discovered. This function returns text only: tools own the JSON/TaskCard
  * commit sequence and subsequent safe Markdown publication. It is not the wording validator.
@@ -245,7 +313,8 @@ export function renderReport(cwd: string, reportId: unknown): string {
   const stacks = report.stack_ids.map((stackId) => readReportInput(cwd, "stack", stackId));
   const data = report.data_ids.map((dataId) => readReportInput(cwd, "data", dataId));
   const runs = report.linked_runs.map((runId) => readReportRun(cwd, runId));
-  return renderReportDocument(report, stacks, data, runs, watermark).markdown;
+  const codeChangeFacts = readReportCodeChangeFacts(cwd, report);
+  return renderReportDocument(report, stacks, data, runs, codeChangeFacts, watermark).markdown;
 }
 
 /** Canonical projection from already validated evidence; not a public injection API. */
@@ -254,18 +323,37 @@ export function renderReportDocument(
   stacks: readonly StackLock[],
   data: readonly DataProvenance[],
   runs: readonly RunRecord[],
+  codeChangeFacts: ReportCodeChangeFacts,
   watermark = reportWatermark(report),
 ): ReportDocument {
   const risks = runs
     .filter((run) => run.status !== "succeeded")
     .map((run) => `- ${metadata(run.run_id)}: ${metadata(run.exit_class)}`);
+  for (const { record } of codeChangeFacts.verifications) {
+    if (record.status === "failed") {
+      risks.push(`- ${metadata(record.vc_id)}: ${metadata(record.failure_reason ?? "null")}`);
+    }
+  }
   const fields: Readonly<Record<string, string>> = {
     report_id: metadata(report.report_id),
     header: watermark.header,
     summary: report.summary,
     task_id: metadata(report.task_id),
-    sources: [...stacks.map(renderStack), ...data.map(renderData)].join("\n\n"),
+    sources: [
+      ...stacks.map(renderStack),
+      ...data.map(renderData),
+      ...codeChangeFacts.changes.map(renderChange),
+      ...codeChangeFacts.verifications.map(({ record }) => renderVerification(record)),
+      ...codeChangeFacts.verifications.flatMap(({ baseBuild, candidateBuild }) => [
+        renderBuild(baseBuild),
+        renderBuild(candidateBuild),
+      ]),
+    ].join("\n\n"),
     runs: renderRuns(runs),
+    metrics:
+      report.change_ids.length === 0
+        ? "本里程碑无指标 artifact，见 limitations"
+        : CODE_CHANGE_SECTION5_WORDING,
     observations: report.observations.join("\n\n"),
     limitations: report.limitations.join("\n\n"),
     invariants: GOVERNANCE_INVARIANTS.join("\n"),

@@ -21,6 +21,8 @@ Required is evaluated within the immediate parent object.
 | stack_ids | yes | no | array<string> | items: pattern=^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | data_ids | yes | no | array<string> | items: pattern=^DATA-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | llm_response_models | yes | no | array<string> | items: minLength=1 |
+| change_ids | no | no | array<string> | default=[]; items: pattern=^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| verification_ids | no | no | array<string> | default=[]; items: pattern=^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | decision_history | yes | no | array<object> | items: additionalProperties=false |
 | decision_history[].decision_id | yes | no | string | pattern=^DEC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | decision_history[].report_id | yes | no | string | pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
@@ -62,6 +64,8 @@ data_ids:
   - "DATA-20261027T081000-7d2e"
 llm_response_models:
   - "deepseek-flash-guan"
+change_ids: []
+verification_ids: []
 decision_history: []
 created_at: "2026-10-27T09:00:00Z"
 updated_at: "2026-10-27T09:00:00Z"
@@ -70,7 +74,7 @@ updated_at: "2026-10-27T09:00:00Z"
 ## Changelog Diff
 
 ```diff
-+ schema EvidenceReport sha256:fcca1d120c47cf71c4e173ec84b27eac3901b7843f31865e07b4737631b981d5
++ schema EvidenceReport sha256:9689cac9de504188568bdb30f332bf397e345ffebf6db4ab2650a422ccadc7d3
 + field report_id required=yes nullable=no type=string constraints=pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field task_id required=yes nullable=no type=string constraints=pattern=^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field status required=yes nullable=no type=enum<string> constraints=values: `draft`, `reviewed`, `awaiting_pi`, `accepted`, `revision_requested`, `rejected`, `archived`
@@ -82,6 +86,8 @@ updated_at: "2026-10-27T09:00:00Z"
 + field stack_ids required=yes nullable=no type=array<string> constraints=items: pattern=^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field data_ids required=yes nullable=no type=array<string> constraints=items: pattern=^DATA-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field llm_response_models required=yes nullable=no type=array<string> constraints=items: minLength=1
++ field change_ids required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field verification_ids required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field decision_history required=yes nullable=no type=array<object> constraints=items: additionalProperties=false
 + field decision_history[].decision_id required=yes nullable=no type=string constraints=pattern=^DEC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field decision_history[].report_id required=yes nullable=no type=string constraints=pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$

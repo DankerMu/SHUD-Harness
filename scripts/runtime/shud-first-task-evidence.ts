@@ -402,6 +402,8 @@ function assertSnapshot(e: FirstTaskEvidence) {
       report.report_id === reportId &&
       report.status === "accepted" &&
       report.linked_runs.length === 1 &&
+      report.change_ids.length === 0 &&
+      report.verification_ids.length === 0 &&
       report.linked_runs[0] === runId,
     "IDENTITY_JOIN",
   );
@@ -453,7 +455,11 @@ function assertSnapshot(e: FirstTaskEvidence) {
     "INVARIANTS",
   );
   fact(
-    markdown === renderReportDocument(report, [stack], [provenance], [record]).markdown,
+    markdown ===
+      renderReportDocument(report, [stack], [provenance], [record], {
+        changes: [],
+        verifications: [],
+      }).markdown,
     "MARKDOWN",
   );
   fact(

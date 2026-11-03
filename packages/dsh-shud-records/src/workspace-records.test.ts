@@ -146,7 +146,7 @@ describe.each(recordCases)("$kind workspace reads", (fixture) => {
               ...fixture.value,
               sources: { ...fixture.value.sources, external_files: [] },
             }
-          : fixture.value;
+          : { ...fixture.value, change_ids: [], verification_ids: [] };
 
   test("reads a schema-valid pre-existing object without changing its bytes", () => {
     const text = `  ${JSON.stringify(fixture.value, null, 2)}\n\n`;
@@ -283,7 +283,7 @@ describe.each(mutableCases)("$kind workspace writes", (fixture) => {
             ...fixture.value,
             sources: { ...fixture.value.sources, external_files: [] },
           }
-        : fixture.value;
+        : { ...fixture.value, change_ids: [], verification_ids: [] };
 
   test("synchronously creates its layout and publishes only schema-valid JSON", () => {
     expect(writeWorkspaceRecord(cwd, fixture.kind, fixture.value)).toBeUndefined();

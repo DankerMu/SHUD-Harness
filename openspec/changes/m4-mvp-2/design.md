@@ -480,6 +480,28 @@ Review focus: clean identity/authorization separation; consumer compatibility wi
 - §5 对 `code_change` 固定写："本里程碑无指标 artifact；验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。"（该句进入 `wording.ts` 常量并由模板逐字渲染）。§7 另列 `status: failed` 的 VC。
 - `report_validate` 增至 15 项：(14) `code_change` §5 固定句；(15) `verification_ids` 中每个 VC 的 `artifact_refs` 两项均为会话 cwd 下的普通文件且 sha256 分别等于 `observed.base_sha256`/`candidate_sha256`（frozen `Verification_Case_Spec.md` 的"passed 需 artifact"在 M4 的落地：`verification_run` 写入时两个 artifact 刚被比较器读过、必然存在，第 (15) 项在报告校验时复核它们仍存在且未改；Review 2 P1-7）。其余 10 节、7 态水印、四句不变式、禁语与密钥扫描不变；`Report_Generation_Spec.md` 的"13 项"改为 15 项。
 
+#### Issue #533 implementation boundary
+
+Change surface: EvidenceReportSchema adds unique branded change_ids/verification_ids with default([]); generated EvidenceReport Markdown/JSON Schema and registry example overrides change together. Keep raw M3 fixtures missing both keys. A private creation-input type may omit only these new default-backed fields; do not widen all brands through z.input or make other fields optional. Existing tools caller remains unchanged.
+
+Governing invariant: the report projects schema/path/id-valid records without deciding scientific or cross-object compatibility, and template-owned wording is independent of authored prose.
+
+The existing readonly report-inputs boundary loads CR/VC/BuildRecord through readWorkspaceRecord(...,{readonly:true}). Load arrays in declared order. VC references independently trigger VC/build sections even when change_ids is empty; each VC displays base then candidate, retaining repeated shared builds. Caching identical build reads is optional, never a reason to deduplicate display. StackLock build_id only adds its row; it does not implicitly load a build.
+
+All D12 fact fields must appear, including each files_changed/floor_categories/make_argv/reviewer_notes element. New nullable facts use literal null; do not change legacy metadata(null) = "unknown (null)". Structured metadata uses the existing single escaping boundary; authored prose remains verbatim. Proposed CRs and failed VCs remain visible. No patch, make log, binary or output contents are read.
+
+Replace only the packaged §5 literal with a controlled template token: nonempty change_ids selects CODE_CHANGE_SECTION5_WORDING, otherwise preserve the old sentence byte-for-byte. The constant is not injected into JSON. Preserve projectTemplate's original-token-only substitution and trusted heading offsets; authored fake headings/tokens cannot redefine validator section origins. Append only failed VC id/reason to existing §7 run failures.
+
+Sibling surfaces: renderReport and renderReportDocument; validateReport's canonical document call; workspace-records createEvidenceReport/createFlatRecord input types; three existing parsed-output tests; core schema tests; scripts/schema/registry.ts examples; packaged template and old golden. Both canonical document consumers load the same new facts; no silent empty-facts default. validateReport keeps thirteen ordered checks and existing controlled render_unavailable handling; its secret check must see new structured facts. Checks 14/15, failed-VC validation and closure belong to #541.
+
+Compile-discovered sibling: scripts/runtime/shud-first-task-evidence.ts also calls the internal document renderer from its offline M3 evidence judge. Migrate that caller with an explicit empty facts object only after asserting both report reference arrays are empty via its existing IDENTITY_JOIN predicate. Do not read live workspace files, silently drop new references or expand this judge into M4 replay. Verify the actual shud:first-task Web/SHUD chain and replay its retained snapshot with nonempty-reference rejection controls; there is no tracked standalone judge self-test. This minimal integration exception is recorded in live #533.
+
+Readonly failures: missing, corrupt, wrong embedded id, unsafe directories or symlink targets for each new kind reject rendering through controlled errors; no managed directory creation, rewritten JSON or partial return. Do not add cross-object task/approval/hash comparisons or directory discovery. No new concurrency/snapshot guarantee or resource limit; only cited JSON and packaged template are read.
+
+Required evidence: semantic RED on old public renderer/schema, then exact fields/order/null/escaping/failed-only risks and unchanged thirteen-check behavior. Frozen actual built M3 baselines are 4035 bytes SHA256 4620ac33c381c2ece739b5bb7f863aead720bd54ef505680857224a33bf54827 (two runs) and 2768 bytes SHA256 1f7916272f888169970cd53a3752bd681bf3b6e3b38bdc1aa74b04272f2c8356 (single successful run). Reconstruct fresh workspaces from frozen inputs and compare output plus input bytes/mtime; preserve report-render.golden.md and add a distinct code-change golden fixture. Built public render/validate smoke inspects actual Markdown and controlled failures; full check and same-SHA CI.
+
+Non-goals and rollback: no tools/policy/jobs, new validator clauses, artifact comparison or PI acceptance. Only two EvidenceReport generated files may change; other 29 remain byte-identical. This D12 boundary is the decision record; normal PR revert is rollback, no parallel renderer or migration rewrite.
+
 #### Issue #525 implementation boundary
 
 Change surface: wording.ts constant and wording.test.ts; existing core wildcard export needs no duplicate statement.

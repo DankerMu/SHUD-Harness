@@ -134,6 +134,18 @@ closure SHALL 在 reconcile 后求值：`science_assist` 卡求 task-cards「sci
 - **WHEN** 以 M3 首任务形态的报告夹具（单运行、StackLock `build_id: null`、无 `change_ids` 与 `verification_ids` 键）渲染 `.md`
 - **THEN** 输出与 M3 渲染器对同一夹具的输出逐字节相同
 
+#### Scenario: verification facts are independent of change references
+- **WHEN** a report has empty change_ids and nonempty verification_ids, and two cited VCs share a build
+- **THEN** each VC and its base-then-candidate build facts appear in declared order, including repeated build displays, while §5 retains the old no-metrics sentence
+
+#### Scenario: unsafe or invalid fact records do not produce a partial report
+- **WHEN** a cited ChangeRequest, VerificationCase or BuildRecord is missing, malformed, schema-invalid, has a mismatched embedded id or is a symlink target
+- **THEN** rendering fails through the readonly file-layer boundary without creating managed directories, returning partial Markdown or changing any input bytes
+
+#### Scenario: new structured facts participate in existing canonical validation
+- **WHEN** a schema-valid new fact contains a secret-shaped token and the canonical report is rendered for the existing thirteen-check validator
+- **THEN** the existing whole-document secret check rejects it with controlled diagnostics; this rendering integration does not add checks 14/15 or cross-object validation
+
 ### Requirement: Report template
 报告 `.md` SHALL 以 `# EvidenceReport: <title>` 开头，并按序包含以下 10 个二级标题：`## 1. 摘要`、`## 2. 任务与问题`、`## 3. StackLock 与数据来源`、`## 4. 运行记录`、`## 5. 指标与图表`、`## 6. 观测与解释限制`、`## 7. 风险和失败项`、`## 8. 需要 PI 判断的问题`、`## 9. 建议下一步`、`## 10. 附录：命令、日志、artifact manifest`。§5 对 `science_assist` 报告 SHALL 固定写"本里程碑无指标 artifact，见 limitations"，对 `code_change` 报告（`change_ids` 非空）SHALL 逐字渲染「code_change report wording constant」的固定句；§3 对 `code_change` 报告另含「Deterministic facts table」的 ChangeRequest 段与 VerificationCase 段（`verification_ids` 非空时另含 BuildRecord 段）；§6 SHALL 在模型提供的 observations 与 limitations 之后，由模板（而非报告 `.json` 的 `limitations` 字段）逐字渲染 core `GOVERNANCE_INVARIANTS` 的四句不变式，每句一行；§7 SHALL 列出每个 `status` 不为 `succeeded` 的关联运行（closure 谓词已排除失败运行，M3 首任务中该节为空列表，渲染器仍覆盖该分支），并另列 `verification_ids` 中每个 `status: failed` 的 VerificationCase 的 `vc_id` 与 `failure_reason`（VerificationCase 规范要求 failed 不能从报告中消失）；§10 SHALL 列出各运行的 argv、日志路径与产物清单。`.md` SHALL 含参数提供的 `summary`、`observations`、`limitations`、`pi_questions` 原文。
 

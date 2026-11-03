@@ -42,6 +42,8 @@ export function freezeEvidenceReport(report: EvidenceReport): EvidenceReport {
   Object.freeze(report.stack_ids);
   Object.freeze(report.data_ids);
   Object.freeze(report.llm_response_models);
+  Object.freeze(report.change_ids);
+  Object.freeze(report.verification_ids);
   report.decision_history.forEach(Object.freeze);
   Object.freeze(report.decision_history);
   return Object.freeze(report);

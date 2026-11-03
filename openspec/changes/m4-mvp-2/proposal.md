@@ -1,16 +1,15 @@
 # Proposal
 
-## Active issue fixture: #532
+## Active issue fixture: #533
 
-- Issue type: feature; Fixture level: expanded; upstream level retained for a public filesystem comparator, bounded hashing and final-target safety. #519 and routed #574 (PR #575) are merged.
-- Scope: records compare-rivqdown.ts/public export/tests and extraction of the existing private hashDescriptor into one internal module shared with verifyBuildBinary. No core/jobs/tools/schema/config/dependency changes.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes.
-- Synchronous compareRivqdown(baseRunDir,candidateRunDir,project) validates absolute string roots and the canonical core project component before IO, then returns exactly compared_path/base_sha256/candidate_sha256/equal for raw rivqdown bytes.
-- Preflight both final targets with lstat as ordinary files; descriptor-bound no-follow/nonblocking opens and fstat identity/type checks precede bounded hashing. Close the first descriptor before the second; no files/directories/records are created or changed.
-- Preserve caller-supplied physical root traversal; root/ancestor aliases remain caller-owned, not a new recursive path policy. Reject final target symlinks/special files and missing/unreadable evidence; never return unequal for a collection error.
-- Reuse the existing 64KiB descriptor hash loop without changing verifyBuildBinary permission, identity, error or cleanup behavior. No duplicate hash algorithm, whole-file buffers, numerical parsing, tolerance, logs or other-artifact discovery.
-- Evidence floor: tests first plus independently qualified system-shasum oracle (candidate-ignored and missing-as-unequal mutants rejected), exact binary/equality/error vectors, bounded read/close/fault evidence, unchanged binary verifier regressions, built public API smoke, full check/profile smoke/strict OpenSpec/31 generated unchanged/three-seat review/same-SHA CI.
-- Non-goals: VerificationCase/tool wiring (#540), caller run-id/task/build checks, arbitrary concurrent-input snapshot isolation, solver statistics/performance/scientific conclusions or PI acceptance. New public export initially absent is a setup RED, not a fabricated production semantic counterexample.
+- Issue type: feature; Fixture level: expanded; upstream level retained for persisted report schema, readonly evidence loading and Critical Paths #6/#7. Dependencies #525/#529 are merged.
+- Scope: EvidenceReport references/projections, canonical records renderer/input loader/template and tests; only the live issue's narrow creation-input, parsed-output, registry-example and existing validator-call adaptations.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Release / packaging / dependency compatibility; Documentation / migration notes.
+- Governing invariant: schema/id-validated cited JSON alone supplies ordered facts; template-owned §5 cannot be rewritten by authored text, and missing references never produce a partial report.
+- Preserve M3 Markdown bytes, raw missing-key JSON, readonly bytes/mtime, trusted section origins, seven watermarks, existing thirteen validator checks and all branded creation inputs.
+- Add defaulted unique change_ids/verification_ids, three §3 fact sections, non-null StackLock build_id rows and failed-VC §7 entries; no cross-object decision, patch/binary/log reads or JSON injection.
+- Evidence floor: tests-only semantic RED before implementation; field/order/null/error vectors, two frozen built M3 baselines, built public render/validate smoke, generated changes limited to two EvidenceReport files, full check/strict OpenSpec/three-seat review/same-SHA CI.
+- Non-goals: tools/policy/jobs, report_generate closure/link population, validator checks 14/15 or failed-VC validation expansion (#541), scientific conclusions and PI acceptance.
 
 ## Why
 
