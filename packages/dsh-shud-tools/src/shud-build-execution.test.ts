@@ -276,6 +276,117 @@ test("compiler version probing cannot publish a mutation of the initially hashed
   });
 });
 
+test("compiler version probing cannot rewrite ordinary main-make stdout evidence", async () => {
+  await h.dispose();
+  h = await buildFixture({
+    files: compilerProbeFiles(
+      "printf '%s\\n' 'forged compiler commands' > ../make.stdout.log",
+      "version",
+    ),
+  });
+  await h.preserve(async () => {
+    const message = expectToolError(await h.build(), /log|evidence|integrity/iu);
+    expect(message).not.toContain(".tmp-");
+    noBuilds(h);
+  });
+});
+
+test.each([
+  { build: "base", phase: "main", entry: "make.stdout.log" },
+  { build: "candidate", phase: "main", entry: "make.stderr.log" },
+  { build: "candidate", phase: "selection", entry: "make.stdout.log" },
+  { build: "base", phase: "selection", entry: "make.stderr.log" },
+  { build: "base", phase: "version", entry: "make.stdout.log" },
+  { build: "candidate", phase: "version", entry: "make.stderr.log" },
+] as const)(
+  "$build build rejects ordinary $entry replacement by $phase execution",
+  async ({ build, phase, entry }) => {
+    await h.dispose();
+    // Keep the old inode alive under src, then clone its bytes into a new file.
+    // Digest-only validation cannot substitute for the creation-time identity.
+    const action = `mv ../${entry} original-${entry}; cat original-${entry} > ../${entry}`;
+    h = await buildFixture({
+      files:
+        phase === "main"
+          ? { ...BASE_FILES, Makefile: `${MAKEFILE}\t${action}\n` }
+          : compilerProbeFiles(action, phase),
+    });
+    const id = build === "candidate" ? await candidate(h) : undefined;
+    await h.preserve(async () => {
+      const message = expectToolError(
+        await h.build(id === undefined ? {} : { change_id: id }),
+        /log identity changed/iu,
+      );
+      expect(message).toContain(entry);
+      expect(message).not.toContain(".tmp-");
+      noBuilds(h);
+    });
+  },
+);
+
+test.each([
+  { build: "base", phase: "selection", entry: "make.stdout.log", mutation: "overwrite" },
+  { build: "candidate", phase: "selection", entry: "make.stderr.log", mutation: "append" },
+  { build: "candidate", phase: "version", entry: "make.stderr.log", mutation: "append" },
+] as const)(
+  "$build build rejects in-place $entry $mutation by compiler $phase",
+  async ({ build, phase, entry, mutation }) => {
+    await h.dispose();
+    const redirect = mutation === "append" ? ">>" : ">";
+    h = await buildFixture({
+      files: compilerProbeFiles(
+        `printf '%s\\n' 'probe-contaminated make evidence' ${redirect} ../${entry}`,
+        phase,
+      ),
+    });
+    const id = build === "candidate" ? await candidate(h) : undefined;
+    await h.preserve(async () => {
+      const message = expectToolError(
+        await h.build(id === undefined ? {} : { change_id: id }),
+        /log changed after main make/iu,
+      );
+      expect(message).toContain(entry);
+      expect(message).not.toContain(".tmp-");
+      noBuilds(h);
+    });
+  },
+);
+
+test("successful main-make stdout and stderr writes remain immutable candidate evidence", async () => {
+  await h.dispose();
+  const files = compilerProbeFiles(":", "version");
+  h = await buildFixture({
+    files: {
+      ...files,
+      Makefile: files.Makefile.replace(
+        "chmod 755 shud compiler\n",
+        "chmod 755 shud compiler\n\tprintf '%s\\n' original-main-stdout\n\tprintf '%s\\n' original-main-stderr >&2\n",
+      ),
+    },
+  });
+  const id = await candidate(h);
+  await h.preserve(async () => {
+    const result = valueOf(await h.build({ change_id: id }));
+    const record = readWorkspaceRecord(h.cwd, "build", BuildIdSchema.parse(result.build_id), {
+      readonly: true,
+    });
+    const stdout = fs.readFileSync(join(h.cwd, record.stdout_path), "utf8");
+    expect(stdout).toContain("\noriginal-main-stdout\n");
+    expect(stdout).not.toContain("fixture compiler 1.0");
+    expect(fs.readFileSync(join(h.cwd, record.stderr_path), "utf8")).toBe("original-main-stderr\n");
+    expect(record.compiler).toBe("fixture compiler 1.0");
+    expect(fs.readdirSync(join(h.cwd, "builds", record.build_id)).sort()).toEqual([
+      "build-record.json",
+      "make.stderr.log",
+      "make.stdout.log",
+      "shud",
+    ]);
+    expect(
+      childProcess.execFileSync(join(h.cwd, record.binary_path), [], { encoding: "utf8" }),
+    ).toBe("candidate-matrix\n");
+  });
+});
+
 test.each([
   { build: "base", phase: "selection" },
   { build: "candidate", phase: "main" },
@@ -510,15 +621,27 @@ test("large stdout and stderr yield at most forty total diagnostic lines with se
   h = await buildFixture({
     files: {
       Makefile:
-        "CXX := cc\nshud:\n\t@printf '%0200000d\\n' 0\n\t@i=0; while test $$i -lt 60; do printf 'stdout-%s\\n' $$i; printf 'stderr-%s\\n' $$i >&2; i=$$((i+1)); done\n\t@printf '%s\\n' \"$$HOME\" \"$$PWD\" 'PRIVATE_BUILD_MATRIX_537' >&2\n\t@exit 2\n",
+        "CXX := cc\nshud:\n\t@printf '%0200000d\\n' 0\n\t@printf '%s\\n' old-stdout-evidence\n\t@i=0; while test $$i -lt 60; do printf 'stdout-%s\\n' $$i; printf 'stderr-%s\\n' $$i >&2; i=$$((i+1)); done\n\t@printf '%s\\n' \"$$HOME\" \"$$PWD\" 'PRIVATE_BUILD_MATRIX_537' >&2\n\t@printf '%s\\n' latest-stderr-evidence >&2\n\t@exit 2\n",
     },
   });
-  vi.stubEnv("SHUD_PRIVATE", PRIVATE);
   await h.preserve(async () => {
-    const message = expectToolError(await h.build(), /make failed \(exit 2\)/u);
+    // Only explicit diagnostic fixtures and required process paths participate in
+    // redaction; unrelated ambient values must not redefine the evidence markers.
+    for (const key of Object.keys(process.env)) {
+      if (key !== "PATH" && key !== "HOME") vi.stubEnv(key, undefined);
+    }
+    vi.stubEnv("SHUD_PRIVATE", PRIVATE);
+    vi.stubEnv("SHUD_NUMERIC_ENV_FIXTURE", "9");
+    let result;
+    try {
+      result = await h.build();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const message = expectToolError(result, /make failed \(exit 2\)/u);
     expect(message.split("\n").slice(1).length).toBeLessThanOrEqual(40);
-    expect(message).toContain("stderr-59");
-    expect(message).not.toContain("stdout-0\n");
+    expect(message).toContain("latest-stderr-evidence");
+    expect(message).not.toContain("old-stdout-evidence");
     expect(message).not.toContain(PRIVATE);
     expect(message).not.toContain(h.cwd);
     expect(message).not.toContain(".tmp-");

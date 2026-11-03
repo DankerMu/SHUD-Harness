@@ -246,67 +246,80 @@ test.each(["parent", "temporary"])(
   },
 );
 
-test.each(["log-open", "copy", "hash-stream", "metadata-short-write", "rename", "close"])(
-  "%s IO failure closes owned descriptors and removes unpublished output",
-  async (kind) => {
-    let hit = false;
-    if (kind === "log-open")
-      vi.mocked(fs.openSync).mockImplementation((...args) => {
-        if (String(args[0]).endsWith("make.stderr.log")) {
-          hit = true;
-          fault();
-        }
-        const fd = native.openSync(...args);
-        if (String(args[0]).includes("/builds/.tmp-")) opened.add(fd);
-        return fd;
-      });
-    if (kind === "copy")
-      vi.mocked(fs.copyFileSync).mockImplementation(() => {
+test.each([
+  "log-open",
+  "copy",
+  "hash-stream",
+  "log-hash-stream",
+  "metadata-short-write",
+  "rename",
+  "close",
+])("%s IO failure closes owned descriptors and removes unpublished output", async (kind) => {
+  let hit = false;
+  if (kind === "log-open")
+    vi.mocked(fs.openSync).mockImplementation((...args) => {
+      if (String(args[0]).endsWith("make.stderr.log")) {
         hit = true;
         fault();
-      });
-    if (kind === "hash-stream")
-      vi.mocked(fs.createReadStream).mockImplementation((...args) => {
-        const stream = native.createReadStream(...args);
+      }
+      const fd = native.openSync(...args);
+      if (String(args[0]).includes("/builds/.tmp-")) opened.add(fd);
+      return fd;
+    });
+  if (kind === "copy")
+    vi.mocked(fs.copyFileSync).mockImplementation(() => {
+      hit = true;
+      fault();
+    });
+  if (kind === "hash-stream" || kind === "log-hash-stream") {
+    let logReads = 0;
+    vi.mocked(fs.createReadStream).mockImplementation((...args) => {
+      const stream = native.createReadStream(...args);
+      const finalLogRead = String(args[0]).endsWith("make.stdout.log") && ++logReads === 2;
+      if (kind === "hash-stream" || finalLogRead) {
         stream.once("data", () => {
           hit = true;
           stream.destroy(new Error(PRIVATE));
         });
-        return stream;
-      });
-    if (kind === "metadata-short-write")
-      vi.mocked(fs.writeFileSync).mockImplementation((...args) => {
-        if (typeof args[0] === "number") {
-          hit = true;
-          native.writeFileSync(args[0], "{");
-          fault();
-        }
-        return native.writeFileSync(...args);
-      });
-    if (kind === "rename")
-      vi.mocked(fs.renameSync).mockImplementation(() => {
+      }
+      return stream;
+    });
+  }
+  if (kind === "metadata-short-write")
+    vi.mocked(fs.writeFileSync).mockImplementation((...args) => {
+      if (typeof args[0] === "number") {
+        hit = true;
+        native.writeFileSync(args[0], "{");
+        fault();
+      }
+      return native.writeFileSync(...args);
+    });
+  if (kind === "rename")
+    vi.mocked(fs.renameSync).mockImplementation(() => {
+      hit = true;
+      fault();
+    });
+  if (kind === "close")
+    vi.mocked(fs.closeSync).mockImplementation((fd) => {
+      if (!opened.delete(fd)) duplicateCloses.push(fd);
+      native.closeSync(fd);
+      if (!hit) {
         hit = true;
         fault();
-      });
-    if (kind === "close")
-      vi.mocked(fs.closeSync).mockImplementation((fd) => {
-        if (!opened.delete(fd)) duplicateCloses.push(fd);
-        native.closeSync(fd);
-        if (!hit) {
-          hit = true;
-          fault();
-        }
-      });
-    await h.preserve(async () => {
-      const message = expectToolError(await h.build(), /failed/iu);
-      expect(hit).toBe(true);
-      expect(message).not.toContain(PRIVATE);
-      expect(message).not.toContain(".tmp-");
-      noBuilds(h);
-      closed();
+      }
     });
-  },
-);
+  await h.preserve(async () => {
+    const message = expectToolError(await h.build(), /failed/iu);
+    if (kind === "log-hash-stream") {
+      expect(message).toMatch(/make\.stdout\.log evidence validation failed/u);
+    }
+    expect(hit).toBe(true);
+    expect(message).not.toContain(PRIVATE);
+    expect(message).not.toContain(".tmp-");
+    noBuilds(h);
+    closed();
+  });
+});
 
 test("producer failure plus cleanup failure preserves both controlled facts and retained owned evidence", async () => {
   vi.mocked(childProcess.execFile).mockImplementation((...args) => {

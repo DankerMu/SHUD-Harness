@@ -14,6 +14,35 @@ import {
 
 const PRODUCER_FILES = ["make.stderr.log", "make.stdout.log", "shud"] as const;
 
+interface FileIdentity {
+  readonly dev: number;
+  readonly ino: number;
+}
+
+interface MakeLog extends FileIdentity {
+  readonly path: string;
+  readonly name: "make.stdout.log" | "make.stderr.log";
+  postMakeSha256: string | null;
+}
+
+function capturedLog(fd: number, path: string, name: MakeLog["name"]): MakeLog {
+  const stat = fs.fstatSync(fd);
+  if (!stat.isFile()) throw new BuildFailure(`${name} is not an ordinary file`);
+  return { path, name, dev: stat.dev, ino: stat.ino, postMakeSha256: null };
+}
+
+function assertLogIdentity(log: MakeLog) {
+  let stat: fs.Stats | undefined;
+  try {
+    stat = fs.lstatSync(log.path);
+  } catch {
+    // Missing or unreadable evidence is rejected without exposing native causes.
+  }
+  if (!stat?.isFile() || stat.dev !== log.dev || stat.ino !== log.ino) {
+    throw new BuildFailure(`${log.name} identity changed`);
+  }
+}
+
 function logTail(path: string): string {
   let fd: number | undefined;
   try {
@@ -57,15 +86,26 @@ function redact(
   return safe;
 }
 
-async function hashBinary(path: string): Promise<string> {
-  const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+async function hashProducerFile(
+  path: string,
+  subject: "copied binary" | MakeLog["name"],
+  identity?: FileIdentity,
+): Promise<string> {
+  const fd = fs.openSync(
+    path,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+  );
   try {
-    if (!fs.fstatSync(fd).isFile()) throw new BuildFailure("copied binary is not an ordinary file");
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new BuildFailure(`${subject} is not an ordinary file`);
+    if (identity !== undefined && (stat.dev !== identity.dev || stat.ino !== identity.ino)) {
+      throw new BuildFailure(`${subject} identity changed`);
+    }
     const hash = createHash("sha256");
     hash.setEncoding("hex");
     await pipeline(fs.createReadStream(path, { fd, autoClose: false }), hash);
     const digest: unknown = hash.read();
-    if (typeof digest !== "string") throw new BuildFailure("binary digest is unavailable");
+    if (typeof digest !== "string") throw new BuildFailure(`${subject} digest is unavailable`);
     return digest;
   } finally {
     fs.closeSync(fd);
@@ -161,9 +201,12 @@ export function buildProducer(input: {
       stage = "make";
       let out: number | undefined;
       let err: number | undefined;
+      const logs: MakeLog[] = [];
       try {
         out = fs.openSync(stdout, "wx", 0o600);
+        logs.push(capturedLog(out, stdout, "make.stdout.log"));
         err = fs.openSync(stderr, "wx", 0o600);
+        logs.push(capturedLog(err, stderr, "make.stderr.log"));
         const result = spawnSync("make", makeArgv.slice(1), {
           cwd: input.cwd,
           env: input.env,
@@ -182,6 +225,7 @@ export function buildProducer(input: {
         }
       }
       assertOwned();
+      for (const log of logs) assertLogIdentity(log);
       stage = "executable validation";
       const binary = join(src, "shud");
       let stat: fs.Stats;
@@ -206,8 +250,16 @@ export function buildProducer(input: {
         throw new BuildFailure("make exited 0 but copied shud executable permission denied");
       }
       stage = "binary hashing";
-      const binarySha = await hashBinary(copiedBinary);
+      const binarySha = await hashProducerFile(copiedBinary, "copied binary");
       assertOwned();
+      // Main make owns writes to these descriptors; freeze content only after it exits.
+      for (const log of logs) {
+        stage = `${log.name} evidence hashing`;
+        assertLogIdentity(log);
+        log.postMakeSha256 = await hashProducerFile(log.path, log.name, log);
+        assertOwned();
+        assertLogIdentity(log);
+      }
       stage = "compiler selection";
       const probe = join(temporary, "print-cxx.mk");
       fs.writeFileSync(probe, ".PHONY: print-cxx\nprint-cxx:\n\t@printf '%s\\n' '$(CXX)'\n", {
@@ -266,9 +318,21 @@ export function buildProducer(input: {
       assertOwned();
       stage = "build publication validation";
       validatePublicationFiles(temporary);
-      const finalSha = await hashBinary(copiedBinary);
+      for (const log of logs) {
+        stage = `${log.name} evidence validation`;
+        assertLogIdentity(log);
+        const digest = await hashProducerFile(log.path, log.name, log);
+        assertOwned();
+        assertLogIdentity(log);
+        if (digest !== log.postMakeSha256) {
+          throw new BuildFailure(`${log.name} changed after main make`);
+        }
+      }
+      stage = "build publication validation";
+      const finalSha = await hashProducerFile(copiedBinary, "copied binary");
       assertOwned();
       validatePublicationFiles(temporary);
+      for (const log of logs) assertLogIdentity(log);
       if (finalSha !== binarySha) {
         throw new BuildFailure("copied binary changed after its initial digest");
       }
