@@ -142,6 +142,8 @@ export const schemaDefinitions: SchemaDefinition[] = [
       stack_ids: ["STACK-20261027T081500-b2c3", "STACK-20261027T080000-a1b2"],
       data_ids: ["DATA-20261027T081500-8e3f", "DATA-20261027T081000-7d2e"],
       llm_response_models: ["deepseek-flash-guan"],
+      change_ids: [],
+      verification_ids: [],
       decision_history: [],
       created_at: "2026-10-27T09:00:00Z",
       updated_at: "2026-10-27T09:00:00Z",

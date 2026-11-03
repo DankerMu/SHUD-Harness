@@ -81,6 +81,22 @@
         "minLength": 1
       }
     },
+    "change_ids": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
+    "verification_ids": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
     "decision_history": {
       "type": "array",
       "items": {

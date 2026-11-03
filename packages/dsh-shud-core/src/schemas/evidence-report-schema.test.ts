@@ -33,8 +33,65 @@ function validPiGateDecision() {
 
 test("EvidenceReport preserves multiple runs and every stack and data reference", () => {
   const report = validEvidenceReport();
-  expect(EvidenceReportSchema.parse(report)).toEqual(report);
+  expect(EvidenceReportSchema.parse(report)).toEqual({
+    ...report,
+    change_ids: [],
+    verification_ids: [],
+  });
 });
+
+test("M3 missing references default to independent empty arrays without changing the input", () => {
+  const input = validEvidenceReport();
+  const before = JSON.stringify(input);
+  const first = EvidenceReportSchema.parse(input);
+  const second = EvidenceReportSchema.parse(input);
+  expect(first).toMatchObject({ change_ids: [], verification_ids: [] });
+  expect(second).toMatchObject({ change_ids: [], verification_ids: [] });
+  expect(first.change_ids).not.toBe(second.change_ids);
+  expect(first.verification_ids).not.toBe(second.verification_ids);
+  expect(first.change_ids).not.toBe(first.verification_ids);
+  expect(JSON.stringify(input)).toBe(before);
+  expect(input).not.toHaveProperty("change_ids");
+  expect(input).not.toHaveProperty("verification_ids");
+});
+
+test("EvidenceReport retains declared change and verification order rather than sorting", () => {
+  const input = {
+    ...validEvidenceReport(),
+    change_ids: ["CHG-20261102T090000-b002", "CHG-20261102T090000-a001"],
+    verification_ids: ["VC-20261102T090000-b002", "VC-20261102T090000-a001"],
+  };
+  expect(EvidenceReportSchema.parse(input)).toEqual(input);
+  expect(
+    EvidenceReportSchema.parse({ ...input, change_ids: [], verification_ids: [] }),
+  ).toMatchObject({ change_ids: [], verification_ids: [] });
+});
+
+test.each([
+  ["change_ids", "CHG-20261102T090000-a1b2", "CHG-0001", "VC-20261102T090000-a1b2"],
+  ["verification_ids", "VC-20261102T090000-a1b2", "VC-0001", "CHG-20261102T090000-a1b2"],
+] as const)(
+  "EvidenceReport rejects invalid or repeated %s with field diagnostics",
+  (field, id, short, wrong) => {
+    for (const value of [
+      [id, id],
+      [short],
+      [wrong],
+      [id.toUpperCase()],
+      null,
+      [null],
+      [42],
+      [""],
+      id,
+    ]) {
+      const result = EvidenceReportSchema.safeParse({ ...validEvidenceReport(), [field]: value });
+      expect(result.success, JSON.stringify(value)).toBe(false);
+      if (!result.success) {
+        expect(result.error.issues.some((issue) => issue.path[0] === field)).toBe(true);
+      }
+    }
+  },
+);
 
 test("PiGateDecision accepts an accepted outcome with an explicit null comment", () => {
   const decision = validPiGateDecision();
@@ -82,7 +139,11 @@ test.each([
   "archived",
 ])("EvidenceReport accepts status %s without imposing a history state machine", (status) => {
   const report = { ...validEvidenceReport(), status };
-  expect(EvidenceReportSchema.parse(report)).toEqual(report);
+  expect(EvidenceReportSchema.parse(report)).toEqual({
+    ...report,
+    change_ids: [],
+    verification_ids: [],
+  });
 });
 
 test("EvidenceReport accepts empty narrative arrays and decision history", () => {
@@ -93,7 +154,11 @@ test("EvidenceReport accepts empty narrative arrays and decision history", () =>
     pi_questions: [],
     decision_history: [],
   };
-  expect(EvidenceReportSchema.parse(report)).toEqual(report);
+  expect(EvidenceReportSchema.parse(report)).toEqual({
+    ...report,
+    change_ids: [],
+    verification_ids: [],
+  });
 });
 
 test("EvidenceReport preserves repeated run references and caller model order", () => {
@@ -102,7 +167,11 @@ test("EvidenceReport preserves repeated run references and caller model order", 
     linked_runs: ["RUN-20261027T083000-b2c3", "RUN-20261027T083000-b2c3"],
     llm_response_models: ["model-z", "model-a"],
   };
-  expect(EvidenceReportSchema.parse(report)).toEqual(report);
+  expect(EvidenceReportSchema.parse(report)).toEqual({
+    ...report,
+    change_ids: [],
+    verification_ids: [],
+  });
 });
 
 test.each(["linked_runs", "stack_ids", "data_ids", "llm_response_models"])(
@@ -189,7 +258,11 @@ test("EvidenceReport preserves nonempty text without trimming or timestamp chron
     created_at: "later",
     updated_at: "earlier",
   };
-  expect(EvidenceReportSchema.parse(report)).toEqual(report);
+  expect(EvidenceReportSchema.parse(report)).toEqual({
+    ...report,
+    change_ids: [],
+    verification_ids: [],
+  });
 });
 
 test.each(["rejected", "revision_requested"])(
@@ -355,7 +428,11 @@ test("EvidenceReport preserves decision history without cross-record or chronolo
       },
     ],
   };
-  expect(EvidenceReportSchema.parse(report)).toEqual(report);
+  expect(EvidenceReportSchema.parse(report)).toEqual({
+    ...report,
+    change_ids: [],
+    verification_ids: [],
+  });
 });
 
 test("EvidenceReport rejects duplicate references without normalizing input", () => {

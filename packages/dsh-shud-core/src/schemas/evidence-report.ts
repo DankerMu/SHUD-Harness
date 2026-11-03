@@ -1,11 +1,13 @@
 import { z } from "zod";
 import {
+  ChangeIdSchema,
   DataIdSchema,
   DecisionIdSchema,
   ReportIdSchema,
   RunIdSchema,
   StackIdSchema,
   TaskIdSchema,
+  VerificationIdSchema,
 } from "./run-identifiers.ts";
 
 export const PiGateDecisionSchema = z
@@ -49,6 +51,11 @@ export const EvidenceReportSchema = z.strictObject({
     .array(z.string().min(1))
     .min(1)
     .refine(hasUniqueEntries, "Duplicate response models"),
+  change_ids: z.array(ChangeIdSchema).refine(hasUniqueEntries, "Duplicate change ids").default([]),
+  verification_ids: z
+    .array(VerificationIdSchema)
+    .refine(hasUniqueEntries, "Duplicate verification ids")
+    .default([]),
   decision_history: z.array(PiGateDecisionSchema),
   created_at: z.string().min(1),
   updated_at: z.string().min(1),

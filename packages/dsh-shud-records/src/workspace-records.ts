@@ -312,10 +312,17 @@ export function writeWorkspaceRecord(cwd: string, kind: WorkspaceRecordKind, val
   publish(path, record);
 }
 
+// Only the new default-backed references may be omitted; all existing fields retain their brands.
+type EvidenceReportCreationInput = Omit<
+  EvidenceReport,
+  "report_id" | "change_ids" | "verification_ids"
+> &
+  Partial<Pick<EvidenceReport, "change_ids" | "verification_ids">>;
+
 function createFlatRecord<K extends "data" | "report">(
   cwd: string,
   kind: K,
-  fields: Omit<DataProvenance, "data_id"> | Omit<EvidenceReport, "report_id">,
+  fields: Omit<DataProvenance, "data_id"> | EvidenceReportCreationInput,
 ): WorkspaceRecordMap[K] {
   const definition = recordTypes[kind];
   let id = createBrandedId(definition.prefix);
@@ -348,7 +355,7 @@ export function createDataProvenance(
 /** Allocate an unused JSON/Markdown report pair and publish JSON; callers render Markdown afterward. */
 export function createEvidenceReport(
   cwd: string,
-  fields: Omit<EvidenceReport, "report_id">,
+  fields: EvidenceReportCreationInput,
 ): EvidenceReport {
   return createFlatRecord(cwd, "report", fields);
 }

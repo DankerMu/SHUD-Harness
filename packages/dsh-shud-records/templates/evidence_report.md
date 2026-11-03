@@ -19,7 +19,7 @@ Task: {{task_id}}
 
 ## 5. 指标与图表
 
-本里程碑无指标 artifact，见 limitations
+{{metrics}}
 
 ## 6. 观测与解释限制
 

@@ -53,7 +53,7 @@ for (const fixture of recordCases) {
           ? { ...fixture.value, build_id: null }
           : fixture.kind === "data"
             ? { ...fixture.value, sources: { ...fixture.value.sources, external_files: [] } }
-            : fixture.value;
+            : { ...fixture.value, change_ids: [], verification_ids: [] };
     expect(readWorkspaceRecord(cwd, fixture.kind, fixture.id, { readonly: true })).toEqual(
       expectedOutput,
     );

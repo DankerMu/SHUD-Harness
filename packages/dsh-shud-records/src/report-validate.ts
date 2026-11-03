@@ -11,7 +11,7 @@ import {
   type StackId,
   type StackLock,
 } from "@shud-harness/dsh-shud-core";
-import { readReportInput, readReportRun } from "./report-inputs.ts";
+import { readReportCodeChangeFacts, readReportInput, readReportRun } from "./report-inputs.ts";
 import { ReportRenderError, type ReportRenderStage } from "./report-render-error.ts";
 import {
   metadata,
@@ -200,6 +200,8 @@ function secretDetails(document: ReportDocument): ReportValidationDetail[] {
  * 4/10/11 are M3-vacuous. Existing Markdown, logs, artifacts and credentials are not read.
  * This is enumerated evidence/wording lint, not closure or PI semantic approval.
  * All report/reference reads are non-creating; missing managed directories remain absent.
+ * Cited change/verification/build facts participate in the canonical document and its
+ * existing checks; their read failures use render_unavailable, not additional clauses.
  */
 export function validateReport(cwd: string, reportId: unknown): ReportValidationResult {
   const id = ReportIdSchema.safeParse(reportId);
@@ -230,7 +232,14 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
   let document: ReportDocument | undefined;
   if (firstFailure === undefined) {
     try {
-      document = renderReportDocument(report, stacks.values, data.values, runs.values);
+      const codeChangeFacts = readReportCodeChangeFacts(cwd, report);
+      document = renderReportDocument(
+        report,
+        stacks.values,
+        data.values,
+        runs.values,
+        codeChangeFacts,
+      );
     } catch (error) {
       renderStage = controlledStage(error);
     }
