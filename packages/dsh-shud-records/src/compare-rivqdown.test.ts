@@ -576,7 +576,7 @@ describe.each(sides)("%s evidence safety", (side) => {
 
     failure(compare, file, /close|read/iu);
 
-    expect(closeFailures).toBeGreaterThan(0);
+    expect(closeFailures).toBe(1);
     if (side === "base")
       expect(
         events.some((event) => event.operation === "open" && event.path === target("candidate")),
@@ -622,7 +622,7 @@ describe.each(sides)("%s evidence safety", (side) => {
 
       expect(error.message).toMatch(/cleanup/iu);
       expect(primaryFailures).toBe(1);
-      expect(cleanupFailures).toBeGreaterThan(0);
+      expect(cleanupFailures).toBe(1);
       if (side === "base")
         expect(
           events.some((event) => event.operation === "open" && event.path === target("candidate")),
