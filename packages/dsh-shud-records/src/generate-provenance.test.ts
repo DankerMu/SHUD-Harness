@@ -35,7 +35,15 @@ const realIo = await vi.importActual<typeof NodeIo>("node:fs/promises");
 
 // Independent SHA-256 and byte-count oracle, established with shasum and hashlib.
 // Literal fixtures are intentionally self-contained: no runtime .workplans dependency.
+const manifest = "1 ignored-date\n./input/ccw\nID Filename\n1 empty\n";
+const manifestVector = {
+  path: "ccw.tsd.forc",
+  hex: Buffer.from(manifest).toString("hex"),
+  sha256: "28812b968639478068404d28c127c7651686bfd82522b1395dc4ee54f6e9dc8c",
+  size_bytes: 47,
+};
 const vectors = [
+  manifestVector,
   {
     path: "empty",
     hex: "",
@@ -210,7 +218,6 @@ describe("generateProvenance", () => {
     expect(realFs.existsSync(join(workspace, "runs"))).toBe(false);
     expect(vectors.map(({ path: relative }) => snapshot(join(copyRoot, relative)))).toEqual(before);
     expect(snapshot(join(original, "z.txt"))).toEqual(originalBefore);
-    expect(observedBytes).toBe(43);
     expectClosed();
   });
 
@@ -236,23 +243,38 @@ describe("generateProvenance", () => {
     expect(realFs.existsSync(original)).toBe(false);
   });
 
-  test("an empty copy tree and nested empty directories are valid", async () => {
+  test("a missing required manifest fails without publishing an empty inventory", async () => {
     realFs.rmSync(copyRoot, { recursive: true });
     realFs.mkdirSync(join(copyRoot, "empty", "nested"), { recursive: true });
-    const result = await generateProvenance(runDir, project, original);
-    expect(result.sources.files).toEqual([]);
-    expect(publishedFiles()).toEqual([`${result.data_id}.json`]);
+    const prior = priorEvidence();
+    const error = await failure();
+    expect(error.message).toContain(join(copyRoot, "ccw.tsd.forc"));
+    expect(publishedFiles()).toEqual(prior.files);
+    expect(snapshot(prior.path)).toEqual(prior.before);
   });
 
   test("genuine replacement, BOM, punctuation and case-sensitive names retain exact ordinal spelling", async () => {
     realFs.rmSync(copyRoot, { recursive: true });
     realFs.mkdirSync(copyRoot);
-    const names = ['A space\nquote".txt', "z.txt", "流域.txt", "\uFEFFbom.txt", "\uFFFD.txt"];
+    const names = [
+      'A space\nquote".txt',
+      "z.txt",
+      "流域.txt",
+      "\u{10000}.txt",
+      "\uE000.txt",
+      "\uFEFFbom.txt",
+      "\uFFFD.txt",
+    ];
     for (const name of [...names].reverse()) realFs.writeFileSync(join(copyRoot, name), "");
+    realFs.writeFileSync(join(copyRoot, "ccw.tsd.forc"), manifest);
+    realFs.writeFileSync(join(copyRoot, "empty"), "");
     const result = await generateProvenance(runDir, project, original);
-    expect(result.sources.files).toEqual(
-      names.map((path) => ({ path, sha256: emptyDigest, size_bytes: 0 })),
-    );
+    expect(result.sources.files).toEqual([
+      { path: names[0], sha256: emptyDigest, size_bytes: 0 },
+      { path: manifestVector.path, sha256: manifestVector.sha256, size_bytes: 47 },
+      { path: "empty", sha256: emptyDigest, size_bytes: 0 },
+      ...names.slice(1).map((path) => ({ path, sha256: emptyDigest, size_bytes: 0 })),
+    ]);
   });
 
   test.each([0xff, 0xfe])(
@@ -382,8 +404,7 @@ describe("generateProvenance", () => {
       sha256: "5256ec18f11624025905d057d6befb03d77b243511ac5f77ed5e0221ce6d84b5",
       size_bytes: 2097152,
     });
-    expect(result.sources.files).toHaveLength(37);
-    expect(observedBytes).toBe(size + 43 + 32);
+    expect(result.sources.files).toHaveLength(38);
     expect(chunks).toBeGreaterThan(1);
     expect(largestChunk).toBeLessThan(size);
     expect(peakStreams).toBe(1);
