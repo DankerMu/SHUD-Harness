@@ -167,3 +167,15 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 #### Scenario: later change to the build binary does not affect a submitted run
 - **WHEN** 以合法 `build_id` 提交成功后，`builds/<build_id>/shud` 被改写或删除
 - **THEN** 本次运行仍执行 `<run_dir>/bin/shud`，其 sha256 仍等于 `run-job.json` 的 `binary_sha256`
+
+#### Scenario: thread selection is independent of build selection
+- **WHEN** a submission omits build_id but supplies threads 2 while the host has different OMP_NUM_THREADS and SHUD_RHS_THREADS values
+- **THEN** it executes configured shudBin without accessing builds or creating bin, records build_id/binary_sha256 as null and threads as 2, and the wrapper receives both thread variables as "2"; unrelated host variables and the parent environment remain unchanged
+
+#### Scenario: omitted threads preserve inherited values
+- **WHEN** a submission omits threads and the host already defines the two thread environment variables
+- **THEN** the wrapper inherits those values without overriding them, while RunJob and RunRecord record threads as null
+
+#### Scenario: accepted binary preparation drains before ownership release
+- **WHEN** registry disposal begins while an admitted build binary copy or its rollback is still in progress
+- **THEN** new admission is closed and stateDir ownership is not released until the accepted preparation and safe rollback or publication have completed

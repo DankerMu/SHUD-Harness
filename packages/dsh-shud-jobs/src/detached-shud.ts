@@ -59,7 +59,8 @@ exit "$code"
 export const produceDetachedShud: ShudProducer = (prepared, _handle, pumpPollMs) =>
   startDetachedShud(prepared, createShudCompletion(), pumpPollMs);
 
-/** Starts only execution. Supplied hooks own registration settlement; exit_code owns model outcome. */
+/** Starts only execution. Omitted threads inherit the host; explicit threads overlay both keys.
+ * Supplied hooks own registration settlement; exit_code owns model outcome. */
 export function startDetachedShud(
   prepared: RunJob,
   hooks: ShudLifecycle,
@@ -96,6 +97,15 @@ export function startDetachedShud(
       cwd: prepared.run_dir,
       detached: true,
       stdio: ["ignore", stdout, stderr],
+      ...(prepared.threads === null
+        ? {}
+        : {
+            env: {
+              ...process.env,
+              OMP_NUM_THREADS: String(prepared.threads),
+              SHUD_RHS_THREADS: String(prepared.threads),
+            },
+          }),
     });
     const launched = child;
     launched.once("error", (error: Error) => {
