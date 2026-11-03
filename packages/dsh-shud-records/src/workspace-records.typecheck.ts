@@ -13,6 +13,8 @@ import type {
   RunJob,
   RunRecord,
   JobRecordId,
+  ChangeId,
+  TaskId,
 } from "@shud-harness/dsh-shud-core";
 import {
   readWorkspaceRecord,
@@ -30,6 +32,7 @@ import {
   transitionTask,
   reconcileTaskCard,
   evaluateClosure,
+  codeChangeClosure,
   isReportMarkdownStale,
   applyDecision,
   markReportReviewed,
@@ -50,6 +53,9 @@ import {
   type ClosureDraft,
   type ClosureFailure,
   type ClosureResult,
+  type CodeChangeClosureLoaders,
+  type CodeChangeObjectLoaders,
+  type TaskEvent,
   type MutableWorkspaceRecordKind,
 } from "./index.ts";
 
@@ -283,6 +289,71 @@ void [
   emptyFailure,
   unidentifiedFailure,
   unknownFailure,
+];
+
+const closureObjects: CodeChangeObjectLoaders = {
+  readChange: (id) => readWorkspaceRecord(cwd, "change", id, { readonly: true }),
+  readPatch: (id) => readChangePatch(cwd, id, { readonly: true }),
+  readVerification: (id) => readWorkspaceRecord(cwd, "verification", id, { readonly: true }),
+};
+const codeClosureLoaders: CodeChangeClosureLoaders = {
+  ...closureObjects,
+  listRunJobsByTask: (id: TaskId) => {
+    void id;
+    return closureJobs;
+  },
+  runRecords: records,
+  draft,
+};
+const codeClosure: ClosureResult = codeChangeClosure(task, codeClosureLoaders);
+const dispatchedClosure: ClosureResult = evaluateClosure(
+  task,
+  closureJobs,
+  records,
+  draft,
+  closureObjects,
+);
+const closurePatch: Uint8Array = closureObjects.readPatch(change.change_id);
+const closureChange: unknown = closureObjects.readChange(change.change_id);
+const closureVerification: unknown = closureObjects.readVerification(verification.vc_id);
+const closureSnapshot: readonly ClosureRunJob[] = codeClosureLoaders.listRunJobsByTask(
+  task.task_id,
+);
+const changeEvent: TaskEvent = { type: "change_create" };
+const changeTransition: TaskCard = transitionTask(task, changeEvent);
+
+// @ts-expect-error The snapshot boundary is synchronous, not the async registry method.
+codeClosureLoaders.listRunJobsByTask = (_id: TaskId): Promise<readonly ClosureRunJob[]> =>
+  Promise.resolve(closureJobs);
+// @ts-expect-error A complete task snapshot requires explicit collect ledger counts.
+codeClosureLoaders.listRunJobsByTask = (_id: TaskId) => closureJobs.map(({ job }) => job);
+// @ts-expect-error Patch readers return exact bytes, never decoded text.
+closureObjects.readPatch = (_id: ChangeId) => "abc";
+// @ts-expect-error Reader ids are branded, not interchangeable strings.
+closureObjects.readChange("CHG-20261102T090000-a1b2");
+// @ts-expect-error Verification identity cannot route a ChangeRequest read.
+closureObjects.readChange(verification.vc_id);
+// @ts-expect-error Change identity cannot route a VerificationCase read.
+closureObjects.readVerification(change.change_id);
+// @ts-expect-error A direct closure call requires the task snapshot, records and draft.
+codeChangeClosure(task, closureObjects);
+// @ts-expect-error Building is not a task-state transition event.
+const buildEvent: TaskEvent = { type: "shud_build" };
+// @ts-expect-error Approval is not a task-state transition event.
+const submitEvent: TaskEvent = { type: "change_submit" };
+// @ts-expect-error Verification publication is not a task-state transition event.
+const verifyEvent: TaskEvent = { type: "verification_run" };
+void [
+  codeClosure,
+  dispatchedClosure,
+  closurePatch,
+  closureChange,
+  closureVerification,
+  closureSnapshot,
+  changeTransition,
+  buildEvent,
+  submitEvent,
+  verifyEvent,
 ];
 
 const stale: boolean = isReportMarkdownStale(report, undefined);

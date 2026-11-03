@@ -21,6 +21,9 @@
  * Provenance inventories prepared input bytes before allocation. Task transition,
  * reconciliation and closure helpers are pure; callers own evidence reads, approval,
  * report augmentation and persistence. Reconciliation identity signals no write.
+ * code_change closure requires explicit synchronous object readers and a preloaded task-job
+ * snapshot with ledger counts. Every linked object is schema/identity checked; valid failed
+ * verification is reportable evidence, not a veto, and closure neither approves nor writes.
  * Report rendering and thirteen-clause validation freshly read cited evidence without
  * publication. Validation returns controlled facts, not scientific or PI approval;
  * root errors omit paths and raw causes. The watermark stale predicate is pure.
@@ -39,7 +42,14 @@ export { transitionTask, TaskTransitionError } from "./task-transition.ts";
 export type { TaskEvent } from "./task-transition.ts";
 export { reconcileTaskCard, TaskReconcileError } from "./task-reconcile.ts";
 export { evaluateClosure } from "./task-closure.ts";
-export type { ClosureRunJob, ClosureDraft, ClosureFailure, ClosureResult } from "./task-closure.ts";
+export { codeChangeClosure } from "./code-change-closure.ts";
+export type { CodeChangeObjectLoaders, CodeChangeClosureLoaders } from "./code-change-closure.ts";
+export type {
+  ClosureRunJob,
+  ClosureDraft,
+  ClosureFailure,
+  ClosureResult,
+} from "./task-closure-shared.ts";
 export { isReportMarkdownStale } from "./report-watermark.ts";
 export {
   applyDecision,
