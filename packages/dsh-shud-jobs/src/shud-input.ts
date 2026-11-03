@@ -3,6 +3,7 @@ import * as io from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
   containsPath,
+  isProjectComponent,
   RunJobSchema,
   TaskIdSchema,
   type RunJob,
@@ -52,10 +53,6 @@ export function realDirectory(path: string): Stats {
   if (!stat.isDirectory() || stat.isSymbolicLink())
     throw new Error(`Expected a real directory, not a symlink: ${path}`);
   return stat;
-}
-
-export function isProjectComponent(project: string): boolean {
-  return project.length > 0 && project !== "." && project !== ".." && !/[\\/\0]/u.test(project);
 }
 
 export function prepareInput(request: SubmitShudRequest, stateDir: string): PreparedInput {

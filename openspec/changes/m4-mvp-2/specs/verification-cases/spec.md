@@ -35,6 +35,17 @@
 - **WHEN** 解析 `reviewer_notes: []`
 - **THEN** 解析失败并指出 `reviewer_notes`
 
+### Requirement: Shared project component grammar
+core SHALL 提供唯一的纯函数 `isProjectComponent(project: string): boolean`，仅拒绝空字符串、恰为 `.` 或 `..`、以及包含 `/`、反斜杠或 NUL 的字符串。SHALL NOT trim、规范化或额外限制空格、换行、Unicode、shell 标点及内嵌 `..`。jobs 的 prepareInput 与 collect SHALL 直接消费该 core 导出并保持既有校验顺序、错误与文件效果；jobs SHALL NOT 保留旧定义或兼容导出。RunJobSchema.project 的既有非空字符串规则 SHALL NOT 因此收紧。records 比较器后续复用该入口，而不是反向依赖 jobs 或复制规则。
+
+#### Scenario: unsafe components remain rejected
+- **WHEN** 传入空字符串、`.`、`..`、`a/b`、含反斜杠或 NUL 的字符串
+- **THEN** 返回 false，既有提交/收集消费者保持其原拒绝语义
+
+#### Scenario: existing ordinary components remain accepted
+- **WHEN** 传入 `tiny`、`a..b`、`...`、Unicode、含空格或换行的单分量字符串以及带 shell 标点的 project
+- **THEN** 返回 true；这不授权 shell 插值或改变求解器语法，仅保留原路径分量接受集合
+
 ### Requirement: Rivqdown comparator
 records SHALL 提供确定性函数 `compareRivqdown(baseRunDir, candidateRunDir, project)`：对两个运行目录的 `output/<project>.out/<project>.rivqdown.dat` 分别 `lstat` 确认为普通文件、计算 sha256，返回 `{ compared_path, base_sha256, candidate_sha256, equal }`。任一文件缺失、为符号链接或特殊文件 SHALL 抛出受控错误（缺证据不是 `failed`）。SHALL NOT 读取数值、SHALL NOT 使用容差、SHALL NOT 比较其它产物、SHALL NOT 读取日志内容。
 

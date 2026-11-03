@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   classifyRunExit,
   COLLECT_RETRY_INTERVAL_MS,
+  isProjectComponent,
   MAX_COLLECT_ATTEMPTS,
   RunJobSchema,
   RunRecordSchema,
@@ -11,7 +12,6 @@ import {
   type RunRecord,
 } from "@shud-harness/dsh-shud-core";
 import { readExit } from "./shud-exit.ts";
-import { isProjectComponent } from "./shud-input.ts";
 import { writeJson } from "@shud-harness/dsh-shud-records";
 import type { IndexEntry } from "./state-indexes.ts";
 import {

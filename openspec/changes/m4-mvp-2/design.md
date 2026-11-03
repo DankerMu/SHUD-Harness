@@ -255,6 +255,24 @@ Review focus: default application precedes refine; all non-code types reject com
 - 持久化：`verifications/<vc_id>.json` 原子写 → TaskCard `linked_verifications` 追加。同一对运行可重复生成新 VC（id 不同），不改写旧 VC。
 - 为什么 reviewer 触发而不是 collect 自动：grill 决定；比较需要两个终态运行与 reviewer 结论字段，自动路径无从填 `reviewer_notes`。
 
+#### Routed issue #574 implementation boundary
+
+Change surface: move isProjectComponent(project:string):boolean from jobs/shud-input.ts to core/project-component.ts and export from core/index.ts; prepareInput and shud-collect import directly from core. Remove the old definition/export rather than adding a shim. New focused core behavior tests cover the same predicate; no records production consumer until #532.
+
+Governing invariant: one implementation, identical results for every accepted string input, and unchanged caller validation order/error/filesystem effects. The exact old expression rejects empty, exactly "."/"..", slash, backslash and NUL. Whitespace-only strings, embedded newlines, Unicode, shell metacharacters, ".hidden", "a..b" and "..." remain valid components; this is a path-component check, not a shell/solver syntax policy.
+
+Ownership: domain core is already depended on by both jobs and records; adding records→jobs would create a cycle. Do not tighten RunJobSchema.project, whose nonempty-string shape remains separate. The helper still takes string, not unknown, and does not become a schema/type guard or perform IO.
+
+Cutover and sibling surfaces: both existing callers keep their current local parsing/guard placement, controlled errors and cleanup behavior. prepareInput checks before cwd/input filesystem traversal; collection checks a parsed terminal job before exit/output reads. Public core entry, jobs package dependencies and future records import all resolve the same implementation. LSP references were attempted and unavailable; targeted search found exactly the definition and two consumers.
+
+Equivalence evidence: .workplans/issue-574/reference-baseline.json freezes the actual old callable predicate for 830 deterministic strings and 21 independently specified positive/negative examples. A disposable mutant omitting backslash rejection fails 142 inputs; one rejecting whitespace/semicolon/embedded dotdot fails 227; the original reference then passes again. These are semantic qualification failures, not import/setup errors or changes to production. Add core behavioral tests before the move, temporarily targeting the existing predicate only for the pre-cutover check; final committed tests import core and contain no jobs dependency. Reuse the frozen output corpus in a throwaway built smoke, never in permanent tests.
+
+Runtime evidence: actual registry submit/collect safety regressions remain green, including pre-side-effect rejection; actual detached-script submission with tiny and metacharacter project preserves input, argv and canaries. Built core import resolved from records can evaluate the full frozen corpus. A final namespace check confirms the old jobs export is absent; this is throwaway cutover evidence, not a permanent wiring test.
+
+Resource/error boundaries: no new streams, allocations, disk operations, retries, logs or exception handling. Existing filesystem safety/record rollback stays with jobs. No scientific syntax, permissions, schema, configuration, package version or generated-document changes. All 31 generated artifacts must remain byte-identical.
+
+Execution and rollback: the exact small move and compact pure-case tests are mechanical parent edits; three read-only review seats and same-SHA CI independently accept them. Existing D8/project-path contract and this routing record document ownership; no new ADR required. Normal PR revert is rollback, not a retained alias. Shared M4 change remains active through PI acceptance.
+
 ### D9 build 与 run 的绑定：`shud_run(build_id, threads)`、StackLock、RunJob（Critical Path #4 局部）
 
 - `shud_run` 新增可选 `build_id`（品牌 `BuildId`）与 `threads`（正整数）。注册表在输入复制之后、StackLock 采集之前解析 `builds/<build_id>/build-record.json`（schema 校验、`task_id` 与本次相同或本次无 task）、校验 `builds/<build_id>/shud` 为普通可执行文件且 sha256 == `binary_sha256`，随后把它原子复制为 `<run_dir>/bin/shud`（临时文件 + rename，0755）并让包装进程执行该副本（关闭"校验后、执行前被替换"的窗口，运行目录自包含）；RunJob/RunRecord 新增 `binary_sha256`（非 null 当且仅当 `build_id` 非 null；M2/M3 记录缺该键按 null 解析，iff 约束在默认值之后求值）。任一失败走既有提交回滚（不留运行目录）。无 `build_id` 时执行与二进制选择逐字节沿用 M2/M3 路径（DataProvenance 的 `tsd.forc` 解析除外，见 D10）。
