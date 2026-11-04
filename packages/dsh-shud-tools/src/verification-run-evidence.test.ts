@@ -11,7 +11,7 @@ import {
   RunRecordSchema,
   TaskCardSchema,
 } from "@shud-harness/dsh-shud-core";
-import { writeWorkspaceRecord } from "@shud-harness/dsh-shud-records";
+import { readWorkspaceRecord, writeWorkspaceRecord } from "@shud-harness/dsh-shud-records";
 import { seedQueryRun } from "../../dsh-shud-jobs/src/list-run-jobs/test-harness.ts";
 import { makeRunRecord } from "../../dsh-shud-records/src/task-lifecycle-test-harness.ts";
 import {
@@ -28,6 +28,7 @@ import {
 import {
   COMPARED_PATH,
   OUTPUT_BYTES,
+  OUTPUT_SHA256,
   verificationHarness,
 } from "./verification-run/test-harness.ts";
 
@@ -51,8 +52,6 @@ for (const side of SIDES) {
     "pin",
     "threads-two",
     "threads-null",
-    "digest",
-    "null-data",
     "invalid-data",
     "internal-input",
     "external-input",
@@ -189,16 +188,12 @@ for (const side of SIDES) {
             RunJobSchema.parse({ ...source.job, threads: fault === "threads-two" ? 2 : null }),
           );
           break;
-        case "digest":
-          putFixture(paths.job, RunJobSchema.parse({ ...source.job, binary_sha256: OTHER_SHA256 }));
-          break;
-        case "null-data":
         case "invalid-data":
           putFixture(
             paths.run,
             RunRecordSchema.parse({
               ...source.run,
-              data_id: fault === "null-data" ? null : "DATA-invalid",
+              data_id: "DATA-invalid",
             }),
           );
           break;
@@ -217,6 +212,48 @@ for (const side of SIDES) {
         }
       }
       await rejectedUnchanged(h, args);
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  test(`${side} mirrored binary digest mismatch reaches BuildRecord validation`, async () => {
+    const h = await verificationHarness();
+    try {
+      const source = h[side];
+      const paths = fixturePaths(h, side);
+      const job = RunJobSchema.parse({ ...source.job, binary_sha256: OTHER_SHA256 });
+      const record = RunRecordSchema.parse({ ...source.run, binary_sha256: OTHER_SHA256 });
+      putFixture(paths.job, job);
+      putFixture(paths.run, record);
+      const build = readWorkspaceRecord(h.cwd, "build", source.build.build_id, { readonly: true });
+      expect(build.binary_sha256).toBe(OUTPUT_SHA256);
+      expect(build.binary_sha256).not.toBe(OTHER_SHA256);
+      expect(await h.registry.listRunJobsByTask(h.card.task_id)).toContainEqual(job);
+      expect(await h.registry.collectShud(job.job_id, { readonly: true })).toEqual(record);
+
+      const message = await rejectedUnchanged(h, verificationArgs(h), /binary_sha256/u);
+      expect(message).toContain(job.run_id);
+      expect(message).toContain(build.build_id);
+    } finally {
+      await h.dispose();
+    }
+  });
+
+  test(`${side} mirrored null data_id reaches provenance validation`, async () => {
+    const h = await verificationHarness();
+    try {
+      const source = h[side];
+      const paths = fixturePaths(h, side);
+      const job = RunJobSchema.parse({ ...source.job, data_id: null });
+      const record = RunRecordSchema.parse({ ...source.run, data_id: null });
+      putFixture(paths.job, job);
+      putFixture(paths.run, record);
+      expect(await h.registry.listRunJobsByTask(h.card.task_id)).toContainEqual(job);
+      expect(await h.registry.collectShud(job.job_id, { readonly: true })).toEqual(record);
+
+      const message = await rejectedUnchanged(h, verificationArgs(h), /data_id.*required/u);
+      expect(message).toContain(job.run_id);
     } finally {
       await h.dispose();
     }
