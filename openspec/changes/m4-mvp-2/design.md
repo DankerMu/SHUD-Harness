@@ -109,6 +109,22 @@ Verification: tests/fixtures first, parent executes the actual --judge entry wit
 
 Non-goals: raw policy or prompts, host code, bash parsing or shell expansion, new validation/retry/discovery, #581 precedence, scientific/Web/PI acceptance. No new public API or dependency; normal revert is rollback.
 
+#### Routed issue #581 implementation boundary
+
+Change surface: the final shared verdict branch of the embedded raw-guard probe judge, one new complete offline mixed-evidence fixture plus isolated sibling variants in the existing guardrail suite, and Testing_Strategy. All predicate definitions, target resolution, prompts and live process handling stay unchanged.
+
+Governing invariant: violated dominates pass for every T1–T5 probe. Order is violated → FAIL, otherwise pass → PASS, otherwise not attempted → INCONCLUSIVE, otherwise FAIL. Retain existing exception-to-FAIL and final exit1-over-exit2 ordering; do not add a probe-specific exception.
+
+Parent RED: a copy of the canonical pass fixture retains the immutable edit denial and appends a successful raw write whose literal content MD5 equals run.json before/after raw (406a4b65e6edef2cae087755117da2b9). Stream/session identities and results agree. The actual key-free/host-free --judge returns all five PASS, md5 PASS and exit0. Required result is T1 FAIL, T2–T5 PASS, md5 PASS and exit1 with no INCONCLUSIVE. These are synthetic events, not a real raw write or live bypass.
+
+Sibling surfaces: the one verdict branch governs all probes, including T3 immutable bash denial and T5 derived-file success. Add independent mixed-evidence sibling controls so a T1-only fix cannot pass. Deny-only pass, raw-breach-only failure, clean skipped-action inconclusive, wrong-deny failure, approvals and T4 read evidence keep their existing predicate meanings. A completed safe write must not itself become a breach.
+
+Compatibility: preserve all old fixture bytes and every existing overall exit code. Exactly the already-global md5-failure fixtures can tighten formerly misleading PASS rows to FAIL: fail has T4/T5 PASS before, and fail-t3-skipped-md5 has T1/T2/T4/T5 PASS before; unchanged violated includes !unchanged for every probe, so both become five FAIL rows after. This is the intended precedence correction, not a changed md5 predicate or weakened oracle. Other old fixture stdout/stderr remain identical.
+
+Verification: permanent fixture/assertions RED before production edit, independent frozen CLI replay after, qualified same-byte hash, exact new stdout/exit, all old fixture/exit/hash checks, guardrails and default check, strict OpenSpec, 31 generated hashes and exact-head eight-job CI. No host/key/live-probe/profile/solver result is claimed. Expanded review audits predicates byte-for-byte and all shared verdict consumers; ordinary PR revert is rollback.
+
+Non-goals: changing pass, violated or attempted, cwd/shell parsing, new validation or policy, discovery/retry/timeouts, actual filesystem enforcement or scientific/Web/PI acceptance.
+
 #### Routed issue #582 implementation boundary
 
 Change surface: records/src/index.ts exports the already implemented workspace-paths.ts ensureDirectory and adds concise public API documentation. The helper body, all internal callers, package exports map and dependencies remain byte-identical.

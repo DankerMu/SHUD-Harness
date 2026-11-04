@@ -8,6 +8,15 @@
 
 路由前置：#582 在5.1/#536之前从records根入口公开既有ensureDirectory，保持实现与所有内部调用方不变；live #536已补Depends on #582。#579/#581为本阶段独立的raw probe judge修复，须在M4收口前完成，不并入#535策略。
 
+### Routed issue #581: breach-first offline verdict
+
+- [x] R581 Implement engineering-gates「Offline raw probe breaches dominate success」 solely at the shared verdict branch; existing pass/violated/attempted and #579 target semantics remain.
+- Selected CLI/event/order/evidence: coherent same-probe immutable deny plus completed same-byte raw write, content MD5 qualified against unchanged manifest; real --judge allPASS/0 before, T1FAIL/md5PASS/1 after. Independent T3/T5 mixed controls reject a T1-only special case; safe completion and deny-only controls remain.
+- Selected legacy/error/auth: old fixture bytes and all overall exits unchanged; ordinary PASS, clean INCONCLUSIVE, wrong-deny/breach/approval/T4 outcomes retained. The two old global-md5-failure fixtures intentionally tighten masked PASS rows to FAIL under unchanged violated, never to INCONCLUSIVE.
+- Selected docs/release: existing Testing_Strategy documents breach-first and synthetic offline limits; no dependency or host/key requirement. No package/raw policy/prompt/live runner changes.
+- Not selected: file mutation/config/concurrency/resource/science experiments; no new state, writer, setting, limit, retry or scientific claim.
+- Verification: permanent and independent CLI RED→GREEN, predicate-preservation audit, all old fixture/hash/exit checks, test-guardrails, pnpm run check, strict OpenSpec, generated equality, expanded three-seat review and same-head eight-job CI.
+
 ### Routed issue #579: offline probe file cwd
 
 - [x] R579 Implement engineering-gates「Offline raw probe file targets follow session cwd」 in the existing judge: one shared narrow per-tool cwd rule, edit/write ignoring extra workdir and bash preserving its current rule.

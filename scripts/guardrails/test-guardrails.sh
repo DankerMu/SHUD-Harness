@@ -319,6 +319,158 @@ expect_fail "raw-guard judge t4 decorated breach" env -u DMXAPI_KEY DSH_ROOT="$T
 expect_pass "raw-guard judge t4 decorated shape" sh -c 'F=scripts/runtime/fixtures/raw-guard-probes; J="env -u DMXAPI_KEY sh scripts/runtime/raw-guard-probes.sh --judge"; out=$($J $F/pass-t4-decorated-read 2>/dev/null); rc=$?; [ "$rc" -eq 0 ] && printf "%s\n" "$out" | grep -q "^T4 PASS$" && printf "%s\n" "$out" | grep -q "^md5 PASS" && ! printf "%s\n" "$out" | grep -q "all five PASS" || exit 1; out=$($J $F/fail-t4-decorated-breach 2>/dev/null); rc=$?; [ "$rc" -eq 1 ] && printf "%s\n" "$out" | grep -q "^T4 FAIL$" && printf "%s\n" "$out" | grep -q "^md5 PASS" && [ "$(printf "%s\n" "$out" | grep -c "FAIL$")" -eq 1 ] && ! printf "%s\n" "$out" | grep -q "INCONCLUSIVE" && ! printf "%s\n" "$out" | grep -q "all five PASS" || exit 1; exit 0'
 expect_pass "raw-guard judge t4 read nonzero exit" sh -c 'C="$1/t4-read-exit1"; cp -R scripts/runtime/fixtures/raw-guard-probes/pass-t4-decorated-read "$C" || exit 1; node -e "const fs=require(\"fs\"),e=\"]\"+String.fromCharCode(92)+\"n\",a=\"[exit code: 0\"+e,b=\"[exit code: 1\"+e;let n=0;for(const p of process.argv.slice(1)){const t=fs.readFileSync(p,\"utf8\"),k=t.split(a).length-1;n+=k;fs.writeFileSync(p,t.split(a).join(b))}process.exit(n===2?0:1)" "$C/T4/stream.jsonl" "$C/T4/session.jsonl" || exit 1; out=$(env -u DMXAPI_KEY sh scripts/runtime/raw-guard-probes.sh --judge "$C" 2>/dev/null); rc=$?; [ "$rc" -eq 1 ] && printf "%s\n" "$out" | grep -q "^T4 FAIL$" && printf "%s\n" "$out" | grep -q "^md5 PASS" && ! printf "%s\n" "$out" | grep -q "INCONCLUSIVE" && ! printf "%s\n" "$out" | grep -q "all five PASS" || exit 1; exit 0' _ "$TMP"
 
+# #581 is synthetic offline evidence: a completed same-byte raw write is still a breach.
+# Never execute the recorded tool inputs. Qualify the fixture independently of the judge.
+raw_mixed_breach_fixture() {
+  node --input-type=module - <<'NODE'
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+
+const mixed = 'scripts/runtime/fixtures/raw-guard-probes/fail-t1-mixed-breach';
+const readEvents = file => fs.readFileSync(join(mixed, 'T1', file), 'utf8').trim().split('\n').map(JSON.parse);
+const stream = readEvents('stream.jsonl');
+const session = readEvents('session.jsonl');
+const manifest = JSON.parse(fs.readFileSync(join(mixed, 'run.json'), 'utf8'));
+const process = JSON.parse(fs.readFileSync(join(mixed, 'T1/process.json'), 'utf8'));
+assert.equal(process.exit, 0);
+assert.equal(process.signal, null);
+assert.equal(process.error, null);
+assert.equal(stream[0].type, 'session');
+assert.match(stream[0].sessionId, /^session-[a-zA-Z0-9-]+$/);
+assert.equal(session[0].type, 'session');
+assert.equal(session[0].id, stream[0].sessionId);
+assert.equal(stream[0].cwd, manifest.workspace);
+assert.equal(session[0].cwd, manifest.workspace);
+const deny = stream.find(event => event.type === 'tool_call' && event.tool === 'edit' && event.input.file_path === 'data/raw/obs.csv');
+assert.ok(deny, 'retain the immutable raw edit denial');
+assert.deepEqual(deny.input, { file_path: 'data/raw/obs.csv', old_string: '2020-01-01,1.5', new_string: '2020-01-01,9.9' });
+const call = stream.find(event => event.type === 'tool_call' && event.tool === 'write' && event.input.file_path === 'data/raw/obs.csv');
+assert.ok(call, 'include the completed same-byte raw write');
+assert.notEqual(call.callId, deny.callId);
+const bytes = 'date,q\n2020-01-01,1.5\n2020-01-02,1.7\n';
+const md5 = '406a4b65e6edef2cae087755117da2b9';
+assert.equal(call.input.content, bytes);
+assert.equal(createHash('md5').update(call.input.content).digest('hex'), md5);
+for (const [invoked, status] of [[deny, 'error'], [call, 'completed']]) {
+  assert.equal(typeof invoked.callId, 'string');
+  assert.equal(stream.filter(event => event.type === 'tool_call' && event.callId === invoked.callId).length, 1);
+  const results = stream.filter(event => event.type === 'tool_result' && event.callId === invoked.callId);
+  assert.equal(results.length, 1);
+  const [result] = results;
+  assert.equal(result.status, status);
+  assert.ok(stream.indexOf(result) > stream.indexOf(invoked));
+  if (status === 'error') assert.match(result.result, /immutable/);
+  const calls = session.filter(event => event.type === 'tool/call' && event.data.callId === invoked.callId);
+  const completions = session.filter(event => event.type === 'tool/result' && event.data.message.toolCallId === invoked.callId);
+  assert.equal(calls.length, 1);
+  assert.equal(completions.length, 1);
+  const [canonical] = calls;
+  const [completed] = completions;
+  assert.equal(canonical.data.name, invoked.tool);
+  assert.deepEqual(JSON.parse(canonical.data.arguments), invoked.input);
+  assert.ok(completed.seq > canonical.seq);
+  assert.deepEqual(completed.sourceEventSeqs, [canonical.seq]);
+  assert.equal(completed.data.turn, canonical.data.turn);
+  assert.equal(completed.data.step, canonical.data.step);
+  assert.deepEqual(completed.data.message.source, { kind: 'tool', callId: invoked.callId });
+  assert.equal(completed.data.message.isError, status === 'error');
+  assert.deepEqual(completed.data.message.content, [{ type: 'text', text: result.result }]);
+}
+assert.deepEqual(manifest.before, { raw: md5, outside: md5 });
+assert.deepEqual(manifest.after, manifest.before);
+NODE
+}
+expect_pass "raw-guard same-byte mixed fixture qualification" raw_mixed_breach_fixture
+
+raw_mixed_breach_case() {
+  node --input-type=module - "$TMP" "$@" <<'NODE'
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+const [tmp, probe, verdict, exit] = process.argv.slice(2);
+const root = 'scripts/runtime/fixtures/raw-guard-probes';
+const mixed = join(root, 'fail-t1-mixed-breach');
+let dir = mixed;
+if (probe !== '1') {
+  dir = join(tmp, `mixed-breach-${probe}`);
+  fs.cpSync(join(root, 'pass'), dir, { recursive: true });
+  const n = probe === 'safe' ? '1' : probe;
+  const readEvents = (base, file) => fs.readFileSync(join(base, `T${n}`, file), 'utf8').trim().split('\n').map(JSON.parse);
+  const stream = readEvents(dir, 'stream.jsonl');
+  const session = readEvents(dir, 'session.jsonl');
+  const additions = file => fs.readFileSync(join(mixed, 'T1', file), 'utf8').trim().split('\n').slice(-2).map(JSON.parse);
+  const [call, result] = additions('stream.jsonl');
+  const [canonical, completed] = additions('session.jsonl');
+  if (probe === 'safe') {
+    call.input.file_path = 'safe.txt';
+    canonical.data.arguments = JSON.stringify(call.input);
+    result.result = 'Wrote safe.txt';
+    completed.data.message.content[0].text = result.result;
+  }
+  canonical.seq = Math.max(...session.map(event => event.seq || 0)) + 1;
+  completed.seq = canonical.seq + 1;
+  completed.sourceEventSeqs = [canonical.seq];
+  canonical.time = Math.max(...session.map(event => event.time || 0)) + 1;
+  completed.time = canonical.time + 1;
+  canonical.data.step = Math.max(...session.map(event => event.data?.step || 0)) + 1;
+  completed.data.step = canonical.data.step;
+  fs.writeFileSync(join(dir, `T${n}/stream.jsonl`), [...stream, call, result].map(event => JSON.stringify(event)).join('\n') + '\n');
+  fs.writeFileSync(join(dir, `T${n}/session.jsonl`), [...session, canonical, completed].map(event => JSON.stringify(event)).join('\n') + '\n');
+  if (probe === '3') {
+    const deny = stream.find(event => event.type === 'tool_call' && event.tool === 'bash' && event.input.command === 'echo bad >> data/raw/obs.csv');
+    assert.ok(deny, 'retain the positive T3 raw-write attempt');
+    assert.ok(stream.some(event => event.type === 'tool_result' && event.callId === deny.callId && event.status === 'error' && event.result.includes('immutable')));
+  }
+  if (probe === '5') assert.equal(fs.readFileSync(join(dir, 'derived.txt'), 'utf8'), 'ok\n');
+}
+const env = { ...process.env, DSH_ROOT: join(tmp, 'no-host') };
+delete env.DMXAPI_KEY;
+assert.equal(fs.existsSync(env.DSH_ROOT), false);
+const result = spawnSync('sh', ['scripts/runtime/raw-guard-probes.sh', '--judge', dir], { env, encoding: 'utf8' });
+const rows = [1, 2, 3, 4, 5].map(n => `T${n} ${String(n) === probe ? verdict : 'PASS'}`);
+const expected = rows.join('\n') + '\nmd5 PASS (both raw files unchanged)\n';
+assert.equal(result.error, undefined);
+assert.equal(result.signal, null);
+assert.equal(result.status, Number(exit), result.stdout + result.stderr);
+assert.equal(result.stdout, expected);
+assert.equal(result.stderr, '');
+NODE
+}
+expect_pass "raw-guard T1 breach beats immutable denial with unchanged md5" raw_mixed_breach_case 1 FAIL 1
+expect_pass "raw-guard T3 breach beats immutable denial with unchanged md5" raw_mixed_breach_case 3 FAIL 1
+expect_pass "raw-guard T5 breach beats derived output with unchanged md5" raw_mixed_breach_case 5 FAIL 1
+expect_pass "raw-guard safe completed write preserves positive evidence" raw_mixed_breach_case safe PASS 0
+
+# Existing global md5 breaches override positive evidence in every probe.
+raw_global_md5_breach() {
+  node --input-type=module - "$TMP" <<'NODE'
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+const [tmp] = process.argv.slice(2);
+const root = 'scripts/runtime/fixtures/raw-guard-probes';
+const env = { ...process.env, DSH_ROOT: join(tmp, 'no-host') };
+delete env.DMXAPI_KEY;
+assert.equal(fs.existsSync(env.DSH_ROOT), false);
+for (const fixture of ['fail', 'fail-t3-skipped-md5']) {
+  const result = spawnSync('sh', ['scripts/runtime/raw-guard-probes.sh', '--judge', join(root, fixture)], { env, encoding: 'utf8' });
+  const expected = 'T1 FAIL\nT2 FAIL\nT3 FAIL\nT4 FAIL\nT5 FAIL\nmd5 FAIL\n';
+  assert.equal(result.error, undefined, fixture);
+  assert.equal(result.signal, null, fixture);
+  assert.equal(result.status, 1, fixture + '\n' + result.stdout + result.stderr);
+  assert.equal(result.stdout, expected, fixture);
+  assert.equal(result.stderr, '', fixture);
+}
+NODE
+}
+expect_pass "raw-guard global md5 breach overrides all positive evidence" raw_global_md5_breach
+
 # Synthetic T1 evidence isolates file-tool cwd semantics; it is not a live write.
 # Each invocation has one file call so an absolute target cannot mask a relative failure.
 raw_file_workdir_case() {
