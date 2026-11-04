@@ -1,16 +1,14 @@
 # Proposal
 
-## Active issue fixture: #538
+## Active issue fixture: #592
 
-- Issue type: feature; Fixture level: expanded (agree upstream). Dependencies #524/#536 are merged; #537 is also merged. Critical Paths #1/#2/#3: deterministic policy precedence, raw protection and host-owned PI approval.
-- Scope: policy-gate change_submit rule/constants/audit, tools change_submit registration/handler, raw-guard exact changes target, accompanying tests and existing behavior documentation. No core/records/jobs/profile/preset changes or new dependencies.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility; Scientific governance / PI gate / evidence lineage; dsh seam / profile / outbound-channel governance.
-- Governing invariant: no high-risk change approval is persisted without host allowed-once; pre-card and execution-time patch hashes both bind to the current canonical CR. Raw/core denial precedes approval. Only the CR approval fields change; TaskCard, patch and unrelated records remain byte/mtime unchanged.
-- Reuse core brands/CR schema/current-role policy, canonical readonly record/patch readers and rewriteChangeRequest, strictTool, existing real ToolRuntime and approved full-access test seam. No second record writer, state machine, approval service or role table.
-- Preserve report approval behavior, single-listener waterfall/next semantics, audit payload restrictions and counters, known-role restrictions, unknown-role level decision, all existing tools and readonly missing-root behavior.
-- Evidence floor: first actual registered high-risk ToolRuntime tracer RED→GREEN with held approval and durable result bound to callId, then denied outcomes/patch mutation/raw/low-risk vertical tracers and complete sibling matrix; built-plugin approval smoke, full check/profile/raw probes/guardrails/strict/generated equality, three-seat white-box review and exact-head CI.
-- Not selected: Config/project setup (no configuration changes), resource-limit/discovery (reuse canonical bounded-scope reads, no new scan or cap), hydrology execution (no solver or job behavior). Compatibility of the existing permission configuration is exercised, not changed.
-- Non-goals: PI comment persistence/change_decide, approval-ledger attestation, new CR states, TaskCard type/base restrictions beyond the specified running state, cross-process hostile-writer transactions, Web/LLM or PI functional acceptance, role/preset rollout, retries or new queues.
+- Issue type: test; Fixture level: compact; upstream suggested level absent. Isolated native fault-injection correction, no production behavior or shared IO/persistence implementation change; existing M4 design remains authoritative, no new design artifact.
+- Scope: only the make-signal row in shud-build-execution.test.ts plus this fixture/scenario. #539/PR591 is parked until this independent prerequisite merges.
+- Selected risk packs: Error handling / rollback / partial outputs, Legacy compatibility / examples, Documentation / migration notes. Other packs are not selected: no API/config/schema/auth/path/resource/concurrency/release or scientific-runtime behavior changes.
+- Governing invariant: report the actual child exit/signal and preserve cleanup/source/TaskCard invariants; sending catchable SIGTERM does not guarantee a SIGTERM wait status.
+- Change only the native recipe signal to KILL and expected actual signal to SIGKILL. Keep real make/spawnSync, one invocation, no residual build, source/card byte and mtime checks, adjacent exit/artifact cases and controlled diagnostics. No sleep/retry/skip, regex widening or production change.
+- Evidence floor: retained CI41761036256 failure plus independent Linux minimal reproduction (498 SIGTERM / 2 exit2 in 500); KILL control 500 actual SIGKILL on Linux and Darwin; parent targeted real tool test, full default gate, strict fixture and exact-head Linux CI.
+- A fixture review and compact correctness+test-evidence review must confirm this preserves the existing signal-classification contract rather than accepting exit2 as a signal. Internal GNU make cleanup causality remains unproven and out of scope.
 
 ## Why
 
