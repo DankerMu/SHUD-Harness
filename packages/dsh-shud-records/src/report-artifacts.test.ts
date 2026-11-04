@@ -36,7 +36,16 @@ function validate(cwd = workspace.cwd) {
   expect(result.checks.map(({ id }) => id)).toEqual([
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
   ]);
-  expect(snapshotTree(workspace.root)).toEqual(before);
+  const after = snapshotTree(workspace.root);
+  expect(after.length).toBe(before.length);
+  for (let index = 0; index < before.length; index++) {
+    const { bytes: beforeBytes, ...beforeMetadata } = before[index];
+    const { bytes: afterBytes, ...afterMetadata } = after[index];
+    // Retain ordered namespace and all metadata; compare file bytes without generic deep traversal.
+    expect(afterMetadata).toEqual(beforeMetadata);
+    if (beforeBytes === null) expect(afterBytes).toBeNull();
+    else expect(afterBytes?.equals(beforeBytes)).toBe(true);
+  }
   const diagnostic = JSON.stringify(result);
   expect(diagnostic).not.toContain(SECRET);
   expect(diagnostic).not.toContain(workspace.cwd);
