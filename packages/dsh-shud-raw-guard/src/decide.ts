@@ -1,6 +1,11 @@
 import { lstatSync, opendirSync, realpathSync, type BigIntStats, type Dir } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { containsPath, ReportIdSchema, TaskIdSchema } from "@shud-harness/dsh-shud-core";
+import {
+  ChangeIdSchema,
+  containsPath,
+  ReportIdSchema,
+  TaskIdSchema,
+} from "@shud-harness/dsh-shud-core";
 import { readWorkspaceRecord } from "@shud-harness/dsh-shud-records";
 
 type RawGuardCall = { name: string; arguments: unknown; cwd?: string };
@@ -481,6 +486,29 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
     const cwd = call.cwd ?? process.cwd();
     const tasks = canonical("tasks", cwd);
     return options.rawDirs.some((raw) => containsRawPath(canonical(raw, cwd), tasks)) ? DENY : NEXT;
+  }
+  if (call.name === "change_submit") {
+    try {
+      const cwd = call.cwd ?? process.cwd();
+      const args = call.arguments;
+      const fields =
+        args && typeof args === "object" && !Array.isArray(args)
+          ? (args as Record<string, unknown>)
+          : {};
+      const id = ChangeIdSchema.safeParse(fields.change_id);
+      // Approval rewrites only this JSON; malformed identity falls back to the changes root.
+      const target = canonical(id.success ? `changes/${id.data}.json` : "changes", cwd);
+      return options.rawDirs.some((raw) => containsRawPath(canonical(raw, cwd), target))
+        ? DENY
+        : NEXT;
+    } catch (error) {
+      if (error instanceof PathUnavailable) throw error;
+      return {
+        kind: "deny",
+        code: "raw-target-unavailable",
+        reason: "Change approval target cannot be safely resolved; execution denied.",
+      };
+    }
   }
   if (call.name === "change_create") {
     try {

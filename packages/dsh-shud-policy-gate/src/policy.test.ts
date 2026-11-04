@@ -81,7 +81,6 @@ test.each([
   { role: "coder", tool: "read" },
   { role: "coder", tool: "edit" },
   { role: "coder", tool: "change_create" },
-  { role: "coder", tool: "change_submit" },
   { role: "coder", tool: "shud_build" },
   { role: "reviewer", tool: "read" },
   { role: "reviewer", tool: "verification_run" },

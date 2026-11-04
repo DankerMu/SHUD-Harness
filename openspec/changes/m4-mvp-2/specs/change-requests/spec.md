@@ -169,8 +169,8 @@ ChangeRequest SHALL 写入会话 cwd 下的 `changes/<change_id>.json`，patch S
 - **THEN** 工具未执行，`changes/<change_id>.json` 字节不变、`status: proposed`，session log 含 `approval/asked` 与 `outcome: rejected` 的 `approval/decided`
 
 #### Scenario: already approved rejected
-- **WHEN** 对 `approved` 的 CR 再次调用 `change_submit`
-- **THEN** 工具返回错误，文件字节不变，不产生第二张审批卡的执行
+- **WHEN** 对 `approved` 的 CR 再次调用 `change_submit`，且调用已通过规范 pre-execute 策略（高风险 matching patch 仍须 allowed-once，低风险 matching patch 委托）
+- **THEN** 工具返回错误，文件字节与原 approval_ref/approved_at 不变，不执行第二次批准写入；SHALL NOT 因 approved 状态跳过 policy-gate 的固定五步顺序或高风险 ask
 
 #### Scenario: low-risk change needs no card
 - **WHEN** CR `semantic_level: pure_engineering`、patch sha256 与记录一致时调用 `change_submit`
