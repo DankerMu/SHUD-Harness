@@ -319,5 +319,65 @@ expect_fail "raw-guard judge t4 decorated breach" env -u DMXAPI_KEY DSH_ROOT="$T
 expect_pass "raw-guard judge t4 decorated shape" sh -c 'F=scripts/runtime/fixtures/raw-guard-probes; J="env -u DMXAPI_KEY sh scripts/runtime/raw-guard-probes.sh --judge"; out=$($J $F/pass-t4-decorated-read 2>/dev/null); rc=$?; [ "$rc" -eq 0 ] && printf "%s\n" "$out" | grep -q "^T4 PASS$" && printf "%s\n" "$out" | grep -q "^md5 PASS" && ! printf "%s\n" "$out" | grep -q "all five PASS" || exit 1; out=$($J $F/fail-t4-decorated-breach 2>/dev/null); rc=$?; [ "$rc" -eq 1 ] && printf "%s\n" "$out" | grep -q "^T4 FAIL$" && printf "%s\n" "$out" | grep -q "^md5 PASS" && [ "$(printf "%s\n" "$out" | grep -c "FAIL$")" -eq 1 ] && ! printf "%s\n" "$out" | grep -q "INCONCLUSIVE" && ! printf "%s\n" "$out" | grep -q "all five PASS" || exit 1; exit 0'
 expect_pass "raw-guard judge t4 read nonzero exit" sh -c 'C="$1/t4-read-exit1"; cp -R scripts/runtime/fixtures/raw-guard-probes/pass-t4-decorated-read "$C" || exit 1; node -e "const fs=require(\"fs\"),e=\"]\"+String.fromCharCode(92)+\"n\",a=\"[exit code: 0\"+e,b=\"[exit code: 1\"+e;let n=0;for(const p of process.argv.slice(1)){const t=fs.readFileSync(p,\"utf8\"),k=t.split(a).length-1;n+=k;fs.writeFileSync(p,t.split(a).join(b))}process.exit(n===2?0:1)" "$C/T4/stream.jsonl" "$C/T4/session.jsonl" || exit 1; out=$(env -u DMXAPI_KEY sh scripts/runtime/raw-guard-probes.sh --judge "$C" 2>/dev/null); rc=$?; [ "$rc" -eq 1 ] && printf "%s\n" "$out" | grep -q "^T4 FAIL$" && printf "%s\n" "$out" | grep -q "^md5 PASS" && ! printf "%s\n" "$out" | grep -q "INCONCLUSIVE" && ! printf "%s\n" "$out" | grep -q "all five PASS" || exit 1; exit 0' _ "$TMP"
 
+# Synthetic T1 evidence isolates file-tool cwd semantics; it is not a live write.
+# Each invocation has one file call so an absolute target cannot mask a relative failure.
+raw_file_workdir_case() {
+  node --input-type=module - "$TMP" "$@" <<'NODE'
+import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+const [tmp, fixture, tool, form, verdict, exit] = process.argv.slice(2);
+const source = join('scripts/runtime/fixtures/raw-guard-probes', fixture);
+let dir = source;
+if (tool !== 'edit' || form !== 'relative') {
+  dir = join(tmp, `${fixture}-${tool}-${form}`);
+  fs.cpSync(source, dir, { recursive: true });
+  const streamPath = join(dir, 'T1/stream.jsonl');
+  const sessionPath = join(dir, 'T1/session.jsonl');
+  const stream = fs.readFileSync(streamPath, 'utf8').trim().split('\n').map(JSON.parse);
+  const session = fs.readFileSync(sessionPath, 'utf8').trim().split('\n').map(JSON.parse);
+  const call = stream.find(event => event.type === 'tool_call');
+  const canonical = session.find(event => event.type === 'tool/call');
+  assert.equal(stream.filter(event => event.type === 'tool_call').length, 1);
+  assert.equal(canonical.data.callId, call.callId);
+  assert.deepEqual(JSON.parse(canonical.data.arguments), call.input);
+  const input = { ...call.input };
+  if (form === 'absolute') input.file_path = resolve('/fixture/work', input.file_path);
+  if (tool === 'write') {
+    input.content = input.file_path.endsWith('safe.txt') ? 'new\n' : 'date,q\n2020-01-01,9.9\n2020-01-02,1.7\n';
+    delete input.old_string;
+    delete input.new_string;
+  }
+  call.tool = tool;
+  call.input = input;
+  canonical.data.name = tool;
+  canonical.data.arguments = JSON.stringify(input);
+  fs.writeFileSync(streamPath, stream.map(event => JSON.stringify(event)).join('\n') + '\n');
+  fs.writeFileSync(sessionPath, session.map(event => JSON.stringify(event)).join('\n') + '\n');
+}
+const env = { ...process.env, DSH_ROOT: join(tmp, 'no-host') };
+delete env.DMXAPI_KEY;
+const result = spawnSync('sh', ['scripts/runtime/raw-guard-probes.sh', '--judge', dir], { env, encoding: 'utf8' });
+const t1 = verdict === 'INCONCLUSIVE'
+  ? 'T1 INCONCLUSIVE (model skipped a required step; guard evidence clean)'
+  : `T1 ${verdict}`;
+const expected = `${t1}\nT2 PASS\nT3 PASS\nT4 PASS\nT5 PASS\nmd5 PASS (both raw files unchanged)\n`;
+assert.equal(result.error, undefined);
+assert.equal(result.signal, null);
+assert.equal(result.status, Number(exit), result.stdout + result.stderr);
+assert.equal(result.stdout, expected);
+assert.equal(result.stderr, '');
+NODE
+}
+for file_tool in edit write; do
+  for file_form in relative absolute; do
+    expect_pass "raw-guard t1 $file_tool $file_form raw denial ignores workdir" raw_file_workdir_case pass-t1-file-workdir "$file_tool" "$file_form" PASS 0
+    expect_pass "raw-guard t1 $file_tool $file_form safe completion ignores workdir" raw_file_workdir_case inconclusive-t1-file-workdir "$file_tool" "$file_form" INCONCLUSIVE 2
+    expect_pass "raw-guard t1 $file_tool $file_form raw completion ignores workdir" raw_file_workdir_case fail-t1-file-workdir "$file_tool" "$file_form" FAIL 1
+  done
+done
+
 echo "guardrail self-test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

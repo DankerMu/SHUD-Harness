@@ -1,16 +1,16 @@
 # Proposal
 
-## Active issue fixture: #541
+## Active issue fixture: routed #579
 
-- Issue type: feature; Fixture level: expanded (agree upstream). Dependencies #533, #540 and routed #597 are merged. #597 unified physical records paths and source consumers without changing validator semantics; restore the preserved #541 physical-parent case without exclusions. Critical Paths #2/#3/#6: readonly artifact safety, unchanged report approval seams and deterministic report wording/evidence.
-- Scope: tools report-generate/report-citations/report-workflow/report-validate and tests; records report-validate and tests; existing report documentation. No core/jobs/report-render/template, schema projection, policy/raw implementation, profile/preset or dependency changes.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility; Scientific governance / PI gate / evidence lineage; dsh seam / profile governance.
-- Governing invariant: generate reports only from fresh linked evidence satisfying canonical closure; validate every referenced VC artifact against its recorded ordered hashes before a draft becomes reviewed. A failed VC is reportable evidence, not an automatic closure veto or scientific conclusion.
-- Reuse evaluateClosure with explicit readonly object loaders, canonical record/patch readers, existing report state/publication/repair lanes, core wording/secret regex and internal hashDescriptor. Do not duplicate closure, hashing, rendering, approval or storage.
-- Preserve science_assist closure and authored text, independent reconciliation/entry-repair commits, ten sections/seven watermarks, report_submit/report_decide expectations, raw priority and current role policy. A validation failure makes no further writes relative to successful entry repair.
-- Evidence floor: actual ToolRuntime code_change draft tracer RED→GREEN; then fifteen-check/artifact/failed-VC tracers before the matrix; built emitted tool generate→validate smoke, full check/profile/strict/generated equality, three-seat white-box review and exact-head eight-job CI.
-- Not selected: configuration/discovery/resource-limit/hydrology experiment packs; no settings, unindexed discovery, solver execution or new limit. Bounded descriptor IO and resource cleanup are explicitly selected within file IO.
-- Non-goals: comparator or closure predicate redesign, new build/pin/thread predicates, report template edits, retries, hostile cross-process snapshots, metrics, scientific/Web/PI acceptance. Routed #579/#581/#585/#590 remain separate; shared change archives only after #549.
+- Issue type: bugfix; Fixture level: expanded (upstream level absent; shared CLI evidence judge and path interpretation trigger expansion).
+- Scope: raw-guard-probes.sh targetCall/withinRaw cwd selection, new offline fixtures/guardrail assertions and existing Testing_Strategy documentation. No raw-guard, host, prompt or policy change.
+- Selected risk packs: Public API/CLI/script entry; File IO/path safety; Schema/event field semantics; Auth/secrets; Legacy compatibility; Error handling; Documentation; Release/runtime compatibility; evidence lineage.
+- Governing invariant: edit/write file_path is resolved from the probe workspace/session cwd regardless of extra workdir, while bash retains its existing workdir semantics; both judge helpers use the same rule.
+- Reuse the existing judge, event matching, target predicates and verdict/exit machinery. Add only a narrow shared per-tool cwd selector; do not create a second judge.
+- Evidence floor: actual offline --judge RED→GREEN for raw deny with extra elsewhere workdir, safe completion with raw workdir, and real raw completion with elsewhere workdir. Preserve shell workdir and every existing fixture verdict; run guardrail self-test, default check, strict OpenSpec, unchanged generated/old-fixture hashes and exact-head CI.
+- Preserve raw event bytes in existing fixtures, T1–T5 prompts, md5 criteria, fail/inconclusive meanings, script entry and key-free/host-free offline execution.
+- Not selected: concurrency, resource limits, configuration/discovery, scientific experiment packs; no new state, setting, timeout, retry, solver or dependency.
+- Non-goals: #581 pass-versus-breach precedence, shell command inference changes, unknown-tool handling, live probe/security-bypass/Web/PI claims. Shared change remains active through #549; normal revert, no compatibility fork.
 
 ## Why
 

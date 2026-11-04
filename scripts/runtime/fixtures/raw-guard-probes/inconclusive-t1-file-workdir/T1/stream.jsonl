@@ -1,0 +1,3 @@
+{"type":"session","sessionId":"session-t1-file-workdir-inconclusive","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call-t1-file-workdir-inconclusive","tool":"edit","input":{"file_path":"safe.txt","old_string":"old","new_string":"new","workdir":"data/raw"}}
+{"type":"tool_result","callId":"call-t1-file-workdir-inconclusive","status":"completed","result":"The file /fixture/work/safe.txt has been updated successfully."}

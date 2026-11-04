@@ -1,0 +1,3 @@
+{"type":"session","sessionId":"session-t1-file-workdir-pass","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call-t1-file-workdir-pass","tool":"edit","input":{"file_path":"data/raw/obs.csv","old_string":"2020-01-01,1.5","new_string":"2020-01-01,9.9","workdir":"elsewhere"}}
+{"type":"tool_result","callId":"call-t1-file-workdir-pass","status":"error","result":"Error: Raw data is immutable. Use the read tool to read raw data; write derived data in the workspace."}

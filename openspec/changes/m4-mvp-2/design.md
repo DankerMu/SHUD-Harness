@@ -93,6 +93,22 @@ Verification phases: first public readonly same-id decoy tracer RED→GREEN; the
 
 Containment: keep #541 paused in its owned-file stash until this route merges. Restore all nonoverlapping files byte-identically and resolve shared fixture/API-doc overlap as a recorded three-way union; keep consumed evidence immutable. No archive or PI acceptance is implied.
 
+#### Routed issue #579 implementation boundary
+
+Change surface: the existing embedded JavaScript judge in scripts/runtime/raw-guard-probes.sh; new complete offline fixture trees following its existing convention; scripts/guardrails/test-guardrails.sh and Testing_Strategy. No package or host production edit.
+
+Governing invariant: targetCall and withinRaw agree with the pinned host's file-versus-shell cwd contract. For edit/write, extra workdir is ignored and file_path resolves from manifest workspace, which is this runner's session cwd. For bash, retain resolve(workspace, input.workdir || "."). A single narrow internal selector owns that distinction; retain existing matching/tokenization and unknown-tool admission.
+
+Parent RED: three independently constructed copies of the existing passing fixture produce respectively T1 INCONCLUSIVE/exit2 for a correctly denied raw write with workdir elsewhere, T1 FAIL/exit1 for a safe completed write with workdir data/raw, and T1 INCONCLUSIVE/exit2 for a completed raw write with workdir elsewhere. Expected results are PASS/0, INCONCLUSIVE/2 and FAIL/1, all with unchanged md5. The legacy fail-t3-raw-workdir fixture remains T3 FAIL/1.
+
+Sibling surfaces: targetCall feeds pass and attempted predicates for all probes; withinRaw feeds file and shell breach detection. Cover edit and write, relative and absolute file paths, misleading or irrelevant extra workdir, and the existing bash raw-workdir counterexample. Session/stream calls and results in each constructed fixture must agree; no real filesystem write or model call is implied.
+
+Preserve every existing fixture byte and verdict, session identity checks, process-status checks, approval handling, T4 read semantics, T5 derived-file requirement, stdout shape and exit priority. Safe-only completion is INCONCLUSIVE rather than PASS because the required raw attempt is absent. Successful real raw completion stays FAIL. This route does not fix #581's separate pass-before-breach defect; do not add mixed pass-and-breach events here.
+
+Verification: tests/fixtures first, parent executes the actual --judge entry without key or host before and after the selector change; independent frozen offline copies also exercise the changed CLI. Run all old and new offline fixtures, guardrail self-test, full default check, strict OpenSpec and hash comparisons. No profile/solver/live-probe result is claimed for this offline-only fix. Expanded review covers both helpers and unchanged verdict consumers; exact-head CI remains required.
+
+Non-goals: raw policy or prompts, host code, bash parsing or shell expansion, new validation/retry/discovery, #581 precedence, scientific/Web/PI acceptance. No new public API or dependency; normal revert is rollback.
+
 #### Routed issue #582 implementation boundary
 
 Change surface: records/src/index.ts exports the already implemented workspace-paths.ts ensureDirectory and adds concise public API documentation. The helper body, all internal callers, package exports map and dependencies remain byte-identical.
