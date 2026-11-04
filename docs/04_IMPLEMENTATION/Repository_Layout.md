@@ -26,7 +26,7 @@ SHUD-Harness/
     dsh-shud-records/               # 已实现四对象文件层、StackLock/provenance 采集、报告渲染/校验/状态机；非 Cordis 插件
       templates/                   # 已用于报告渲染的 Markdown 模板，仅此一个落点
     dsh-shud-policy-gate/           # 已挂载全局 tools/pre-execute，角色 deny + 报告 ask + 变更完整性/级别决策
-    dsh-shud-presets/               # 已接入 coordinator/worker prompt + 全局 shud-role-restrict
+    dsh-shud-presets/               # 已接入 coordinator/worker/coder/reviewer prompts + 全局 shud-role-restrict
   profile/
     shud/
       package.json                  # dsh bundle 声明（dsh.bundle.patch）
@@ -131,7 +131,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 
 raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json（非法、缺失或提取不可用的 id 回退 tasks）及 `repos/SHUD`：身份提取失败仍继续检查全部固定根，目标落入 raw 即拒绝，不相交则委托下一个监听器；canonical/物理路径身份不可用仍 fail-closed，不读取卡片内容。抛错 getter 的回归仅覆盖直接 JS `tools/pre-execute` 边界；本回归使用的不可枚举抛错 getter 在 native 参数快照阶段即被拒绝，这不是普遍 accessor 拒绝契约，也不代表模型输入绕过。`task_create` 仍只检查 tasks。两工具不调用 LLM、不发起审批、不自行批准变更，也不承诺外部 Git 并发写入者之间的快照隔离。
 
-工具注册不等于完整 M4 角色链路已交付：当前 profile 仍挂载 coordinator/worker，coder/reviewer 的角色工具映射不代表其 presets 已挂载；`change_submit` 与 `shud_build` 已挂载（见下文），M4 coder/reviewer presets 仍未交付。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
+工具注册与角色装配不等于完整 M4 回放链路已交付：当前 profile 已挂载 coordinator/worker/coder/reviewer 四个 preset，coordinator 的 subagent/subagent_coder/subagent_reviewer 分别委派 worker/coder/reviewer；`change_submit` 与 `shud_build` 已挂载（见下文）。四角色真实 Web 工具面与三条委派身份链见 [#545 / PR #608](https://github.com/DankerMu/SHUD-Harness/pull/608)，不据此声称变更审批或完整回放已通过。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
 
 ### 已挂载的 `change_submit`
 
@@ -147,7 +147,7 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 - **失败与重复调用**：CR/卡不合法、patch 缺失/不可读/不匹配均零改写；审批展示后 patch 被改动也由执行时复核拒绝。文件层错误只返回受控阶段，不透传异常载荷。已 approved 的 CR 没有策略捷径：匹配 patch 的高风险重复调用仍 ask，allowed-once 后由工具拒绝非 proposed；非高风险重复调用委托后同样拒绝，保留原批准字段。可读 patch 不匹配仍先于这两种情况 deny。并发获准的同一 CR 调用只会有一次成功批准写入。
 - **raw 与不变量边界**：raw-guard 先于 policy/approval，仅按路径元数据保护合法 id 对应的确切 `changes/<id>.json`；id 缺失/非法或参数根不合法时回退 `changes`。复用物理路径/已有祖先识别，覆盖链接别名和尚未创建的目标，不读取 CR、卡或 patch 内容来选目标。合法 id 不扩大为整个 changes，也不额外保护其它 CR、patches、tasks 或源检出。工具本身不改 TaskCard 状态/phase/链接，不改 patch，不读取源检出或引用链；不要求、采集或保存 comment，也不新增 `change_decide`。报告终态的 comment 契约不变。
 
-当前 profile 仍只挂载 coordinator/worker；角色映射与工具注册不等于 coder/reviewer presets 已交付。真实 ToolRuntime、宿主 ApprovalService 与 canonical 文件读写的自动答复测试，以及 built-plugin smoke，只证明工程审批边界；不声称真实 Web 操作、PI 功能验收或科学有效性。
+四角色 presets 与三条 coordinator 委派行已装配；配置 dump 只证明装配与表达式，#545 的 canonical session log 证明实际工具面与委派身份，不证明 Web 变更审批卡往返。真实 ToolRuntime、宿主 ApprovalService 与 canonical 文件读写的自动答复测试，以及 built-plugin smoke，只证明工程审批边界；不声称 PI 功能验收或科学有效性。
 
 伴生测试入口：`packages/dsh-shud-policy-gate/src/full-access-approval.test.ts`、`change-approval.test.ts`，`packages/dsh-shud-tools/src/change-submit.test.ts` 与 `packages/dsh-shud-raw-guard/src/decide-change-target.test.ts`。完整契约见 [change_submit](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_submit) 与 [高风险变更审批策略](../../openspec/changes/m4-mvp-2/specs/policy-gate/spec.md#requirement-change_submit-asks-for-high-risk-change-requests)。
 
