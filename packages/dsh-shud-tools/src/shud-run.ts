@@ -1,10 +1,13 @@
 import { basename } from "node:path";
 import { defineTool, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import {
+  BuildIdSchema,
   DataIdSchema,
   JobRecordIdSchema,
+  RunJobSchema,
   StackIdSchema,
   TaskIdSchema,
+  type BuildId,
   type TaskId,
 } from "@shud-harness/dsh-shud-core";
 import { produceDetachedShud, type ShudJobRegistry } from "@shud-harness/dsh-shud-jobs";
@@ -34,6 +37,14 @@ const parameters = {
   task_id: {
     type: "string",
     description: "Optional TASK-YYYYMMDDTHHMMSS-xxxx id of a planned or running workspace task.",
+  },
+  build_id: {
+    type: "string",
+    description: "Optional BUILD-YYYYMMDDTHHMMSS-xxxx id of a workspace build to execute.",
+  },
+  threads: {
+    type: "integer",
+    description: "Optional positive safe integer thread count for this run.",
   },
 } as const;
 
@@ -87,6 +98,20 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
         if (!parsed.success) throw new Error("shud_run requires a valid task_id");
         taskId = parsed.data;
       }
+      let buildId: BuildId | undefined;
+      if (args.build_id !== undefined) {
+        const parsed = BuildIdSchema.safeParse(args.build_id);
+        if (!parsed.success) throw new Error("shud_run requires a valid build_id");
+        buildId = parsed.data;
+      }
+      let threads: number | undefined;
+      if (args.threads !== undefined) {
+        const parsed = RunJobSchema.shape.threads.safeParse(args.threads);
+        if (!parsed.success || parsed.data === null) {
+          throw new Error("shud_run threads must be a positive safe integer");
+        }
+        threads = parsed.data;
+      }
       const session = exec.agent?.session;
       const cwd = session?.header.cwd;
       const owner = session?.id;
@@ -122,6 +147,8 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
           ...(args.end_days === undefined ? {} : { end_days: args.end_days }),
           ...(args.label === undefined ? {} : { label: args.label }),
           ...(taskId === undefined ? {} : { task_id: taskId }),
+          ...(buildId === undefined ? {} : { build_id: buildId }),
+          ...(threads === undefined ? {} : { threads }),
           owner_session: owner,
           llm: { response_model: model, response_model_source: "configured" },
         },

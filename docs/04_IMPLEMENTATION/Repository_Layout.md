@@ -75,11 +75,21 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 {"input_dir":"input/ccw","end_days":30,"label":"ccw END=30"}
 ```
 
-当前 M3 接受 `input_dir`、可选 `project`、`end_days`、`label` 与品牌 `task_id`；未知参数（包括 `workdir`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
+当前接受 `input_dir`、可选 `project`、`end_days`、`label`、品牌 `task_id`、品牌 `build_id` 与正安全整数 `threads`；未知参数（包括 `workdir`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
 
 **M4 扩参契约（待 #534/#539 交付）**：新增可选品牌 `build_id` 与正整数 `threads`；零、负数、小数、字符串或非法品牌在文件系统操作前拒绝。未知参数的负例保留 workdir，不再以合法整数 threads 作未知键。注册表解析本工作区 `builds/<build_id>/build-record.json`，校验普通可执行二进制及 SHA256，复制到 `runs/<run_id>/bin/shud` 并执行副本；RunJob/RunRecord 原样记录 build_id、threads、binary_sha256，StackLock 记录构建来源。threads 提供时设置 OMP_NUM_THREADS/SHUD_RHS_THREADS，缺省不新增环境变量；无 build 沿用配置 shudBin。M4 对所有提交新增 tsd.forc 解析与外部 forcing 只读哈希，缺失或解析失败拒绝，不把无 build 路径称为完全无行为变化。详见 [shud_run arguments](../../openspec/changes/m4-mvp-2/specs/shud-run-tools/spec.md#requirement-shud_run-arguments)。
 
-回放传 `input_dir: input/keliya`、task_id、build_id、`threads: 1`，不传 end_days，保留准备后的 START/END；N=1 是 VerificationCase 的准入条件，不把工具正整数 schema 收窄为只接受 1（D15(3)，M4 范围裁剪、非放宽 baseline）。
+回放传 `input_dir: input/keliya`、task_id、build_id、`threads: 1`，不传 end_days；运行副本的完整 cfg 字节保持不变，包括准备后的 START、END 与 NUM_OPENMP，不因指定 threads 改写 cfg。N=1 是 VerificationCase 的准入条件，不把工具正安全整数 schema 收窄为只接受 1（D15(3)，M4 范围裁剪、非放宽 baseline）。
+
+使用已构建二进制的模型工具参数示例；`build_id` 必须替换为本工作区 `shud_build` 实际返回的 id。如需关联任务，另传该构建所属任务的 `task_id`：
+
+```json
+{"input_dir":"input/keliya","build_id":"BUILD-20261103T080200-c003","threads":1}
+```
+
+- **参数与准入**：`build_id` 使用 core 品牌格式 `BUILD-YYYYMMDDTHHMMSS-xxxx`；`threads` 使用 RunJob 的正安全整数约束，拒绝显式 null、零、负数、小数、字符串及超出安全整数范围的值。通过既有守卫后，工具在关联作业查询、TaskCard 读取/修复及提交前完成新参数的纯校验，不先读取 builds 或创建运行目录。原生工具调用使用 JSON：可选参数应省略键；显式 JavaScript `undefined` 与非有限数先被宿主的无损 JSON 检查拒绝，不能把直接注册表请求中 undefined 视为省略的行为当作原生调用的传输契约。
+- **独立选项与后端所有权**：只传 `threads` 时仍执行配置的 `shudBin`，build_id/binary_sha256 为 null，且不读取可能不安全的 builds 树；只传 `build_id` 时执行已验证的运行目录副本，threads 为 null。提供 threads 时由后端设置本次进程的 `OMP_NUM_THREADS` 与 `SHUD_RHS_THREADS`；省略时不注入也不清空，沿用宿主已有值。工具只转交已提供的合法值；BuildRecord 读取、可执行文件及摘要校验、复制到 `runs/<run_id>/bin/shud`、环境设置和失败回滚均归注册表，后端继续复核参数。RunJob 持久化 build_id、binary_sha256、threads，collect 原样保留到 RunRecord，不扩展下述工具返回字段。
+- **只读与 raw 边界**：原始输入、BuildRecord 和构建二进制保持只读。仅 builds 位于 raw 内不使其成为 `shud_run` 写入根；既有 `runs`、`stacks`、`provenance` 写入根任一位于 raw 内仍在工具执行前拒绝，包括新参数非法的调用。不增加 raw 读取审批规则，也不改变既有输入审批。
 
 工具要求会话 id/cwd 与已配置模型：先取 `agent.session.requestHeader()?.config.model`，缺失再取 `agent.options.model`；恒记 `response_model_source: configured`，不把 assistant `source.model` 当响应体模型。它通过导出的 `produceDetachedShud` 提交实际执行，沿用 jobs 内与接管共用的登记完成工厂；`submitShud(request, producer)` 的显式 producer 参数仍必需。
 
@@ -135,7 +145,7 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 - **失败与重复调用**：CR/卡不合法、patch 缺失/不可读/不匹配均零改写；审批展示后 patch 被改动也由执行时复核拒绝。文件层错误只返回受控阶段，不透传异常载荷。已 approved 的 CR 没有策略捷径：匹配 patch 的高风险重复调用仍 ask，allowed-once 后由工具拒绝非 proposed；非高风险重复调用委托后同样拒绝，保留原批准字段。可读 patch 不匹配仍先于这两种情况 deny。并发获准的同一 CR 调用只会有一次成功批准写入。
 - **raw 与不变量边界**：raw-guard 先于 policy/approval，仅按路径元数据保护合法 id 对应的确切 `changes/<id>.json`；id 缺失/非法或参数根不合法时回退 `changes`。复用物理路径/已有祖先识别，覆盖链接别名和尚未创建的目标，不读取 CR、卡或 patch 内容来选目标。合法 id 不扩大为整个 changes，也不额外保护其它 CR、patches、tasks 或源检出。工具本身不改 TaskCard 状态/phase/链接，不改 patch，不读取源检出或引用链；不要求、采集或保存 comment，也不新增 `change_decide`。报告终态的 comment 契约不变。
 
-当前 profile 仍只挂载 coordinator/worker；角色映射与工具注册不等于 coder/reviewer presets 已交付。本次也不扩展 `shud_run` 的 `build_id` 参数面（另属 #539）。真实 ToolRuntime、宿主 ApprovalService 与 canonical 文件读写的自动答复测试，以及 built-plugin smoke，只证明工程审批边界；不声称真实 Web 操作、PI 功能验收或科学有效性。
+当前 profile 仍只挂载 coordinator/worker；角色映射与工具注册不等于 coder/reviewer presets 已交付。真实 ToolRuntime、宿主 ApprovalService 与 canonical 文件读写的自动答复测试，以及 built-plugin smoke，只证明工程审批边界；不声称真实 Web 操作、PI 功能验收或科学有效性。
 
 伴生测试入口：`packages/dsh-shud-policy-gate/src/full-access-approval.test.ts`、`change-approval.test.ts`，`packages/dsh-shud-tools/src/change-submit.test.ts` 与 `packages/dsh-shud-raw-guard/src/decide-change-target.test.ts`。完整契约见 [change_submit](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_submit) 与 [高风险变更审批策略](../../openspec/changes/m4-mvp-2/specs/policy-gate/spec.md#requirement-change_submit-asks-for-high-risk-change-requests)。
 
@@ -156,7 +166,7 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 - **配置与准入**：只接受必填 `task_id`、可选 `change_id` 和布尔 `rhs_openmp`（缺省 `false`），未知键拒绝。工作区取调用 session cwd，源固定为 `repos/SHUD`，卡须为 `planned` / `running` 的 `code_change`。`sundialsRoot` 只取实际挂载的 `shud-jobs` provider 配置；缺失在任何写入前失败，不从工具参数、环境变量或默认目录猜测。源须为真实独立 Git 检出且 HEAD 等于卡的 pin。base 要求工作树观测为空；候选要求 CR 已批准、task/base 一致、观测路径集合精确匹配，且观测 diff 与普通持久 patch 文件的 SHA-256 均等于 CR 摘要。
 - **构建输入**：在排他的 `builds/.tmp-<build_id>/src/` 内解包钉定 commit 的 archive，核对条目路径、类型及 blob 身份与 `ls-tree` 一致；不复制工作树，忽略文件和陈旧 `shud` 不进入输入，未跟踪修改在准入时拒绝。候选只应用准入时已校验并保留的 patch 字节；受控 Git ceiling 防止发现外层仓库，并验证每个变更文件实际生效。同步运行 `make -C builds/.tmp-<build_id>/src shud SUNDIALS_DIR=<sundialsRoot>`，OpenMP 为真时追加 `SHUD_ENABLE_OPENMP_RHS=1`；环境只传 `PATH`、`HOME`、`SUNDIALS_DIR`，构建不静默，stdout 保留回显命令。独立的 CXX 探测记录实际编译器 `--version` 首行。
 - **结果与失败**：两份主 make 日志在创建时从描述符记录文件身份，主 make 结束后确认路径仍指向原文件，才以有界读取计算内容摘要；主 make 自身的正常 stdout/stderr 写入被保留，之后的编译器探测不得原地覆盖、追加或用同名普通文件替换日志。编译器选择与版本探测全部结束、临时源码及探测文件清理后，工具 producer 要求仅剩普通文件 `shud`、`make.stdout.log`、`make.stderr.log`，复核两份日志的身份及主 make 后摘要，并复核二进制的有效执行权限及其摘要仍等于最初复制后记录的摘要；额外、缺失或错误类型的条目、被替换或篡改的证据均拒绝，不以新摘要承认变更。这是工具 producer 的校验，不是通用 records publisher 的职责；publisher 随后写入 `build-record.json` 并整目录 rename 为 `builds/<build_id>/`，成功目录恰含上述四个文件。公开结果含 `build_id`、nullable `change_id` / `patch_sha256`、`source_commit`、`rhs_openmp`、`binary_sha256` 与 `duration_seconds`。发布前失败不生成成功 BuildRecord；受控错误保留阶段、已观测的退出事实及最多 40 行日志尾部，脱敏环境值和已删除临时路径。诊断日志以 `O_NONBLOCK` 打开并确认普通文件，避免日志被替换为 FIFO 后错误处理挂起。规范 publisher 清理自有临时目录；清理失败或目录所有权不确定时保留证据并报告清理失败，不冒称已全部删除。发布完成后不回滚已提交目录。
-- **只读与权限边界**：`shud_build` 不改写 `repos/SHUD` 的文件、Git index/HEAD，也不改变 TaskCard 的状态、phase 或链接。raw-guard 在执行前按物理路径保护固定的 `builds` 与 `repos/SHUD`；policy-gate 允许 coder，拒绝 worker/reviewer/coordinator，不由构建处理器自行审批。工具注册不使当前 profile 自动具备 coder/reviewer presets，也不扩展 `shud_run` 的 `build_id` 参数面（另属 #539）。
+- **只读与权限边界**：`shud_build` 不改写 `repos/SHUD` 的文件、Git index/HEAD，也不改变 TaskCard 的状态、phase 或链接。raw-guard 在执行前按物理路径保护固定的 `builds` 与 `repos/SHUD`；policy-gate 允许 coder，拒绝 worker/reviewer/coordinator，不由构建处理器自行审批。工具注册不使当前 profile 自动具备 coder/reviewer presets。
 - **可信命名空间边界**：临时目录排他分配、等待后的目录身份复核与规范清理保护协作构建；所有权变化时拒绝继续写入或删除外来目录。这不是对任意敌对外部写入者的原子快照或 rename-no-replace 保证。工程集成使用真实 ToolRuntime/Git/tar/make/编译器探测及假 Makefile 生成的脚本可执行文件，不据此宣称真实 SHUD 求解器已编译、真实 Web 链路已验收或 PI 已批准。
 
 伴生测试入口：`packages/dsh-shud-tools/src/shud-build.test.ts`；完整契约见 [shud_build](../../openspec/changes/m4-mvp-2/specs/shud-build/spec.md#requirement-shud_build)。

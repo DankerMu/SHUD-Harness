@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { createToolHarness } from "./test-harness.ts";
 
-test("shud_run advertises a closed model contract with optional task identity", async () => {
+test("shud_run advertises a closed model contract with optional task, build and threads", async () => {
   const h = await createToolHarness();
   try {
     const schema = h.runtime.schemas(h.agent).find((tool) => tool.name === "shud_run");
@@ -13,13 +13,17 @@ test("shud_run advertises a closed model contract with optional task identity", 
       required: ["input_dir"],
     });
     expect(Object.keys(schema?.parameters?.properties ?? {}).sort()).toEqual([
+      "build_id",
       "end_days",
       "input_dir",
       "label",
       "project",
       "task_id",
+      "threads",
     ]);
     expect(schema?.parameters?.properties?.task_id).toMatchObject({ type: "string" });
+    expect(schema?.parameters?.properties?.build_id).toMatchObject({ type: "string" });
+    expect(schema?.parameters?.properties?.threads).toMatchObject({ type: "integer" });
   } finally {
     await h.dispose();
   }
@@ -37,7 +41,7 @@ const invalidArguments: Array<{ name: string; args: unknown; error: RegExp }> = 
   { name: "boolean input", args: { input_dir: false }, error: /input_dir/iu },
   { name: "array input", args: { input_dir: [] }, error: /input_dir/iu },
   { name: "empty input", args: { input_dir: "" }, error: /input_dir|project/iu },
-  { name: "threads", args: { threads: 4 }, error: /unknown parameter/iu },
+  { name: "invalid threads", args: { threads: 0 }, error: /positive|integer/iu },
   { name: "workdir", args: { workdir: "/tmp" }, error: /unknown parameter/iu },
   {
     name: "inherited-looking key",
