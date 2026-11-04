@@ -598,6 +598,14 @@ function decideFileShellAccess(
   roots: readonly string[],
   governance: boolean,
 ): RawGuardDecision {
+  if (
+    call.name !== "write" &&
+    call.name !== "edit" &&
+    call.name !== "str_replace_editor" &&
+    call.name !== "bash" &&
+    call.name !== "pwsh"
+  )
+    return NEXT;
   const args = call.arguments;
   if (!args || typeof args !== "object" || Array.isArray(args)) return NEXT;
   const fields = args as Record<string, unknown>;

@@ -105,3 +105,7 @@ shell 工具：对 `bash`（含 persistent 变体）与 `pwsh`，"触及治理�
 #### Scenario: unsupported file workdir cannot redirect the guard
 - **WHEN** 调用 `write` 或 `edit`，`file_path` 为 `changes/x.json` 且额外 `workdir` 为 `repos/SHUD`；另一次调用 `file_path` 为 `repos/SHUD/x` 且额外 `workdir` 为 `changes`
 - **THEN** 第一项 deny `governance-immutable`，第二项返回下一个监听器的结果；两者均按 session cwd 解析真实文件目标。shell 的有效 workdir 规则不变
+
+#### Scenario: unrelated tools do not enter file or shell argument classification
+- **WHEN** a raw-specific decision returns NEXT for a tool other than write, edit, str_replace_editor, bash or pwsh, or such a tool reaches generic raw fallback
+- **THEN** the shared file/shell classifier returns NEXT without reading that call envelope's arguments; the specialized raw decision remains authoritative and all supported file/shell protections are unchanged
