@@ -47,6 +47,9 @@ vi.mock("node:fs", async (original) => {
   return {
     ...actual,
     lstatSync: vi.fn(actual.lstatSync),
+    realpathSync: Object.assign(vi.fn(actual.realpathSync), {
+      native: vi.fn(actual.realpathSync.native),
+    }),
     mkdirSync: vi.fn(actual.mkdirSync),
     readFileSync: vi.fn(actual.readFileSync),
     openSync: vi.fn(actual.openSync),
@@ -78,6 +81,7 @@ const secret = "private-publication-payload-527";
 const patchBytes = Buffer.from("abc");
 let root: string;
 let cwd: string;
+let physicalCwd: string;
 let descriptors: number[];
 
 beforeEach(() => {
@@ -102,6 +106,7 @@ beforeEach(() => {
   root = native.mkdtempSync(nativePath.join(tmpdir(), "workspace-publication-"));
   cwd = nativePath.join(root, "workspace");
   native.mkdirSync(cwd);
+  physicalCwd = native.realpathSync.native(cwd);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-11-02T09:00:00.987Z"));
   entropy.suffixes = ["a1b2", "abcd", "1234", "5678", "9999"];
@@ -121,7 +126,7 @@ afterEach(() => {
 });
 
 function seed(relative: string, bytes: string | Uint8Array): string {
-  const target = nativePath.join(cwd, relative);
+  const target = nativePath.join(physicalCwd, relative);
   native.mkdirSync(nativePath.dirname(target), { recursive: true });
   native.writeFileSync(target, bytes);
   return target;
@@ -169,6 +174,7 @@ function expectNoPathOrIO(): void {
   expect(resolve).not.toHaveBeenCalled();
   expect(normalize).not.toHaveBeenCalled();
   expect(fs.lstatSync).not.toHaveBeenCalled();
+  expect(fs.realpathSync.native).not.toHaveBeenCalled();
   expect(fs.readFileSync).not.toHaveBeenCalled();
   expectNoWrites();
 }
@@ -211,7 +217,7 @@ describe.each(allocations)("$kind first publication", (fixture) => {
   });
 
   test("publishes complete private JSON once, closes before visibility, and leaves no temporary", () => {
-    const target = nativePath.join(cwd, fixture.relative);
+    const target = nativePath.join(physicalCwd, fixture.relative);
     let observed = false;
     vi.mocked(fs.linkSync).mockImplementationOnce((temporary, final) => {
       expect(final).toBe(target);
@@ -296,7 +302,7 @@ describe.each(allocations)("$kind first publication", (fixture) => {
   });
 
   test("a final target appearing at link is not clobbered and reallocates only that collision", () => {
-    const target = nativePath.join(cwd, fixture.relative);
+    const target = nativePath.join(physicalCwd, fixture.relative);
     let original: unknown;
     vi.mocked(fs.linkSync).mockImplementationOnce((temporary, final) => {
       native.writeFileSync(final, "late foreign record\n");
@@ -345,7 +351,7 @@ describe.each(allocations)("$kind first publication", (fixture) => {
       const outside = nativePath.join(root, "outside.json");
       native.writeFileSync(outside, "foreign bytes\n");
       const before = snapshot(outside);
-      const target = nativePath.join(cwd, fixture.relative);
+      const target = nativePath.join(physicalCwd, fixture.relative);
       native.mkdirSync(nativePath.dirname(target), { recursive: true });
       installUnsafe(target, kind, outside);
       vi.clearAllMocks();
@@ -418,7 +424,7 @@ describe.each(allocations)("$kind first publication", (fixture) => {
     const outside = nativePath.join(root, "outside.json");
     native.writeFileSync(outside, "foreign bytes\n");
     const before = snapshot(outside);
-    const target = nativePath.join(cwd, fixture.relative);
+    const target = nativePath.join(physicalCwd, fixture.relative);
     vi.mocked(fs.linkSync).mockImplementationOnce((temporary, final) => {
       native.symlinkSync(outside, final);
       native.linkSync(temporary, final);
@@ -434,7 +440,7 @@ describe.each(allocations)("$kind first publication", (fixture) => {
   });
 
   test("a late collision with failed cleanup does not allocate a duplicate", () => {
-    const target = nativePath.join(cwd, fixture.relative);
+    const target = nativePath.join(physicalCwd, fixture.relative);
     vi.mocked(fs.linkSync).mockImplementationOnce((temporary, final) => {
       native.writeFileSync(final, "late foreign record\n");
       native.linkSync(temporary, final);
@@ -543,7 +549,7 @@ describe("change patch companion", () => {
     (bytes) => {
       const target = seed(changeCase.relative, ` ${JSON.stringify(changeCase.value)}\n`);
       const before = snapshot(target);
-      const patch = nativePath.join(cwd, change.patch_path);
+      const patch = nativePath.join(physicalCwd, change.patch_path);
       let observed = false;
       vi.mocked(fs.linkSync).mockImplementationOnce((temporary, final) => {
         expect(final).toBe(patch);
@@ -590,7 +596,7 @@ describe("change patch companion", () => {
     (late) => {
       const target = seed(changeCase.relative, JSON.stringify(changeCase.value));
       const before = snapshot(target);
-      const patch = nativePath.join(cwd, change.patch_path);
+      const patch = nativePath.join(physicalCwd, change.patch_path);
       let patchBefore: unknown;
       if (late) {
         vi.mocked(fs.linkSync).mockImplementationOnce((temporary, final) => {
@@ -743,7 +749,7 @@ describe.each(patchCalls)("patch $name path safety", ({ call }) => {
       const outside = nativePath.join(root, "outside.patch");
       native.writeFileSync(outside, "foreign patch\n");
       const before = snapshot(outside);
-      const target = nativePath.join(cwd, change.patch_path);
+      const target = nativePath.join(physicalCwd, change.patch_path);
       native.mkdirSync(nativePath.dirname(target));
       installUnsafe(target, kind, outside);
       vi.mocked(fs.readFileSync).mockImplementation((file, ...args) => {
@@ -816,7 +822,7 @@ describe.each(boundCalls)("$name requires existing valid CR", ({ call }) => {
       const outside = nativePath.join(root, "outside.json");
       native.writeFileSync(outside, JSON.stringify(changeCase.value));
       const before = snapshot(outside);
-      const target = nativePath.join(cwd, changeCase.relative);
+      const target = nativePath.join(physicalCwd, changeCase.relative);
       native.mkdirSync(nativePath.dirname(target));
       installUnsafe(target, kind, outside);
       vi.mocked(fs.readFileSync).mockImplementation(() => {

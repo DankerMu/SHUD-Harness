@@ -76,7 +76,11 @@ for (const tool of TERMINAL_TOOLS) {
         const before = await durableSnapshot(h.cwd);
         const originalJson = await fileSnapshot(reportPath(h));
         const originalCard = await cardSnapshot(h);
-        const stackPath = join(h.cwd, "stacks", `${stack.stack_id}.json`);
+        const stackPath = join(
+          nativeFs.realpathSync.native(h.cwd),
+          "stacks",
+          `${stack.stack_id}.json`,
+        );
         const stackBytes = fs.readFileSync(stackPath);
         let failures = 0;
         let committed = false;
@@ -170,9 +174,11 @@ for (const tool of TERMINAL_TOOLS) {
         await h.mount();
         const original = getCard(h);
         let changedSnapshot: unknown;
+        let changes = 0;
         vi.mocked(fs.renameSync).mockImplementation((source, target) => {
           nativeFs.renameSync(source, target);
           if (target !== reportPath(h)) return;
+          changes++;
           const card = {
             ...original,
             title: "fresh PI title",
@@ -198,6 +204,7 @@ for (const tool of TERMINAL_TOOLS) {
             : null;
         });
         const result = await h.call(tool, decisionArgs(tool), `fresh-${change}`);
+        expect(changes).toBe(1);
         restoreIO();
         expect(readReport(h).decision_history).toHaveLength(1);
         if (change === "fields") {

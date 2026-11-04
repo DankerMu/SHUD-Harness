@@ -60,6 +60,8 @@ test.each(["source", "copied"])(
     let deniedPath: string | undefined;
     let qualified = false;
     let denied = false;
+    let qualifications = 0;
+    let denials = 0;
     function qualify(path: string) {
       const stat = nativeFs.lstatSync(path);
       expect(stat.isFile()).toBe(true);
@@ -76,6 +78,7 @@ test.each(["source", "copied"])(
       }
       deniedPath = path;
       qualified = true;
+      qualifications++;
     }
     vi.mocked(childProcess.spawnSync).mockImplementation((...args) => {
       const result = native.spawnSync(...args);
@@ -90,7 +93,7 @@ test.each(["source", "copied"])(
         const source: unknown = argv[argv.indexOf("-C") + 1];
         if (typeof source !== "string")
           throw new Error("Missing make source in permission fixture");
-        qualify(join(h.cwd, source, "shud"));
+        qualify(join(nativeFs.realpathSync.native(h.cwd), source, "shud"));
       }
       return result;
     });
@@ -100,7 +103,7 @@ test.each(["source", "copied"])(
       if (
         location === "copied" &&
         String(args[0]).endsWith("/src/shud") &&
-        target.startsWith(`${join(h.cwd, "builds")}/`)
+        target.startsWith(`${join(nativeFs.realpathSync.native(h.cwd), "builds")}/`)
       ) {
         nativeFs.chmodSync(target, 0o650);
         qualify(target);
@@ -109,6 +112,7 @@ test.each(["source", "copied"])(
     vi.mocked(fs.accessSync).mockImplementation((path, mode) => {
       if (mode !== undefined && (mode & fs.constants.X_OK) !== 0 && String(path) === deniedPath) {
         denied = true;
+        denials++;
         throw Object.assign(new Error(PRIVATE), { code: "EACCES" });
       }
       return nativeFs.accessSync(path, mode);
@@ -116,11 +120,13 @@ test.each(["source", "copied"])(
     await h.preserve(async () => {
       const result = await h.build();
       expect(qualified).toBe(true);
+      expect(qualifications).toBe(1);
       const message = expectToolError(result, /executable|permission/iu);
       expect(message).toMatch(/exit(?:ed)? 0/u);
       expect(message).not.toContain(PRIVATE);
       expect(message).not.toContain(".tmp-");
       expect(denied).toBe(true);
+      expect(denials).toBe(1);
       noBuilds(h);
     });
   },
@@ -441,17 +447,19 @@ test.each([
     h = await buildFixture({ files: compilerProbeFiles(action, phase) });
     const id = build === "candidate" ? await candidate(h) : undefined;
     let denied = false;
+    let denials = 0;
     if (mutation === "effective-permission") {
       vi.mocked(fs.accessSync).mockImplementation((path, mode) => {
         const target = String(path);
         if (
           mode !== undefined &&
           (mode & fs.constants.X_OK) !== 0 &&
-          target.startsWith(`${join(h.cwd, "builds")}/`) &&
+          target.startsWith(`${join(nativeFs.realpathSync.native(h.cwd), "builds")}/`) &&
           target.endsWith("/shud") &&
           (nativeFs.lstatSync(target).mode & 0o777) === 0o650
         ) {
           denied = true;
+          denials++;
           throw Object.assign(new Error(PRIVATE), { code: "EACCES" });
         }
         return nativeFs.accessSync(path, mode);
@@ -465,6 +473,7 @@ test.each([
       expect(message).not.toContain(PRIVATE);
       expect(message).not.toContain(".tmp-");
       if (mutation === "effective-permission") expect(denied).toBe(true);
+      if (mutation === "effective-permission") expect(denials).toBe(1);
       noBuilds(h);
     });
   },

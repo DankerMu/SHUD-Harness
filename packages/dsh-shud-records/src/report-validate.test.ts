@@ -73,7 +73,10 @@ function validate(): ReportValidationResult {
   expect(
     vi
       .mocked(fs.readFileSync)
-      .mock.calls.some(([path]) => String(path) === join(workspace.cwd, workspace.markdownPath)),
+      .mock.calls.some(
+        ([path]) =>
+          String(path) === join(realFs.realpathSync.native(workspace.cwd), workspace.markdownPath),
+      ),
   ).toBe(false);
   expect(result.checks.map(({ id, vacuous }) => ({ id, vacuous }))).toEqual(CHECK_SHAPE);
   expect(result.ok).toBe(result.checks.every(({ pass }) => pass));
@@ -159,17 +162,24 @@ test("accepts an absolute TMPDIR log path and empty observations without reading
   workspace.fixture.runs[0].artifacts.stdout = stdout;
   realFs.writeFileSync(stdout, `${PRIVATE_PAYLOAD} ${SECRET}`);
   workspace.publishFixture();
+  const physicalCwd = realFs.realpathSync.native(workspace.cwd);
   const allowed = new Set(
-    renderingInputs(workspace.fixture).map(({ path }) => join(workspace.cwd, path)),
+    renderingInputs(workspace.fixture).map(({ path }) => join(physicalCwd, path)),
   );
+  const visited = new Set<string>();
+  const denied: string[] = [];
   vi.mocked(fs.readFileSync).mockImplementation((...args) => {
     const path = String(args[0]);
     if (!allowed.has(path) && !path.endsWith("/templates/evidence_report.md")) {
+      denied.push(path);
       throw new Error(PRIVATE_PAYLOAD);
     }
+    if (allowed.has(path)) visited.add(path);
     return realFs.readFileSync(...args);
   });
   expectFailed(validate(), []);
+  expect([...visited].sort()).toEqual([...allowed].sort());
+  expect(denied).toEqual([]);
   expect(fs.readdirSync).not.toHaveBeenCalled();
   expect(fs.openSync).not.toHaveBeenCalled();
 });
@@ -216,7 +226,7 @@ describe.each([
     "reports %s without aborting any of the thirteen clauses",
     (stage) => {
       const input = selectInput(workspace, kind);
-      const target = join(workspace.cwd, input.path);
+      const target = join(realFs.realpathSync.native(workspace.cwd), input.path);
       if (stage === "missing") realFs.unlinkSync(target);
       if (stage === "parse") realFs.writeFileSync(target, `{${PRIVATE_PAYLOAD} ${SECRET}`);
       if (stage === "schema")
@@ -226,12 +236,17 @@ describe.each([
           ...input.value,
           [field]: `${prefix}-20261029T090000-f003`,
         });
+      let injectedReads = 0;
       if (stage === "read")
         vi.mocked(fs.readFileSync).mockImplementation((...args) => {
-          if (String(args[0]) === target) throw new Error(`${PRIVATE_PAYLOAD} ${SECRET}`);
+          if (String(args[0]) === target) {
+            injectedReads++;
+            throw new Error(`${PRIVATE_PAYLOAD} ${SECRET}`);
+          }
           return realFs.readFileSync(...args);
         });
       const result = validate();
+      if (stage === "read") expect(injectedReads).toBe(1);
       expectFailed(result, [id, 8, 9, 12, 13]);
       expect(check(result, id).details).toEqual([
         {
@@ -255,7 +270,7 @@ describe.each([
     "rejects a %s target before reading and preserves outside evidence",
     (unsafe) => {
       const input = selectInput(workspace, kind);
-      const target = join(workspace.cwd, input.path);
+      const target = join(realFs.realpathSync.native(workspace.cwd), input.path);
       const outside = join(workspace.root, "outside.json");
       realFs.writeFileSync(outside, `${PRIVATE_PAYLOAD} ${SECRET}`);
       const before = {
@@ -693,7 +708,7 @@ test.each([
 test.each(["missing", "parse", "schema", "identity", "read"] as const)(
   "throws a controlled %s root-request error without source paths, prose, causes or issues",
   (stage) => {
-    const target = join(workspace.cwd, workspace.reportPath);
+    const target = join(realFs.realpathSync.native(workspace.cwd), workspace.reportPath);
     if (stage === "missing") realFs.unlinkSync(target);
     if (stage === "parse") realFs.writeFileSync(target, `{${PRIVATE_PAYLOAD} ${SECRET}`);
     if (stage === "schema")
@@ -703,15 +718,19 @@ test.each(["missing", "parse", "schema", "identity", "read"] as const)(
         ...workspace.fixture.report,
         report_id: ReportIdSchema.parse("REPORT-20261029T090000-f003"),
       });
+    let injectedReads = 0;
     if (stage === "read")
       vi.mocked(fs.readFileSync).mockImplementation((...args) => {
-        if (String(args[0]) === target)
+        if (String(args[0]) === target) {
+          injectedReads++;
           throw Object.assign(new Error(`${PRIVATE_PAYLOAD} ${SECRET}`), {
             cause: { path: workspace.cwd },
           });
+        }
         return realFs.readFileSync(...args);
       });
     expectRootError(stage, workspace.fixture.report.report_id);
+    if (stage === "read") expect(injectedReads).toBe(1);
     if (stage === "missing") expect(realFs.existsSync(target)).toBe(false);
   },
 );
@@ -719,7 +738,7 @@ test.each(["missing", "parse", "schema", "identity", "read"] as const)(
 test.each(["symlink", "dangling-link", "directory", "fifo"] as const)(
   "rejects a root %s before reading its bytes",
   (unsafe) => {
-    const target = join(workspace.cwd, workspace.reportPath);
+    const target = join(realFs.realpathSync.native(workspace.cwd), workspace.reportPath);
     const outside = join(workspace.root, "outside.json");
     realFs.writeFileSync(outside, `${PRIVATE_PAYLOAD} ${SECRET}`);
     realFs.unlinkSync(target);

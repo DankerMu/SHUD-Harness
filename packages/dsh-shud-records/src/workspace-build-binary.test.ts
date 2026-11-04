@@ -15,6 +15,9 @@ vi.mock("node:fs", async (original) => {
     ...actual,
     lstatSync: vi.fn(actual.lstatSync),
     fstatSync: vi.fn(actual.fstatSync),
+    realpathSync: Object.assign(vi.fn(actual.realpathSync), {
+      native: vi.fn(actual.realpathSync.native),
+    }),
     accessSync: vi.fn(actual.accessSync),
     mkdirSync: vi.fn(actual.mkdirSync),
     openSync: vi.fn(actual.openSync),
@@ -80,7 +83,7 @@ function seed(bytes: string | Uint8Array = "abc", mode = 0o755): string {
   native.mkdirSync(nativePath.dirname(binary), { recursive: true });
   native.writeFileSync(binary, bytes, { mode });
   native.chmodSync(binary, mode);
-  return binary;
+  return native.realpathSync.native(binary);
 }
 function snapshot(target: string) {
   const { dev, ino, mode, mtimeNs } = native.lstatSync(target, { bigint: true });
@@ -118,6 +121,7 @@ function expectNoPathOrIO(): void {
     normalize,
     fs.lstatSync,
     fs.fstatSync,
+    fs.realpathSync.native,
     fs.accessSync,
     fs.openSync,
     fs.readSync,

@@ -64,6 +64,7 @@ for (const side of SIDES) {
         const paths = fixturePaths(h, side);
         const before = await snapshotQueryTree(h.root);
         const fail = () => Object.assign(new Error(PRIVATE), { code: "EIO" });
+        let injectedReads = 0;
         if (fault === "job" || fault === "run") {
           vi.mocked(io.readFile).mockImplementation(async (...args) => {
             if (args[0] === paths[fault]) throw fail();
@@ -71,7 +72,10 @@ for (const side of SIDES) {
           });
         } else if (fault === "build" || fault === "data") {
           vi.mocked(fs.readFileSync).mockImplementation((...args) => {
-            if (String(args[0]) === paths[fault]) throw fail();
+            if (String(args[0]) === paths[fault]) {
+              injectedReads++;
+              throw fail();
+            }
             return native.readFileSync(...args);
           });
         } else if (fault === "ancestor") {
@@ -105,6 +109,7 @@ for (const side of SIDES) {
         }
         const result = await h.invoke();
         expectToolError(result, /read|directory|query|collect|open|close/iu);
+        if (fault === "build" || fault === "data") expect(injectedReads).toBe(1);
         expect(JSON.stringify(result)).not.toContain(PRIVATE);
         expect(await snapshotQueryTree(h.root)).toEqual(before);
       } finally {

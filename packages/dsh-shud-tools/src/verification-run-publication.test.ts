@@ -135,25 +135,31 @@ test.each(["open", "link"] as const)(
   async (phase) => {
     const h = await verificationHarness();
     try {
-      const directory = join(h.cwd, "verifications");
+      const directory = join(native.realpathSync.native(h.cwd), "verifications");
       fs.mkdirSync(directory);
       const card = await fileSnapshot(fixturePaths(h, "base").task);
       const evidence = await h.evidenceSnapshot();
       fixedAllocation();
+      let failures = 0;
       if (phase === "open")
         vi.mocked(fs.openSync).mockImplementation((...args) => {
-          if (String(args[0]).startsWith(`${directory}/`))
+          if (String(args[0]).startsWith(`${directory}/`)) {
+            failures++;
             throw Object.assign(new Error(PRIVATE), { code: "EACCES" });
+          }
           return native.openSync(...args);
         });
       else
         vi.mocked(fs.linkSync).mockImplementation((source, target) => {
-          if (String(target).startsWith(`${directory}/`))
+          if (String(target).startsWith(`${directory}/`)) {
+            failures++;
             throw Object.assign(new Error(PRIVATE), { code: "EACCES" });
+          }
           return native.linkSync(source, target);
         });
       const result = await h.invoke();
       expectToolError(result, /write|publication/iu);
+      expect(failures).toBe(1);
       expect(JSON.stringify(result)).not.toContain(PRIVATE);
       expect(fs.readdirSync(directory)).toEqual([]);
       expect(await fileSnapshot(fixturePaths(h, "base").task)).toEqual(card);
@@ -181,12 +187,17 @@ test("card write-back failure retains the collision-reallocated VC and reports i
     const card = await fileSnapshot(taskPath);
     const evidence = await h.evidenceSnapshot();
     fixedAllocation();
+    let failures = 0;
     vi.mocked(fs.renameSync).mockImplementation((source, target) => {
-      if (String(target) === taskPath) throw Object.assign(new Error(PRIVATE), { code: "EIO" });
+      if (String(target) === taskPath) {
+        failures++;
+        throw Object.assign(new Error(PRIVATE), { code: "EIO" });
+      }
       return native.renameSync(source, target);
     });
     const result = await h.invoke();
     const message = expectToolError(result, /task_card|retained/iu);
+    expect(failures).toBe(1);
     expect(message).toContain(ids[1]);
     expect(JSON.stringify(result)).not.toContain(PRIVATE);
     expect(readWorkspaceRecord(h.cwd, "verification", ids[1], { readonly: true })).toMatchObject({

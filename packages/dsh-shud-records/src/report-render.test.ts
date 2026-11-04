@@ -38,6 +38,7 @@ const golden = realFs.readFileSync(new URL("./report-render.golden.md", import.m
 const privatePayload = "private-untrusted-source-payload-440";
 let root: string;
 let cwd: string;
+let physicalCwd: string;
 let fixture: RenderingFixture;
 
 function publish(relative: string, value: unknown): void {
@@ -68,6 +69,9 @@ function expectFailure(stage: string, path?: string): void {
   } catch (error) {
     caught = error;
   }
+  if (path?.startsWith(`${cwd}/`) && dirname(path) !== cwd) {
+    path = `${physicalCwd}${path.slice(cwd.length)}`;
+  }
   expect(caught).toBeInstanceOf(ReportRenderError);
   expect(caught).toMatchObject({ stage, ...(path === undefined ? {} : { path }) });
   expect(caught).not.toHaveProperty("cause");
@@ -84,6 +88,7 @@ beforeEach(() => {
   cwd = join(root, "workspace");
   fixture = makeRenderingFixture();
   for (const input of renderingInputs(fixture)) publish(input.path, input.value);
+  physicalCwd = realFs.realpathSync.native(cwd);
   vi.clearAllMocks();
 });
 
@@ -403,7 +408,7 @@ test("renderReport ignores cwd, time and existing Markdown, and never reads Task
     bytes: realFs.readFileSync(markdownPath),
     mtime: realFs.statSync(markdownPath).mtimeMs,
   };
-  const inputs = new Set(renderingInputs(fixture).map(({ path }) => join(cwd, path)));
+  const inputs = new Set(renderingInputs(fixture).map(({ path }) => join(physicalCwd, path)));
   vi.mocked(fs.readFileSync).mockImplementation((...args) => {
     const target = args[0] instanceof URL ? args[0].pathname : String(args[0]);
     if (!inputs.has(target) && !target.endsWith("/templates/evidence_report.md")) {
@@ -438,7 +443,7 @@ describe.each(FILE_KINDS)("renderReport %s input failures", (kind) => {
     "rejects %s evidence without input repair",
     (stage) => {
       const input = selected();
-      const target = join(cwd, input.path);
+      const target = join(physicalCwd, input.path);
       if (stage === "missing") realFs.unlinkSync(target);
       if (stage === "parse") realFs.writeFileSync(target, `{${privatePayload}`);
       if (stage === "schema")
@@ -450,13 +455,18 @@ describe.each(FILE_KINDS)("renderReport %s input failures", (kind) => {
         const prefix = { report: "REPORT", stack: "STACK", data: "DATA", run: "RUN" }[kind];
         publish(input.path, { ...input.value, [field]: `${prefix}-20261029T090000-f003` });
       }
+      let injectedReads = 0;
       if (stage === "read") {
         vi.mocked(fs.readFileSync).mockImplementation((...args) => {
-          if (String(args[0]) === target) throw new Error(privatePayload);
+          if (String(args[0]) === target) {
+            injectedReads++;
+            throw new Error(privatePayload);
+          }
           return realFs.readFileSync(...args);
         });
       }
       expectFailure(stage, target);
+      if (stage === "read") expect(injectedReads).toBe(1);
       if (stage === "missing") expect(realFs.existsSync(target)).toBe(false);
     },
   );
@@ -465,7 +475,7 @@ describe.each(FILE_KINDS)("renderReport %s input failures", (kind) => {
     "rejects a %s record target before reading",
     (unsafe) => {
       const input = selected();
-      const target = join(cwd, input.path);
+      const target = join(physicalCwd, input.path);
       const outside = join(root, "outside.json");
       realFs.writeFileSync(outside, privatePayload);
       const beforeOutside = realFs.statSync(outside).mtimeMs;

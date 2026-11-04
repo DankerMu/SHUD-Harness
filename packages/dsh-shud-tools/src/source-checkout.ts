@@ -2,11 +2,12 @@ import { lstatSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { runGit } from "@shud-harness/dsh-shud-core";
 
-/** Validate the fixed checkout and read its pin without changing source or index. */
+/** Bind the fixed checkout and its pin to the physical workspace without changing source or index. */
 export async function readSourceCheckout(cwd: string) {
-  const sourceDir = join(cwd, "repos", "SHUD");
   let stage = "directory validation";
   try {
+    const physicalCwd = realpathSync.native(cwd);
+    const sourceDir = join(physicalCwd, "repos", "SHUD");
     if (!lstatSync(sourceDir).isDirectory()) throw new Error();
     const physicalSource = realpathSync.native(sourceDir);
 
@@ -22,7 +23,7 @@ export async function readSourceCheckout(cwd: string) {
     const headOutput = (await runGit(sourceDir, ["rev-parse", "HEAD"])).stdout.toString("utf8");
     const head = headOutput.endsWith("\n") ? headOutput.slice(0, -1) : headOutput;
     if (head.length !== 40 || !/^[0-9a-f]{40}$/u.test(head)) throw new Error();
-    return { sourceDir, head };
+    return { cwd: physicalCwd, sourceDir, head };
   } catch {
     throw new Error(`Source checkout repos/SHUD: ${stage} failed`);
   }

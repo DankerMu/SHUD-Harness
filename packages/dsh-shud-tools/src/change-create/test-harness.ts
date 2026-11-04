@@ -99,7 +99,7 @@ export async function seedTask(h: ChangeHarness): Promise<TaskId> {
 }
 
 export function taskPath(h: ChangeHarness, id: TaskId) {
-  return join(h.cwd, "tasks", id, "task.json");
+  return join(fs.realpathSync.native(h.cwd), "tasks", id, "task.json");
 }
 
 export function readCard(h: ChangeHarness, id: TaskId) {

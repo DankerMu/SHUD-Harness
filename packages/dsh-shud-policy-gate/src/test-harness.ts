@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,7 +49,7 @@ export function reportFixture(overrides: Partial<EvidenceReport> = {}) {
 
 export async function writeReport(cwd: string, report: unknown = reportFixture(), id = REPORT_ID) {
   await mkdir(join(cwd, "reports"), { recursive: true });
-  const path = join(cwd, "reports", `${id}.json`);
+  const path = join(realpathSync.native(cwd), "reports", `${id}.json`);
   await writeFile(path, `${JSON.stringify(report)}\n`);
   return path;
 }
@@ -72,7 +73,7 @@ export async function writeReportingTask(cwd: string) {
     created_at: "2026-10-29T08:00:05Z",
     updated_at: "2026-10-29T08:00:05Z",
   });
-  const directory = join(cwd, "tasks", TASK_ID);
+  const directory = join(realpathSync.native(cwd), "tasks", TASK_ID);
   await mkdir(directory, { recursive: true });
   const path = join(directory, "task.json");
   await writeFile(path, `${JSON.stringify(card)}\n`);
@@ -132,9 +133,10 @@ export async function writeProposedChange(cwd: string, overrides: Partial<Change
   await mkdir(join(cwd, "changes"), { recursive: true });
   await mkdir(join(cwd, "patches"), { recursive: true });
   await mkdir(join(cwd, "tasks", TASK_ID), { recursive: true });
-  const changePath = join(cwd, "changes", `${CHANGE_ID}.json`);
-  const patchPath = join(cwd, change.patch_path);
-  const taskPath = join(cwd, "tasks", TASK_ID, "task.json");
+  const physicalCwd = realpathSync.native(cwd);
+  const changePath = join(physicalCwd, "changes", `${CHANGE_ID}.json`);
+  const patchPath = join(physicalCwd, change.patch_path);
+  const taskPath = join(physicalCwd, "tasks", TASK_ID, "task.json");
   await writeFile(changePath, `${JSON.stringify(change)}\n`);
   await writeFile(patchPath, "abc");
   await writeFile(taskPath, `${JSON.stringify(card)}\n`);

@@ -54,6 +54,7 @@ const candidates = [firstId, secondId, thirdId, fourthId];
 const secret = "private-build-producer-payload-527";
 let root: string;
 let cwd: string;
+let physicalCwd: string;
 let descriptors: number[];
 
 beforeEach(() => {
@@ -74,6 +75,7 @@ beforeEach(() => {
   root = native.mkdtempSync(join(tmpdir(), "build-publication-"));
   cwd = join(root, "workspace");
   native.mkdirSync(cwd);
+  physicalCwd = native.realpathSync.native(cwd);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-11-02T09:00:00.987Z"));
   entropy.suffixes = ["a7b8", "abcd", "1234", "5678", "9999"];
@@ -114,7 +116,7 @@ function identity(target: string) {
   return { dev, ino, mode, mtimeNs };
 }
 function reserve(relative: string, populated = true): string {
-  const directory = join(cwd, "builds", relative);
+  const directory = join(physicalCwd, "builds", relative);
   native.mkdirSync(directory, { recursive: true });
   if (populated) native.writeFileSync(join(directory, "sentinel"), "foreign directory bytes\n");
   return directory;
@@ -149,8 +151,8 @@ function pause() {
 }
 
 test("publishes metadata directly inside its exclusive temporary and commits one whole directory", async () => {
-  const final = join(cwd, "builds", firstId);
-  const temporary = join(cwd, "builds", `.tmp-${firstId}`);
+  const final = join(physicalCwd, "builds", firstId);
+  const temporary = join(physicalCwd, "builds", `.tmp-${firstId}`);
   let observed = false;
   vi.mocked(fs.renameSync).mockImplementationOnce((from, to) => {
     expect(from).toBe(temporary);
@@ -193,10 +195,82 @@ test("publishes metadata directly inside its exclusive temporary and commits one
   expect(readWorkspaceRecord(cwd, "build", firstId, { readonly: true })).toEqual(buildCase.value);
   expect(native.readFileSync(join(final, "shud"), "utf8")).toBe("abc");
   expect(fs.rmSync).not.toHaveBeenCalled();
-  expect(native.readdirSync(join(cwd, "builds"))).toEqual([firstId]);
+  expect(native.readdirSync(join(physicalCwd, "builds"))).toEqual([firstId]);
   expect(entropy.suffixes).toEqual(["abcd", "1234", "5678", "9999"]);
   expectClosed();
 });
+
+test.each(["success", "producer failure"] as const)(
+  "build publication follows physical cwd through %s and preserves foreign directories",
+  async (outcome) => {
+    native.mkdirSync(join(cwd, "child"));
+    const physicalWorkspace = native.realpathSync.native(cwd);
+    const alias = join(root, "cwd-alias");
+    native.symlinkSync(join(physicalWorkspace, "child"), alias);
+    const aliasedCwd = `${alias}/..`;
+    expect(native.realpathSync.native(aliasedCwd)).toBe(physicalWorkspace);
+    const lexicalBuilds = join(root, "builds");
+    native.mkdirSync(lexicalBuilds);
+    const lexicalSentinel = join(lexicalBuilds, "sentinel");
+    native.writeFileSync(lexicalSentinel, "LEXICAL_BUILD_SENTINEL");
+    const lexicalBefore = identity(lexicalBuilds);
+    const lexicalSentinelBefore = identity(lexicalSentinel);
+    const foreign = reserve("foreign-build");
+    const foreignBefore = identity(foreign);
+    const foreignSentinelBefore = identity(join(foreign, "sentinel"));
+    const builds = join(physicalWorkspace, "builds");
+    const temporary = join(builds, `.tmp-${firstId}`);
+    const final = join(builds, firstId);
+    let owned: { dev: bigint; ino: bigint } | undefined;
+    const producer = vi.fn(async (directory: string, id: BuildId) => {
+      owned = identity(directory);
+      const record = populate(directory, id);
+      await Promise.resolve();
+      if (outcome === "producer failure") fault();
+      return record;
+    });
+
+    const publishing = publishBuildDirectory(aliasedCwd, producer);
+    if (outcome === "producer failure") await failure(publishing, "write");
+    else expect(await publishing).toEqual(buildCase.value);
+
+    expect(producer).toHaveBeenCalledExactlyOnceWith(temporary, firstId);
+    expect(owned).toBeDefined();
+    expect(native.existsSync(temporary)).toBe(false);
+    if (outcome === "producer failure") {
+      expect(fs.rmSync).toHaveBeenCalledExactlyOnceWith(temporary, {
+        recursive: true,
+        force: true,
+      });
+      expect(fs.renameSync).not.toHaveBeenCalled();
+      expect(native.existsSync(final)).toBe(false);
+      expect(native.readdirSync(builds)).toEqual(["foreign-build"]);
+    } else {
+      expect(identity(final)).toMatchObject({ dev: owned?.dev, ino: owned?.ino });
+      expect(readWorkspaceRecord(physicalWorkspace, "build", firstId, { readonly: true })).toEqual(
+        buildCase.value,
+      );
+      expect(native.readFileSync(join(final, "shud"), "utf8")).toBe("abc");
+      expect(native.readFileSync(join(final, "make.stdout.log"), "utf8")).toBe(
+        "fixture compiler output\n",
+      );
+      expect(native.readFileSync(join(final, "make.stderr.log"), "utf8")).toBe("");
+      expect(native.readdirSync(builds).sort()).toEqual([firstId, "foreign-build"].sort());
+      expect(fs.rmSync).not.toHaveBeenCalled();
+      expect(fs.renameSync).toHaveBeenCalledExactlyOnceWith(temporary, final);
+      expectClosed();
+    }
+    expect(identity(lexicalBuilds)).toEqual(lexicalBefore);
+    expect(identity(lexicalSentinel)).toEqual(lexicalSentinelBefore);
+    expect(native.readFileSync(lexicalSentinel, "utf8")).toBe("LEXICAL_BUILD_SENTINEL");
+    expect(native.readdirSync(lexicalBuilds)).toEqual(["sentinel"]);
+    expect(identity(foreign)).toEqual(foreignBefore);
+    expect(identity(join(foreign, "sentinel"))).toEqual(foreignSentinelBefore);
+    expect(native.readFileSync(join(foreign, "sentinel"), "utf8")).toBe(
+      "foreign directory bytes\n",
+    );
+  },
+);
 
 describe.each(["final", "temporary"] as const)("occupied %s directory", (location) => {
   test.each([1, 2, 3])(
@@ -215,7 +289,7 @@ describe.each(["final", "temporary"] as const)("occupied %s directory", (locatio
       expect(await publishBuildDirectory(cwd, producer)).toEqual(metadata(selected));
 
       expect(producer).toHaveBeenCalledExactlyOnceWith(
-        join(cwd, "builds", `.tmp-${selected}`),
+        join(physicalCwd, "builds", `.tmp-${selected}`),
         selected,
       );
       for (const original of originals) {
@@ -226,7 +300,7 @@ describe.each(["final", "temporary"] as const)("occupied %s directory", (locatio
             "foreign directory bytes\n",
           );
       }
-      expect(native.readdirSync(join(cwd, "builds")).sort()).toEqual(
+      expect(native.readdirSync(join(physicalCwd, "builds")).sort()).toEqual(
         [
           ...candidates.slice(0, count).map((id) => (location === "final" ? id : `.tmp-${id}`)),
           selected,
@@ -258,7 +332,7 @@ describe.each(["final", "temporary"] as const)("occupied %s directory", (locatio
         "foreign directory bytes\n",
       );
     }
-    expect(native.readdirSync(join(cwd, "builds")).sort()).toEqual(
+    expect(native.readdirSync(join(physicalCwd, "builds")).sort()).toEqual(
       originals.map(({ directory }) => basename(directory)).sort(),
     );
   });
@@ -270,11 +344,11 @@ describe.each(["root", "final", "temporary"] as const)("unsafe %s path", (locati
     native.mkdirSync(outside);
     native.writeFileSync(join(outside, "sentinel"), "foreign bytes\n");
     const sentinelBefore = identity(join(outside, "sentinel"));
-    if (location !== "root") native.mkdirSync(join(cwd, "builds"));
+    if (location !== "root") native.mkdirSync(join(physicalCwd, "builds"));
     const target =
       location === "root"
-        ? join(cwd, "builds")
-        : join(cwd, "builds", location === "final" ? firstId : `.tmp-${firstId}`);
+        ? join(physicalCwd, "builds")
+        : join(physicalCwd, "builds", location === "final" ? firstId : `.tmp-${firstId}`);
     installUnsafe(target, kind, outside);
     const before = identity(target);
     vi.clearAllMocks();
@@ -296,9 +370,11 @@ describe.each(["root", "final", "temporary"] as const)("unsafe %s path", (locati
 });
 
 test("a reservation created immediately before mkdir is preserved and consumes just one candidate", async () => {
-  const temporary = join(cwd, "builds", `.tmp-${firstId}`);
+  const temporary = join(physicalCwd, "builds", `.tmp-${firstId}`);
+  let injectedReservations = 0;
   vi.mocked(fs.mkdirSync).mockImplementation((directory, options) => {
     if (String(directory) === temporary && !native.existsSync(temporary)) {
+      injectedReservations++;
       native.mkdirSync(temporary);
       native.writeFileSync(join(temporary, "sentinel"), "late reservation\n");
     }
@@ -309,9 +385,10 @@ test("a reservation created immediately before mkdir is preserved and consumes j
   );
 
   expect(await publishBuildDirectory(cwd, producer)).toEqual(metadata(secondId));
+  expect(injectedReservations).toBe(1);
 
   expect(producer).toHaveBeenCalledExactlyOnceWith(
-    join(cwd, "builds", `.tmp-${secondId}`),
+    join(physicalCwd, "builds", `.tmp-${secondId}`),
     secondId,
   );
   expect(native.readFileSync(join(temporary, "sentinel"), "utf8")).toBe("late reservation\n");
@@ -329,7 +406,7 @@ test("cooperating same-id publishers never share or remove another producer's re
     return record;
   });
   await entered.promise;
-  const temporary = join(cwd, "builds", `.tmp-${firstId}`);
+  const temporary = join(physicalCwd, "builds", `.tmp-${firstId}`);
   const before = identity(temporary);
   const contender = vi.fn(async (directory: string, id: BuildId) =>
     Promise.resolve(populate(directory, id)),
@@ -337,7 +414,7 @@ test("cooperating same-id publishers never share or remove another producer's re
   try {
     expect(await publishBuildDirectory(cwd, contender)).toEqual(metadata(secondId));
     expect(contender).toHaveBeenCalledExactlyOnceWith(
-      join(cwd, "builds", `.tmp-${secondId}`),
+      join(physicalCwd, "builds", `.tmp-${secondId}`),
       secondId,
     );
     expect(identity(temporary)).toEqual(before);
@@ -347,7 +424,9 @@ test("cooperating same-id publishers never share or remove another producer's re
     await first;
   }
   expect(readWorkspaceRecord(cwd, "build", firstId)).toEqual(buildCase.value);
-  expect(native.readdirSync(join(cwd, "builds")).sort()).toEqual([firstId, secondId].sort());
+  expect(native.readdirSync(join(physicalCwd, "builds")).sort()).toEqual(
+    [firstId, secondId].sort(),
+  );
   expect(entropy.suffixes).toEqual(["9999"]);
 });
 
@@ -378,7 +457,7 @@ test.each([false, true])(
       expect(native.readFileSync(join(final, "sentinel"), "utf8")).toBe(
         "foreign directory bytes\n",
       );
-    expect(native.readdirSync(join(cwd, "builds"))).toEqual([firstId]);
+    expect(native.readdirSync(join(physicalCwd, "builds"))).toEqual([firstId]);
     expect(fs.renameSync).not.toHaveBeenCalled();
     expect(entropy.suffixes).toEqual(["abcd", "1234", "5678", "9999"]);
   },
@@ -397,7 +476,7 @@ test.each(["temporary", "parent"] as const)(
     });
     const rejected = failure(publishing, "directory");
     await entered.promise;
-    const managed = join(cwd, "builds");
+    const managed = join(physicalCwd, "builds");
     const temporary = join(managed, `.tmp-${firstId}`);
     const target = replaced === "parent" ? managed : temporary;
     const detached = join(root, "detached-owned-directory");
@@ -436,7 +515,7 @@ test("producer failure cannot clean a foreign symlink replacing its temporary di
   });
   const rejected = failure(publishing, "write");
   await entered.promise;
-  const temporary = join(cwd, "builds", `.tmp-${firstId}`);
+  const temporary = join(physicalCwd, "builds", `.tmp-${firstId}`);
   native.renameSync(temporary, join(root, "detached-owned-directory"));
   const outside = join(root, "outside");
   native.mkdirSync(outside);
@@ -456,7 +535,7 @@ test("producer failure cannot clean a foreign symlink replacing its temporary di
   expect(native.readlinkSync(temporary)).toBe(outside);
   expect(identity(join(outside, "sentinel"))).toEqual(sentinelBefore);
   expect(native.readFileSync(join(outside, "sentinel"), "utf8")).toBe("foreign bytes\n");
-  expect(native.existsSync(join(cwd, "builds", firstId))).toBe(false);
+  expect(native.existsSync(join(physicalCwd, "builds", firstId))).toBe(false);
   expect(fs.rmSync).not.toHaveBeenCalled();
 });
 
@@ -487,7 +566,7 @@ test.each([
     const error = await failure(publishBuildDirectory(cwd, producer), stage);
 
     expect(error.message).toContain(firstId);
-    expect(native.readdirSync(join(cwd, "builds"))).toEqual([]);
+    expect(native.readdirSync(join(physicalCwd, "builds"))).toEqual([]);
     expect(fs.renameSync).not.toHaveBeenCalled();
     expect(entropy.suffixes).toEqual(["abcd", "1234", "5678", "9999"]);
     expectClosed();
@@ -509,7 +588,7 @@ test.each(["producer", "metadata write", "rename"] as const)(
     const error = await failure(publishBuildDirectory(cwd, producer), "write");
 
     expect(error.message).toContain(firstId);
-    expect(native.readdirSync(join(cwd, "builds"))).toEqual([]);
+    expect(native.readdirSync(join(physicalCwd, "builds"))).toEqual([]);
     expect(entropy.suffixes).toEqual(["abcd", "1234", "5678", "9999"]);
     expectClosed();
   },
@@ -535,8 +614,8 @@ test.each(["producer", "metadata write", "rename"] as const)(
       phase === "producer" ? /producer/iu : phase === "rename" ? /rename/iu : /record|metadata/iu,
     );
     expect(error.message).toMatch(/cleanup/iu);
-    expect(native.existsSync(join(cwd, "builds", firstId))).toBe(false);
-    expect(native.readdirSync(join(cwd, "builds"))).toEqual([`.tmp-${firstId}`]);
+    expect(native.existsSync(join(physicalCwd, "builds", firstId))).toBe(false);
+    expect(native.readdirSync(join(physicalCwd, "builds"))).toEqual([`.tmp-${firstId}`]);
     expect(entropy.suffixes).toEqual(["abcd", "1234", "5678", "9999"]);
     expectClosed();
   },
@@ -557,8 +636,8 @@ test("metadata write and descriptor cleanup failure preserve both facts and remo
   expect(error.message).toMatch(/metadata/iu);
   expect(error.message).toMatch(/cleanup/iu);
   expect(producer).toHaveBeenCalledTimes(1);
-  expect(native.existsSync(join(cwd, "builds", firstId))).toBe(false);
-  expect(native.readdirSync(join(cwd, "builds"))).toEqual(["unrelated-build"]);
+  expect(native.existsSync(join(physicalCwd, "builds", firstId))).toBe(false);
+  expect(native.readdirSync(join(physicalCwd, "builds"))).toEqual(["unrelated-build"]);
   expect(identity(foreign)).toEqual(before);
   expect(native.readFileSync(join(foreign, "sentinel"), "utf8")).toBe("foreign directory bytes\n");
   expect(entropy.suffixes).toEqual(["abcd", "1234", "5678", "9999"]);
@@ -569,7 +648,7 @@ test("metadata write and descriptor cleanup failure preserve both facts and remo
 });
 
 test("reservation permission failure rejects without producer invocation, reallocation, or cleanup", async () => {
-  const managed = join(cwd, "builds");
+  const managed = join(physicalCwd, "builds");
   native.mkdirSync(managed);
   const before = identity(managed);
   vi.mocked(fs.mkdirSync).mockImplementationOnce(() => {
@@ -600,8 +679,8 @@ test.each(["cleans", "commits"] as const)(
     const foreign = reserve("foreign-build");
     const sentinel = join(foreign, "sentinel");
     const sentinelBefore = identity(sentinel);
-    const temporary = join(cwd, "builds", `.tmp-${firstId}`);
-    const winnerFinal = join(cwd, "builds", firstId);
+    const temporary = join(physicalCwd, "builds", `.tmp-${firstId}`);
+    const winnerFinal = join(physicalCwd, "builds", firstId);
     let winnerBefore: unknown;
     let collisions = 0;
     vi.mocked(fs.mkdirSync).mockImplementation((directory, options) => {
@@ -636,14 +715,14 @@ test.each(["cleans", "commits"] as const)(
 
     expect(collisions).toBe(1);
     expect(producer).toHaveBeenCalledExactlyOnceWith(
-      join(cwd, "builds", `.tmp-${secondId}`),
+      join(physicalCwd, "builds", `.tmp-${secondId}`),
       secondId,
     );
     expect(readWorkspaceRecord(cwd, "build", secondId)).toEqual(metadata(secondId));
     expect(native.existsSync(temporary)).toBe(false);
     expect(identity(sentinel)).toEqual(sentinelBefore);
     expect(native.readFileSync(sentinel, "utf8")).toBe("foreign directory bytes\n");
-    expect(native.readdirSync(join(cwd, "builds")).sort()).toEqual(
+    expect(native.readdirSync(join(physicalCwd, "builds")).sort()).toEqual(
       (outcome === "commits"
         ? ["foreign-build", firstId, secondId]
         : ["foreign-build", secondId]
@@ -671,7 +750,7 @@ test("four native reservation collisions still exhaust the budget when every win
   const sentinel = join(foreign, "sentinel");
   const sentinelBefore = identity(sentinel);
   const attempted: string[] = [];
-  const temporaryPaths = candidates.map((id) => join(cwd, "builds", `.tmp-${id}`));
+  const temporaryPaths = candidates.map((id) => join(physicalCwd, "builds", `.tmp-${id}`));
   vi.mocked(fs.mkdirSync).mockImplementation((directory, options) => {
     const target = String(directory);
     if (!temporaryPaths.includes(target)) return native.mkdirSync(directory, options);
@@ -697,7 +776,7 @@ test("four native reservation collisions still exhaust the budget when every win
   expect(producer).not.toHaveBeenCalled();
   expect(fs.rmSync).not.toHaveBeenCalled();
   expect(fs.renameSync).not.toHaveBeenCalled();
-  expect(native.readdirSync(join(cwd, "builds"))).toEqual(["foreign-build"]);
+  expect(native.readdirSync(join(physicalCwd, "builds"))).toEqual(["foreign-build"]);
   expect(identity(sentinel)).toEqual(sentinelBefore);
   expect(native.readFileSync(sentinel, "utf8")).toBe("foreign directory bytes\n");
   expect(entropy.suffixes).toEqual(["9999"]);
@@ -709,11 +788,11 @@ test.each(["parent", "temporary"] as const)(
     const foreign = reserve("foreign-build");
     const sentinel = join(foreign, "sentinel");
     const sentinelBefore = identity(sentinel);
-    const managed = join(cwd, "builds");
+    const managed = join(physicalCwd, "builds");
     const temporary = join(managed, `.tmp-${firstId}`);
     const inspection = location === "parent" ? managed : temporary;
     let reserved = false;
-    let injected = false;
+    let injected = 0;
     let reservationBefore: unknown;
     vi.mocked(fs.mkdirSync).mockImplementation((directory, options) => {
       const result = native.mkdirSync(directory, options);
@@ -724,8 +803,8 @@ test.each(["parent", "temporary"] as const)(
       return result;
     });
     vi.mocked(fs.lstatSync).mockImplementation((target, options) => {
-      if (reserved && !injected && String(target) === inspection) {
-        injected = true;
+      if (reserved && injected === 0 && String(target) === inspection) {
+        injected++;
         fault();
       }
       return native.lstatSync(target, options);
@@ -737,7 +816,7 @@ test.each(["parent", "temporary"] as const)(
     const error = await failure(publishBuildDirectory(cwd, producer), "directory");
 
     expect(reserved).toBe(true);
-    expect(injected).toBe(true);
+    expect(injected).toBe(1);
     expect(error.message).toContain(firstId);
     expect(error.message).toMatch(/directory/iu);
     expect(error.message).toMatch(/cleanup.*(?:failed|incomplete)/iu);

@@ -57,6 +57,14 @@ workspace/
 
 task worktree、分析 artifacts、warehouse、通知等下文目录属于未激活的后续规划，不由 M3/M4 回放创建。会话与作业索引属于宿主/profile stateDir，不混入领域对象目录。
 
+records 文件层按**物理会话工作区**定位托管根：保留 cwd 中符号链接与 `..` 的实际遍历次序，先直接追加固定根名，以 `lstat` 拒绝根本身的符号链接（含悬空链接）、普通文件或 FIFO 等非目录，再用 native realpath 取得真实目录拼写，最后拼接经校验的品牌 id 与固定后代路径。因此 `cwd-alias → W/child` 时，`cwd-alias/..` 的记录属于 `W`，不会读取或写入词法折叠位置的同名对象。托管后代仍按原有 no-follow 规则检查；build producer 获得物理临时目录，碰撞、dev/ino 所有权复核与仅清理自有临时目录的规则不变。
+
+readonly 查询不创建缺失的 cwd、托管根或对象，也不回退到词法工作区：记录读取保持原来的缺失错误，Markdown 真正缺失返回 `undefined`，报告引用的 runs 根缺失仍为目录错误。普通非 readonly 记录读取保留创建标准托管目录的兼容行为，写入方保留递归创建（包括 cwd 尚不存在）；读取不会创建已发布 build id 目录。非法 kind、品牌 id 或待写对象仍在各自既有文件系统边界前拒绝。这里保证已观察路径类型的拒绝和物理路由，不承诺对恶意跨进程目录替换提供原子快照或新的文件系统锁。
+
+cwd 必须是字符串；非字符串不得隐式回退到进程 cwd，也不得先调用对象的字符串转换。空字符串仍保留旧有相对路径语义，不作为非字符串处理。此检查位于共享托管根边界，不改变 StackLock 配置/仓库元数据采集等调用方原有的校验与观察顺序。
+
+`task_create(code_change)`、`change_create` 与 `shud_build` 共用 source-checkout 边界：在既有受控目录校验内，先对原始 cwd 做 native realpath，再定位并校验固定 `repos/SHUD` 检出与 HEAD，返回同一个物理工作区供后续记录读取、输出目录预检、构建 producer、发布与回滚使用。源码 HEAD、dirty diff 和 patch 必须来自记录实际落盘的工作区，不能把词法同名检出的证据写入物理工作区。品牌/参数校验及已有 TaskCard 的资格检查仍先于 Git；`science_assist` 不进入 source-checkout，也不新增检出存在要求，保留 cwd 尚不存在时的递归创建行为。
+
 原始数据目录 `<data_root>/raw/` **必须位于 workspace root 之外**（ADR-0004 治理不变式：dsh `workspace-write` 沙箱下由 Seatbelt 拒写，`data/raw` 字节保护不依赖字符串扫描）。M3 DataProvenance 记录提交输入副本的文件级 sha256，不在此定义原始数据语义分类。布局以 [Repository Layout §2](../04_IMPLEMENTATION/Repository_Layout.md#2-运行时资产不进代码仓) 为准。
 
 ### 1.3 映射关系

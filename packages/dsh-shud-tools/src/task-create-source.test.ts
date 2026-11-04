@@ -93,17 +93,21 @@ test("code_change validates root and HEAD before making task directories and lea
   const head = seedSource(h);
   const before = sourceSnapshot(h);
   const order: string[] = [];
+  const tasks = join(native.realpathSync.native(h.cwd), "tasks");
+  let rootCreations = 0;
   hooks.git = (argv) => {
     if (argv.includes("rev-parse")) order.push(argv.at(-1)!);
   };
   vi.mocked(fs.mkdirSync).mockImplementation((...args) => {
-    if (String(args[0]).startsWith(join(h.cwd, "tasks"))) order.push("mkdir-task");
+    if (String(args[0]).startsWith(tasks)) order.push("mkdir-task");
+    if (String(args[0]) === tasks) rootCreations++;
     return native.mkdirSync(...args);
   });
   const id = await seedTask(h);
   expect(readCard(h, id).source_base_commit).toBe(head);
   expect(order.slice(0, 2)).toEqual(["--show-toplevel", "HEAD"]);
   expect(order.indexOf("mkdir-task")).toBeGreaterThan(1);
+  expect(rootCreations).toBe(1);
   expect(sourceSnapshot(h)).toEqual(before);
 });
 
@@ -145,19 +149,26 @@ test.each(["missing", "broken-repos", "broken-checkout"])(
 
 test.each(["native", "git"])("checkout %s faults suppress private cause details", async (kind) => {
   seedSource(h);
+  const source = join(native.realpathSync.native(h.cwd), "repos", "SHUD");
+  let failures = 0;
   if (kind === "native") {
     vi.mocked(fs.lstatSync).mockImplementation((...args) => {
-      if (String(args[0]) === h.source) throw Object.assign(new Error(PRIVATE), { code: "EACCES" });
+      if (String(args[0]) === source) {
+        failures++;
+        throw Object.assign(new Error(PRIVATE), { code: "EACCES" });
+      }
       return native.lstatSync(...args);
     });
   } else
     hooks.git = () => {
+      failures++;
       throw Object.assign(new Error(PRIVATE), { code: "EIO", stderr: Buffer.from(PRIVATE) });
     };
   const message = expectToolError(
     await h.invoke("task_create", taskArgs),
     /repos\/SHUD.*validation/iu,
   );
+  expect(failures).toBe(1);
   expect(message).not.toContain(PRIVATE);
   expect(fs.existsSync(join(h.cwd, "tasks"))).toBe(false);
 });

@@ -221,7 +221,7 @@ test.each(["missing", "corrupt", "schema-invalid", "identity-mismatch", "read-er
     const h = await createPolicyHarness();
     try {
       await io.mkdir(join(h.cwd, "reports"));
-      const path = join(h.cwd, "reports", `${REPORT_ID}.json`);
+      const path = join(fs.realpathSync.native(h.cwd), "reports", `${REPORT_ID}.json`);
       if (kind === "corrupt") await io.writeFile(path, "private-corrupt-json{");
       if (kind === "schema-invalid")
         await io.writeFile(
@@ -239,6 +239,7 @@ test.each(["missing", "corrupt", "schema-invalid", "identity-mismatch", "read-er
         );
       if (kind === "read-error") await writeReport(h.cwd);
       const before = kind === "missing" ? null : await snapshotFile(path);
+      vi.mocked(fs.readFileSync).mockClear();
       if (kind === "read-error")
         vi.mocked(fs.readFileSync).mockImplementationOnce(() => {
           throw new Error("private-read-error-secret");
@@ -248,6 +249,7 @@ test.each(["missing", "corrupt", "schema-invalid", "identity-mismatch", "read-er
       expect(ask.zh).toContain("无法读取");
       if (kind === "read-error") {
         expect(fs.readFileSync).toHaveBeenLastCalledWith(path, "utf8");
+        expect(fs.readFileSync).toHaveBeenCalledTimes(1);
       }
       for (const display of [ask.en, ask.zh]) {
         expect(display).not.toContain("private-");

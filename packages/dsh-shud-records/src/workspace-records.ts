@@ -48,7 +48,7 @@ import {
   writeExclusiveBytesSync,
   writeJsonSync,
 } from "./state-files.ts";
-import { ensureDirectory, regularTarget } from "./workspace-paths.ts";
+import { ensureDirectory, regularTarget, resolveManagedRoot } from "./workspace-paths.ts";
 import { hashDescriptor } from "./hash-descriptor.ts";
 
 export interface WorkspaceRecordMap {
@@ -195,8 +195,18 @@ function workspacePath(
   extension = "json",
 ): string {
   const definition = recordTypes[kind];
-  const root = join(cwd, definition.directory);
-  managedDirectory(root, readonly);
+  const candidate = typeof cwd === "string" ? `${cwd || "."}/${definition.directory}` : undefined;
+  let root: string | undefined;
+  try {
+    root = resolveManagedRoot(cwd, definition.directory, "Workspace record", readonly);
+  } catch {
+    throw new WorkspaceRecordError("directory", candidate);
+  }
+  if (root === undefined) {
+    const relative =
+      "nested" in definition ? `${id}/${definition.nested.filename}` : `${id}.${extension}`;
+    throw new WorkspaceRecordError("missing", `${candidate}/${relative}`);
+  }
   if (!("nested" in definition)) return join(root, `${id}.${extension}`);
   const directory = join(root, id);
   managedDirectory(directory, readonly || !definition.nested.createDirectory);
@@ -213,9 +223,11 @@ function publish(path: string, value: unknown): void {
 
 /**
  * Read one of the seven fixed workspace layouts, synchronously and through its core schema.
- * Missing managed roots are created unless readonly; reads never create a published build directory.
- * Missing/corrupt objects are never repaired. cwd is the trusted session root;
- * managed descendants are lstat-checked, not canonicalized.
+ * Missing managed roots are created unless readonly, recursively including a missing cwd.
+ * Reads never create a published build directory or repair missing/corrupt objects.
+ * cwd is trusted but its symlink/.. traversal is physical: managed roots are lstat-checked
+ * before native resolution, then descendants are checked. Readonly absence never falls back
+ * to a lexical workspace and never creates cwd or managed directories.
  * New kinds always bind embedded identity; legacy kinds bind identity only in readonly mode.
  */
 export function readWorkspaceRecord<K extends WorkspaceRecordKind>(
@@ -257,7 +269,13 @@ export function readWorkspaceRecord<K extends WorkspaceRecordKind>(
 /** Safe, non-creating Markdown read. Only genuine absence returns undefined. */
 export function readReportMarkdown(cwd: string, reportId: ReportId): string | undefined {
   const id = validatedId("report", reportId);
-  const path = workspacePath(cwd, "report", id, true, "md");
+  let path: string;
+  try {
+    path = workspacePath(cwd, "report", id, true, "md");
+  } catch (error) {
+    if (error instanceof WorkspaceRecordError && error.stage === "missing") return undefined;
+    throw error;
+  }
   if (!checkedTarget(path)) return undefined;
   try {
     return readFileSync(path, "utf8");
@@ -327,8 +345,7 @@ function createFlatRecord<K extends "data" | "report">(
   const definition = recordTypes[kind];
   let id = createBrandedId(definition.prefix);
   let record = parseRecord(kind, { ...fields, [definition.field]: id });
-  const directory = join(cwd, definition.directory);
-  managedDirectory(directory);
+  const directory = dirname(workspacePath(cwd, kind, id));
   for (;;) {
     const path = join(directory, `${id}.json`);
     const jsonExists = checkedTarget(path);
@@ -413,8 +430,16 @@ function patchRelativePath(id: string): string {
 
 function changePatchPath(cwd: string, id: string, readonly: boolean): string {
   const { directory, extension } = recordTypes.change.patch;
-  const root = join(cwd, directory);
-  managedDirectory(root, readonly);
+  const candidate = typeof cwd === "string" ? `${cwd || "."}/${directory}` : undefined;
+  let root: string | undefined;
+  try {
+    root = resolveManagedRoot(cwd, directory, "Workspace record", readonly);
+  } catch {
+    throw new WorkspaceRecordError("directory", candidate);
+  }
+  if (root === undefined) {
+    throw new WorkspaceRecordError("missing", `${candidate}/${id}.${extension}`);
+  }
   return join(root, `${id}.${extension}`);
 }
 
@@ -506,6 +531,7 @@ export function rewriteChangeRequest(cwd: string, value: ChangeRequest): void {
 }
 
 export type BuildDirectoryProducer = (
+  /** Physical owned directory; the producer must not replace it or its managed parent. */
   temporaryDirectory: string,
   buildId: BuildId,
 ) => Promise<BuildRecord>;
@@ -579,8 +605,15 @@ export async function publishBuildDirectory(
 ): Promise<BuildRecord> {
   for (let reallocations = 0; ; reallocations += 1) {
     const id = createBrandedId(recordTypes.build.prefix);
-    const root = join(cwd, recordTypes.build.directory);
-    managedDirectory(root);
+    let root: string;
+    try {
+      root = resolveManagedRoot(cwd, recordTypes.build.directory, "Workspace record");
+    } catch {
+      throw new WorkspaceRecordError(
+        "directory",
+        typeof cwd === "string" ? `${cwd || "."}/${recordTypes.build.directory}` : undefined,
+      );
+    }
     const parent = buildDirectory(root);
     if (!parent) throw new WorkspaceRecordError("directory", root);
     const final = join(root, id);

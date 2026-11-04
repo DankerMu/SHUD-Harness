@@ -156,7 +156,7 @@ export function createShudBuildTool(ctx: Context): ToolDefinition {
         throw new Error("shud_build requires host PATH and HOME");
       }
       const pin = eligibleTask(cwd, parsed.data).source_base_commit;
-      const { sourceDir, head } = await readSourceCheckout(cwd);
+      const { cwd: physicalCwd, sourceDir, head } = await readSourceCheckout(cwd);
       if (head !== pin) {
         throw new Error(`Source checkout repos/SHUD drifted from pinned base ${pin}: HEAD ${head}`);
       }
@@ -184,16 +184,16 @@ export function createShudBuildTool(ctx: Context): ToolDefinition {
       const change =
         changeId === null
           ? null
-          : approvedChange(cwd, changeId.data, parsed.data, head, observation);
-      eligibleTask(cwd, parsed.data, head);
+          : approvedChange(physicalCwd, changeId.data, parsed.data, head, observation);
+      eligibleTask(physicalCwd, parsed.data, head);
       let diagnostic: string | undefined;
       let record;
       let publicationFailure = "shud_build publication failed";
       try {
         record = await publishBuildDirectory(
-          cwd,
+          physicalCwd,
           buildProducer({
-            cwd,
+            cwd: physicalCwd,
             source: sourceDir,
             commit: head,
             branch,
@@ -217,7 +217,7 @@ export function createShudBuildTool(ctx: Context): ToolDefinition {
         const buildsRoot =
           error instanceof WorkspaceRecordError &&
           error.stage === "directory" &&
-          error.path === join(cwd, "builds");
+          error.path === join(physicalCwd, "builds");
         const collision =
           error instanceof WorkspaceRecordError &&
           /: collision \(BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}\)(?:: cleanup (?:failed|incomplete) \(BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}\))?$/u.test(

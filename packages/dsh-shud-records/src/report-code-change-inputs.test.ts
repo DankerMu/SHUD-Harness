@@ -11,8 +11,10 @@ import {
 } from "./report-code-change-test-harness.ts";
 
 let workspace: CodeChangeWorkspace;
+let physicalCwd: string;
 beforeEach(() => {
   workspace = makeCodeChangeWorkspace();
+  physicalCwd = realFs.realpathSync.native(workspace.cwd);
 });
 afterEach(() => {
   realFs.rmSync(workspace.root, { recursive: true, force: true });
@@ -67,7 +69,7 @@ describe.each(workspaceFileCases)("cited $kind facts", (fixture) => {
     (fault, stage) => {
       const fact = workspace.facts.find((entry) => entry.kind === fixture.kind);
       if (fact === undefined) throw new Error("Missing fact fixture");
-      const target = join(workspace.cwd, fact.path);
+      const target = join(physicalCwd, fact.path);
       if (fault === "missing") realFs.unlinkSync(target);
       if (fault === "malformed")
         realFs.writeFileSync(target, `{private-invalid-fact-533 ${SECRET}`);

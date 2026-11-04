@@ -214,6 +214,45 @@ function headerPath(): string {
   return header;
 }
 
+test.each(["ordinary", "alias", "physical-parent", "missing-cwd"] as const)(
+  "%s capture and reuse stay in the physical workspace and preserve lexical locks",
+  (mode) => {
+    const physical = realFs.realpathSync.native(cwd);
+    realFs.mkdirSync(join(physical, "child"));
+    const alias = join(root, "cwd-alias");
+    realFs.symlinkSync(mode === "physical-parent" ? join(physical, "child") : physical, alias);
+    const selectedCwd =
+      mode === "missing-cwd"
+        ? join(root, "missing", "workspace")
+        : mode === "ordinary"
+          ? cwd
+          : mode === "alias"
+            ? alias
+            : `${alias}/..`;
+    const expectedWorkspace = mode === "missing-cwd" ? selectedCwd : physical;
+    if (mode !== "missing-cwd") expect(realFs.realpathSync.native(selectedCwd)).toBe(physical);
+    const lexical = join(root, "stacks", `${stackCase.id}.json`);
+    realFs.mkdirSync(dirname(lexical));
+    realFs.writeFileSync(lexical, JSON.stringify(stackCase.value));
+    const before = snapshot(lexical);
+    const captured = captureStackLock({ ...config, cwd: selectedCwd }, llm);
+    expect(captured.stack_id).toBe(firstId);
+    const path = join(expectedWorkspace, "stacks", `${firstId}.json`);
+    expect(
+      readWorkspaceRecord(expectedWorkspace, "stack", captured.stack_id, { readonly: true }),
+    ).toEqual(captured);
+    const capturedBefore = snapshot(path);
+    expect(
+      captureStackLock({ ...config, cwd: selectedCwd }, { response_model: "later-response" }),
+    ).toEqual(captured);
+    expect(snapshot(path)).toEqual(capturedBefore);
+    expect(snapshot(lexical)).toEqual(before);
+    expect(realFs.readdirSync(join(expectedWorkspace, "stacks"))).toEqual([`${firstId}.json`]);
+    expect(realFs.readdirSync(join(root, "stacks"))).toEqual([`${stackCase.id}.json`]);
+    expectClosed();
+  },
+);
+
 describe("captureStackLock", () => {
   test("captures three real repositories and exact configured, OS and root-manifest fields", () => {
     realFs.writeFileSync(join(cwd, "package.json"), '{"version":"not-the-harness"}\n');
@@ -662,3 +701,32 @@ describe("captureStackLock", () => {
     expect(snapshot(originalPath)).toEqual(before);
   });
 });
+
+for (const mode of ["alias", "physical-parent"] as const) {
+  test.each(unsafeKinds)(
+    `${mode} capture rejects a %s physical stacks root without touching foreign locks`,
+    (kind) => {
+      const physical = realFs.realpathSync.native(cwd);
+      realFs.mkdirSync(join(physical, "child"));
+      const alias = join(root, "cwd-alias");
+      realFs.symlinkSync(mode === "physical-parent" ? join(physical, "child") : physical, alias);
+      const selectedCwd = mode === "alias" ? alias : `${alias}/..`;
+      expect(realFs.realpathSync.native(selectedCwd)).toBe(physical);
+      const foreign = join(root, "foreign-stacks");
+      realFs.mkdirSync(foreign);
+      const path = join(foreign, `${stackCase.id}.json`);
+      realFs.writeFileSync(path, JSON.stringify(stackCase.value));
+      const before = snapshot(path);
+      installUnsafe(join(physical, "stacks"), kind, foreign);
+      vi.clearAllMocks();
+      expect(caught(() => captureStackLock({ ...config, cwd: selectedCwd }, llm)).message).toMatch(
+        /directory/u,
+      );
+      expect(fs.openSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+      expect(fs.rmSync).not.toHaveBeenCalled();
+      expect(snapshot(path)).toEqual(before);
+      expect(realFs.readdirSync(foreign)).toEqual([`${stackCase.id}.json`]);
+    },
+  );
+}

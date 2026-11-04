@@ -92,7 +92,7 @@ afterEach(async () => {
   await h.dispose();
 });
 function root() {
-  return join(h.cwd, "builds");
+  return join(native.realpathSync.native(h.cwd), "builds");
 }
 function temporary(id = ids[0]) {
   return join(root(), `.tmp-${id}`);

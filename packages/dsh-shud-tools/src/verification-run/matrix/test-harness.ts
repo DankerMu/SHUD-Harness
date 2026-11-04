@@ -46,13 +46,14 @@ export function verificationArgs(h: VerificationFixture) {
 }
 export function fixturePaths(h: VerificationFixture, side: "base" | "candidate") {
   const run = h[side];
+  const physicalCwd = fs.realpathSync.native(h.cwd);
   return {
     job: join(run.job.run_dir, "run-job.json"),
     run: join(run.job.run_dir, "run-record.json"),
-    build: join(h.cwd, "builds", run.build.build_id, "build-record.json"),
-    data: join(h.cwd, "provenance", `${run.data.data_id}.json`),
-    task: join(h.cwd, "tasks", h.card.task_id, "task.json"),
-    change: join(h.cwd, "changes", `${h.change.change_id}.json`),
+    build: join(physicalCwd, "builds", run.build.build_id, "build-record.json"),
+    data: join(physicalCwd, "provenance", `${run.data.data_id}.json`),
+    task: join(physicalCwd, "tasks", h.card.task_id, "task.json"),
+    change: join(physicalCwd, "changes", `${h.change.change_id}.json`),
   };
 }
 // Test fixture mutation only: immutable records are never passed to the mutable production writer.

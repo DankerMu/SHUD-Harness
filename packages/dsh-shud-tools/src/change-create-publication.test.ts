@@ -92,8 +92,10 @@ afterEach(async () => {
   await h.dispose();
 });
 const call = () => h.invoke("change_create", { task_id: id, semantic_level: "pure_engineering" });
-const recordPath = (changeId = first) => join(h.cwd, "changes", `${changeId}.json`);
-const patchPath = (changeId = first) => join(h.cwd, "patches", `${changeId}.patch`);
+const recordPath = (changeId = first) =>
+  join(native.realpathSync.native(h.cwd), "changes", `${changeId}.json`);
+const patchPath = (changeId = first) =>
+  join(native.realpathSync.native(h.cwd), "patches", `${changeId}.patch`);
 function readChange(changeId = first) {
   return ChangeRequestSchema.parse(JSON.parse(fs.readFileSync(recordPath(changeId), "utf8")));
 }
@@ -146,12 +148,17 @@ for (const target of ["changes", "patches", "tasks", "task-directory"]) {
 
 test("native preflight error hides private OS payload and the unclaimed candidate", async () => {
   const before = fileSnapshot(taskPath(h, id));
+  const patches = join(native.realpathSync.native(h.cwd), "patches");
+  let failures = 0;
   vi.mocked(fs.mkdirSync).mockImplementation((...args) => {
-    if (String(args[0]) === join(h.cwd, "patches"))
+    if (String(args[0]) === patches) {
+      failures++;
       throw Object.assign(new Error(PRIVATE), { code: "EIO" });
+    }
     return native.mkdirSync(...args);
   });
   const message = expectToolError(await call(), /patches/iu);
+  expect(failures).toBe(1);
   expect(message).not.toContain(PRIVATE);
   expect(message).not.toContain(first);
   noChangeObjects(h);
@@ -272,17 +279,25 @@ test.each(["patch", "card"])(
     const occupied = fileSnapshot(recordPath());
     const card = fileSnapshot(taskPath(h, id));
     controls.suffixes = ["a001", "b002"];
+    let attempts = 0;
     if (stage === "patch")
       vi.mocked(fs.linkSync).mockImplementation((from, to) => {
-        if (String(to) === patchPath(second)) throw new Error(PRIVATE);
+        if (String(to) === patchPath(second)) {
+          attempts++;
+          throw new Error(PRIVATE);
+        }
         native.linkSync(from, to);
       });
     else
       vi.mocked(fs.renameSync).mockImplementation((from, to) => {
-        if (String(to) === taskPath(h, id)) throw new Error(PRIVATE);
+        if (String(to) === taskPath(h, id)) {
+          attempts++;
+          throw new Error(PRIVATE);
+        }
         native.renameSync(from, to);
       });
     const message = expectToolError(await call(), /publication failed/iu);
+    expect(attempts).toBe(1);
     expect(message).toContain(second);
     expect(message).not.toContain(first);
     expect(message).not.toContain(PRIVATE);

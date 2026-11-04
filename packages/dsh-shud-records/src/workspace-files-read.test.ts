@@ -20,6 +20,9 @@ vi.mock("node:fs", async (original) => {
     ...actual,
     lstatSync: vi.fn(actual.lstatSync),
     statSync: vi.fn(actual.statSync),
+    realpathSync: Object.assign(vi.fn(actual.realpathSync), {
+      native: vi.fn(actual.realpathSync.native),
+    }),
     mkdirSync: vi.fn(actual.mkdirSync),
     readFileSync: vi.fn(actual.readFileSync),
     openSync: vi.fn(actual.openSync),
@@ -65,12 +68,14 @@ const modes = [
 ] as const;
 let root: string;
 let cwd: string;
+let physicalCwd: string;
 
 beforeEach(() => {
   vi.mocked(fs.readFileSync).mockReset().mockImplementation(native.readFileSync);
   root = native.mkdtempSync(nativePath.join(tmpdir(), "workspace-files-read-"));
   cwd = nativePath.join(root, "workspace");
   native.mkdirSync(cwd);
+  physicalCwd = native.realpathSync.native(cwd);
   vi.clearAllMocks();
 });
 afterEach(() => {
@@ -79,7 +84,7 @@ afterEach(() => {
 });
 
 function seed(relative: string, text: string): string {
-  const target = nativePath.join(cwd, relative);
+  const target = nativePath.join(physicalCwd, relative);
   native.mkdirSync(nativePath.dirname(target), { recursive: true });
   native.writeFileSync(target, text);
   return target;
@@ -103,6 +108,15 @@ function failure(call: () => unknown, stage: WorkspaceRecordStage, target?: stri
     call();
   } catch (error) {
     caught = error;
+  }
+  if (target?.startsWith(`${cwd}/`) && nativePath.dirname(target) !== cwd) {
+    const directory = nativePath.relative(cwd, target).split(nativePath.sep)[0];
+    if (
+      directory &&
+      native.lstatSync(nativePath.join(cwd, directory), { throwIfNoEntry: false })?.isDirectory()
+    ) {
+      target = `${physicalCwd}${target.slice(cwd.length)}`;
+    }
   }
   expect(caught).toBeInstanceOf(WorkspaceRecordError);
   expect(caught).toMatchObject({ stage, path: target });
@@ -138,6 +152,7 @@ function expectNoPathOrIO(): void {
   for (const operation of [
     fs.lstatSync,
     fs.statSync,
+    fs.realpathSync.native,
     fs.readFileSync,
     io.lstat,
     io.stat,
