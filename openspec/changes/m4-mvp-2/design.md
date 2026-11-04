@@ -736,6 +736,16 @@ Headless four-row ownership/assertions remain #544. During this separately merge
 
 Verification: actual pinned-host install/dump first vertical, full profile smoke with negative controls and existing invalid-boot path, default check/guard self-tests/strict/generated preservation, three-seat whitebox review and exact-head CI. No host/scientific changes or PI acceptance.
 
+#### Issue #544 implementation boundary
+
+Change surface: extend OwnedPatch and headless desired targets from two presets to four, plus the same smoke/helper predicates and fixtures. The #543 helper is the current owner of preset assertions; no second headless checker. Governing invariant: jobs and four disabled fields form one validated in-memory transaction and one atomic publication, preserving all other preset properties and external bytes.
+
+Preserve original-source preflight before any reduce/update even when desired values already match (5297ee59), source-range/YAML dialect handling, inert Loader tags, regular-file checks, controlled diagnostics and cleanup. New targets must not escape duplicate/shared/aliased rejection. No parser rewrite, retries, new config, Web ownership change or bundle modification.
+
+Required evidence: first actual headless dump RED for enabled coder/reviewer then minimal target extension GREEN; M3 old two rows plus raw/comments migrate without rewriting them; second install preserves bytes/inode/mtime/mode. Exercise four-role duplicate/shared/aliased inputs through precheck, writer and installer while jobs also needs updating, including already-desired targets. Independent actual writer interception counts one rename for valid five-target publication and zero for unsafe/precheck/no-op; temp files do not remain. Existing Web override/no-op, flow/CRLF/indent/document-end/missing-field metadata and secret/invalid-boot checks survive. Default/profile/guardrails/strict plus exact-head CI and critical-path review gate merge.
+
+No real Web role header, model workflow or PI acceptance claim; those remain #545/#547/#549. Preserve installed Web composition and all31 generated artifacts.
+
 
 ### D12 报告：`code_change` 的事实表与固定措辞（Critical Path #6）
 

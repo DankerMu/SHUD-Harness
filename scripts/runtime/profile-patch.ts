@@ -41,7 +41,12 @@ type ParsedPatch = {
   targets: Target[];
 };
 type JobsPatch = { id: "shud-jobs"; config: Config };
-type OwnedPatch = JobsPatch | { id: "preset-coordinator" | "preset-worker"; disabled: true };
+type OwnedPatch =
+  | JobsPatch
+  | {
+      id: "preset-coordinator" | "preset-worker" | "preset-coder" | "preset-reviewer";
+      disabled: true;
+    };
 // Read Loader expressions as inert metadata; only the runtime Loader evaluates them.
 const inertTags = [{ tag: "tag:yaml.org,2002:js", resolve: (source: string) => source }];
 
@@ -341,6 +346,8 @@ try {
     desired.push(
       { id: "preset-coordinator", disabled: true },
       { id: "preset-worker", disabled: true },
+      { id: "preset-coder", disabled: true },
+      { id: "preset-reviewer", disabled: true },
     );
   }
   const stats = lstatSync(file, { throwIfNoEntry: false });
