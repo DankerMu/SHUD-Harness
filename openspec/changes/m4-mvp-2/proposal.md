@@ -1,16 +1,17 @@
 # Proposal
 
-## Active issue fixture: routed #590
+## Active issue fixture: #542
 
-- Issue type: bugfix; Fixture level: expanded (upstream level absent; raw-protection public waterfall, metadata path safety and controlled diagnostics). Critical Path #2.
-- Scope: only change_create task identity extraction in raw-guard decide.ts, direct Cordis waterfall regression tests and its existing Repository_Layout documentation. No change_submit, other tool branches, generic classifier, schema/config or host changes.
-- Selected risk packs: Public API/entry; File IO/path safety; Auth/secrets; Ordering; Legacy compatibility; Error handling; Documentation; Release/runtime compatibility; dsh seam/evidence lineage.
-- Governing invariant: unavailable task identity selects the fixed tasks target but never prevents checks of changes, patches and repos/SHUD; path identity failures remain independently fail-closed.
-- Reuse the adjacent verification_run identity-extraction pattern and existing canonical/containsRawPath, error facade and waterfall. No shared all-tool extractor or alternate path policy.
-- Evidence floor: actual built-plugin Cordis waterfall currently returns generic deny for a throwing task_id getter under both disjoint data/raw and four protected roots; expected exact downstream identity/one next or raw-immutable before next. First permanent tracer RED→GREEN, then boundary matrix; no content reads/writes/mkdir or private payload in decisions/logs.
-- Preserve valid exact tasks/<id>/task.json routing, missing/ordinary-invalid fixed tasks fallback, metadata-only effects and existing canonical failure codes. No persistent/shared state, new configuration or heap mechanism.
-- Not selected: schema/units/config/concurrency/resource/hydrology experiments; no record shape, state machine, setting, limit or scientific behavior changes.
-- Non-goals: native ToolRuntime/LLM accessor input, outer execution.arguments extraction, change_submit or all-tool refactoring, live bypass/Web/PI claims. Shared change remains active through #549.
+- Issue type: feature; Fixture level: expanded (upstream classification retained; model instructions and inherited authorization surface). Critical Path #1. Dependencies #524/#525 delivered.
+- Scope: packages/dsh-shud-presets prompts and their existing tests/harness; parent-owned OpenSpec fixture. No profile, core, policy-gate, host, schema or dependency changes.
+- Selected risk packs: Public API/assets; Auth/permissions; Lifecycle/order; Legacy compatibility; Error handling; Documentation; Release/runtime compatibility; dsh seam and scientific-governance evidence.
+- Governing invariant: each known role receives exactly canonical inherited capabilities, never local delegations; lifecycle replacement and disposal preserve ownership. Prompt content bounds code_change without conferring approval or scientific authority.
+- Existing role derivation already supports four roles after #524; preserve role-restrict.ts unless executable evidence exposes an in-scope gap. Existing prompt export wildcard already covers new assets.
+- Must preserve coordinator first-task/PI conversation/canonical wording verbatim and worker M3 collection/wake boundary; no-build worker calls retain M3 parameters.
+- Add coder/reviewer prompt assets, coordinator ordered code_change delegation and worker build-bound submission. Canonical wording drift covers coordinator/coder/reviewer; worker retains its existing distinct collection contract.
+- Evidence: first new prompt contract RED before asset implementation, then GREEN; four-role real Cordis/ToolRuntime creation, invalid/empty allow, replacement, duplicate-event and separate-lifetime checks. Built package asset loading and lifecycle smoke, default check/profile smoke, strict fixture and exact-head CI.
+- Not selected: file mutation/path safety, schema, configuration, resource limits, persistence/rollback and hydrology experiments; no production filesystem writer, settings or scientific execution added.
+- Non-goals: bundle rows (#543), headless installer (#544), actual four-role Web surface (#545), replay behavior (#547), PI acceptance (#549). Prompt tests prove content, not model compliance; shared change remains active.
 
 ## Why
 

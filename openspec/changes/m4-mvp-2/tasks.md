@@ -510,13 +510,24 @@
 
 ## 6. presets 与 profile：coder/reviewer、三条委派行、restrict 与 headless
 
-- [ ] 6.1 依赖 2.4、2.5。`prompts/{coder,reviewer}.md`、`coordinator.md` 新增 code_change 流程段与 `worker.md` 的 build_id/threads 提交段（agent-presets「Preset system prompts」「code_change orchestration」）；wording 漂移测试覆盖三份 prompt；restrict 按四角色 `inherited` 绑定（agent-presets「Role tool surface restriction」）；未被 profile 引用时可独立保绿。
+- [x] 6.1 依赖 2.4、2.5。`prompts/{coder,reviewer}.md`、`coordinator.md` 新增 code_change 流程段与 `worker.md` 的 build_id/threads 提交段（agent-presets「Preset system prompts」「code_change orchestration」）；wording 漂移测试覆盖三份 prompt；restrict 按四角色 `inherited` 绑定（agent-presets「Role tool surface restriction」）；未被 profile 引用时可独立保绿。
 - [ ] 6.2a 依赖 6.1、5.0。bundle：`preset-coder`、`preset-reviewer` 行与子树、coordinator 三条 `tool-subagent` 行（id/toolName/agentPreset 互异）、worker 不变（agent-presets「Coordinator and worker preset rows」「Preset plugin subtrees」）；`profile:smoke` 断言四 preset、三委派行、宿主 subagent/provider 各一次（shud-profile「Profile composition」「Local profile smoke」、agent-presets「Profile smoke covers presets」）。**首条断言**为 dump-config 三委派行且 `toolName` 互异；若宿主拒绝同包三行，按 Seam-only 报告偏差并停止（design D11/O4）。
 - [ ] 6.2b 依赖 6.2a。`profile-patch.ts` headless 禁用四个 preset 行（扩展既有两行逻辑，原子发布不变；shud-profile「Idempotent profile installation」）；`profile:smoke` 断言 headless 四行禁用。
 - [ ] 6.2c 依赖 6.2b、5.2、5.3、5.5。真实 Web session log 证明四角色 header 与 coordinator `header.tools` 含三委派工具、coder/reviewer 的 `header.tools` 为各自 inherited（agent-presets「Role tool surface restriction」）；`instructions/agents/shared.md` 的 Runtime Lifecycle 段（四 preset、三委派、headless 四行、治理根写保护）同步并 `pnpm run instructions:render`，CI 比对无漂移。
 
 - Suggested fixture level: expanded - 生产 profile 配置、安装器写入、角色工具面（Critical Path #1）
 - Minimal mergeable slice: 6.1 首刀（prompt 与 restrict 映射未被 profile 引用时可独立保绿）；6.2a 依赖 6.1 与 5.0；6.2b 依赖 6.2a；6.2c 为后继且依赖全部新工具
+
+### Issue #542 risk and evidence fixture
+
+- API/assets and release: coder/reviewer resolve through the existing exported prompt wildcard; preserve Loader mechanism and package/profile configuration. Built consumer reads all four assets; no embedded copies, absolute machine paths or upstream diff.
+- Scientific governance/docs: first code_change prompt tracer RED→GREEN; verify eight-step order, explicit three delegate names, PI denial relay/no self-approval, coder base-before-edit/no commit/no solver/no governance writes and engineering-only reviewer verdict. Direct canonical-constant comparison plus missing/changed/extra/duplicate negative controls covers coordinator/coder/reviewer, with no second wording oracle.
+- Legacy: parent byte proof preserves coordinator old sections and worker old text; no-build worker omits build_id/threads, build-bound worker uses threads:1 and no end_days, waits for collected RunRecord and returns run/build identities. Keep existing first-task/report-rejection/guard-boundary/wake tests.
+- Auth/lifecycle/order: real Cordis and ToolRuntime, independent exact four-role visible surfaces, three coordinator local tools excluded from inherited allow, each role's actual jobs/non-jobs boundary. Four-role empty and unknown inherited failures at creation/replacement preserve prior/foreign masks; duplicate events, distinct Agents, unknown switch and plugin/Agent cleanup retain ownership. Preserve reentry regression suite.
+- Errors: failed replacement remains explicit with plugin/role/tool context and no silently dropped names; later valid event may bind. Raw emit propagation does not promise host UI error visibility or projection rollback.
+- Evidence: parent runs first vertical tracer, focused matrix, build then public emitted-plugin asset/lifecycle smoke, pnpm run check, profile:smoke, OpenSpec strict and generated-hash preservation; reviewers consume results without running checks. Three expanded seats and exact-head eight-job CI before merge.
+- Non-goals/not-selected packs: production path IO, schema, config, persistence, resource budgets or solver experiments unchanged. Bundle/headless/Web/model orchestration proof remain #543/#544/#545/#547 respectively; prompt content is not actual model compliance or PI acceptance.
+
 
 ## 7. 回放脚本、工作区准备与控制面登记
 

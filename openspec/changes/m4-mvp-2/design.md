@@ -708,6 +708,21 @@ Non-goals: new tools/ask rules, prompts/profile rows, restrict algorithm/lifecyc
 
 Review focus: clean identity/authorization separation; consumer compatibility without disabling new roles; no stale Zero allow paths or softened old lifecycle/approval evidence.
 
+#### Issue #542 implementation boundary
+
+Change surface: presets prompt assets and existing prompt/restrict tests and harness. #524 already widened canonical-derived Restriction.role and current projection mapping; no new mapper, role table or restrict algorithm is needed. package.json already exports ./prompts/*.md. Keep these production mechanisms unchanged unless an observed in-scope failure requires repair.
+
+Governing invariant: known-role restrictions use only canonical inherited, not local; install replacement before releasing prior ownership, retain prior mask on failure, ignore stale header/event payload, and invalidate reentrant pending bindings. History d23303c5 repaired reentry/cleanup; preserve its tests and effect semantics.
+
+Content: preserve existing coordinator text byte-for-byte outside a new code_change section; append worker build-bound instructions without weakening no-build collection/wake behavior. Coordinator orders base build before edits, approved change before candidate build, both collected runs before reviewer, then report gates. Denial relays PI words, never self-approval or retry of a denied CR. Coder only edits tracked repos/SHUD files, never commits/runs SHUD/writes governance roots, returns base/change/candidate identities; reviewer produces verification through verification_run with engineering-only notes. Canonical lists in coordinator/coder/reviewer are compared directly with core constants; the worker remains a collection prompt, not a fourth list copy. Prompts contain no machine paths or upstream diff.
+
+Sibling surfaces: core role-tool-map/current projection, existing public ToolRuntime harness, prompts.test.ts canonical-list parser, package asset exports and read-only profile persona Loader. Expand the harness to all three Agent-owned coordinator delegations and inherited role tools without mistaking registration-only doubles for real profile assembly. Independent expected tool collections must not be derived from the map being checked.
+
+Evidence: first missing code_change prompt requirement must fail semantically before adding content. Four roles must reject empty/unknown inherited at creation and replacement, preserve old/foreign masks on failed replacement, avoid stacking repeated events, isolate live Agents and stop binding after disposal. Keep historical reentry tests. Existing unchanged lifecycle behavior may already be GREEN: do not invent a production RED or alter working code to manufacture one. Built emitted-plugin/asset smoke exercises actual public runtime restrictions and export loading; #545 owns real Web evidence, #547 actual model sequence.
+
+No persistence, new config/dependency, profile mount, governance policy or solver changes. Prompt content itself is the delivered documentation; parent fixture records the package-only cut. Default check, profile smoke, strict validation, three-seat critical-path review and exact-head CI gate merge.
+
+
 ### D12 报告：`code_change` 的事实表与固定措辞（Critical Path #6）
 
 - `report_generate` 对 `code_change` 卡求 D7 谓词；报告 `.json` 新增 `change_ids`、`verification_ids`（M3 报告 `default([])`），生成投影随之更新。

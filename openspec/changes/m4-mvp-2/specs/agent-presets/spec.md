@@ -158,7 +158,7 @@ preset 的 persona/agent-instructions 段 SHALL 来自 `packages/dsh-shud-preset
 - `coder.md` SHALL 含：只在工作区 `repos/SHUD` 内修改已跟踪文件；先做 base 构建再改码；改完调用 `change_create` 再调用 `change_submit`；`change_submit` 未获放行即停止并回报，不重试提交；获批后调用 `shud_build(change_id, rhs_openmp: true)` 并回报 `build_id`；禁止科学结论措辞；禁止运行 SHUD。
 - `reviewer.md` SHALL 含：只调用 `verification_run` 给出验证结论；`reviewer_notes` 只陈述工程事实；"bitwise 相等 ≠ 并行正确性/性能"。
 
-presets 包 SHALL 有一项纳入默认 `pnpm run test` 的漂移测试：读取 `coordinator.md`，断言其逐字含 `FORBIDDEN_REPORT_PHRASES` 与 `GOVERNANCE_INVARIANTS` 的每一项；常量增删或改字而 prompt 未同步时测试失败。prompt 中的这些文案 SHALL NOT 另有手写副本作为来源。
+presets 包 SHALL 有一项纳入默认 `pnpm run test` 的漂移测试：读取 `coordinator.md`、`coder.md` 与 `reviewer.md`，断言每份逐字含 `FORBIDDEN_REPORT_PHRASES` 与 `GOVERNANCE_INVARIANTS` 的每一项；常量增删或改字而任一 prompt 未同步时测试失败。prompt 中的这些文案 SHALL NOT 另有手写副本作为来源。`worker.md` 保留独立的执行与收集契约，不要求复制这两份措辞列表。
 
 #### Scenario: coordinator prompt carries the governance rules
 - **WHEN** 检查 `packages/dsh-shud-presets/prompts/coordinator.md`
@@ -189,8 +189,8 @@ presets 包 SHALL 有一项纳入默认 `pnpm run test` 的漂移测试：读取
 - **THEN** 文件含只调用 `verification_run`、`reviewer_notes` 只陈述工程事实，以及"bitwise 相等 ≠ 并行正确性/性能"的说明；不含把 bitwise 相等表述为并行正确性、性能或模型改进的句子
 
 #### Scenario: wording drift fails the test
-- **WHEN** `GOVERNANCE_INVARIANTS` 的某一句被改字而 `coordinator.md` 未同步
-- **THEN** 漂移测试失败并指出缺失的文案，`pnpm run test` 非 0 退出
+- **WHEN** `GOVERNANCE_INVARIANTS` 的某一句被改字而 `coordinator.md`、`coder.md` 或 `reviewer.md` 中任一份未同步
+- **THEN** 漂移测试失败并指出该 prompt 缺失的文案，`pnpm run test` 非 0 退出
 
 ## ADDED Requirements
 

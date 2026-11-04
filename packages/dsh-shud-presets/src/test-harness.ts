@@ -8,6 +8,7 @@ import { defineTool, ToolRuntime } from "@deepseek-ai/dsh-tools";
 import { vi } from "vitest";
 
 // Independent oracle: agent-presets' exact effective surfaces, not the implementation's map.
+export const COORDINATOR_DELEGATIONS = ["subagent", "subagent_coder", "subagent_reviewer"];
 export const COORDINATOR_TOOLS = [
   "task_create",
   "report_generate",
@@ -15,7 +16,7 @@ export const COORDINATOR_TOOLS = [
   "report_submit",
   "report_decide",
   "shud_collect",
-  "subagent",
+  ...COORDINATOR_DELEGATIONS,
   "job_output",
   "job_list",
   "job_kill",
@@ -27,6 +28,25 @@ export const WORKER_TOOLS = [
   "job_list",
   "job_kill",
 ].sort();
+const CODER_TOOLS = ["bash", "read", "edit", "change_create", "change_submit", "shud_build"].sort();
+const REVIEWER_TOOLS = [
+  "read",
+  "verification_run",
+  "shud_collect",
+  "job_output",
+  "job_list",
+].sort();
+export const ROLE_CASES = [
+  {
+    role: "coordinator",
+    inherited: COORDINATOR_TOOLS.filter((name) => !COORDINATOR_DELEGATIONS.includes(name)),
+    local: COORDINATOR_DELEGATIONS,
+    expected: COORDINATOR_TOOLS,
+  },
+  { role: "worker", inherited: WORKER_TOOLS, local: [], expected: WORKER_TOOLS },
+  { role: "coder", inherited: CODER_TOOLS, local: [], expected: CODER_TOOLS },
+  { role: "reviewer", inherited: REVIEWER_TOOLS, local: [], expected: REVIEWER_TOOLS },
+] as const;
 const GLOBAL_TOOLS = [
   "task_create",
   "report_generate",
@@ -35,13 +55,17 @@ const GLOBAL_TOOLS = [
   "report_decide",
   "shud_run",
   "shud_collect",
-  "bash",
-  "read",
+  "change_create",
+  "change_submit",
+  "shud_build",
+  "verification_run",
   "write",
-  "edit",
   "list_subagent_models",
 ];
-const JOB_TOOLS = ["job_output", "job_list", "job_kill"];
+// A deliberately broad preset ancestor pool tests filtering even when an unrelated
+// provider is present: coder must see no jobs and reviewer must not see job_kill.
+// This is not profile assembly; only registration and restrictions are real.
+const PRESET_TOOLS = ["job_output", "job_list", "job_kill", "bash", "read", "edit"];
 
 function registerTool(ctx: Context, name: string) {
   return ctx.tools.register(
@@ -68,7 +92,7 @@ interface AgentFixture {
   session: { id: SessionId; header: { agentPreset: string } };
   surface(): string[];
   setProjection(value: unknown): void;
-  setLocalSubagent(enabled: boolean): void;
+  setLocalDelegations(enabled: boolean): void;
   announce(): Promise<unknown>;
   selected(payload?: string): void;
   announceDisposed(): void;
@@ -128,20 +152,24 @@ export async function createRoleHarness(options: HarnessOptions = {}): Promise<R
         const agent = { id: session.id, session } as unknown as Agent;
         const presetKey = {};
         const presetScope = createScope(owner, presetKey);
-        for (const name of JOB_TOOLS) {
+        for (const name of PRESET_TOOLS) {
           if (name !== options.missing) registerTool(presetScope.ctx, name);
         }
         const agentScope = createScope(owner, agent, { parent: presetKey });
         Object.assign(agent, { ctx: agentScope.ctx });
-        let releaseSubagent: (() => void) | undefined;
-        const setLocalSubagent = (enabled: boolean) => {
-          if (enabled && !releaseSubagent) releaseSubagent = registerTool(agent.ctx, "subagent");
-          if (!enabled && releaseSubagent) {
-            releaseSubagent();
-            releaseSubagent = undefined;
+        let releaseDelegations: Array<() => void> = [];
+        const setLocalDelegations = (enabled: boolean) => {
+          if (enabled && releaseDelegations.length === 0) {
+            releaseDelegations = COORDINATOR_DELEGATIONS.map((name) =>
+              registerTool(agent.ctx, name),
+            );
+          }
+          if (!enabled) {
+            for (const release of releaseDelegations) release();
+            releaseDelegations = [];
           }
         };
-        setLocalSubagent(preset === "coordinator");
+        setLocalDelegations(preset === "coordinator");
         return {
           agent,
           session,
@@ -151,7 +179,7 @@ export async function createRoleHarness(options: HarnessOptions = {}): Promise<R
               .map((tool) => tool.name)
               .sort(),
           setProjection: (value: unknown) => projections.set(session, value),
-          setLocalSubagent,
+          setLocalDelegations,
           announce: () => ctx.serial("agent/created", { agent, source: "startup" }),
           selected: (payload = "worker") => ctx.emit("agent-preset/selected", session.id, payload),
           // Observe plugin-owned cleanup separately from scope teardown, which could hide a leak.
