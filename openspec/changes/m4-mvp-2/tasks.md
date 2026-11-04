@@ -8,6 +8,16 @@
 
 路由前置：#582 在5.1/#536之前从records根入口公开既有ensureDirectory，保持实现与所有内部调用方不变；live #536已补Depends on #582。#579/#581为本阶段独立的raw probe judge修复，须在M4收口前完成，不并入#535策略。
 
+### Routed issue #597: physical records workspace
+
+- [x] R597 Before5.6/#541, unify records managed-root resolution so symlink/.. cwd addresses the physical workspace across readonly reads, mutable/exclusive creation, Markdown, patch, TaskCard, StackLock, build publication and binary verification, including independent report-run lookup.
+- Selected API/IO/auth/evidence lineage: actual same-id schema-valid physical and lexical records prove correct selection; physical absence with a lexical decoy remains missing. Cover every owner, ordinary cwd/plain aliases/TMPDIR, missing cwd creation versus readonly non-creation, and invalid kind/id/record rejection before lstat/realpath/read/write.
+- Selected ordering/error/ownership: lstat managed roots before canonicalization; reject links/dangling links/files/FIFO and unsafe targets, preserve no-follow behavior. Realpath failures remain failures, never fallback/retry. Build producer paths resolve physically and success/failed rollback/collision/replacement cases preserve original dev/ino ownership and immutable foreign sentinels.
+- Selected legacy/docs/release/dsh consumers: no schemas, public helper signature, persisted record bytes, fingerprint, collision limits or report-state changes. Reuse public ensureDirectory/regularTarget and canonical publishers; one private root resolver, no second store. Migrate test fault seams to actual physical owned targets only where canonicalization changes spelling, keeping assertions and failure causes.
+- Evidence: readonly tracer RED→GREEN, then real write/producer and missing-root tracers before matrix; built public read/write/render/validate/producer smoke, frozen M3 Markdown and original thirteen checks unchanged, pnpm run check/profile:smoke, strict OpenSpec and31generated equality, three-seat review and exact-head eight-job CI.
+- Integration: #541 stays paused; after this route merges restore its29files with hash/three-way proof and run its unchanged physical-parent case and complete fifteen-check matrix. Do not merge #541 with the case filtered out.
+- Non-goals: #541 validator rollout, other-package production paths, artifact-relative traversal changes, new schema/config/dependency/limits, hostile-writer snapshot guarantees, scientific/Web/PI claims. Normal revert, no coexistence shim.
+
 ### Routed issue #586: system make prerequisite
 
 - [x] R586 Before5.2/#537, add exact make to existing external-binary declarations and canonical system prerequisite prose; render instructions normally. No other ignore entries/rules, runtime source, package dependencies, thresholds or replay registration changes.

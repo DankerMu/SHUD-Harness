@@ -71,10 +71,13 @@ test.each([false, true])(
       const submissions = vi.spyOn(h.registry, "submitShud");
       let repairAtPublication: TaskCard | undefined;
       let cardAtFirstRunWrite: unknown;
+      let repairs = 0;
       vi.mocked(fs.renameSync).mockImplementation((source, target) => {
         nativeFs.renameSync(source, target);
-        if (target === cardPath(h) && submissions.mock.calls.length === 0)
+        if (target === cardPath(h) && submissions.mock.calls.length === 0) {
+          repairs++;
           repairAtPublication = getCard(h);
+        }
       });
       vi.mocked(io.rename).mockImplementation(async (source, target) => {
         if (String(target).endsWith("/run-job.json")) cardAtFirstRunWrite ??= getCard(h);
@@ -84,6 +87,7 @@ test.each([false, true])(
       try {
         const result = await h.call({ input_dir: h.inputDir, task_id: TASK });
         if (!repairAtPublication) throw new Error("Initial task repair was not published");
+        expect(repairs).toBe(1);
         expect(repairAtPublication.updated_at).toBeTypeOf("string");
         const repaired = {
           ...original,

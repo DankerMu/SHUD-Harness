@@ -31,11 +31,37 @@ afterEach(() => {
   vi.useRealTimers();
   fs.rmSync(cwd, { recursive: true, force: true });
 });
-function allocate() {
+function allocate(workspace = cwd) {
   const { report_id: ignored, ...fields } = makeEvidenceReport();
   expect(ignored).toMatch(/^REPORT-/u);
-  return createEvidenceReport(cwd, fields);
+  return createEvidenceReport(workspace, fields);
 }
+
+test("flat report allocation publishes in the physical cwd without touching the lexical decoy", () => {
+  const workspace = join(cwd, "workspace");
+  fs.mkdirSync(join(workspace, "child"), { recursive: true });
+  const physicalWorkspace = fs.realpathSync.native(workspace);
+  const alias = join(cwd, "cwd-alias");
+  fs.symlinkSync(join(physicalWorkspace, "child"), alias);
+  const aliasedCwd = `${alias}/..`;
+  expect(fs.realpathSync.native(aliasedCwd)).toBe(physicalWorkspace);
+  const lexicalReports = join(cwd, "reports");
+  const before = fs.statSync(lexicalReports, { bigint: true });
+  expect(fs.readdirSync(lexicalReports)).toEqual([]);
+  expect(fs.existsSync(join(physicalWorkspace, "reports"))).toBe(false);
+
+  const report = allocate(aliasedCwd);
+
+  expect(report).toEqual(makeEvidenceReport());
+  const physicalReport = join(physicalWorkspace, "reports", "REPORT-20261027T080005-3f9c.json");
+  expect(fs.existsSync(physicalReport)).toBe(true);
+  expect(JSON.parse(fs.readFileSync(physicalReport, "utf8"))).toEqual(makeEvidenceReport());
+  expect(fs.readdirSync(join(physicalWorkspace, "reports"))).toEqual([
+    "REPORT-20261027T080005-3f9c.json",
+  ]);
+  expect(fs.readdirSync(lexicalReports)).toEqual([]);
+  expect(fs.statSync(lexicalReports, { bigint: true }).mtimeNs).toBe(before.mtimeNs);
+});
 
 test.each(["json", "md"])(
   "existing %s sibling forces a fresh report id and preserves old bytes and mtime",

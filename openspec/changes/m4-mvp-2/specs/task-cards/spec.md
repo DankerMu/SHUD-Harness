@@ -36,6 +36,16 @@ TaskCard SHALL 持久化为会话 cwd 下的 `tasks/<task_id>/task.json`，每�
 
 records 包根 SHALL 公开既有 `ensureDirectory(path, label, readonly = false): boolean`，供对象写入前复用同一目录预检实现，不复制目录策略或开放私有模块子路径。已有真实目录返回 `false`；缺失路径在 readonly 模式返回 `false` 且不创建，否则递归创建并返回 `true`。最终路径为符号链接（含悬空链接）、普通文件或特殊文件时两种模式均拒绝；既有错误语义保持。该低层函数不替调用方校验全部祖先或品牌 id、不发布对象、不提供事务或模型诊断脱敏；调用方仍拥有这些边界。
 
+records 的 managed path SHALL 保留可信会话 cwd 的文件系统遍历语义：cwd 含现有符号链接后接 `..` 时，SHALL 在拼接规范对象子路径前确定其物理工作区，SHALL NOT 以词法折叠后的另一个工作区代替。该规则同用于规范对象读写/创建、Markdown、patch、TaskCard、StackLock、build 发布及二进制读取，以及报告关联 RunRecord 查找；managed root 自身仍须先经 lstat 拒绝链接/特殊文件。既有 id/kind/record 前置校验、readonly 不创建、可写路径递归创建与排他/原子发布所有权规则 SHALL 保持。
+
+#### Scenario: physical cwd wins over a same-id lexical decoy
+- **WHEN** `R/cwd-alias` 指向 `W/child`，调用 cwd 为 `R/cwd-alias/..`，且 `R` 与 `W` 下分别存在同品牌 id、schema-valid 但内容不同的对象
+- **THEN** records 读取与写入仅作用于物理工作区 `W`；`R` 中 decoy 的字节与修改时间不变；`W` 的只读目标缺失时仍报告缺失，不回退 `R`
+
+#### Scenario: physical build producer retains owned publication
+- **WHEN** 同一 physical-parent cwd 通过 build publisher 接纳 producer，producer 使用收到的临时目录拼接文件，随后成功或失败
+- **THEN** producer 文件与最终目录只位于物理 workspace，成功整体发布、失败仅清理本次仍拥有的临时目录；父目录或临时目录被替换时保持原有拒绝/保留外来对象语义
+
 #### Scenario: public directory preflight reuses the canonical implementation
 - **WHEN** 从 records built 包根调用 ensureDirectory，分别检查已有目录、readonly 缺失路径、可写缺失嵌套路径与最终链接/普通文件/FIFO
 - **THEN** 返回值、错误与文件系统效果和既有内部 helper 一致；readonly 不创建路径，拒绝项不改变其目标内容，根入口声明提供同一个 boolean 返回 API，既有对象读写行为不变

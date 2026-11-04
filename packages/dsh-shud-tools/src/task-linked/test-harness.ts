@@ -42,7 +42,7 @@ export function plannedCard(overrides: Partial<TaskCard> = {}) {
 }
 
 export function cardPath(h: Pick<TaskToolHarness, "cwd">, id = TASK) {
-  return join(h.cwd, "tasks", id, "task.json");
+  return join(fs.realpathSync.native(h.cwd), "tasks", id, "task.json");
 }
 
 export function putCard(h: Pick<TaskToolHarness, "cwd">, card = plannedCard()) {

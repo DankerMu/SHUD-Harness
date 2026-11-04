@@ -12,7 +12,7 @@ import {
   type StackLock,
 } from "@shud-harness/dsh-shud-core";
 import manifest from "../lib/harness-version.json" with { type: "json" };
-import { ensureDirectory, regularTarget } from "./workspace-paths.ts";
+import { regularTarget, resolveManagedRoot } from "./workspace-paths.ts";
 import { readWorkspaceRecord } from "./workspace-records.ts";
 
 /** Trusted session root and explicit capture settings; no process-cwd or repository fallback. */
@@ -92,13 +92,14 @@ function fingerprint(environment: Environment, id: StackId): string {
 }
 
 function lockDirectory(cwd: string): string {
-  const directory = join(cwd, "stacks");
   try {
-    ensureDirectory(directory, "Stack capture");
+    return resolveManagedRoot(cwd, "stacks", "Stack capture");
   } catch {
-    throw new StackCaptureError("directory", directory);
+    throw new StackCaptureError(
+      "directory",
+      typeof cwd === "string" ? `${cwd || "."}/stacks` : undefined,
+    );
   }
-  return directory;
 }
 
 function matchingLock(

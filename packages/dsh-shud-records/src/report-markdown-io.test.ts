@@ -70,9 +70,13 @@ test.each(["symlink", "file", "fifo"] as const)(
 
 test("unreadable Markdown is not absent and diagnostics discard raw error causes", async () => {
   await writeReportMarkdown(cwd, id, "original");
+  const physicalTarget = native.realpathSync.native(target());
+  let injectedReads = 0;
   vi.mocked(fs.readFileSync).mockImplementation((...args) => {
-    if (args[0] === target())
+    if (args[0] === physicalTarget) {
+      injectedReads++;
       throw Object.assign(new Error("PRIVATE_MARKDOWN_READ"), { code: "EACCES" });
+    }
     return native.readFileSync(...args);
   });
   let failure: unknown;
@@ -81,6 +85,7 @@ test("unreadable Markdown is not absent and diagnostics discard raw error causes
   } catch (error) {
     failure = error;
   }
+  expect(injectedReads).toBe(1);
   expect(failure).toBeInstanceOf(Error);
   expect(String(failure)).not.toContain("PRIVATE_MARKDOWN_READ");
   expect(native.readFileSync(target(), "utf8")).toBe("original");

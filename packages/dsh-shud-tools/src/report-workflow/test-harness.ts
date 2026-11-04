@@ -99,7 +99,7 @@ export async function seedEvidence(
 }
 
 export function reportPath(h: Pick<ReportHarness, "cwd">, id = REPORT, extension = "json") {
-  return join(h.cwd, "reports", `${id}.${extension}`);
+  return join(fs.realpathSync.native(h.cwd), "reports", `${id}.${extension}`);
 }
 export function readReport(h: ReportHarness, id = REPORT) {
   return EvidenceReportSchema.parse(JSON.parse(fs.readFileSync(reportPath(h, id), "utf8")));

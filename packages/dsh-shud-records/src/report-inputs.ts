@@ -15,7 +15,7 @@ import {
   WorkspaceRecordError,
   type WorkspaceRecordMap,
 } from "./workspace-records.ts";
-import { regularTarget } from "./workspace-paths.ts";
+import { regularTarget, resolveManagedRoot } from "./workspace-paths.ts";
 import { ReportRenderError } from "./report-render-error.ts";
 
 type ReportInputKind = "report" | "stack" | "data" | "change" | "verification" | "build";
@@ -88,10 +88,18 @@ function requireRunDirectory(path: string): void {
   throw new ReportRenderError("directory", path);
 }
 
-/** Read only the cited same-workspace record; never create or discover run directories. */
+/** Read only the cited physical same-workspace record; never create or discover run directories. */
 export function readReportRun(cwd: string, runId: RunId): RunRecord {
-  const root = join(cwd, "runs");
-  requireRunDirectory(root);
+  let root: string | undefined;
+  try {
+    root = resolveManagedRoot(cwd, "runs", "Report run", true);
+  } catch {
+    throw new ReportRenderError(
+      "directory",
+      typeof cwd === "string" ? `${cwd || "."}/runs` : undefined,
+    );
+  }
+  if (root === undefined) throw new ReportRenderError("directory", `${cwd || "."}/runs`);
   const directory = join(root, runId);
   requireRunDirectory(directory);
   const path = join(directory, "run-record.json");

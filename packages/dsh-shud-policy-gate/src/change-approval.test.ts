@@ -154,13 +154,17 @@ for (const part of ["change", "patch"] as const) {
             if (fault === "fifo") execFileSync("mkfifo", [path]);
           }
           vi.clearAllMocks();
+          let injectedReads = 0;
           if (fault === "read-error")
             vi.mocked(fs.readFileSync).mockImplementation((...args) => {
-              if (args[0] === path)
+              if (args[0] === path) {
+                injectedReads++;
                 throw Object.assign(new Error("PRIVATE_READ_ERROR"), { code: "EACCES" });
+              }
               return native.readFileSync(...args);
             });
           const display = expectAsk(await h.decide("change_submit", { change_id: CHANGE_ID }));
+          if (fault === "read-error") expect(injectedReads).toBe(1);
           expect(display.reason).toBe(`${CHANGE_APPROVAL_REASON_PREFIX} ${CHANGE_ID}`);
           expect(display.en).toMatch(/cannot read/iu);
           expect(display.zh).toContain("无法读取");

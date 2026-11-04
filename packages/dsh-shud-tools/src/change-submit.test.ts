@@ -191,13 +191,17 @@ for (const target of ["change", "task", "patch"] as const) {
           ? undefined
           : await snapshotFile(fixture.changePath);
       vi.clearAllMocks();
+      let injectedReads = 0;
       if (fault === "read-error")
         vi.mocked(fs.readFileSync).mockImplementation((...args) => {
-          if (args[0] === path)
+          if (args[0] === path) {
+            injectedReads++;
             throw Object.assign(new Error("PRIVATE_IO_DETAIL"), { code: "EACCES" });
+          }
           return native.readFileSync(...args);
         });
       failure(await h.submit(), /change_submit/iu);
+      if (fault === "read-error") expect(injectedReads).toBe(1);
       expect(fs.renameSync).not.toHaveBeenCalled();
       expect(fs.mkdirSync).not.toHaveBeenCalled();
       if (before) expect(await snapshotFile(fixture.changePath)).toEqual(before);

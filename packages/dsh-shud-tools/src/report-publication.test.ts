@@ -142,14 +142,21 @@ test.each(["json", "markdown"])(
       putCard(h, { ...getCard(h), status: "reporting", linked_reports: [REPORT] });
       const jsonBefore = await fileSnapshot(reportPath(h));
       const markdownBefore = await fileSnapshot(reportPath(h, REPORT, "md"));
+      let failures = 0;
       if (stage === "json")
         vi.mocked(fs.renameSync).mockImplementation((source, target) => {
-          if (target === reportPath(h)) throw ioFault();
+          if (target === reportPath(h)) {
+            failures++;
+            throw ioFault();
+          }
           nativeFs.renameSync(source, target);
         });
       else
         vi.mocked(io.rename).mockImplementation(async (source, target) => {
-          if (target === reportPath(h, REPORT, "md")) throw ioFault();
+          if (target === reportPath(h, REPORT, "md")) {
+            failures++;
+            throw ioFault();
+          }
           await nativeIo.rename(source, target);
         });
       const message = expectToolError(
@@ -157,6 +164,7 @@ test.each(["json", "markdown"])(
         stage === "markdown" ? /render/u : /write|report/iu,
       );
       expect(message).not.toContain(PRIVATE);
+      expect(failures).toBe(1);
       expect(await fileSnapshot(reportPath(h, REPORT, "md"))).toEqual(markdownBefore);
       if (stage === "json") expect(await fileSnapshot(reportPath(h))).toEqual(jsonBefore);
       else {
@@ -196,11 +204,16 @@ test("failed card repair never reaches Markdown; terminal repair publishes no in
         ]),
       );
     const before = await snapshot();
+    let failures = 0;
     vi.mocked(fs.renameSync).mockImplementation((source, target) => {
-      if (target === cardPath(h)) throw ioFault();
+      if (target === cardPath(h)) {
+        failures++;
+        throw ioFault();
+      }
       nativeFs.renameSync(source, target);
     });
     expectToolError(await h.invoke("report_validate", { report_id: REPORT }), /task_card/u);
+    expect(failures).toBe(1);
     expect(await snapshot()).toEqual(before);
     expect(fs.existsSync(reportPath(h, REPORT, "md"))).toBe(false);
     const states: string[] = [];
@@ -228,8 +241,12 @@ test("unreadable Markdown is not absence and exposes no raw cause", async () => 
     putReport(h, run);
     putCard(h, { ...getCard(h), status: "reporting", linked_reports: [REPORT] });
     const before = await treeOrAbsent(h.cwd);
+    let failures = 0;
     vi.mocked(fs.readFileSync).mockImplementation((...args) => {
-      if (args[0] === reportPath(h, REPORT, "md")) throw ioFault();
+      if (args[0] === reportPath(h, REPORT, "md")) {
+        failures++;
+        throw ioFault();
+      }
       return nativeFs.readFileSync(...args);
     });
     const message = expectToolError(
@@ -238,6 +255,7 @@ test("unreadable Markdown is not absence and exposes no raw cause", async () => 
     );
     expect(message).toContain(REPORT);
     expect(message).not.toContain(PRIVATE);
+    expect(failures).toBe(1);
     expect(await treeOrAbsent(h.cwd)).toEqual(before);
   } finally {
     vi.mocked(fs.readFileSync).mockImplementation(nativeFs.readFileSync);

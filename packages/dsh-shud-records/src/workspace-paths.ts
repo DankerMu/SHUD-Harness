@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, type Stats } from "node:fs";
+import { lstatSync, mkdirSync, realpathSync, type Stats } from "node:fs";
 
 /** Return whether this call created the directory; readonly inspection never creates a missing path. */
 export function ensureDirectory(path: string, label: string, readonly = false): boolean {
@@ -9,6 +9,38 @@ export function ensureDirectory(path: string, label: string, readonly = false): 
     throw new Error(`${label} path is not a real directory: ${path}`);
   }
   return created;
+}
+
+/** Resolve a preflighted managed root without lexically collapsing the trusted session cwd. */
+export function resolveManagedRoot(
+  cwd: string,
+  directory: string,
+  label: string,
+  readonly?: false,
+): string;
+export function resolveManagedRoot(
+  cwd: string,
+  directory: string,
+  label: string,
+  readonly: boolean,
+): string | undefined;
+export function resolveManagedRoot(
+  cwd: string,
+  directory: string,
+  label: string,
+  readonly = false,
+): string | undefined {
+  if (typeof cwd !== "string") throw new TypeError("Workspace cwd must be a string");
+  const path = `${cwd || "."}/${directory}`;
+  ensureDirectory(path, label, readonly);
+  if (readonly) {
+    const observed = lstatSync(path, { throwIfNoEntry: false });
+    if (!observed) return undefined;
+    if (!observed.isDirectory()) {
+      throw new Error(`${label} path is not a real directory: ${path}`);
+    }
+  }
+  return realpathSync.native(path);
 }
 
 /** lstat, rather than stat, also rejects dangling links without following them. */

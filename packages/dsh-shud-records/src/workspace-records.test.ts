@@ -24,7 +24,9 @@ vi.mock("node:fs", async (original) => {
     lstatSync: vi.fn(actual.lstatSync),
     statSync: vi.fn(actual.statSync),
     existsSync: vi.fn(actual.existsSync),
-    realpathSync: vi.fn(actual.realpathSync),
+    realpathSync: Object.assign(vi.fn(actual.realpathSync), {
+      native: vi.fn(actual.realpathSync.native),
+    }),
     accessSync: vi.fn(actual.accessSync),
     mkdirSync: vi.fn(actual.mkdirSync),
     readFileSync: vi.fn(actual.readFileSync),
@@ -61,6 +63,7 @@ const realFs = await vi.importActual<typeof NodeFs>("node:fs");
 const realPath = await vi.importActual<typeof NodePath>("node:path");
 let root: string;
 let cwd: string;
+let physicalCwd: string;
 const secret = "private-record-payload-437";
 
 beforeEach(() => {
@@ -69,6 +72,7 @@ beforeEach(() => {
   root = realFs.mkdtempSync(realPath.join(tmpdir(), "records-workspace-"));
   cwd = realPath.join(root, "workspace");
   realFs.mkdirSync(cwd);
+  physicalCwd = realFs.realpathSync.native(cwd);
   vi.clearAllMocks();
 });
 afterEach(() => {
@@ -82,6 +86,9 @@ function failure(call: () => unknown, stage: string, target?: string): Error {
     call();
   } catch (error) {
     caught = error;
+  }
+  if (target?.startsWith(`${cwd}/`) && realPath.dirname(target) !== cwd) {
+    target = `${physicalCwd}${target.slice(cwd.length)}`;
   }
   expect(caught).toBeInstanceOf(WorkspaceRecordError);
   expect(caught).toMatchObject({ stage, ...(target === undefined ? {} : { path: target }) });
@@ -99,6 +106,7 @@ function expectNoPathOrFileCalls(): void {
     fs.statSync,
     fs.existsSync,
     fs.realpathSync,
+    fs.realpathSync.native,
     fs.accessSync,
     fs.mkdirSync,
     fs.readFileSync,
@@ -124,7 +132,7 @@ function expectNoPathOrIO(): void {
 }
 
 function seed(relative: string, text: string): string {
-  const target = realPath.join(cwd, relative);
+  const target = realPath.join(physicalCwd, relative);
   realFs.mkdirSync(realPath.dirname(target), { recursive: true });
   realFs.writeFileSync(target, text);
   return target;
