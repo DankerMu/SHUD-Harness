@@ -357,6 +357,14 @@
 
 - [x] 5.0 raw-guard 治理根写保护：固定九根 `tasks stacks provenance reports runs changes patches verifications builds`；`write`/`edit`/`str_replace_editor` 目标在内 → deny `governance-immutable`；`bash`/`pwsh` 触及且按既有写 denylist 判写 → deny，只读触及 → next；与角色/`sandbox_permissions` 无关；raw 判定优先；路径身份复用既有规则；决策审计。矩阵测试：九根 × 存在/不存在 × 符号链接别名 × 写/读命令 × 四角色与 unknown（raw-data-guard「Governance roots are write-protected from model file and shell tools」）。无依赖；必须先于 6.2a 合入。Critical Path #2：reviewer 白盒审查记录 + 测试证据贴 PR。
 
+### Issue #594 risk and evidence fixture
+
+- Public entry/order/error handling selected: direct decideRawAccess calls cover generic non-file names and existing shud_build/change_submit raw NEXT branches with throwing arguments getters. The shared classifier must not read those arguments; specialized fallback/deny remains intact. This is a direct-envelope boundary, not an adapter/LLM exploit.
+- Path/auth/compatibility selected: preserve actual file/shell raw deny/ask, governance writes deny and governance reads NEXT for write/edit/str_replace_editor/bash/pwsh, including native aliases, unsupported file workdir, real shell workdir, path failures and raw priority. Full raw package regressions plus built plugin waterfall/audit smoke; no raw content writes or profile mutation.
+- Documentation selected: D16 and existing raw usage describe supported-name dispatch before arguments and the accessor evidence limit. No new API, configurable list, parser, schema, dependency, synchronization or resource limit; those packs are not selected.
+- Scope/integration: #540 retains its original verification getter scenario and full protected-root mapping; independently test already-shipped analogous branches on main, then restore #540 and require its original regression GREEN. Do not delete that test or move the new verification tool into this PR; #590 nested task_id behavior stays separate.
+- [x] 5.0a 路由 #594：先取得真实 direct-decision RED，再限定共享分类器支持的五个工具名后读取参数；保留支持路径与 raw 优先级。父级执行 focused/full raw、built smoke、默认 check、profile/raw probes/guardrails/strict/31generated，三席审查与同提交全 CI 后合并并恢复 #540。
+
 ### Issue #536 risk and evidence fixture
 
 - Public API / CLI / script entry + Schema / columns / units / field names selected: closed task_create type extension and change_create arguments/results; unknown keys, root types, invalid brands/levels, missing cwd and malformed description fail before tool FS/Git. Real ToolRuntime verifies model schema and execution, not a copied factory return. Core schemas/generation unchanged.

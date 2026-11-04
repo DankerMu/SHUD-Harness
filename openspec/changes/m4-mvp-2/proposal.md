@@ -1,16 +1,16 @@
 # Proposal
 
-## Active issue fixture: #539
+## Active issue fixture: #594
 
-- Issue type: feature; Fixture level: expanded (agree upstream). Dependency #534 and routed CI prerequisite #592 are merged. Critical Paths #2/#4: public run arguments must preserve raw admission and the existing durable submission transaction.
-- Scope: tools shud-run.ts argument schema/validation/conditional forwarding and its tests, active fixture and existing tool documentation. No jobs/records/core/raw implementation, schema projection, profile/preset or dependency changes.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility; Scientific governance / PI gate / evidence lineage; Hydrology runtime / SHUD compatibility; dsh seam / profile governance.
-- Governing invariant: valid optional build_id/threads reach the existing registry unchanged; invalid values fail before tool-owned workspace IO or task reconciliation. The registry alone owns build resolution, run-local binary, environment overlay, durable identities and rollback. Omitted parameters preserve the old configured-binary path and inherited environment.
-- Reuse core BuildId and existing RunJob threads field constraints, strictTool, actual ShudJobRegistry/produceDetachedShud and existing build/executable/input test fixtures. No second build reader, digest/copy helper, process producer, environment builder or run-state writer.
-- Preserve TaskCard reconciliation/link/publication ordering, call context/model identity, closed result shape, labels/project/defaults/END behavior, no-task path, collect semantics, raw three write roots and source-read distinction.
-- Evidence floor: actual registered ToolRuntime build-plus-threads tracer RED→GREEN with run-local executable/environment/RunJob evidence; then invalid-before-IO and omitted-END tracers, expanded combinations and rollback/legacy/raw regressions; independent built task/build/run smoke, full check/profile smoke/strict/generated equality, three-seat review and exact-head CI.
-- Not selected: Config/project setup and resource-limit/discovery (no new config, scan, allocation policy or runtime cap). Hydrology evidence is synthetic cfg-layout compatibility only; real no-build solver regression remains #534's evidence rather than a new scientific experiment.
-- Non-goals: backend transaction or StackLock changes, new approval/preset behavior, verification_run's threads=1 rule, actual solver/scientific/performance claims, retries, new validation limits, complete M4/Web/PI acceptance. Routed #585 owns the separate one-line build-runtime/tool delivery-status correction.
+- Issue type: bugfix; Fixture level: expanded; upstream level absent. Shared raw/governance classifier dispatch touches Critical Path #2 even though the fix is a narrow early return.
+- Scope: raw-guard decideFileShellAccess supported-name admission before argument access, focused tests and existing behavior documentation. No plugin adapter, host, profile, raw-root list, field parser or other tool-specific branch changes.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; dsh seam / governance.
+- Governing invariant: the shared file/shell classifier may inspect arguments only for its existing five tool names; unrelated calls return NEXT without irrelevant argument or filesystem work. Existing raw-specific decisions still run first and own their arguments.
+- Preserve every existing supported write/edit/str_replace_editor/bash/pwsh path, raw deny/ask precedence, governance deny/read delegation, path failures and exact downstream behavior. No blanket catch, verification-only workaround, retries or new configurable support list.
+- Evidence floor: direct call-envelope accessor RED on main's existing shud_build/change_submit and generic fallback, then GREEN with supported-tool counterexamples and complete raw regressions; built direct/plugin smoke, full check/profile/raw probes with stronger audit/guardrails/strict/generated equality, three review seats and exact-head CI.
+- Not selected: schema, configuration, dependencies and new resource limits; none change. No solver/scientific or PI acceptance.
+- #540's 22-file implementation/test set remains stashed and its original verification getter regression is retained. That new tool's protected-root mapping belongs to #540, which must pass the unchanged scenario after integrating this independent fix.
+- Direct decideRawAccess accepts the synthetic getter envelope; the real plugin adapter extracts execution.arguments beforehand. Tests and documentation must not claim a native ToolRuntime/LLM accessor path or a raw-write bypass.
 
 ## Why
 

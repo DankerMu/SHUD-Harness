@@ -691,6 +691,20 @@ Review focus: exact scientific limits and punctuation, exported primitive, no sc
 - 其它层的复核：policy-gate ask 前与 `change_submit` 执行时复核 patch sha（D5）；`shud_build` 从对象库 + 已批 patch 构建（D3）；closure 复核 patch sha（D7）；`shud_run`/`verification_run` 复核二进制 sha（D8/D9）。
 - 已知边界：raw-guard 的 bash 判定是启发式（同 raw 的漏报清单），且 `repos/SHUD/.git` 不受保护——coder 用 bash 篡改对象库不在 M4 威胁模型内（与 coder 本就可以写任意源码同一信任级别）；登记 D15(9)。
 
+#### Issue #594 implementation boundary
+
+Change surface: only the existing shared decideFileShellAccess admission boundary, focused tests and existing documentation. Recognize exactly write, edit, str_replace_editor, bash and pwsh before reading call.arguments; all other names return the existing NEXT. Keep recognition in the shared owner rather than duplicating filters at its raw and governance callers.
+
+Must preserve: raw-specific dispatch first; raw deny/ask terminates before governance; existing supported-tool parsing, fields, cwd/workdir resolution, path identity failures, read/write rules, next result and audit behavior. No broad exception handling, new policy/root/configuration, special case for verification_run or changes to index.ts's adapter.
+
+The observed failure is a direct exported-function call with a throwing arguments property. change_submit can catch identity extraction and return NEXT, only for governance fallback to read it again; shud_build never needs arguments but fallback reads them. Generic non-file calls unnecessarily read arguments before returning NEXT too. The fix removes only these irrelevant accesses, not any supported-tool guard.
+
+Use existing shud_build/change_submit and generic names for independent main-based RED/GREEN. The #540 verification branch is not on main and remains in the preserved parent slice; its original protected-verifications/tasks and disjoint-raw accessor regression must pass unchanged after integration. This evidence split prevents a false dependency cycle without reducing the overall invariant.
+
+Sibling surfaces: both callers of the shared classifier, all five supported names, task/build/change specialized branches, index.ts's plain adapter, governance and raw file/shell/alias/error tests. The adapter reads execution.arguments before calling decideRawAccess, so no claim that a getter envelope reaches this path from native ToolRuntime or an LLM.
+
+Required evidence: first throwing-envelope direct-decision RED; supported read/write/raw-priority counterexamples; full raw suite and built direct/function plus real-plugin plain-envelope smoke; full default gate, profile smoke, raw probes with retained-byte stronger audit, guardrails, strict fixture, generated equality, three white-box seats and exact-head CI. No arbitrary raw data writes, external host changes, new sandbox guarantees or scientific acceptance.
+
 #### Issue #535 implementation boundary
 
 Change surface: decideRawAccess/decideKnownRawAccess and existing internal file/shell classifiers in raw-guard/decide.ts; new test files because decide.test.ts is already near its size bound. index.ts keeps its existing configuration, waterfall and audit adapter. No second copy of command/path classifiers or new configurable roots.
