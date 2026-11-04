@@ -30,6 +30,19 @@ vi.mock("node:fs", async (original) => {
     renameSync: vi.fn(actual.renameSync),
   };
 });
+vi.mock("node:fs/promises", async (original) => {
+  const actual = await original<typeof io>();
+  return {
+    ...actual,
+    lstat: vi.fn(actual.lstat),
+    mkdir: vi.fn(actual.mkdir),
+    readFile: vi.fn(actual.readFile),
+    readdir: vi.fn(actual.readdir),
+    realpath: vi.fn(actual.realpath),
+    open: vi.fn(actual.open),
+    rename: vi.fn(actual.rename),
+  };
+});
 const nativeFs = await vi.importActual<typeof fs>("node:fs");
 beforeEach(() => vi.clearAllMocks());
 
@@ -57,11 +70,13 @@ test("planned and second running task submissions preserve metadata and sorted l
     const schema = h.runtime.schemas(h.agent).find((tool) => tool.name === "shud_run");
     expect(schema?.parameters).toMatchObject({ type: "object", additionalProperties: false });
     expect(Object.keys(schema?.parameters?.properties ?? {}).sort()).toEqual([
+      "build_id",
       "end_days",
       "input_dir",
       "label",
       "project",
       "task_id",
+      "threads",
     ]);
     const first = await returnedRun(
       h,
@@ -183,6 +198,78 @@ test.each([
   }
 });
 
+const invalidRunArguments = [
+  ...[
+    "",
+    "BUILD-0001",
+    "../builds/x",
+    "BUILD-20261102T090000-ABCD",
+    "RUN-20261102T090000-a7b8",
+    null,
+    7,
+    false,
+    [],
+    {},
+  ].map((build_id) => ({ args: { build_id }, error: /build_id/iu })),
+  ...[0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "1", null, false, [], {}].map((threads) => ({
+    args: { threads },
+    error: /threads/iu,
+  })),
+].flatMap((row) => [false, true].map((linked) => ({ ...row, linked })));
+
+test.each([
+  ...invalidRunArguments,
+  // Direct registry requests allow undefined as absent; native calls must be lossless JSON.
+  ...[
+    { build_id: undefined, threads: undefined },
+    ...[NaN, Infinity, -Infinity].map((threads) => ({ threads })),
+  ].map((args) => ({ args, error: /losslessly JSON-serializable/iu, linked: true })),
+])(
+  "invalid build/run arguments $args reject before workspace IO; linked=$linked",
+  async ({ args, error, linked }) => {
+    const h = await createToolHarness({ pumpPollMs: 60_000 });
+    const query = vi.spyOn(h.registry, "listRunJobsByTask");
+    const submit = vi.spyOn(h.registry, "submitShud");
+    try {
+      putCard(h);
+      const cardBefore = await cardSnapshot(h);
+      const before = await submissionSnapshot(h);
+      vi.clearAllMocks();
+      const message = expectToolError(
+        await h.call({ input_dir: h.inputDir, ...(linked ? { task_id: TASK } : {}), ...args }),
+        error,
+      );
+      expect(message).not.toMatch(/unknown parameter/iu);
+      expect(query).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
+      expect(taskFileCalls()).toEqual([]);
+      for (const operation of [
+        fs.lstatSync,
+        fs.mkdirSync,
+        fs.readFileSync,
+        fs.openSync,
+        fs.renameSync,
+        io.lstat,
+        io.mkdir,
+        io.readFile,
+        io.readdir,
+        io.realpath,
+        io.open,
+        io.rename,
+      ]) {
+        expect(operation).not.toHaveBeenCalled();
+      }
+      expect(await cardSnapshot(h)).toEqual(cardBefore);
+      expect(await submissionSnapshot(h)).toEqual(before);
+      expect(h.registry.list()).toEqual([]);
+    } finally {
+      query.mockRestore();
+      submit.mockRestore();
+      await h.dispose();
+    }
+  },
+);
+
 test.each([
   "missing",
   "json",
@@ -282,8 +369,8 @@ test("closed task-linked schema still rejects unknown parameters without IO", as
   try {
     vi.clearAllMocks();
     expectToolError(
-      await h.call({ input_dir: h.inputDir, task_id: TASK, threads: 4 }),
-      /threads/iu,
+      await h.call({ input_dir: h.inputDir, task_id: TASK, workdir: "/tmp" }),
+      /unknown parameter.*workdir/iu,
     );
     expect(query).not.toHaveBeenCalled();
     expect(taskFileCalls()).toEqual([]);

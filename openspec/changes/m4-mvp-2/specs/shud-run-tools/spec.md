@@ -29,6 +29,18 @@
 - **WHEN** 模型不带 `build_id` 与 `threads` 调用 `shud_run` 且提交成功
 - **THEN** `run-job.json` 的 `build_id` 与 `threads` 均为 `null`，包装进程使用配置的 `shudBin`，其环境不新增 `OMP_NUM_THREADS` 或 `SHUD_RHS_THREADS`
 
+#### Scenario: invalid build arguments precede task reconciliation
+- **WHEN** 调用带有合法 `task_id`，但 `build_id` 品牌非法或 `threads` 为非法值
+- **THEN** 工具在关联作业查询、TaskCard 读取/修复及提交前拒绝，不读写工作区文件，不读取 builds、不创建运行目录，卡片字节与修改时间不变
+
+#### Scenario: threads and build selection are independent
+- **WHEN** 仅提供合法 `threads` 而不提供 `build_id`；另一次仅提供合法 `build_id` 而不提供 `threads`
+- **THEN** 前者使用配置二进制、记录 null build_id/binary_sha256 和指定 threads；后者使用已验证的运行目录二进制副本、记录该 build_id/摘要和 null threads，未指定的线程环境沿用宿主值而非清空
+
+#### Scenario: replay input without END override is preserved
+- **WHEN** 以构造的 keliya 布局输入调用 `shud_run`，未提供 `end_days`
+- **THEN** 副本 cfg 文件与原文件字节相同，包括 START、END 与 NUM_OPENMP；不因 build_id/threads 参数而重写求解器配置
+
 #### Scenario: label persisted
 - **WHEN** 以 `label: "ccw 30d"` 调用 `shud_run`
 - **THEN** `run-job.json` 的 `label` 为 `ccw 30d`，`job_list` 中该登记的 label 为 `<run_id> ccw 30d`

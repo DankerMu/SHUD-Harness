@@ -1,14 +1,16 @@
 # Proposal
 
-## Active issue fixture: #592
+## Active issue fixture: #539
 
-- Issue type: test; Fixture level: compact; upstream suggested level absent. Isolated native fault-injection correction, no production behavior or shared IO/persistence implementation change; existing M4 design remains authoritative, no new design artifact.
-- Scope: only the make-signal row in shud-build-execution.test.ts plus this fixture/scenario. #539/PR591 is parked until this independent prerequisite merges.
-- Selected risk packs: Error handling / rollback / partial outputs, Legacy compatibility / examples, Documentation / migration notes. Other packs are not selected: no API/config/schema/auth/path/resource/concurrency/release or scientific-runtime behavior changes.
-- Governing invariant: report the actual child exit/signal and preserve cleanup/source/TaskCard invariants; sending catchable SIGTERM does not guarantee a SIGTERM wait status.
-- Change only the native recipe signal to KILL and expected actual signal to SIGKILL. Keep real make/spawnSync, one invocation, no residual build, source/card byte and mtime checks, adjacent exit/artifact cases and controlled diagnostics. No sleep/retry/skip, regex widening or production change.
-- Evidence floor: retained CI41761036256 failure plus independent Linux minimal reproduction (498 SIGTERM / 2 exit2 in 500); KILL control 500 actual SIGKILL on Linux and Darwin; parent targeted real tool test, full default gate, strict fixture and exact-head Linux CI.
-- A fixture review and compact correctness+test-evidence review must confirm this preserves the existing signal-classification contract rather than accepting exit2 as a signal. Internal GNU make cleanup causality remains unproven and out of scope.
+- Issue type: feature; Fixture level: expanded (agree upstream). Dependency #534 and routed CI prerequisite #592 are merged. Critical Paths #2/#4: public run arguments must preserve raw admission and the existing durable submission transaction.
+- Scope: tools shud-run.ts argument schema/validation/conditional forwarding and its tests, active fixture and existing tool documentation. No jobs/records/core/raw implementation, schema projection, profile/preset or dependency changes.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility; Scientific governance / PI gate / evidence lineage; Hydrology runtime / SHUD compatibility; dsh seam / profile governance.
+- Governing invariant: valid optional build_id/threads reach the existing registry unchanged; invalid values fail before tool-owned workspace IO or task reconciliation. The registry alone owns build resolution, run-local binary, environment overlay, durable identities and rollback. Omitted parameters preserve the old configured-binary path and inherited environment.
+- Reuse core BuildId and existing RunJob threads field constraints, strictTool, actual ShudJobRegistry/produceDetachedShud and existing build/executable/input test fixtures. No second build reader, digest/copy helper, process producer, environment builder or run-state writer.
+- Preserve TaskCard reconciliation/link/publication ordering, call context/model identity, closed result shape, labels/project/defaults/END behavior, no-task path, collect semantics, raw three write roots and source-read distinction.
+- Evidence floor: actual registered ToolRuntime build-plus-threads tracer RED→GREEN with run-local executable/environment/RunJob evidence; then invalid-before-IO and omitted-END tracers, expanded combinations and rollback/legacy/raw regressions; independent built task/build/run smoke, full check/profile smoke/strict/generated equality, three-seat review and exact-head CI.
+- Not selected: Config/project setup and resource-limit/discovery (no new config, scan, allocation policy or runtime cap). Hydrology evidence is synthetic cfg-layout compatibility only; real no-build solver regression remains #534's evidence rather than a new scientific experiment.
+- Non-goals: backend transaction or StackLock changes, new approval/preset behavior, verification_run's threads=1 rule, actual solver/scientific/performance claims, retries, new validation limits, complete M4/Web/PI acceptance. Routed #585 owns the separate one-line build-runtime/tool delivery-status correction.
 
 ## Why
 

@@ -5,6 +5,9 @@ import type { ApprovalService } from "@deepseek-ai/dsh-user-approval";
 import * as rawGuard from "@shud-harness/dsh-shud-raw-guard";
 import { expect, test, vi } from "vitest";
 import { createToolHarness } from "./test-harness.ts";
+import { expectNativeReceipt, seedBuild } from "./shud-run-build/test-harness.ts";
+import { returnedRun } from "./task-linked/test-harness.ts";
+import { fileSnapshot } from "../../dsh-shud-jobs/src/submit-shud-build/test-harness.ts";
 
 test.each([
   "output denied",
@@ -119,6 +122,70 @@ async function observeGuardedExecution(ctx: Context) {
     },
   };
 }
+
+test.each(["builds", "runs", "stacks", "provenance"])(
+  "build-referenced shud_run treats raw %s according to its read/write role",
+  async (root) => {
+    const h = await createToolHarness({ pumpPollMs: 60_000 });
+    const submissions = vi.spyOn(h.registry, "submitShud");
+    try {
+      const { build, source, recordPath } = await seedBuild(h.cwd);
+      await h.apply(rawGuard, { rawDirs: [join(h.cwd, root)] });
+      const observed = await observeGuardedExecution(h.ctx);
+      const paths = [
+        source,
+        recordPath,
+        h.shudBin,
+        ...Object.keys(h.originals).map((name) => join(h.inputDir, name)),
+      ];
+      const snapshots = await Promise.all(paths.map(fileSnapshot));
+      if (root === "builds") {
+        const job = await returnedRun(
+          h,
+          await h.call({
+            input_dir: h.inputDir,
+            build_id: build.build_id,
+            threads: 1,
+          }),
+        );
+        expect(observed.executions).toBe(1);
+        expect(observed.asks).toEqual([]);
+        expect(submissions).toHaveBeenCalledTimes(1);
+        expect(job.build_id).toBe(build.build_id);
+        await expectNativeReceipt(job.run_dir, "argv-receipt", "-o\noutput/tiny.out\ntiny\n");
+        expect(await readFile(join(job.run_dir, "invoked-path"), "utf8")).toBe(
+          `${join(job.run_dir, "bin", "shud")}\n`,
+        );
+        await writeFile(join(job.run_dir, "allow-exit"), "");
+        await expectNativeReceipt(job.run_dir, "exit_code", "0\n");
+      } else {
+        const trees = [h.cwd, h.stateDir, h.inputDir];
+        const before = await Promise.all(trees.map(snapshotGuardTree));
+        for (const args of [
+          { build_id: build.build_id, threads: 1 },
+          { build_id: "../builds/x", threads: 1 },
+          { build_id: build.build_id, threads: 0 },
+        ]) {
+          const result = await h.call({ input_dir: h.inputDir, ...args });
+          expect(result.isError).toBe(true);
+          if (!result.isError) throw new Error("Protected run output unexpectedly accepted");
+          expect(result.error.message).toMatch(/immutable/iu);
+          expect(observed.executions).toBe(0);
+          expect(observed.asks).toEqual([]);
+          expect(submissions).not.toHaveBeenCalled();
+          expect(h.registry.list()).toEqual([]);
+          expect(h.registry.indexes.read()).toEqual({ active: [], completed: [] });
+          expect(await Promise.all(trees.map(snapshotGuardTree))).toEqual(before);
+        }
+      }
+      expect(await Promise.all(paths.map(fileSnapshot))).toEqual(snapshots);
+    } finally {
+      submissions.mockRestore();
+      await h.dispose();
+    }
+  },
+  15_000,
+);
 
 for (const destination of ["stacks", "provenance"]) {
   for (const kind of [
