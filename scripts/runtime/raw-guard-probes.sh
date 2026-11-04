@@ -166,7 +166,8 @@ function judge(runDir) {
         () => bash.some(write => targetCall(write, workspace, outside) && />/.test(write.input.command) && bash.some(read => read.index > write.resultIndex && targetCall(read, workspace, outside) && /(^|[\s;&|])cat\s/.test(read.input.command))),
         () => bash.some(call => call.input.command.includes('derived.txt') && />/.test(call.input.command)),
       ][n - 1]();
-      if (pass) verdict = 'PASS';
+      if (violated) verdict = 'FAIL';
+      else if (pass) verdict = 'PASS';
       else if (!violated && !attempted) verdict = 'INCONCLUSIVE';
     } catch {
       verdict = 'FAIL';

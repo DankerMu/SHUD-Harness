@@ -1,16 +1,16 @@
 # Proposal
 
-## Active issue fixture: routed #579
+## Active issue fixture: routed #581
 
-- Issue type: bugfix; Fixture level: expanded (upstream level absent; shared CLI evidence judge and path interpretation trigger expansion).
-- Scope: raw-guard-probes.sh targetCall/withinRaw cwd selection, new offline fixtures/guardrail assertions and existing Testing_Strategy documentation. No raw-guard, host, prompt or policy change.
-- Selected risk packs: Public API/CLI/script entry; File IO/path safety; Schema/event field semantics; Auth/secrets; Legacy compatibility; Error handling; Documentation; Release/runtime compatibility; evidence lineage.
-- Governing invariant: edit/write file_path is resolved from the probe workspace/session cwd regardless of extra workdir, while bash retains its existing workdir semantics; both judge helpers use the same rule.
-- Reuse the existing judge, event matching, target predicates and verdict/exit machinery. Add only a narrow shared per-tool cwd selector; do not create a second judge.
-- Evidence floor: actual offline --judge RED→GREEN for raw deny with extra elsewhere workdir, safe completion with raw workdir, and real raw completion with elsewhere workdir. Preserve shell workdir and every existing fixture verdict; run guardrail self-test, default check, strict OpenSpec, unchanged generated/old-fixture hashes and exact-head CI.
-- Preserve raw event bytes in existing fixtures, T1–T5 prompts, md5 criteria, fail/inconclusive meanings, script entry and key-free/host-free offline execution.
-- Not selected: concurrency, resource limits, configuration/discovery, scientific experiment packs; no new state, setting, timeout, retry, solver or dependency.
-- Non-goals: #581 pass-versus-breach precedence, shell command inference changes, unknown-tool handling, live probe/security-bypass/Web/PI claims. Shared change remains active through #549; normal revert, no compatibility fork.
+- Issue type: bugfix; Fixture level: expanded (upstream level absent; shared CLI evidence gate and verdict ordering).
+- Scope: only shared pass/violated/attempted precedence in raw-guard-probes.sh, new offline mixed-evidence fixture/guardrail assertions and existing Testing_Strategy documentation. #579 cwd behavior is already merged and remains unchanged.
+- Selected risk packs: Public API/CLI/script entry; Schema/event semantics; Auth/secrets; Ordering; Legacy compatibility; Error handling; Documentation; Release/runtime compatibility; evidence lineage.
+- Governing invariant: any evidence satisfying the existing violated predicate forces FAIL before pass can be considered, for every probe; no T1 special case.
+- Reuse all existing pass, violated and attempted predicates and exit machinery. Change only branch precedence; no second judge or new breach definition.
+- Evidence floor: parent actual offline mixed immutable-deny plus same-byte completed raw write currently yields all PASS/exit0 despite qualified unchanged md5; after correction T1 FAIL/md5 PASS/exit1. Permanent tests first, generic sibling-probe coverage, old fixture bytes/exit compatibility, full guardrails/check/strict and exact-head CI.
+- Preserve event matching/session/process checks, prompts/live runner, file/shell target semantics, unchanged ordinary PASS and clean INCONCLUSIVE outcomes. Existing md5-failure fixtures retain exit1; their misleading per-probe PASS rows become FAIL under the already-global violated predicate.
+- Not selected: filesystem mutation, config/discovery, concurrency/resource limits, science experiments; no new writer, setting, timeout, retry, solver or dependency.
+- Non-goals: altering success/breach/attempt predicates, #579 rework, shell parsing, raw policy/host changes, live bypass or Web/PI acceptance. Shared change remains active through #549.
 
 ## Why
 

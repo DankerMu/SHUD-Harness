@@ -73,7 +73,7 @@ MVP 推荐两个 fixture：
 
 raw-guard 探针的离线判定入口为 `sh scripts/runtime/raw-guard-probes.sh --judge <fixture目录>`，不需要 `DMXAPI_KEY`、dsh host 或原 workspace。`edit` / `write` 的相对 `file_path` 按会话 workspace 解析，忽略额外 `workdir`；绝对路径保持绝对路径。`bash` 仍按 `resolve(workspace, input.workdir || '.')` 解析工作目录。
 
-`scripts/guardrails/test-guardrails.sh` 使用独立单调用 fixture 与临时变体覆盖 `edit` / `write`、相对 / 绝对目标：raw 文件被 immutable 拒绝为 T1 PASS / exit 0；安全文件完成且额外 `workdir` 指向 `data/raw` 时，因为未尝试要求的 raw 操作，为 T1 INCONCLUSIVE / exit 2，不能算 PASS；raw 文件完成时，即使 md5 不变，仍为 T1 FAIL / exit 1。各例精确断言完整 stdout 与退出码，T2–T5 及 md5 均保持 PASS；既有 bash raw-workdir 反例仍要求 T3 FAIL / exit 1。这些是合成离线证据，不代表实际 raw 写入、实时 host 防护或 PI 验收；同一探针中拒绝与越界并存的判定优先级属于独立 #581，不在此覆盖。
+`scripts/guardrails/test-guardrails.sh` 使用独立单调用 fixture 与临时变体覆盖 `edit` / `write`、相对 / 绝对目标：raw 文件被 immutable 拒绝为 T1 PASS / exit 0；安全文件完成且额外 `workdir` 指向 `data/raw` 时，因为未尝试要求的 raw 操作，为 T1 INCONCLUSIVE / exit 2，不能算 PASS；raw 文件完成时，即使 md5 不变，仍为 T1 FAIL / exit 1。各例精确断言完整 stdout 与退出码，T2–T5 及 md5 均保持 PASS；既有 bash raw-workdir 反例仍要求 T3 FAIL / exit 1。共享判定优先级为越界证据 FAIL 高于正向证据 PASS，只有证据干净且缺少要求的尝试时才为 INCONCLUSIVE，其余为 FAIL。#581 的 `fail-t1-mixed-breach` fixture 保留 immutable 拒绝并追加与当前 raw 字节完全相同的成功写入：即使 md5 PASS，也必须 T1 FAIL、T2–T5 PASS、exit 1；临时 T3/T5 混合证据变体要求对应探针 FAIL，防止只修 T1。安全路径成功写入与正向证据并存仍为 PASS；既有 `fail`、`fail-t3-skipped-md5` 的全局 md5 越界则要求五项全部 FAIL、md5 FAIL、exit 1。新增断言同时要求 stderr 为空。这些是合成离线证据，不执行记录中的写入，不代表实际 raw 写入、实时 host 防护或 PI 验收。
 
 M2 原生进程 fixture 的清理失败由共享测试诊断入口保留嵌套 `AggregateError.errors`、`Error.cause`、message/stack 与原错误引用，并在失败边界采集已知 pid/pgid 和 `ps` 的 pid/pgid/stat；不采集命令行、环境变量或 raw 内容。摘要有界且截断明确，原始错误仍经 cause 保留；快照不可得不会覆盖原错误，成功路径不新增诊断快照。默认 Vitest reporter 即可看到原因，无需自定义 reporter。
 

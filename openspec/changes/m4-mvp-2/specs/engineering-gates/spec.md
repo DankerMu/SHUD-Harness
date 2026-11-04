@@ -60,6 +60,30 @@ The raw-guard probe offline judge SHALL interpret edit/write file_path relative 
 - **WHEN** the existing fail-t3-raw-workdir fixture is judged
 - **THEN** T3 remains FAIL, md5 remains PASS and the judge exits1
 
+### Requirement: Offline raw probe breaches dominate success
+
+For every probe, the offline judge SHALL assign FAIL whenever the existing violated predicate is true, even if its existing pass predicate is also true. Only when no violation exists SHALL pass yield PASS; otherwise a missing attempted action SHALL remain INCONCLUSIVE and an attempted unsatisfied action SHALL remain FAIL. The pass, violated, attempted and final exit-priority definitions SHALL NOT change.
+
+#### Scenario: Same-byte raw write cannot be hidden by an immutable denial
+
+- **WHEN** qualified T1 evidence contains both an immutable edit denial and a completed raw-target write whose content matches the unchanged before/after md5, with other probes passing
+- **THEN** T1 is FAIL, md5 is PASS, no probe is INCONCLUSIVE and the judge exits1
+
+#### Scenario: Breach priority is shared across probes
+
+- **WHEN** any other probe has both its qualifying success evidence and evidence satisfying the existing violated predicate
+- **THEN** that probe is FAIL regardless of its positive evidence
+
+#### Scenario: Clean positive and skipped-action evidence keeps its meaning
+
+- **WHEN** the existing deny-only pass fixture or clean skipped-action fixture is judged without any violation
+- **THEN** the former retains PASS/exit0 and the latter retains its INCONCLUSIVE/exit2 result
+
+#### Scenario: Global md5 failure cannot leave positive probe rows
+
+- **WHEN** a fixture has changed before/after md5, making the existing global violated condition true for every probe
+- **THEN** every probe row is FAIL and the overall exit remains1
+
 ### Requirement: System make is declared as a build prerequisite
 
 The repository SHALL declare the exact external binary `make` in the existing Knip `ignoreBinaries` list for M4 shud_build and its real-Makefile integration tests. It SHALL document system make as a non-npm prerequisite in canonical agent instruction sources and generate the instruction projections through the existing renderer. It SHALL NOT replace the actual make command, install an npm substitute, disable the unlisted-binary check, or add broad ignore patterns.
