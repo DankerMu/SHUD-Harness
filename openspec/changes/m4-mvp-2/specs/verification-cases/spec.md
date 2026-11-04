@@ -76,6 +76,8 @@ records SHALL 提供确定性的同步函数 `compareRivqdown(baseRunDir, candid
 ### Requirement: verification_run
 `verification_run` SHALL 由 `dsh-shud-tools` 以闭合 schema 挂载，参数：`task_id`、`base_run_id`、`candidate_run_id`（均必填，品牌校验）、`reviewer_notes`（非空字符串数组，至少一条）、`compatibility_verdict`（`compatible|incompatible|unknown`）；未知键拒绝。交叉校验（任一失败即工具错误、零写入）：卡存在、通过 schema 校验且 `type: code_change`、`status: running`；两个运行的 RunJob SHALL 取自注册表只读 `listRunJobsByTask(task_id)`（不轮询、不收集、不写文件或索引），`base_run_id` 与 `candidate_run_id` 均 SHALL 出现在其结果中（因而 RunJob `task_id` 等于参数 `task_id`），下文 RunJob 的 `job_id`、`run_dir`、`build_id`、`threads`、`binary_sha256` 均取自该结果；两个运行经注册表 `collectShud(id, {readonly: true})` 只读取得已有 RunRecord（SHALL NOT 触发收集、失败记账、状态投影或通知；未 collected 的运行即拒绝），均 `status: succeeded`、`project` 相同；两个 RunRecord 的 `task_id` SHALL 等于参数 `task_id`，且其 `job_id` SHALL 属于卡片 `linked_jobs`；两个运行的 RunJob `run_dir` 的 realpath SHALL 等于 `realpath(<session cwd>/runs/<run_id>)`（运行属于本会话工作区，`artifact_refs` 才能在会话 cwd 下解析），否则拒绝；候选 RunJob 的 `build_id` 非 `null`，其 BuildRecord `change_id` 非 `null`、该 CR `status: approved` 且 `task_id` 相同；base RunJob 的 `build_id` 非 `null`，其 BuildRecord `change_id: null`、`rhs_openmp: false`（serial baseline），且 `source_commit` 等于候选 BuildRecord 的 `source_commit`；两个 BuildRecord 的 `task_id` SHALL 等于参数 `task_id`，`source_commit` SHALL 等于卡片 `source_base_commit`；两个 RunJob 的 `threads` 均为 `1`；两个 RunJob 的 `binary_sha256` 分别等于各自 BuildRecord 的 `binary_sha256`；两个运行的 DataProvenance `files` 与 `sources.external_files` 的 `(path, sha256)` 集合相等；`reviewer_notes` 任一条命中 core `wording.ts` 禁止用语时 SHALL 返回错误（它们会渲染进报告，与模型撰写节同一护栏）。校验通过后调用「Rivqdown comparator」，`equal` → `status: passed`，否则 `status: failed` 且 `failure_reason` 为受控文本（含两 sha）；比较器错误 → 工具错误、零写入。持久化：分配 `vc_id`，以排他创建原子写 `verifications/<vc_id>.json`（EEXIST 时按 task-cards「TaskCard workspace file」规则 (4) 重新分配 id，SHALL NOT 覆盖已有 VC；字段：`change_id` 取自候选 BuildRecord 的 `change_id`（不是工具参数）、`case_type: regression`、`expected_result_source: baseline_regression`、`bundle_id: null`、`target_code_targets` = 该 CR `files_changed`、`expected_result` 与 `pass_criteria` 为固定文本、`artifact_refs` 恰为相对会话 cwd 的 `runs/<base_run_id>/output/<project>.out/<project>.rivqdown.dat` 与 `runs/<candidate_run_id>/output/<project>.out/<project>.rivqdown.dat` 两项（依此顺序）、`reviewed_by` = 调用者当前 preset 投影），再回写 TaskCard `linked_verifications`（追加排序去重，不改状态）；回写失败返回含 `vc_id` 的错误并保留 VC 文件。同一对运行可重复调用生成新 VC，SHALL NOT 改写旧 VC。结果 SHALL 含 `vc_id`、`status`、`observed` 与 `failure_reason`。
 
+The same-project predicate SHALL use the two identity-bound RunJob.project fields returned by listRunJobsByTask. RunRecord does not contain a project field; its succeeded status, task_id and job_id remain the readonly record predicates. This requirement SHALL NOT add a RunRecord field or infer project from command arguments.
+
 #### Scenario: replay passes
 - **WHEN** reviewer 以 base 运行（null-CR 构建、threads 1、succeeded）与候选运行（approved-CR 构建、同 source_commit、threads 1、succeeded、同输入）调用 `verification_run`，两个 rivqdown 字节相同
 - **THEN** 写入 `status: passed` 的 VC，其 `change_id` 等于候选 BuildRecord 的 `change_id`，`artifact_refs` 为 `runs/<base_run_id>/output/<project>.out/<project>.rivqdown.dat` 与 `runs/<candidate_run_id>/output/<project>.out/<project>.rivqdown.dat`；卡片 `linked_verifications` 含该 `vc_id`，卡状态仍 `running`；两个运行的 `run-job.json`、`run-record.json` 与索引字节不变
@@ -135,6 +137,18 @@ records SHALL 提供确定性的同步函数 `compareRivqdown(baseRunDir, candid
 #### Scenario: wrong role denied before execution
 - **WHEN** 当前 preset 投影为 coder 或 worker 的 Agent 调用 `verification_run`
 - **THEN** policy-gate `role-tool-surface` 返回 `deny`，工具不执行
+
+#### Scenario: verification rechecks the current card after evidence awaits
+- **WHEN** the task status, pinned commit or linked jobs changes while readonly run evidence is being retrieved
+- **THEN** verification validates the current card before publication, rejects newly ineligible or mismatched evidence without writes, and never overwrites unrelated current fields with a stale snapshot
+
+#### Scenario: provenance pair sets include external evidence
+- **WHEN** two valid provenance records contain the same path and SHA256 pairs in different order or with duplicate entries in sources.files or sources.external_files
+- **THEN** the input comparison treats them as equal sets; a changed pair in either collection rejects verification before publication
+
+#### Scenario: output ancestors cannot redirect verification evidence
+- **WHEN** an output or project-output directory beneath a bound run is a symlink or non-directory
+- **THEN** verification fails before comparing redirected evidence and writes no VerificationCase or TaskCard link
 
 ### Requirement: VerificationCase workspace files
 VerificationCase SHALL 以同目录临时文件写完后排他发布（`wx` 语义，不覆盖已有文件，EEXIST 时重新分配 `vc_id`，至多 3 次）的方式原子写入会话 cwd 下的 `verifications/<vc_id>.json`；目录与文件的路径安全 SHALL 遵循 task-cards「TaskCard workspace file」规则；SHALL NOT 经 `ctx.storage` 或 stateDir 索引；查找按 id 定位、不扫描目录；读取经 schema 校验，损坏文件报错且不改写。

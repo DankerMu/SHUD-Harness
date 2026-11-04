@@ -1,16 +1,16 @@
 # Proposal
 
-## Active issue fixture: #594
+## Active issue fixture: #540
 
-- Issue type: bugfix; Fixture level: expanded; upstream level absent. Shared raw/governance classifier dispatch touches Critical Path #2 even though the fix is a narrow early return.
-- Scope: raw-guard decideFileShellAccess supported-name admission before argument access, focused tests and existing behavior documentation. No plugin adapter, host, profile, raw-root list, field parser or other tool-specific branch changes.
-- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; dsh seam / governance.
-- Governing invariant: the shared file/shell classifier may inspect arguments only for its existing five tool names; unrelated calls return NEXT without irrelevant argument or filesystem work. Existing raw-specific decisions still run first and own their arguments.
-- Preserve every existing supported write/edit/str_replace_editor/bash/pwsh path, raw deny/ask precedence, governance deny/read delegation, path failures and exact downstream behavior. No blanket catch, verification-only workaround, retries or new configurable support list.
-- Evidence floor: direct call-envelope accessor RED on main's existing shud_build/change_submit and generic fallback, then GREEN with supported-tool counterexamples and complete raw regressions; built direct/plugin smoke, full check/profile/raw probes with stronger audit/guardrails/strict/generated equality, three review seats and exact-head CI.
-- Not selected: schema, configuration, dependencies and new resource limits; none change. No solver/scientific or PI acceptance.
-- #540's 22-file implementation/test set remains stashed and its original verification getter regression is retained. That new tool's protected-root mapping belongs to #540, which must pass the unchanged scenario after integrating this independent fix.
-- Direct decideRawAccess accepts the synthetic getter envelope; the real plugin adapter extracts execution.arguments beforehand. Tests and documentation must not claim a native ToolRuntime/LLM accessor path or a raw-write bypass.
+- Issue type: feature; Fixture level: expanded (agree upstream). Dependencies #527/#529/#532/#539 and routed shared-classifier prerequisite #594 are merged. Critical Paths #2/#6: identity-bound readonly verification evidence, raw-protected publication and reviewer wording.
+- Scope: tools verification_run and registration, raw-guard verification targets, accompanying tests and existing tool documentation. No records/jobs/core/policy implementation, schema projection, profile/preset, dependency or comparator changes.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility; Scientific governance / PI gate / evidence lineage; dsh seam / profile governance.
+- Governing invariant: publish a passed/failed VerificationCase only from two existing collected, identity-bound runs satisfying the complete D8 matrix; missing/unsafe/mismatched evidence is a tool error with no writes, never a failed comparison. Only VC publication followed by a fresh sorted TaskCard link may mutate the workspace.
+- Reuse strictTool, core brands/VerificationCase constraints/wording/current preset, registry readonly list/collect, canonical readonly record readers/createVerificationCase/writeWorkspaceRecord and compareRivqdown. Output ancestors require an existing ordinary directory; a direct lstat check preserves that contract, unlike the missing-tolerant ensureDirectory preflight. No second allocator, record writer, hash loop, collector, role table or scientific classifier.
+- Preserve existing tools, report closure, immutable run/record/index bytes, task status/runtime_phase, authored notes and compatibility verdict, legacy unknown-role policy behavior, raw priority and exact target semantics.
+- Evidence floor: actual registered ToolRuntime passed replay tracer RED→GREEN, then unequal-output and missing-evidence/raw tracers before expanding the full cross-object matrix; built-plugin readonly replay smoke, full check/profile/raw probes/guardrails/strict/generated equality, three-seat white-box review and exact-head CI.
+- Not selected: Config/project setup (no configuration change), resource limits/discovery (bounded comparator and indexed lookup are existing owners), hydrology runtime (synthetic output-byte evidence, no solver/numerical/performance experiment).
+- Non-goals: report closure/validation rollout, prompts/presets, nst comparison, tolerances, artifact rewriting, CR approval, new task transitions, retries/queues, cross-process hostile-writer snapshots or Web/PI/scientific acceptance. Existing routed #579/#581/#585/#590 remain separate.
 
 ## Why
 

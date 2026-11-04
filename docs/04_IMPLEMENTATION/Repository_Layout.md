@@ -22,7 +22,7 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/change_submit/shud_build/report_generate/report_validate/report_submit/report_decide
+    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/change_submit/shud_build/verification_run/report_generate/report_validate/report_submit/report_decide
     dsh-shud-records/               # 已实现四对象文件层、StackLock/provenance 采集、报告渲染/校验/状态机；非 Cordis 插件
       templates/                   # 已用于报告渲染的 Markdown 模板，仅此一个落点
     dsh-shud-policy-gate/           # 已挂载全局 tools/pre-execute，角色 deny + 报告 ask + 变更完整性/级别决策
@@ -173,6 +173,14 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 
 伴生测试入口：`packages/dsh-shud-tools/src/shud-build.test.ts`；完整契约见 [shud_build](../../openspec/changes/m4-mvp-2/specs/shud-build/spec.md#requirement-shud_build)。
 
+### 已挂载的 `verification_run`
+
+接收 `task_id`、`base_run_id`、`candidate_run_id`、非空 `reviewer_notes` 数组和 `compatibility_verdict`（`compatible|incompatible|unknown`）。从真实注册表只读查询已索引、已 collected 的运行，复核当前 running/code_change 卡、关联作业、同项目/输入、钉定构建、候选 approved CR、单线程与二进制摘要绑定；不运行求解器、不补收集、不批准变更。
+
+工具限定本会话运行根及普通 output 目录，复用 records 的 rivqdown 原始字节 SHA256 比较器。相等写 `passed`，不相等写 `failed` 并保留两摘要；缺失或不安全产物报错，不生成判定。规范发布器排他写 `verifications/<vc_id>.json` 后，工具排序去重回写卡片链接，不改变状态或 runtime phase；回写失败保留已提交 VC 并在错误中返回其 id。`reviewed_by` 取当前 preset 投影，notes/compatibility 不覆盖确定性比较结果。字节一致不构成科学、并行正确性、性能或 PI 验收结论。
+
+伴生首条回放测试：`packages/dsh-shud-tools/src/verification-run.test.ts`；完整契约见 [verification_run](../../openspec/changes/m4-mvp-2/specs/verification-cases/spec.md#requirement-verification_run)。
+
 ### 本机 Web 重启验收
 
 在已安装 workspace 依赖、Node 24+ 与 pnpm 的本机，环境中提供非空 `DMXAPI_KEY` 后执行：
@@ -209,7 +217,7 @@ $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指
   repos/SHUD/                      # 调用方准备的 scratch 独立检出；code_change 建卡钉定 HEAD
   changes/<change_id>.json          # change_create 提案；change_submit 只将批准字段推进为 approved
   patches/<change_id>.patch         # change_create 已发布的精确 patch
-  verifications/<vc_id>.json        # M4 目标：VerificationCase
+  verifications/<vc_id>.json        # verification_run 排他发布的 VerificationCase
   builds/<build_id>/                # shud_build 整目录发布：build-record.json、shud、make.stdout.log、make.stderr.log
 <data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```

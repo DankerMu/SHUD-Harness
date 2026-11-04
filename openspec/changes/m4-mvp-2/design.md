@@ -350,6 +350,32 @@ Review focus: default application precedes refine; all non-code types reject com
 - 持久化：`verifications/<vc_id>.json` 原子写 → TaskCard `linked_verifications` 追加。同一对运行可重复生成新 VC（id 不同），不改写旧 VC。
 - 为什么 reviewer 触发而不是 collect 自动：grill 决定；比较需要两个终态运行与 reviewer 结论字段，自动路径无从填 `reviewer_notes`。
 
+#### Issue #540 implementation boundary
+
+Change surface: one registered strict verification_run tool and its narrow internal evidence helpers, plus raw-guard fixed verifications/exact TaskCard targets. Existing records/jobs/core contracts are consumed unchanged. Use the already-shipped readonly collect option; do not create a second retrieval seam.
+
+Validate all branded ids, notes and compatibility enum before tool-owned IO/query. Preserve nonempty strings verbatim, scan the canonical forbidden phrase list, report a controlled note index rather than echoing arbitrary authored text. Known off-role denial remains the existing global policy's responsibility; reviewed_by comes from readCallerPresetId's current projection, not the creation header or a hardcoded reviewer.
+
+Read an eligible code_change/running card readonly, obtain indexed RunJobs through listRunJobsByTask and existing RunRecords through collectShud(id, {readonly:true}); never reconcile, poll, collect a new result, touch retry ledgers, notify or scan unindexed runs. Bind requested run_id/job_id/task identity, require successful RunRecords and linked jobs, and compare project from the identity-bound RunJobs: the existing RunRecord schema has no project field. Do not add a schema field or infer project from argv. Missing/null build or provenance references fail closed.
+
+After asynchronous evidence retrieval, reread and validate the current card before the synchronous validation/comparison/publication stretch. Current pin, links, status and all unrelated fields must survive; reject newly ineligible/unlinked/mismatched evidence before any publication. No new task queue or cross-process snapshot guarantee.
+
+Resolve the session workspace and both run roots physically, retaining symlink-plus-parent traversal semantics, and require each run root to equal the physical cwd/runs/<requested-id> target. The caller owns the output ancestor namespace: check ordinary output/project directories before the comparator; do not let an ancestor link redirect evidence outside the bound run. Reuse the shared project-component grammar before forming project-derived paths. Final-file identity, bounded hashing and descriptor cleanup remain compareRivqdown-owned.
+
+Load canonical BuildRecords, candidate CR and DataProvenance readonly and enforce every D8 predicate. The provenance comparison is mathematical set equality over (path,sha256) pairs from sources.files plus sources.external_files: order and duplicate entries do not change the set. Internal paths remain relative and external paths absolute under the existing schema, so an identical pair cannot migrate between those collections. Do not normalize paths, drop external entries, compare whole provenance ids or collapse pairs by path alone.
+
+Call compareRivqdown once after preflight. Equal bytes produce passed/null failure_reason; unequal bytes produce failed with both observed digests. Missing/unsafe/unreadable evidence throws a controlled tool error and creates no verification directory, record or task link. compatibility_verdict and notes do not override the deterministic status.
+
+Create the complete core-valid regression/baseline_regression record through createVerificationCase: null bundle, candidate build's change_id, CR files_changed targets, fixed descriptive/expected/pass text, exact base-then-candidate relative artifact refs, current preset and unchanged authored fields. That existing publisher owns allocation, first-plus-three collisions and exclusive atomic publication. No custom writer or overwrite path.
+
+Only after the VC commits, reread the eligible card and synchronously merge the actual allocated vc_id into sorted deduplicated linked_verifications with updated_at; preserve status/runtime_phase and other fields. A write-back failure names and retains the committed vc_id; no rollback or automatic repair. Repeated pairs create new cases; an unequal comparison is a successful recorded failed verdict and still links, unlike a preflight/comparison error.
+
+Raw checks remain metadata-only and prior to policy/tool execution: verifications plus tasks/<validated-id>/task.json, falling back to tasks for missing/invalid/unavailable argument identity. Separate argument extraction fallback from physical-resolution errors; do not repeat routed #590's getter behavior or change unrelated tool branches. Existing aliases, missing ancestors, rawDirs ordering and unrelated sibling cases remain intact.
+
+Sibling surfaces: report-generate.ts's fresh-card pattern, change-create.ts's exclusive-object/link ordering, tools/index.ts/strict-tool.ts, raw decide.ts's change_submit extraction split, core wording/current-preset helper, records workspace publication/comparator, jobs readonly collection/listing, and existing task/report/raw tests. Use existing real ToolRuntime, seedQueryRun/makeRunRecord and workspace-record fixtures without modifying shared executable symlink targets.
+
+Verification: vertical passed, unequal and missing-evidence/raw loops; then both-side cross-object rejection matrix, exact readonly snapshots, fresh-card interleavings, native file/link/FIFO failures, exclusive collision exhaustion and retained write-back failure. Independent built-plugin smoke must observe durable VC and links, unchanged run evidence, and missing-output error with no new publication. Full default/profile/raw/guardrails/strict/generated gates and three review seats complete engineering delivery; no scientific or PI acceptance claim.
+
 #### Issue #532 implementation boundary
 
 Change surface: add synchronous compareRivqdown(baseRunDir:string,candidateRunDir:string,project:string) to records/public index; extract the existing hashDescriptor(fd):string loop from workspace-records.ts into an internal hash-descriptor.ts module shared by the comparator and verifyBuildBinary. The live issue records this minimal records-only reuse boundary; do not expose a new public hash API or duplicate the loop.
