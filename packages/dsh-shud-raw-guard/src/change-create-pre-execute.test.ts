@@ -45,7 +45,8 @@ test("change_create delegates once with unavailable task identity and disjoint r
       const getter = vi.fn(() => {
         throw new Error(privatePayload);
       });
-      // Direct JS seam only: native ToolRuntime rejects accessor-bearing non-JSON input.
+      // Direct JS seam: this non-enumerable throwing getter is rejected during native
+      // argument snapshotting; this is not a blanket accessor-rejection contract.
       const args = Object.defineProperty({ description: privatePayload }, "task_id", {
         get: getter,
       });

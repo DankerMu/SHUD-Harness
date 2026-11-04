@@ -129,7 +129,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 
 发布顺序为排他 CR JSON → 精确 patch → 新鲜 TaskCard，发布段不让出执行；CR 始终为 `proposed`、审批字段为空。碰撞后以 records 返回的实际 `change_id` 驱动 patch 路径、结果与卡片链接。新鲜卡仍须符合类型、状态与原 pin；保留其它字段及全部既有链接，`linked_changes` 合并排序去重，`planned` 进入 `running/running_local`，已 `running` 的 phase 保持。CR 提交后的失败保留已提交证据，受控错误携带实际 id（含 publisher 已提交但清理失败的 id）；不回滚，也不伪造成功链接。
 
-raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json（非法、缺失或提取不可用的 id 回退 tasks）及 `repos/SHUD`：身份提取失败仍继续检查全部固定根，目标落入 raw 即拒绝，不相交则委托下一个监听器；canonical/物理路径身份不可用仍 fail-closed，不读取卡片内容。抛错 getter 的行为仅指直接 JS `tools/pre-execute` 边界，native ToolRuntime 会更早拒绝带 accessor 的非 JSON 输入，不代表模型输入绕过。`task_create` 仍只检查 tasks。两工具不调用 LLM、不发起审批、不自行批准变更，也不承诺外部 Git 并发写入者之间的快照隔离。
+raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json（非法、缺失或提取不可用的 id 回退 tasks）及 `repos/SHUD`：身份提取失败仍继续检查全部固定根，目标落入 raw 即拒绝，不相交则委托下一个监听器；canonical/物理路径身份不可用仍 fail-closed，不读取卡片内容。抛错 getter 的回归仅覆盖直接 JS `tools/pre-execute` 边界；本回归使用的不可枚举抛错 getter 在 native 参数快照阶段即被拒绝，这不是普遍 accessor 拒绝契约，也不代表模型输入绕过。`task_create` 仍只检查 tasks。两工具不调用 LLM、不发起审批、不自行批准变更，也不承诺外部 Git 并发写入者之间的快照隔离。
 
 工具注册不等于完整 M4 角色链路已交付：当前 profile 仍挂载 coordinator/worker，coder/reviewer 的角色工具映射不代表其 presets 已挂载；`change_submit` 与 `shud_build` 已挂载（见下文），M4 coder/reviewer presets 仍未交付。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
 
