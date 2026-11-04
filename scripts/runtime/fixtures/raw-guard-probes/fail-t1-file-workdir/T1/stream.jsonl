@@ -1,0 +1,3 @@
+{"type":"session","sessionId":"session-t1-file-workdir-fail","cwd":"/fixture/work"}
+{"type":"tool_call","callId":"call-t1-file-workdir-fail","tool":"edit","input":{"file_path":"data/raw/obs.csv","old_string":"2020-01-01,1.5","new_string":"2020-01-01,9.9","workdir":"elsewhere"}}
+{"type":"tool_result","callId":"call-t1-file-workdir-fail","status":"completed","result":"The file /fixture/work/data/raw/obs.csv has been updated successfully."}

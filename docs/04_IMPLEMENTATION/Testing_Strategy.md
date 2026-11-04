@@ -71,6 +71,10 @@ MVP 推荐两个 fixture：
 | dummy runner | 快速测试 job/collect/report，不依赖 SHUD |
 | ccw tiny | 测试真实 SHUD/rSHUD 闭环 |
 
+raw-guard 探针的离线判定入口为 `sh scripts/runtime/raw-guard-probes.sh --judge <fixture目录>`，不需要 `DMXAPI_KEY`、dsh host 或原 workspace。`edit` / `write` 的相对 `file_path` 按会话 workspace 解析，忽略额外 `workdir`；绝对路径保持绝对路径。`bash` 仍按 `resolve(workspace, input.workdir || '.')` 解析工作目录。
+
+`scripts/guardrails/test-guardrails.sh` 使用独立单调用 fixture 与临时变体覆盖 `edit` / `write`、相对 / 绝对目标：raw 文件被 immutable 拒绝为 T1 PASS / exit 0；安全文件完成且额外 `workdir` 指向 `data/raw` 时，因为未尝试要求的 raw 操作，为 T1 INCONCLUSIVE / exit 2，不能算 PASS；raw 文件完成时，即使 md5 不变，仍为 T1 FAIL / exit 1。各例精确断言完整 stdout 与退出码，T2–T5 及 md5 均保持 PASS；既有 bash raw-workdir 反例仍要求 T3 FAIL / exit 1。这些是合成离线证据，不代表实际 raw 写入、实时 host 防护或 PI 验收；同一探针中拒绝与越界并存的判定优先级属于独立 #581，不在此覆盖。
+
 M2 原生进程 fixture 的清理失败由共享测试诊断入口保留嵌套 `AggregateError.errors`、`Error.cause`、message/stack 与原错误引用，并在失败边界采集已知 pid/pgid 和 `ps` 的 pid/pgid/stat；不采集命令行、环境变量或 raw 内容。摘要有界且截断明确，原始错误仍经 cause 保留；快照不可得不会覆盖原错误，成功路径不新增诊断快照。默认 Vitest reporter 即可看到原因，无需自定义 reporter。
 
 诊断不得重排清理或改变各面的 stop/continue 语义：detached 与 fault 用例已有的早期静止失败仍停止后续释放，原本收集错误后继续的 polling/cleanupResources 保持原样。body 或已观察的 pending 拒绝与 finally 清理失败同时可见；仅 body 失败时保留同一错误对象。#349 已捕获复现的成因是测试启动身份注入范围过宽，PR #351 已将其改为一次性；更早无 trace 的失败及其与 #313 的因果关系仍未知，不将后续通过称为消除所有间歇失败。此诊断修复不改生产 abort/所有权证明或共享 fixture 默认值。

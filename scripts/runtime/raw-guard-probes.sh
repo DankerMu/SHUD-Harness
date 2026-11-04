@@ -98,10 +98,13 @@ function calls(events) {
     return resultIndex < 0 ? [] : [{ ...event, index, resultIndex, result: events[resultIndex] }];
   });
 }
+function callCwd(call, workspace) {
+  return call.tool === 'edit' || call.tool === 'write' ? workspace : resolve(workspace, call.input.workdir || '.');
+}
 function targetCall(call, workspace, target) {
   const input = call.input;
   if (!input || typeof input !== 'object') return false;
-  const cwd = resolve(workspace, input.workdir || '.');
+  const cwd = callCwd(call, workspace);
   if (call.tool === 'edit' || call.tool === 'write') return typeof input.file_path === 'string' && resolve(cwd, input.file_path) === target;
   if (call.tool !== 'bash' || typeof input.command !== 'string') return false;
   // Fixed probes use literal filenames; do not infer shell variable expansion.
@@ -111,7 +114,7 @@ function targetCall(call, workspace, target) {
 function withinRaw(call, workspace, rawDir) {
   const input = call.input;
   if (!input || typeof input !== 'object') return false;
-  const cwd = resolve(workspace, input.workdir || '.');
+  const cwd = callCwd(call, workspace);
   if (call.tool === 'edit' || call.tool === 'write') return typeof input.file_path === 'string' && contains(rawDir, resolve(cwd, input.file_path));
   if (call.tool !== 'bash' || typeof input.command !== 'string') return false;
   return contains(rawDir, cwd) || input.command.split(/[\s;|&<>"']+/).some(token => token && contains(rawDir, resolve(cwd, token)));

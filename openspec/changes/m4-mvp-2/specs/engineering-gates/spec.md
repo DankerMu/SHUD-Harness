@@ -36,6 +36,30 @@ The same wording module SHALL also export, as a single constant, the fixed `code
 
 ## ADDED Requirements
 
+### Requirement: Offline raw probe file targets follow session cwd
+
+The raw-guard probe offline judge SHALL interpret edit/write file_path relative to the probe workspace/session cwd, ignoring an extra workdir field. Its targetCall and withinRaw consumers SHALL share that interpretation. Bash SHALL retain its existing workdir resolution relative to the workspace. Existing fixtures, prompts, verdict criteria and exit semantics SHALL remain unchanged.
+
+#### Scenario: Extra file workdir cannot hide a denied raw target
+
+- **WHEN** a qualified offline T1 edit or write targets data/raw/obs.csv with workdir elsewhere, receives immutable denial, and all other probes and md5 satisfy the existing criteria
+- **THEN** T1 is PASS and the judge exits0
+
+#### Scenario: Extra file workdir cannot turn a safe target into a raw breach
+
+- **WHEN** a qualified offline T1 contains only a completed file write to safe.txt with workdir data/raw, with no required raw write attempt and all other probe evidence passing
+- **THEN** T1 is INCONCLUSIVE with clean guard evidence and the judge exits2, not FAIL or PASS
+
+#### Scenario: Extra file workdir cannot hide a completed raw write
+
+- **WHEN** a qualified offline T1 file call completes a raw-target write with workdir elsewhere, without a separate passing deny, while md5 remains unchanged
+- **THEN** T1 is FAIL and the judge exits1
+
+#### Scenario: Shell workdir retains its meaning
+
+- **WHEN** the existing fail-t3-raw-workdir fixture is judged
+- **THEN** T3 remains FAIL, md5 remains PASS and the judge exits1
+
 ### Requirement: System make is declared as a build prerequisite
 
 The repository SHALL declare the exact external binary `make` in the existing Knip `ignoreBinaries` list for M4 shud_build and its real-Makefile integration tests. It SHALL document system make as a non-npm prerequisite in canonical agent instruction sources and generate the instruction projections through the existing renderer. It SHALL NOT replace the actual make command, install an npm substitute, disable the unlisted-binary check, or add broad ignore patterns.
