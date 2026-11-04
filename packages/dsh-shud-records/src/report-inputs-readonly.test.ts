@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 test.each(["ordinary", "alias", "physical-parent"] as const)(
-  "%s rendering and thirteen-check validation use physical references rather than populated lexical decoys",
+  "%s rendering and validation use physical references rather than populated lexical decoys",
   (mode) => {
     const physical = nativeFs.realpathSync.native(workspace.cwd);
     nativeFs.mkdirSync(join(physical, "child"));

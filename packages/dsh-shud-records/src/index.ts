@@ -26,9 +26,10 @@
  * code_change closure requires explicit synchronous object readers and a preloaded task-job
  * snapshot with ledger counts. Every linked object is schema/identity checked; valid failed
  * verification is reportable evidence, not a veto, and closure neither approves nor writes.
- * Report rendering and thirteen-clause validation freshly read cited evidence without
- * publication. Validation returns controlled facts, not scientific or PI approval;
- * root errors omit paths and raw causes. The watermark stale predicate is pure.
+ * Report rendering and fifteen-clause validation freshly read cited evidence without
+ * publication. Validation hashes VC artifacts and returns controlled facts, not scientific
+ * or PI approval; artifact paths redact secrets, root errors omit paths and raw causes.
+ * The watermark stale predicate is pure.
  * Pure report transitions record caller-established validation/allowed-once facts; they
  * are not approval authority. Report status projection and last-link repair detection
  * are pure; tools own missing-link/status repair, prerequisites and atomic publication.

@@ -30,7 +30,7 @@ import {
   terminalReport,
 } from "./report-workflow/test-harness.ts";
 
-test("validation returns the exact thirteen canonical checks and publishes reviewed JSON then canonical Markdown", async () => {
+test("validation returns the exact fifteen canonical checks and publishes reviewed JSON then canonical Markdown", async () => {
   const h = await reportHarness();
   try {
     const { run } = await seedEvidence(h);

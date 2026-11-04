@@ -110,6 +110,46 @@ test.each([
   },
 );
 
+test.each(["engineering", "ops"] as const)(
+  "generation rejects unsupported %s tasks before querying or reconciling indexed jobs",
+  async (type) => {
+    const h = await reportHarness();
+    try {
+      const { job, run } = await seedEvidence(h);
+      expect(await h.registry.listRunJobsByTask(TASK)).toEqual([job]);
+      expect(await h.registry.collectShud(job.run_id, { readonly: true })).toEqual(run);
+      putCard(h, plannedCard({ type, status: "running", linked_reports: [] }));
+      const protectedPaths = [
+        h.cwd,
+        h.inputDir,
+        join(h.stateDir, "active.json"),
+        join(h.stateDir, "completed.json"),
+      ];
+      const before = await Promise.all(protectedPaths.map(treeOrAbsent));
+      const query = vi.spyOn(h.registry, "listRunJobsByTask");
+      const ledger = vi.spyOn(h.registry, "readCollectErrorAttempts");
+      const collect = vi.spyOn(h.registry, "collectShud");
+      try {
+        const message = expectToolError(
+          await h.invoke("report_generate", DRAFT),
+          new RegExp(`type.*${type}`, "u"),
+        );
+        expect(message).toContain(type);
+        expect(query).not.toHaveBeenCalled();
+        expect(ledger).not.toHaveBeenCalled();
+        expect(collect).not.toHaveBeenCalled();
+        expect(await Promise.all(protectedPaths.map(treeOrAbsent))).toEqual(before);
+      } finally {
+        query.mockRestore();
+        ledger.mockRestore();
+        collect.mockRestore();
+      }
+    } finally {
+      await h.dispose();
+    }
+  },
+);
+
 test.each(
   [
     null,

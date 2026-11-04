@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
 import { expect, test, vi } from "vitest";
+import { evaluateClosure } from "@shud-harness/dsh-shud-records";
 import { installUnsafe } from "../../dsh-shud-records/src/test-harness.ts";
 import {
   TASK,
@@ -53,6 +54,57 @@ for (const field of ["summary", "observations", "limitations", "pi_questions"] a
     },
   );
 }
+
+test.each(["CHG", "VC", "BUILD"] as const)(
+  "missing %s citation rejects before indexed evidence queries or stale-card reconciliation",
+  async (prefix) => {
+    const h = await reportHarness();
+    try {
+      const { job, run } = await seedEvidence(h);
+      expect(await h.registry.listRunJobsByTask(TASK)).toEqual([job]);
+      expect(await h.registry.collectShud(job.run_id, { readonly: true })).toEqual(run);
+      const closure = evaluateClosure(
+        getCard(h),
+        [{ job, collect_error_attempts: await h.registry.readCollectErrorAttempts(job.job_id) }],
+        [run],
+        DRAFT,
+      );
+      expect(closure.ok, JSON.stringify(closure)).toBe(true);
+      // The indexed evidence qualifies, but the stale card would need reconciliation.
+      putCard(h, plannedCard({ linked_reports: [] }));
+      const absentRoots = ["changes", "verifications", "builds", "reports"].map((name) =>
+        join(h.cwd, name),
+      );
+      expect(await Promise.all(absentRoots.map(treeOrAbsent))).toEqual([null, null, null, null]);
+      const protectedPaths = [
+        h.cwd,
+        h.inputDir,
+        join(h.stateDir, "active.json"),
+        join(h.stateDir, "completed.json"),
+      ];
+      const before = await Promise.all(protectedPaths.map(treeOrAbsent));
+      const token = `${prefix}-20991231T235959-ffff`;
+      const query = vi.spyOn(h.registry, "listRunJobsByTask");
+      const collect = vi.spyOn(h.registry, "collectShud");
+      try {
+        const message = expectToolError(
+          await h.invoke("report_generate", { ...DRAFT, summary: `Evidence (${token}).` }),
+          new RegExp(`citation unavailable: ${token}`, "u"),
+        );
+        expect(message).toContain(token);
+        expect(query).not.toHaveBeenCalled();
+        expect(collect).not.toHaveBeenCalled();
+        expect(await Promise.all(protectedPaths.map(treeOrAbsent))).toEqual(before);
+        expect(await Promise.all(absentRoots.map(treeOrAbsent))).toEqual([null, null, null, null]);
+      } finally {
+        query.mockRestore();
+        collect.mockRestore();
+      }
+    } finally {
+      await h.dispose();
+    }
+  },
+);
 
 test.each(["active", "completed"] as const)(
   "all six resolvable citations accept owned %s RUN/JOB entries",

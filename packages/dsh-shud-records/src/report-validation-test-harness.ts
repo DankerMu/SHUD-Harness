@@ -19,7 +19,7 @@ export const INVARIANTS = [
   "不得宣称普遍改进",
 ] as const;
 
-// Literal oracle from the reviewed thirteen-clause contract, never production-derived.
+// Literal science-assist oracle from the reviewed fifteen-clause contract.
 export const CHECK_SHAPE = [
   { id: 1, vacuous: false },
   { id: 2, vacuous: false },
@@ -34,7 +34,13 @@ export const CHECK_SHAPE = [
   { id: 11, vacuous: true },
   { id: 12, vacuous: false },
   { id: 13, vacuous: false },
+  { id: 14, vacuous: true },
+  { id: 15, vacuous: true },
 ] as const;
+
+export const CODE_CHANGE_CHECK_SHAPE = CHECK_SHAPE.map((check) =>
+  check.id === 14 || check.id === 15 ? { ...check, vacuous: false } : check,
+);
 
 export interface ValidationWorkspace {
   root: string;

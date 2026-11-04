@@ -4,6 +4,8 @@ import { join } from "node:path";
 import type { ToolCallId } from "@deepseek-ai/dsh-llm";
 import type { ToolExecutionResult } from "@deepseek-ai/dsh-tools";
 import {
+  BuildRecordSchema,
+  ChangeRequestSchema,
   EvidenceReportSchema,
   ReportIdSchema,
   type EvidenceReport,
@@ -11,7 +13,13 @@ import {
   type RunRecord,
 } from "@shud-harness/dsh-shud-core";
 import type { ShudJobRegistry } from "@shud-harness/dsh-shud-jobs";
-import { renderReport, writeWorkspaceRecord } from "@shud-harness/dsh-shud-records";
+import {
+  createChangeRequest,
+  createVerificationCase,
+  renderReport,
+  writeChangePatch,
+  writeWorkspaceRecord,
+} from "@shud-harness/dsh-shud-records";
 import { expect } from "vitest";
 import { createToolHarness } from "../test-harness.ts";
 import { TASK, plannedCard, putCard } from "../task-linked/test-harness.ts";
@@ -22,6 +30,11 @@ import {
   makeEvidenceReport,
   makeReportDecision,
 } from "../../../dsh-shud-records/src/report-render-test-harness.ts";
+import {
+  buildCase,
+  changeCase,
+  verificationCase,
+} from "../../../dsh-shud-records/src/workspace-files-test-harness.ts";
 
 export const REPORT = ReportIdSchema.parse("REPORT-20261029T080000-a001");
 export const OTHER_REPORT = ReportIdSchema.parse("REPORT-20261029T080000-b002");
@@ -96,6 +109,92 @@ export async function seedEvidence(
     }),
   );
   return { job, run, stack, data };
+}
+
+export async function seedCodeChangeEvidence(h: ReportHarness) {
+  // Published SHA-256 "abc" vector from the canonical record fixtures.
+  const bytes = "abc";
+  const change = createChangeRequest(
+    h.cwd,
+    ChangeRequestSchema.parse({
+      ...changeCase.value,
+      task_id: TASK,
+      status: "approved",
+      approval_ref: "fixture-approved-change-541",
+      approved_at: "2026-11-02T09:01:00Z",
+    }),
+  );
+  writeChangePatch(h.cwd, change.change_id, bytes);
+  const runs = [];
+  for (const [index, suffix] of ["1001", "1002"].entries()) {
+    const buildId = `BUILD-20261102T090000-${suffix}`;
+    const build = BuildRecordSchema.parse({
+      ...buildCase.value,
+      build_id: buildId,
+      task_id: TASK,
+      change_id: index === 0 ? null : change.change_id,
+      patch_sha256: index === 0 ? null : change.patch_sha256,
+      dirty_paths: index === 0 ? [] : change.files_changed,
+      binary_path: `builds/${buildId}/shud`,
+      stdout_path: `builds/${buildId}/make.stdout.log`,
+      stderr_path: `builds/${buildId}/make.stderr.log`,
+    });
+    // Immutable build evidence uses a schema-qualified fixture, never the mutable writer.
+    await io.mkdir(join(h.cwd, "builds", buildId), { recursive: true });
+    await io.writeFile(join(h.cwd, "builds", buildId, "build-record.json"), JSON.stringify(build));
+    const lineage = {
+      build_id: build.build_id,
+      binary_sha256: build.binary_sha256,
+      threads: 1,
+    };
+    const evidence = await seedEvidence(h, suffix, lineage, {
+      ...lineage,
+      artifacts: {
+        stdout: "stdout.log",
+        stderr: "stderr.log",
+        shud_output: "output/tiny.out",
+        files: [{ path: "output/tiny.out/tiny.rivqdown.dat", size_bytes: 3 }],
+      },
+    });
+    await io.mkdir(join(evidence.job.run_dir, "output", "tiny.out"), { recursive: true });
+    await io.writeFile(
+      join(evidence.job.run_dir, "output", "tiny.out", "tiny.rivqdown.dat"),
+      bytes,
+    );
+    runs.push({ ...evidence, build });
+  }
+  const [base, candidate] = runs;
+  const verification = createVerificationCase(h.cwd, {
+    ...verificationCase.schema.parse(verificationCase.value),
+    task_id: TASK,
+    change_id: change.change_id,
+    base_run_id: base.run.run_id,
+    candidate_run_id: candidate.run.run_id,
+    base_build_id: base.build.build_id,
+    candidate_build_id: candidate.build.build_id,
+    artifact_refs: runs.map(({ run }) => `runs/${run.run_id}/output/tiny.out/tiny.rivqdown.dat`),
+    observed: {
+      ...verificationCase.value.observed,
+      compared_path: "output/tiny.out/tiny.rivqdown.dat",
+    },
+  });
+  // seedEvidence replaces the card: publish the complete union only after both runs exist.
+  const card = putCard(
+    h,
+    plannedCard({
+      type: "code_change",
+      status: "running",
+      runtime_phase: "running_local",
+      source_base_commit: change.base_commit,
+      stack_id: base.stack.stack_id,
+      data_id: base.data.data_id,
+      linked_jobs: runs.map(({ job }) => job.job_id),
+      linked_changes: [change.change_id],
+      linked_verifications: [verification.vc_id],
+      linked_reports: [],
+    }),
+  );
+  return { card, change, verification, runs };
 }
 
 export function reportPath(h: Pick<ReportHarness, "cwd">, id = REPORT, extension = "json") {
