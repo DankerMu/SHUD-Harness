@@ -1,15 +1,16 @@
 # Proposal
 
-## Active issue fixture: #537
+## Active issue fixture: #538
 
-- Issue type: feature; Fixture level: expanded (agree upstream), archived-source build identity, subprocess secrets and governed filesystem publication. Dependencies #526/#527/#536 and routed #586 are merged; the root make declaration remains owned by #586.
-- Scope: tools shud_build implementation/registration/tests and existing source-checkout reuse; raw-guard shud_build fixed targets/tests; CONTEXT invariant and existing tool documentation. No core/records/jobs/policy/presets/profile changes.
-- Selected risk packs: Public API / CLI / script entry; Config / project setup; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Resource limits / large input / discovery; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility.
-- Governing invariant: a published executable is built only from the task-pinned commit archive plus the exact approved patch, never ignored working-tree inputs or a stale binary; TaskCard and source checkout remain unchanged.
-- Reuse core runGit/brands/BuildRecord schema, tools readSourceCheckout/strictTool, records observeSourceChanges/readonly readers/readChangePatch/publishBuildDirectory. No second Git runner, allocator, metadata writer or directory commit protocol.
-- Preserve source/index/HEAD bytes and mtimes, existing task/change/job/report tools, raw priority and physical containment, historical records and current role/preset policy.
-- Evidence floor: real ToolRuntime base-build tracer RED→GREEN, then approved-patch/raw tracers and complete real Git/make/tar failure matrix; independent built-tool executable smoke; full check/profile/raw probes/guardrails/strict/generated equality/three-seat review/exact-head CI.
-- Non-goals: actual SHUD compilation or solver/scientific claims, change approval, shud_run argument integration, new role/preset configuration, external hostile-writer transaction guarantees, retries or alternative build backends.
+- Issue type: feature; Fixture level: expanded (agree upstream). Dependencies #524/#536 are merged; #537 is also merged. Critical Paths #1/#2/#3: deterministic policy precedence, raw protection and host-owned PI approval.
+- Scope: policy-gate change_submit rule/constants/audit, tools change_submit registration/handler, raw-guard exact changes target, accompanying tests and existing behavior documentation. No core/records/jobs/profile/preset changes or new dependencies.
+- Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility; Scientific governance / PI gate / evidence lineage; dsh seam / profile / outbound-channel governance.
+- Governing invariant: no high-risk change approval is persisted without host allowed-once; pre-card and execution-time patch hashes both bind to the current canonical CR. Raw/core denial precedes approval. Only the CR approval fields change; TaskCard, patch and unrelated records remain byte/mtime unchanged.
+- Reuse core brands/CR schema/current-role policy, canonical readonly record/patch readers and rewriteChangeRequest, strictTool, existing real ToolRuntime and approved full-access test seam. No second record writer, state machine, approval service or role table.
+- Preserve report approval behavior, single-listener waterfall/next semantics, audit payload restrictions and counters, known-role restrictions, unknown-role level decision, all existing tools and readonly missing-root behavior.
+- Evidence floor: first actual registered high-risk ToolRuntime tracer RED→GREEN with held approval and durable result bound to callId, then denied outcomes/patch mutation/raw/low-risk vertical tracers and complete sibling matrix; built-plugin approval smoke, full check/profile/raw probes/guardrails/strict/generated equality, three-seat white-box review and exact-head CI.
+- Not selected: Config/project setup (no configuration changes), resource-limit/discovery (reuse canonical bounded-scope reads, no new scan or cap), hydrology execution (no solver or job behavior). Compatibility of the existing permission configuration is exercised, not changed.
+- Non-goals: PI comment persistence/change_decide, approval-ledger attestation, new CR states, TaskCard type/base restrictions beyond the specified running state, cross-process hostile-writer transactions, Web/LLM or PI functional acceptance, role/preset rollout, retries or new queues.
 
 ## Why
 

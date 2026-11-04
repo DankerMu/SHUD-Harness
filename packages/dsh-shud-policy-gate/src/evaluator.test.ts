@@ -76,7 +76,7 @@ test("missing caller never gives the evaluator a process workspace", async () =>
   }
 });
 
-test.each(["shud_collect", "report_submit", "report_decide"])(
+test.each(["shud_collect", "report_submit", "report_decide", "change_submit"])(
   "evaluator failure denies %s without leaking exception or input",
   async (tool) => {
     const h = await createPolicyHarness();
@@ -183,3 +183,23 @@ test.each(auditSeparators)(
     }
   },
 );
+
+test("change_submit evaluator failure precedes even change identity inspection", async () => {
+  const h = await createPolicyHarness({ preset: "coder" });
+  try {
+    const identity = vi.fn(() => "CHG-20261102T090000-a1b2");
+    const input = Object.defineProperty({}, "change_id", { get: identity });
+    vi.mocked(evaluatePolicyGate).mockImplementationOnce(() => {
+      throw new Error("PRIVATE_EVALUATOR_CAUSE");
+    });
+    expect(await h.decide("change_submit", input)).toEqual({
+      kind: "deny",
+      reason: POLICY_EVALUATION_FAILURE_REASON,
+    });
+    expect(identity).not.toHaveBeenCalled();
+    expect(h.next).not.toHaveBeenCalled();
+    expect(h.policyLogs()).toEqual([["deny change_submit policy-evaluation-failed"]]);
+  } finally {
+    await h.dispose();
+  }
+});

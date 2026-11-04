@@ -8,6 +8,7 @@ import {
 } from "@shud-harness/dsh-shud-core";
 import type { PolicyGateDecision } from "@shud-harness/dsh-shud-core";
 import { reportApproval } from "./report-approval.ts";
+import { changeApproval } from "./change-approval.ts";
 
 export const name = "shud-policy-gate";
 export const POLICY_EVALUATION_FAILURE_REASON = "Tool denied because policy evaluation failed.";
@@ -58,6 +59,14 @@ export function apply(ctx: Context): void {
       deny++;
       logger.info(`deny ${auditToolName(execution.name)} ${decision.ruleId}`);
       return Promise.resolve({ kind: "deny", reason: decision.reason });
+    }
+    if (execution.name === "change_submit") {
+      const approval = changeApproval(input, cwd);
+      if (approval === undefined) return next();
+      if (approval.decision.kind === "deny") deny++;
+      else ask++;
+      logger.info(`${approval.decision.kind} change_submit ${approval.audit}`);
+      return Promise.resolve(approval.decision);
     }
     if (execution.name === "report_submit" || execution.name === "report_decide") {
       const approval = reportApproval(execution.name, input, cwd);

@@ -10,8 +10,12 @@ import type { SystemPrompt } from "@deepseek-ai/dsh-system-prompt";
 import { defineTool, ToolRuntime } from "@deepseek-ai/dsh-tools";
 import type { PreToolDecision, ToolExecution } from "@deepseek-ai/dsh-tools";
 import type { ApprovalOutcome, ApprovalService } from "@deepseek-ai/dsh-user-approval";
-import { EvidenceReportSchema, TaskCardSchema } from "@shud-harness/dsh-shud-core";
-import type { EvidenceReport } from "@shud-harness/dsh-shud-core";
+import {
+  ChangeRequestSchema,
+  EvidenceReportSchema,
+  TaskCardSchema,
+} from "@shud-harness/dsh-shud-core";
+import type { ChangeRequest, EvidenceReport } from "@shud-harness/dsh-shud-core";
 import * as rawGuard from "@shud-harness/dsh-shud-raw-guard";
 import { expect, vi } from "vitest";
 import * as policyGate from "./index.ts";
@@ -77,6 +81,82 @@ export async function writeReportingTask(cwd: string) {
 
 export async function snapshotFile(path: string) {
   return { bytes: await readFile(path), mtimeNs: (await stat(path, { bigint: true })).mtimeNs };
+}
+
+export const CHANGE_ID = "CHG-20261102T090000-a1b2";
+
+export async function writeProposedChange(cwd: string, overrides: Partial<ChangeRequest> = {}) {
+  const change = ChangeRequestSchema.parse({
+    change_id: CHANGE_ID,
+    task_id: TASK_ID,
+    source_path: "repos/SHUD",
+    base_commit: "1111111111111111111111111111111111111111",
+    files_changed: ["src/Model/f.cpp"],
+    semantic_level: "numerical_implementation",
+    semantic_floor: "numerical_implementation",
+    floor_categories: ["numerical_implementation"],
+    risk: "high",
+    patch_path: `patches/${CHANGE_ID}.patch`,
+    // Independent SHA256 known-answer vector: the exact three bytes "abc".
+    patch_sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    status: "proposed",
+    approval_ref: null,
+    approved_at: null,
+    description: "Engineering approval boundary fixture, not scientific validation.",
+    created_by: "coder",
+    created_at: "2026-11-02T09:00:00Z",
+    updated_at: "2026-11-02T09:00:00Z",
+    ...overrides,
+  });
+  const card = TaskCardSchema.parse({
+    task_id: TASK_ID,
+    type: "code_change",
+    status: "running",
+    runtime_phase: "running_local",
+    title: "Change approval boundary",
+    question_or_goal: "Check durable approval without changing source or task state",
+    created_by: "coordinator",
+    current_owner: "coder",
+    reviewer: "pi",
+    inference_budget: { mode: "normal" },
+    stack_id: null,
+    data_id: null,
+    linked_jobs: [],
+    linked_reports: [],
+    linked_changes: [CHANGE_ID],
+    linked_verifications: [],
+    source_base_commit: "1111111111111111111111111111111111111111",
+    created_at: "2026-11-02T09:00:00Z",
+    updated_at: "2026-11-02T09:00:00Z",
+  });
+  await mkdir(join(cwd, "changes"), { recursive: true });
+  await mkdir(join(cwd, "patches"), { recursive: true });
+  await mkdir(join(cwd, "tasks", TASK_ID), { recursive: true });
+  const changePath = join(cwd, "changes", `${CHANGE_ID}.json`);
+  const patchPath = join(cwd, change.patch_path);
+  const taskPath = join(cwd, "tasks", TASK_ID, "task.json");
+  await writeFile(changePath, `${JSON.stringify(change)}\n`);
+  await writeFile(patchPath, "abc");
+  await writeFile(taskPath, `${JSON.stringify(card)}\n`);
+  return { change, changePath, patchPath, taskPath };
+}
+
+export async function writeChangeSentinel(cwd: string, original: ChangeRequest) {
+  const change = ChangeRequestSchema.parse({
+    ...original,
+    change_id: "CHG-20261102T090000-ffff",
+    patch_path: "patches/CHG-20261102T090000-ffff.patch",
+    // Independent SHA256 known-answer vector for the exact five bytes "hello".
+    patch_sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    description: "Unrelated retained change and patch sentinel.",
+  });
+  const paths = [
+    join(cwd, "changes", `${change.change_id}.json`),
+    join(cwd, change.patch_path),
+  ] as const;
+  await writeFile(paths[0], `${JSON.stringify(change)}\n`);
+  await writeFile(paths[1], "hello");
+  return { change, paths, before: await Promise.all(paths.map(snapshotFile)) };
 }
 
 export function expectAsk(decision: PreToolDecision) {

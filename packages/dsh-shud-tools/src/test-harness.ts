@@ -24,6 +24,19 @@ interface ToolHarnessOptions {
   sundialsRoot?: string;
 }
 
+export async function mountIdleTools(ctx: Context, cwd: string) {
+  // No job is submitted; use the existing executable solely for registry config validation.
+  await ctx.plugin(ShudJobRegistry, {
+    stateDir: join(cwd, "job-state"),
+    shudBin: process.execPath,
+    stackRepos: { SHUD: cwd, rSHUD: cwd, AutoSHUD: cwd },
+    hostVersion: "0.2.1-rc.2",
+    llm: { base_url: "https://fixture.invalid", request_alias: "fixture" },
+    pumpPollMs: 60_000,
+  });
+  await ctx.plugin(shudTools);
+}
+
 export async function createToolHarness(options: ToolHarnessOptions = {}) {
   const h = await createHarness(undefined, "absent");
   try {

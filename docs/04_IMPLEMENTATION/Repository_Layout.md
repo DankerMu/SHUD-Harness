@@ -22,10 +22,10 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/shud_build/report_generate/report_validate/report_submit/report_decide
+    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/change_submit/shud_build/report_generate/report_validate/report_submit/report_decide
     dsh-shud-records/               # 已实现四对象文件层、StackLock/provenance 采集、报告渲染/校验/状态机；非 Cordis 插件
       templates/                   # 已用于报告渲染的 Markdown 模板，仅此一个落点
-    dsh-shud-policy-gate/           # 已挂载全局 tools/pre-execute，角色 deny + 报告 ask
+    dsh-shud-policy-gate/           # 已挂载全局 tools/pre-execute，角色 deny + 报告 ask + 变更完整性/级别决策
     dsh-shud-presets/               # 已接入 coordinator/worker prompt + 全局 shud-role-restrict
   profile/
     shud/
@@ -53,7 +53,7 @@ R1–R12 启动对账已接入 `[Service.init]`：先排空启动 pass 再开放
 
 ### 文件权限与 PI 审批
 
-SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permission` 行保留完整三项 catalog。文件访问范围不代表 PI 的报告审批权：
+SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permission` 行保留完整三项 catalog。文件访问范围不代表 PI 的报告或高风险变更审批权：
 
 | 权限预设 | sandbox 模式 | 需要审批的操作 |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 | `workspace-write` | `workspace-write` | `ask` |
 | `danger-full-access` | `danger-full-access` | `ask` |
 
-即使启动环境设置 `DSH_PERMISSION_MODE=danger-full-access`，SHUD 的默认 approval 仍为 ask；不把 full access 降为 workspace-write，也不自动批准。`report_submit` / `report_decide` 仍须经过既有 policy-gate 和真实 answerer，只有本次 `allowed-once` 才能执行；拒绝、取消及无 answerer 均 fail closed。headless 不因这个配置获得自动 PI 权限。raw 不可变/provenance 审批、角色工具面和报告/TaskCard 写入顺序不变。
+即使启动环境设置 `DSH_PERMISSION_MODE=danger-full-access`，SHUD 的默认 approval 仍为 ask；不把 full access 降为 workspace-write，也不自动批准。`report_submit` / `report_decide` 与策略判为 ask 的 `change_submit` 仍须经过 policy-gate 和宿主 answerer，只有本次 `allowed-once` 才能执行；拒绝、取消及无 answerer 均 fail closed。匹配 patch 的 `pure_engineering` / `io_format` 变更无需审批卡，详见下文 `change_submit`。headless 不因这个配置获得自动 PI 权限。raw 不可变/provenance 审批、角色工具面和报告/TaskCard 写入顺序不变。
 
 **旧会话需要显式重选。** 安装更新、重启宿主不会改写已有会话的 durable `approval/policy: never` 事件；旧 full-access 会话可显示为 `custom`。保留原会话/报告/任务历史，在更新后的 SHUD Web 权限选择器中明确重选所需预设（包括 full access），由宿主公开权限机制追加 ask；重复选择相同有效预设不追加事件。不要手改日志或报告来“恢复审批”。已有用户 patch 仍由用户拥有；若它显式覆写 approval 或 permission 为 never，bundle 不偷偷覆盖，需检查有效配置并由操作者决定调整。
 
@@ -119,7 +119,25 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 
 raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json（非法/缺失 id 回退 tasks）及 `repos/SHUD`：目标落入 raw 即拒绝，不读取卡片内容；`task_create` 仍只检查 tasks。两工具不调用 LLM、不发起审批、不自行批准变更，也不承诺外部 Git 并发写入者之间的快照隔离。
 
-工具注册不等于完整 M4 角色链路已交付：当前 profile 仍挂载 coordinator/worker，coder/reviewer 的角色工具映射不代表其 presets 已挂载；`shud_build` 已挂载（见下节），M4 coder/reviewer presets 与 `change_submit` 仍未交付。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
+工具注册不等于完整 M4 角色链路已交付：当前 profile 仍挂载 coordinator/worker，coder/reviewer 的角色工具映射不代表其 presets 已挂载；`change_submit` 与 `shud_build` 已挂载（见下文），M4 coder/reviewer presets 仍未交付。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
+
+### 已挂载的 `change_submit`
+
+同一 `shud-tools` 插件已提供变更批准入口，无需新增 profile 行。唯一参数为经 core 品牌校验的 `change_id`；未知参数拒绝。下例是模型工具参数，不是 shell 命令，id 须替换为实际 `change_create` 返回值：
+
+```json
+{"change_id":"CHG-20261103T080100-b002"}
+```
+
+- **策略固定顺序**：先执行既有 core deny（当前角色取 committed preset 投影，非创建 header）；只有未被拒绝的调用继续。随后用规范 readonly reader 读取 CR；id 缺失/非法、参数根类型不符、CR 缺失/损坏/身份不符/不安全或无会话 cwd 时 ask，且不读 patch。CR 可读才只读读取并哈希对应 patch；可读但 SHA-256 不符时，无论级别或 CR 状态均 deny，要求重新 `change_create`；patch 缺失、不可读、链接或特殊文件时均 ask。全部匹配后，`output_semantics`、`numerical_implementation`、`parameter_default`、`physical_equation`、`model_assumption` 五档 ask；`pure_engineering`（low）与 `io_format`（medium）恰好委托一次，不发审批卡。unknown 角色沿用同一证据/级别表，不自动放行高风险。
+- **宿主批准与审计**：ask 由宿主处理，仅 `allowed-once` 进入真实工具；`rejected`、`cancelled`、`unavailable` 不执行、不改 CR，不产生 rejected 状态或额外决定对象。审批 `reason` 仅为固定前缀加合法 id 或受控无效标记；`displayReason.en/zh` 展示 id、语义级别/下限、全部 floor categories、risk、完整文件列表、patch 路径及 description，不可得字段明确标记无法读取。展示文本不落 session log，不能充当审计证据。policy ask 日志为 `change-approval` 加合法 id/已校验级别，patch mismatch 日志为 `change-patch-mismatch` 加合法 id；均不记录原始参数、路径、摘要哈希、文件列表、description、patch 内容或原始异常，委托不记决策日志。
+- **执行与持久化**：工具只取调用 session cwd，要求非空执行 callId；在宿主放行之后重新读取新鲜 `proposed` CR、其 `running` TaskCard 及精确 patch，并重算 SHA-256。TaskCard 不额外要求 `code_change` 类型或 base 一致性；这些不是本工具新增的批准条件。校验到规范 `rewriteChangeRequest` 发布之间不 await、不排队，只改 `status: approved`、`approval_ref`、`approved_at`、`updated_at` 四字段；返回 `change_id`、`status`、`approval_ref`。`approval_ref` 精确取 `exec.callId`，通过 session log 的 `asked.callId → asked.id → decided.id` 关联，不取审批 request id。
+- **失败与重复调用**：CR/卡不合法、patch 缺失/不可读/不匹配均零改写；审批展示后 patch 被改动也由执行时复核拒绝。文件层错误只返回受控阶段，不透传异常载荷。已 approved 的 CR 没有策略捷径：匹配 patch 的高风险重复调用仍 ask，allowed-once 后由工具拒绝非 proposed；非高风险重复调用委托后同样拒绝，保留原批准字段。可读 patch 不匹配仍先于这两种情况 deny。并发获准的同一 CR 调用只会有一次成功批准写入。
+- **raw 与不变量边界**：raw-guard 先于 policy/approval，仅按路径元数据保护合法 id 对应的确切 `changes/<id>.json`；id 缺失/非法或参数根不合法时回退 `changes`。复用物理路径/已有祖先识别，覆盖链接别名和尚未创建的目标，不读取 CR、卡或 patch 内容来选目标。合法 id 不扩大为整个 changes，也不额外保护其它 CR、patches、tasks 或源检出。工具本身不改 TaskCard 状态/phase/链接，不改 patch，不读取源检出或引用链；不要求、采集或保存 comment，也不新增 `change_decide`。报告终态的 comment 契约不变。
+
+当前 profile 仍只挂载 coordinator/worker；角色映射与工具注册不等于 coder/reviewer presets 已交付。本次也不扩展 `shud_run` 的 `build_id` 参数面（另属 #539）。真实 ToolRuntime、宿主 ApprovalService 与 canonical 文件读写的自动答复测试，以及 built-plugin smoke，只证明工程审批边界；不声称真实 Web 操作、PI 功能验收或科学有效性。
+
+伴生测试入口：`packages/dsh-shud-policy-gate/src/full-access-approval.test.ts`、`change-approval.test.ts`，`packages/dsh-shud-tools/src/change-submit.test.ts` 与 `packages/dsh-shud-raw-guard/src/decide-change-target.test.ts`。完整契约见 [change_submit](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_submit) 与 [高风险变更审批策略](../../openspec/changes/m4-mvp-2/specs/policy-gate/spec.md#requirement-change_submit-asks-for-high-risk-change-requests)。
 
 ### 已挂载的 `shud_build`
 
@@ -129,7 +147,7 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 {"task_id":"TASK-20261103T080005-a001"}
 ```
 
-候选构建须已有同任务、同 base 的 approved CR；`shud_build` 不批准 `proposed` CR，也不替代尚未交付的 `change_submit` 审批链路：
+候选构建须已有同任务、同 base 的 approved CR；`shud_build` 不批准 `proposed` CR，也不替代上节 `change_submit` 的策略/宿主审批链路：
 
 ```json
 {"task_id":"TASK-20261103T080005-a001","change_id":"CHG-20261103T080100-b002","rhs_openmp":true}
@@ -177,7 +195,7 @@ $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指
   reports/<report_id>.md            # 同名 JSON 的确定性 Markdown 投影
   runs/<run_id>/                    # M2 运行记录、输入副本、日志、pid/退出码与 output 产物
   repos/SHUD/                      # 调用方准备的 scratch 独立检出；code_change 建卡钉定 HEAD
-  changes/<change_id>.json          # change_create 已发布的 proposed ChangeRequest
+  changes/<change_id>.json          # change_create 提案；change_submit 只将批准字段推进为 approved
   patches/<change_id>.patch         # change_create 已发布的精确 patch
   verifications/<vc_id>.json        # M4 目标：VerificationCase
   builds/<build_id>/                # shud_build 整目录发布：build-record.json、shud、make.stdout.log、make.stderr.log

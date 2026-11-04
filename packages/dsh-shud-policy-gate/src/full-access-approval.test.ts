@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
@@ -14,10 +14,31 @@ import { SystemPrompt } from "@deepseek-ai/dsh-system-prompt";
 import { defineTool, ToolRuntime } from "@deepseek-ai/dsh-tools";
 import { ApprovalService } from "@deepseek-ai/dsh-user-approval";
 import type { ApprovalOutcome, ApprovalRequest } from "@deepseek-ai/dsh-user-approval";
+import { readCallerPresetId } from "@shud-harness/dsh-shud-core";
+import { readWorkspaceRecord } from "@shud-harness/dsh-shud-records";
+import { mountIdleTools } from "../../dsh-shud-tools/src/test-harness.ts";
+import * as rawGuard from "../../dsh-shud-raw-guard/src/index.ts";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { parseDocument } from "yaml";
 import * as policyGate from "./index.ts";
-import { REPORT_ID, writeReport } from "./test-harness.ts";
+import { z } from "zod";
+import {
+  CHANGE_ID,
+  REPORT_ID,
+  snapshotFile,
+  writeChangeSentinel,
+  writeProposedChange,
+  writeReport,
+} from "./test-harness.ts";
+
+declare module "@deepseek-ai/dsh-session-projection" {
+  interface SessionProjectionStateMap {
+    agentPreset: string | null;
+  }
+  interface SessionProjectionMap {
+    agentPreset: string | null;
+  }
+}
 
 // Pinned dsh-base 0.2.1-rc.2 composition, not the service's two-preset default.
 // The base derives never from environment-selected full access, ask from other startup modes.
@@ -86,7 +107,11 @@ async function profileOverrides() {
   };
 }
 
-async function mountApprovalHarness() {
+async function mountApprovalHarness(
+  realChangeTools = false,
+  rawDirs?: (cwd: string) => string[],
+  approvalService = true,
+) {
   const config = await profileOverrides();
   const cwd = await mkdtemp(join(tmpdir(), "shud-full-access-approval-"));
   const ctx = new Context();
@@ -95,6 +120,14 @@ async function mountApprovalHarness() {
   const operations: Promise<unknown>[] = [];
   const releases: Array<() => void> = [];
   const executions: string[] = [];
+  const logs: Array<{ name: string; args: unknown[] }> = [];
+  const stopLogging = ctx.logger.exporter({
+    export(message) {
+      if (message.name === "shud-policy-gate" || message.name === "shud-raw-guard") {
+        logs.push({ name: message.name, args: message.args as unknown[] });
+      }
+    },
+  });
   let deadline: NodeJS.Timeout | undefined;
   async function dispose() {
     abort.abort();
@@ -107,6 +140,7 @@ async function mountApprovalHarness() {
       try {
         await ctx.fiber.dispose();
       } finally {
+        await stopLogging();
         await rm(cwd, { recursive: true, force: true });
       }
     }
@@ -115,7 +149,7 @@ async function mountApprovalHarness() {
     await ctx.plugin(SessionStore);
     await ctx.plugin(SessionProjectionRegistry);
     await ctx.plugin(SystemPrompt);
-    await ctx.plugin(ApprovalService, config.approval);
+    if (approvalService) await ctx.plugin(ApprovalService, config.approval);
     // Only the filesystem executor's composition default is consumed; no shell runs.
     ctx.provide("shell", {
       sandboxMode: config.startup,
@@ -129,15 +163,37 @@ async function mountApprovalHarness() {
         throw new Error("This approval regression must not execute a shell");
       },
     });
-    await ctx.plugin(PermissionPresetService, config.permission);
+    // Keep the genuine profile-configured plugin registered. Without approval its required
+    // injection cannot activate; never substitute a provider or claim a selected permission mode.
+    const permissionFiber = ctx.plugin(PermissionPresetService, config.permission);
+    if (approvalService) await permissionFiber;
     await ctx.plugin(ToolRuntime, { mode: "native" });
+    if (rawDirs) await ctx.plugin(rawGuard, { rawDirs: rawDirs(cwd) });
     await ctx.plugin(policyGate);
+    if (realChangeTools) await mountIdleTools(ctx, cwd);
     await writeReport(cwd);
     let caller: Context | undefined;
     await ctx.plugin({
       inject: ["tools", "sessionProjections"],
       apply(consumer: Context) {
         caller = createScope(consumer, {}).ctx;
+        if (realChangeTools) {
+          consumer.on("tools/execute", (execution, next) => {
+            executions.push(execution.name);
+            return next();
+          });
+          // Public projection boundary; no preset loader or role-restrict configuration changes.
+          const schema = z.string().nullable();
+          consumer.sessionProjections.register<"agentPreset", string | null>({
+            key: "agentPreset",
+            stateSchema: schema,
+            init: () => "coder",
+            apply: (state) => state,
+            wire: { viewSchema: schema, view: (state) => state },
+            stateVersion: 1,
+          });
+          return;
+        }
         for (const name of reportTools) {
           consumer.tools.register(
             defineTool({
@@ -169,35 +225,41 @@ async function mountApprovalHarness() {
     return {
       ctx,
       session,
+      cwd,
       executions,
+      logs,
       createSession,
       dispose,
       watchdog: watchdog.promise,
-      hold() {
+      hold(expectedRequests = 1) {
         const answer = deferred<ApprovalOutcome>();
         const dispatched = deferred<{ kind: "dispatched" }>();
         const requests: ApprovalRequest[] = [];
         ctx.on("approval/request", (request) => {
           requests.push(request);
-          dispatched.resolve({ kind: "dispatched" });
+          if (requests.length === expectedRequests) dispatched.resolve({ kind: "dispatched" });
           return answer.promise;
         });
         releases.push(() => answer.resolve("cancelled"));
         return { answer, dispatched: dispatched.promise, requests };
       },
-      call(tool: ReportTool, target = session) {
+      call(tool: ReportTool | "change_submit", target = session) {
         const agent = { id: target.id, session: target, ctx: callerContext } as unknown as Agent;
         let settled = false;
+        const callId = `full-access-${tool}-${++callNumber}` as ToolCallId;
         const done = ctx.tools
           .execute({
             name: tool,
-            arguments: {
-              report_id: REPORT_ID,
-              ...(tool === "report_decide"
-                ? { disposition: "revision_requested", comment: "PI original words" }
-                : {}),
-            },
-            callId: `full-access-${tool}-${++callNumber}` as ToolCallId,
+            arguments:
+              tool === "change_submit"
+                ? { change_id: CHANGE_ID }
+                : {
+                    report_id: REPORT_ID,
+                    ...(tool === "report_decide"
+                      ? { disposition: "revision_requested", comment: "PI original words" }
+                      : {}),
+                  },
+            callId,
             agent,
             signal: abort.signal,
           })
@@ -212,7 +274,7 @@ async function mountApprovalHarness() {
             },
           );
         operations.push(done);
-        return { done, agent, isSettled: () => settled };
+        return { done, agent, callId, isSettled: () => settled };
       },
     };
   } catch (error) {
@@ -410,6 +472,476 @@ test("restored full-access never history remains intact until explicit preset re
     });
     expect(h.executions).toEqual(["report_submit"]);
     expect(restored.snapshotEvents().slice(0, history.length)).toEqual(history);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("held high-risk change_submit approves only after allowed-once with the execution callId", async () => {
+  const h = await mountApprovalHarness(true);
+  try {
+    const fixture = await writeProposedChange(h.cwd);
+    const sibling = await writeChangeSentinel(h.cwd, fixture.change);
+    const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath, ...sibling.paths];
+    const before = await Promise.all(paths.map(snapshotFile));
+    const held = h.hold();
+    h.ctx.permissionPresets.set(h.session, "danger-full-access");
+    h.session.append("turn/start", { turn: 1 });
+    const operation = h.call("change_submit");
+    expect(readCallerPresetId(operation.agent)).toBe("coder");
+    expect(h.ctx.sessionProjections.stateOf(h.session, "permissions")).toMatchObject({
+      sandbox: "danger-full-access",
+      approval: "ask",
+    });
+
+    // Missing registration must fail here with UNKNOWN_TOOL, not by waiting for a timeout.
+    const first = await Promise.race([held.dispatched, operation.done, h.watchdog]);
+    expect(first).toMatchObject({ kind: "dispatched" });
+    expect(held.requests).toHaveLength(1);
+    expect(held.requests[0]).toMatchObject({
+      toolName: "change_submit",
+      callId: operation.callId,
+      agent: operation.agent,
+    });
+    expect(operation.isSettled()).toBe(false);
+    expect(await Promise.all(paths.map(snapshotFile))).toEqual(before);
+    expect(decisions(h.session)).toEqual([]);
+    const asked = h.session.snapshotEvents().filter((event) => event.type === "approval/asked");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]?.data).toMatchObject({
+      toolName: "change_submit",
+      callId: operation.callId,
+    });
+    expect(asked[0]?.data.id).not.toBe(operation.callId);
+
+    const approvalStarted = Date.now();
+    held.answer.resolve("allowed-once");
+    expect(await Promise.race([operation.done, h.watchdog])).toMatchObject({
+      kind: "settled",
+      result: {
+        isError: false,
+        value: {
+          change_id: CHANGE_ID,
+          status: "approved",
+          approval_ref: operation.callId,
+        },
+      },
+    });
+    const approved = readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true });
+    expect(approved).toEqual({
+      ...fixture.change,
+      status: "approved",
+      approval_ref: "full-access-change_submit-1",
+      approved_at: approved.approved_at,
+      updated_at: approved.updated_at,
+    });
+    expect(approved.approval_ref).toBe(operation.callId);
+    expect(approved.approval_ref).not.toBe(asked[0]?.data.id);
+    expect(approved.approved_at).toBe(approved.updated_at);
+    expect(approved.approved_at).toBeTypeOf("string");
+    expect(Date.parse(approved.updated_at)).toBeGreaterThanOrEqual(approvalStarted);
+    expect(Date.parse(approved.updated_at)).toBeLessThanOrEqual(Date.now());
+    expect(approved.updated_at).not.toBe(fixture.change.updated_at);
+    expect(await snapshotFile(fixture.taskPath)).toEqual(before[1]);
+    expect(await snapshotFile(fixture.patchPath)).toEqual(before[2]);
+    expect(await Promise.all(sibling.paths.map(snapshotFile))).toEqual(sibling.before);
+    expect(decisions(h.session)).toMatchObject([
+      { data: { id: asked[0]?.data.id, outcome: "allowed-once" } },
+    ]);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test.each(["rejected", "cancelled", "unavailable"] as const)(
+  "high-risk change_submit approval %s never executes or changes workspace evidence",
+  async (outcome) => {
+    const h = await mountApprovalHarness(true);
+    try {
+      const fixture = await writeProposedChange(h.cwd);
+      const sibling = await writeChangeSentinel(h.cwd, fixture.change);
+      const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath, ...sibling.paths];
+      const before = await Promise.all(paths.map(snapshotFile));
+      // No answerer exercises the real ApprovalService unavailable outcome.
+      const held = outcome === "unavailable" ? undefined : h.hold();
+      h.ctx.permissionPresets.set(h.session, "danger-full-access");
+      h.session.append("turn/start", { turn: 1 });
+      const operation = h.call("change_submit");
+      if (held) {
+        expect(await Promise.race([held.dispatched, operation.done, h.watchdog])).toEqual({
+          kind: "dispatched",
+        });
+        expect(await Promise.all(paths.map(snapshotFile))).toEqual(before);
+        expect(h.executions).toEqual([]);
+        held.answer.resolve(outcome);
+      }
+      expect(await Promise.race([operation.done, h.watchdog])).toMatchObject({
+        kind: "settled",
+        result: { isError: true },
+      });
+      expect(h.executions).toEqual([]);
+      expect(await Promise.all(paths.map(snapshotFile))).toEqual(before);
+      const asked = h.session.snapshotEvents().filter((event) => event.type === "approval/asked");
+      expect(asked).toHaveLength(1);
+      expect(asked[0]?.data).toMatchObject({
+        toolName: "change_submit",
+        callId: operation.callId,
+      });
+      expect(decisions(h.session)).toMatchObject([{ data: { id: asked[0]?.data.id, outcome } }]);
+    } finally {
+      await h.dispose();
+    }
+  },
+);
+
+test("change_submit rechecks patch bytes changed while high-risk approval is held", async () => {
+  const h = await mountApprovalHarness(true);
+  try {
+    const fixture = await writeProposedChange(h.cwd);
+    const sibling = await writeChangeSentinel(h.cwd, fixture.change);
+    const changeBefore = await snapshotFile(fixture.changePath);
+    const taskBefore = await snapshotFile(fixture.taskPath);
+    const patchBefore = await snapshotFile(fixture.patchPath);
+    const held = h.hold();
+    h.ctx.permissionPresets.set(h.session, "danger-full-access");
+    h.session.append("turn/start", { turn: 1 });
+    const operation = h.call("change_submit");
+    expect(await Promise.race([held.dispatched, operation.done, h.watchdog])).toEqual({
+      kind: "dispatched",
+    });
+    expect(h.executions).toEqual([]);
+    expect(await snapshotFile(fixture.changePath)).toEqual(changeBefore);
+    expect(await snapshotFile(fixture.taskPath)).toEqual(taskBefore);
+    expect(await snapshotFile(fixture.patchPath)).toEqual(patchBefore);
+    expect(await Promise.all(sibling.paths.map(snapshotFile))).toEqual(sibling.before);
+    await writeFile(fixture.patchPath, "abd");
+    const mutatedPatch = await snapshotFile(fixture.patchPath);
+    held.answer.resolve("allowed-once");
+    const result = await Promise.race([operation.done, h.watchdog]);
+    expect(result).toMatchObject({ kind: "settled", result: { isError: true } });
+    if (result.kind !== "settled" || !result.result.isError) {
+      throw new Error("Expected the actual change_submit handler to reject changed patch bytes");
+    }
+    expect(result.result.error.message).toMatch(/patch sha256 mismatch/iu);
+    expect(result.result.error.message).toContain("change_create");
+    expect(h.executions).toEqual(["change_submit"]);
+    expect(await snapshotFile(fixture.changePath)).toEqual(changeBefore);
+    expect(await snapshotFile(fixture.taskPath)).toEqual(taskBefore);
+    expect(await snapshotFile(fixture.patchPath)).toEqual(mutatedPatch);
+    expect(await Promise.all(sibling.paths.map(snapshotFile))).toEqual(sibling.before);
+    expect(readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true })).toEqual(
+      fixture.change,
+    );
+    expect(decisions(h.session)).toMatchObject([{ data: { outcome: "allowed-once" } }]);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("matching low-risk change_submit approves directly with its execution callId and no card", async () => {
+  const h = await mountApprovalHarness(true);
+  try {
+    const fixture = await writeProposedChange(h.cwd, {
+      files_changed: ["docs/build.md"],
+      semantic_level: "pure_engineering",
+      semantic_floor: "pure_engineering",
+      floor_categories: ["pure_engineering"],
+      risk: "low",
+    });
+    const taskBefore = await snapshotFile(fixture.taskPath);
+    const patchBefore = await snapshotFile(fixture.patchPath);
+    const held = h.hold();
+    h.ctx.permissionPresets.set(h.session, "danger-full-access");
+    h.session.append("turn/start", { turn: 1 });
+    const approvalStarted = Date.now();
+    const operation = h.call("change_submit");
+    expect(await Promise.race([operation.done, held.dispatched, h.watchdog])).toMatchObject({
+      kind: "settled",
+      result: {
+        isError: false,
+        value: {
+          change_id: CHANGE_ID,
+          status: "approved",
+          approval_ref: "full-access-change_submit-1",
+        },
+      },
+    });
+    expect(h.executions).toEqual(["change_submit"]);
+    expect(held.requests).toEqual([]);
+    expect(h.session.snapshotEvents().filter((event) => event.type === "approval/asked")).toEqual(
+      [],
+    );
+    expect(decisions(h.session)).toEqual([]);
+    const approved = readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true });
+    expect(approved).toEqual({
+      ...fixture.change,
+      status: "approved",
+      approval_ref: operation.callId,
+      approved_at: approved.approved_at,
+      updated_at: approved.updated_at,
+    });
+    expect(approved.approved_at).toBe(approved.updated_at);
+    expect(approved.approved_at).toBeTypeOf("string");
+    expect(Date.parse(approved.updated_at)).toBeGreaterThanOrEqual(approvalStarted);
+    expect(Date.parse(approved.updated_at)).toBeLessThanOrEqual(Date.now());
+    expect(await snapshotFile(fixture.taskPath)).toEqual(taskBefore);
+    expect(await snapshotFile(fixture.patchPath)).toEqual(patchBefore);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("raw exact change JSON denies change_submit before policy approval and any evidence write", async () => {
+  const h = await mountApprovalHarness(true, (cwd) => [join(cwd, "changes", `${CHANGE_ID}.json`)]);
+  try {
+    const fixture = await writeProposedChange(h.cwd);
+    const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath];
+    const before = await Promise.all(paths.map(snapshotFile));
+    const held = h.hold();
+    h.ctx.permissionPresets.set(h.session, "danger-full-access");
+    h.session.append("turn/start", { turn: 1 });
+    const operation = h.call("change_submit");
+    // A missing raw route reaches actual policy/approval immediately, not a watchdog timeout.
+    const result = await Promise.race([operation.done, held.dispatched, h.watchdog]);
+    expect(result).toMatchObject({ kind: "settled", result: { isError: true } });
+    if (result.kind !== "settled" || !result.result.isError) {
+      throw new Error("Expected raw-immutable denial before approval dispatch");
+    }
+    expect(result.result.error.message).toMatch(/immutable/iu);
+    expect(held.requests).toEqual([]);
+    expect(h.executions).toEqual([]);
+    expect(h.session.snapshotEvents().filter((event) => event.type === "approval/asked")).toEqual(
+      [],
+    );
+    expect(decisions(h.session)).toEqual([]);
+    expect(h.logs.filter((row) => row.name === "shud-policy-gate")).toEqual([]);
+    expect(
+      h.logs.filter((row) => row.name === "shud-raw-guard").map((row) => row.args),
+    ).toContainEqual(["deny change_submit raw-immutable"]);
+    expect(await Promise.all(paths.map(snapshotFile))).toEqual(before);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test.each([
+  "approved-change",
+  "blocked-task",
+  "missing-task",
+  "missing-patch",
+  "fresh-description",
+] as const)("change_submit uses fresh %s evidence after host approval", async (mutation) => {
+  const h = await mountApprovalHarness(true);
+  try {
+    const fixture = await writeProposedChange(h.cwd);
+    const held = h.hold();
+    h.session.append("turn/start", { turn: 1 });
+    const operation = h.call("change_submit");
+    expect(await Promise.race([held.dispatched, operation.done, h.watchdog])).toEqual({
+      kind: "dispatched",
+    });
+    if (mutation === "approved-change" || mutation === "fresh-description") {
+      await writeFile(
+        fixture.changePath,
+        JSON.stringify({
+          ...fixture.change,
+          ...(mutation === "approved-change"
+            ? {
+                status: "approved",
+                approval_ref: "other-approval",
+                approved_at: "2026-11-03T00:00:00Z",
+              }
+            : { description: "Fresh externally updated description" }),
+        }),
+      );
+    } else if (mutation === "blocked-task") {
+      const card = readWorkspaceRecord(h.cwd, "task", fixture.change.task_id, { readonly: true });
+      await writeFile(fixture.taskPath, JSON.stringify({ ...card, status: "blocked" }));
+    } else await rm(mutation === "missing-task" ? fixture.taskPath : fixture.patchPath);
+    const before = await snapshotFile(fixture.changePath);
+    const taskBefore =
+      mutation === "missing-task" ? undefined : await snapshotFile(fixture.taskPath);
+    const patchBefore =
+      mutation === "missing-patch" ? undefined : await snapshotFile(fixture.patchPath);
+    held.answer.resolve("allowed-once");
+    const result = await Promise.race([operation.done, h.watchdog]);
+    expect(result).toMatchObject({
+      kind: "settled",
+      result: { isError: mutation !== "fresh-description" },
+    });
+    expect(h.executions).toEqual(["change_submit"]);
+    if (mutation === "fresh-description") {
+      expect(readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true })).toMatchObject({
+        description: "Fresh externally updated description",
+        status: "approved",
+        approval_ref: operation.callId,
+      });
+    } else expect(await snapshotFile(fixture.changePath)).toEqual(before);
+    if (taskBefore) expect(await snapshotFile(fixture.taskPath)).toEqual(taskBefore);
+    else await expect(readFile(fixture.taskPath)).rejects.toMatchObject({ code: "ENOENT" });
+    if (patchBefore) expect(await snapshotFile(fixture.patchPath)).toEqual(patchBefore);
+    else await expect(readFile(fixture.patchPath)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("concurrent accepted change_submit calls publish exactly one durable approval", async () => {
+  const h = await mountApprovalHarness(true);
+  try {
+    const fixture = await writeProposedChange(h.cwd);
+    const taskBefore = await snapshotFile(fixture.taskPath);
+    const patchBefore = await snapshotFile(fixture.patchPath);
+    const held = h.hold(2);
+    h.session.append("turn/start", { turn: 1 });
+    const first = h.call("change_submit");
+    const second = h.call("change_submit");
+    expect(await Promise.race([held.dispatched, first.done, second.done, h.watchdog])).toEqual({
+      kind: "dispatched",
+    });
+    expect(held.requests).toHaveLength(2);
+    expect(h.executions).toEqual([]);
+    const approvalStarted = Date.now();
+    held.answer.resolve("allowed-once");
+    const results = await Promise.race([Promise.all([first.done, second.done]), h.watchdog]);
+    if (!Array.isArray(results)) throw new Error("Concurrent approval did not settle");
+    const successes = results.filter((entry) => entry.kind === "settled" && !entry.result.isError);
+    const failures = results.filter((entry) => entry.kind === "settled" && entry.result.isError);
+    expect(successes).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+    const winner = results[0]?.kind === "settled" && !results[0].result.isError ? first : second;
+    const approved = readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true });
+    expect(approved).toEqual({
+      ...fixture.change,
+      status: "approved",
+      approval_ref: winner.callId,
+      approved_at: approved.approved_at,
+      updated_at: approved.updated_at,
+    });
+    expect(approved.approved_at).toBeTypeOf("string");
+    expect(approved.approved_at).toBe(approved.updated_at);
+    expect(Date.parse(approved.updated_at)).toBeGreaterThanOrEqual(approvalStarted);
+    expect(Date.parse(approved.updated_at)).toBeLessThanOrEqual(Date.now());
+    expect(h.executions).toEqual(["change_submit", "change_submit"]);
+    expect(decisions(h.session)).toHaveLength(2);
+    for (const event of decisions(h.session)) expect(event.data.outcome).toBe("allowed-once");
+    expect(await snapshotFile(fixture.taskPath)).toEqual(taskBefore);
+    expect(await snapshotFile(fixture.patchPath)).toEqual(patchBefore);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test.each([false, true])(
+  "already approved change low=%s preserves original approval and policy ownership",
+  async (low) => {
+    const h = await mountApprovalHarness(true);
+    try {
+      const fixture = await writeProposedChange(h.cwd, {
+        semantic_level: low ? "pure_engineering" : "numerical_implementation",
+        semantic_floor: low ? "pure_engineering" : "numerical_implementation",
+        floor_categories: [low ? "pure_engineering" : "numerical_implementation"],
+        risk: low ? "low" : "high",
+        status: "approved",
+        approval_ref: "original-call",
+        approved_at: "2026-11-02T09:01:00Z",
+      });
+      const before = await snapshotFile(fixture.changePath);
+      const held = h.hold();
+      h.session.append("turn/start", { turn: 1 });
+      const operation = h.call("change_submit");
+      if (!low) {
+        expect(await Promise.race([held.dispatched, operation.done, h.watchdog])).toEqual({
+          kind: "dispatched",
+        });
+        expect(h.executions).toEqual([]);
+        held.answer.resolve("allowed-once");
+      }
+      const settled = await Promise.race([
+        operation.done,
+        h.watchdog,
+        ...(low ? [held.dispatched] : []),
+      ]);
+      expect(settled).toMatchObject({ kind: "settled", result: { isError: true } });
+      expect(h.executions).toEqual(["change_submit"]);
+      expect(held.requests).toHaveLength(low ? 0 : 1);
+      expect(await snapshotFile(fixture.changePath)).toEqual(before);
+    } finally {
+      await h.dispose();
+    }
+  },
+);
+
+test.each(["patches", "tasks", "repos/SHUD", "changes/CHG-20261102T090000-ffff.json"])(
+  "raw protected %s does not block approval of the distinct exact change JSON",
+  async (raw) => {
+    const h = await mountApprovalHarness(true, (cwd) => [join(cwd, raw)]);
+    try {
+      const fixture = await writeProposedChange(h.cwd);
+      const before = await Promise.all([fixture.taskPath, fixture.patchPath].map(snapshotFile));
+      const held = h.hold();
+      h.session.append("turn/start", { turn: 1 });
+      const operation = h.call("change_submit");
+      expect(await Promise.race([held.dispatched, operation.done, h.watchdog])).toEqual({
+        kind: "dispatched",
+      });
+      held.answer.resolve("allowed-once");
+      expect(await Promise.race([operation.done, h.watchdog])).toMatchObject({
+        kind: "settled",
+        result: { isError: false },
+      });
+      expect(readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true })).toMatchObject({
+        status: "approved",
+        approval_ref: operation.callId,
+      });
+      expect(await Promise.all([fixture.taskPath, fixture.patchPath].map(snapshotFile))).toEqual(
+        before,
+      );
+      expect(h.logs.filter((row) => row.name === "shud-raw-guard")).toEqual([]);
+    } finally {
+      await h.dispose();
+    }
+  },
+);
+
+test("high-risk change_submit without ApprovalService fails closed before actual handler dispatch", async () => {
+  const h = await mountApprovalHarness(true, undefined, false);
+  try {
+    expect(h.ctx.get("approval")).toBeUndefined();
+    // The real permission plugin requires approval injection and is therefore inactive.
+    expect(h.ctx.get("permissionPresets")).toBeUndefined();
+    const fixture = await writeProposedChange(h.cwd);
+    const sibling = await writeChangeSentinel(h.cwd, fixture.change);
+    const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath, ...sibling.paths];
+    const before = await Promise.all(paths.map(snapshotFile));
+    const held = h.hold();
+    h.session.append("turn/start", { turn: 1 });
+    const operation = h.call("change_submit");
+    expect(readCallerPresetId(operation.agent)).toBe("coder");
+    expect(h.ctx.tools.schemas(operation.agent).map((tool) => tool.name)).toContain(
+      "change_submit",
+    );
+    expect(await Promise.race([operation.done, held.dispatched, h.watchdog])).toMatchObject({
+      kind: "settled",
+      result: {
+        isError: true,
+        error: { message: `${policyGate.CHANGE_APPROVAL_REASON_PREFIX} ${CHANGE_ID}` },
+      },
+    });
+    expect(h.executions).toEqual([]);
+    expect(held.requests).toEqual([]);
+    // No service means no approval/request or approval audit pair, not an unavailable decision.
+    expect(h.session.snapshotEvents().filter((event) => event.type === "approval/asked")).toEqual(
+      [],
+    );
+    expect(decisions(h.session)).toEqual([]);
+    expect(h.logs.filter((row) => row.name === "shud-policy-gate").map((row) => row.args)).toEqual([
+      [`ask change_submit change-approval ${CHANGE_ID} numerical_implementation`],
+    ]);
+    expect(readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true })).toEqual(
+      fixture.change,
+    );
+    expect(await Promise.all(paths.map(snapshotFile))).toEqual(before);
   } finally {
     await h.dispose();
   }
