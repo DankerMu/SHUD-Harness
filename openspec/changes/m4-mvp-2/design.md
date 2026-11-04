@@ -746,6 +746,18 @@ Required evidence: first actual headless dump RED for enabled coder/reviewer the
 
 No real Web role header, model workflow or PI acceptance claim; those remain #545/#547/#549. Preserve installed Web composition and all31 generated artifacts.
 
+#### Issue #545 implementation boundary
+
+Change surface: actual Web/DMXAPI engineering evidence plus shared.md Runtime Lifecycle/profile-smoke description and renderer outputs. Existing public WebHost supplies startup, authenticated RPC, flush and identity-owned cleanup; use disposable verification code, not a new product probe or permanent test. No package/profile/host changes.
+
+Governing invariant: one actual coordinator session calls subagent/subagent_coder/subagent_reviewer, yielding exactly one catalog-bound worker/coder/reviewer. Match each tool/call callId to its successful native tool/result child receipt and that child's stored preset, not merely the set of three roles. Flush each session separately, read its stored canonical log, verify parent/origin/role identity and exact request/header.data.header.tools. Child logs must contain request evidence and completed turns, advertise no delegation tools and contain no nested catalog entries; do not derive truth from model acknowledgements. Prompt asks children to attempt delegation only if a delegation tool is actually advertised, never to substitute shell or domain operations.
+
+Qualify the evidence judge against wrong stored role/parent, missing and extra tools, missing/wrong delegate calls and fabricated nested children; untouched evidence must return GREEN. Prompt delivery, if cited, comes only from system/message.data.message.content. Screen bounded evidence before persistence; keep launch URLs/cookies/API keys out of files and PRs, stop only the owned host, no approval answers or SHUD execution. This is characterization, not a fabricated product fix.
+
+Observed qualification correction: the first private probe counted every coordinator call as a delegation and rejected one additional authorized readonly job_list, although all three delegations completed, children made no tool calls and the workspace stayed empty. #545 requires three explicit delegates and exact advertised tool sets, not perfect adherence to the probe's stricter no-job-tool wording. Preserve the original failure and canonical bytes; qualified audit counts delegates separately, permits only this readonly host inspection as an extra call, still rejects domain/mutating calls, and adds that negative control. Do not report the initial probe as PASS or claim verbatim model compliance.
+
+After proof, update only relevant existing instruction paragraphs and stale profile-smoke count wording, render generated files without hand edits, and verify source/generated consistency, full check/profile smoke/strict, independent review and exact-head CI. Actual Web session evidence does not prove full code_change replay, browser clicks, scientific validity or PI acceptance; #547/#549 remain.
+
 
 ### D12 报告：`code_change` 的事实表与固定措辞（Critical Path #6）
 
