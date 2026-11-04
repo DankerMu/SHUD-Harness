@@ -722,6 +722,20 @@ Evidence: first missing code_change prompt requirement must fail semantically be
 
 No persistence, new config/dependency, profile mount, governance policy or solver changes. Prompt content itself is the delivered documentation; parent fixture records the package-only cut. Default check, profile smoke, strict validation, three-seat critical-path review and exact-head CI gate merge.
 
+#### Issue #543 implementation boundary
+
+Change surface: bundle rows plus smoke preset predicates/negative controls. The existing smoke is 999 lines; move its current JavaScript preset checks into an imported scripts/runtime helper, remove the old implementation and retain one canonical predicate. Do not refactor process cleanup or installer writers. A JavaScript module preserves the existing heredoc dialect; no new dependency or lint exclusion.
+
+Governing invariant: three distinct coordinator delegation registrations survive actual Loader composition, each with its fixed provider/toolName/agentPreset/model-selection settings. First new composed-dump assertion checks this seam before broader preset checks. Current single-row RED establishes the absent feature; after configuring the intended rows, a host rejection/collapse is the mandated stop condition, not permission to weaken the assertion or choose a different delegation API.
+
+Pinned tool-fs defaults enable read, readImage, write and edit. Configure coder as read/edit only and reviewer as read only, explicitly disabling readImage/write and reviewer edit. Use existing persona asset Loader expression, agent-instructions maxBytes65536, exact child ordering, no order on new presets, no worker changes or nested restrict/delegation. Host registry/provider remain once globally with unchanged default depth.
+
+Sibling surfaces: profile installer and profile-patch are read-only; preserve jobs capture, raw overrides, YAML metadata-only parsing, secret checks, failed boot diagnostics and bounded subprocess cleanup. Existing negative mutations for old presets/default/imports/host rows stay effective after helper extraction. New controls mutate actual dumps through the same predicate, never a second expected-tree implementation.
+
+Headless four-row ownership/assertions remain #544. During this separately mergeable slice, preserve existing two-row headless tests and make the new Web-only acceptance boundary explicit; do not silently enable a headless default or claim new rows disabled. #544 must extend the same canonical predicate, not fork it. New Web role tools and prompt delivery are not proved by dump metadata; #545 supplies session-log evidence.
+
+Verification: actual pinned-host install/dump first vertical, full profile smoke with negative controls and existing invalid-boot path, default check/guard self-tests/strict/generated preservation, three-seat whitebox review and exact-head CI. No host/scientific changes or PI acceptance.
+
 
 ### D12 报告：`code_change` 的事实表与固定措辞（Critical Path #6）
 
