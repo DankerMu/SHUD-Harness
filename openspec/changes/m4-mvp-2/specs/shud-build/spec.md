@@ -126,6 +126,10 @@
 - **WHEN** 假 `Makefile` 以退出码 2 失败
 - **THEN** 工具返回含 `2` 与 make 输出末尾行的错误，不引用任何 `builds/.tmp-*` 路径，`builds/` 下没有 `.tmp-*` 或 `<build_id>` 目录
 
+#### Scenario: signaled make failure preserves cleanup
+- **WHEN** the actual make subprocess is terminated by a signal during an admitted build attempt
+- **THEN** the tool reports that observed signal, does not misclassify an ordinary nonzero exit as signal termination, removes its owned temporary build without publishing a BuildRecord, and preserves source checkout and TaskCard bytes and modification times
+
 #### Scenario: secrets are not inherited by make
 - **WHEN** 宿主环境含 `DMXAPI_KEY`，假 `Makefile` 把全部环境变量名写入 stdout
 - **THEN** `make.stdout.log` 不含 `DMXAPI_KEY`，含 `SUNDIALS_DIR`；`git archive`/`git apply` 子进程环境同样不含 `DMXAPI_KEY`
