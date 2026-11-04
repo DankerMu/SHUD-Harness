@@ -3,7 +3,7 @@ import { defineConfig } from "vitest/config";
 // Coverage floor mirrors constraints.yaml thresholds.coverage_percent_min; change it there first.
 export default defineConfig({
   test: {
-    include: ["packages/*/src/**/*.test.ts"],
+    include: ["packages/*/src/**/*.test.ts", "scripts/runtime/**/*.test.ts"],
     environment: "node",
     coverage: {
       provider: "v8",

@@ -20,6 +20,12 @@
 - **WHEN** 工作区已有 `repos/SHUD`
 - **THEN** 脚本退出非零并指出该路径，不修改它
 
+#### Scenario: Unrepresentable forcing directory fails before writes
+
+- **WHEN** the physical forcing.trimmed directory contains ASCII whitespace, which the pinned SHUD reader's sscanf `%s` conversion cannot preserve
+- **THEN** preparation exits nonzero with an actionable path-format diagnostic before creating workspace outputs; quoting, copying forcing, or modifying the solver does not substitute for rejection
+- **AND** workspace paths may still contain spaces or resolve through aliases when the physical forcing directory is representable
+
 ### Requirement: Replay local acceptance script
 `pnpm run shud:replay <scratch-workspace>`（`scripts/runtime/shud-replay.sh` → `shud-replay.ts`）SHALL 以显式工作区参数运行（不检查、不拒绝 `$TMPDIR` 下的路径），前置：非空 `DMXAPI_KEY`、绝对可执行普通文件 `SHUD_BIN`（安装器仍要求）、已存在绝对目录 `SUNDIALS_ROOT`、keliya 来源（`SHUD_REPLAY_KELIYA`）；任一缺失 SHALL 在创建会话前失败。脚本 SHALL 依次：执行「Replay workspace preparation」；以独立 Web profile 安装 bundle（沿 `shud:first-task` 的安装与 HTTP 驱动）；以一句话任务启动 coordinator 会话（任务文本给出 P1e 设计文档路径 `../openMP/docs/p1e/p1e_strict_omp_design.md` 与五文件清单，SHALL NOT 给出上游 diff）；对 `approval/asked` 自动 Allow once（恰两次：`change_submit` 与 `report_submit`），该自动允许是工程证据而非 PI 验收；等待子会话结束与作业终态；最后执行判据并输出汇总。退出码：全部判据成立为 0；VerificationCase `failed` 或任一判据不成立为 1 并保留全部证据（coder 重导出失败是回归证据，SHALL NOT 标为 INCONCLUSIVE）；前置缺失为 1 且不创建会话。CI SHALL NOT 运行本脚本。
 

@@ -556,13 +556,22 @@
 
 ## 7. 回放脚本、工作区准备与控制面登记
 
-- [ ] Routed #609: test job initializes only registered SHUD and fails loudly unless the full replay commit object exists; retain gitlink HEAD and every other job. Verify actual step in isolated shallow checkout, missing-pin negative control, default check/guardrails/strict, one paired review and exact-head CI. Keep issue open until #546 proves default script-test discovery and full integration CI.
-- [ ] 7.1a `scripts/runtime/shud-replay-prepare.sh`（clone + `checkout --detach 9a422e5`、全 sha 与 `--absolute-git-dir` 断言、keliya 副本两项改写、`PREPARED.json`、已存在不覆盖、根 submodule git dir（`git -C SHUD rev-parse --absolute-git-dir`）文件清单不变断言；known-answer-replay「Replay workspace preparation」）与其单测（构造的 keliya 夹具、缺来源/已存在失败）。无运行时依赖。
+- [x] Routed #609: test job initializes only registered SHUD and fails loudly unless the full replay commit object exists; retain gitlink HEAD and every other job. Verify actual step in isolated shallow checkout, missing-pin negative control, default check/guardrails/strict, one paired review and exact-head CI. #546 supplies default-discovered real preparation tests; complete integration CI remains its merge/issue-closure gate.
+- [x] 7.1a `scripts/runtime/shud-replay-prepare.sh`（clone + `checkout --detach 9a422e5`、全 sha 与 `--absolute-git-dir` 断言、keliya 副本两项改写、`PREPARED.json`、已存在不覆盖、根 submodule git dir（`git -C SHUD rev-parse --absolute-git-dir`）文件清单不变断言；known-answer-replay「Replay workspace preparation」）与其单测（构造的 keliya 夹具、缺来源/已存在失败）。无运行时依赖；默认测试的真实 SHUD 对象库由前置 #609 提供。
 - [ ] 7.1b 依赖 5.6、6.2c、7.1a。`shud-replay.sh`/`shud-replay.ts`（前置检查、独立 Web profile、单提示、恰两次自动 Allow once、等待、判据与退出码；known-answer-replay「Replay local acceptance script」「Replay acceptance criteria」）；`package.json` 增 `shud:replay` 入口；复用 `shud-web-driver.ts` 与首任务脚本的会话驱动；判据求值的单测（构造的工作区与 session log 夹具，含缺 `-fopenmp` 证据、第三次审批、VC failed 三个反例）；本机一次真实运行记录到 PR。
 - [ ] 7.2 依赖 7.1b。控制面登记：Testing_Strategy Verification Matrix 行、Test_Fixtures_And_Command_Matrix keliya 回放夹具、`constraints.yaml` 本机闸清单、`instructions/agents/shared.md` Verification Matrix 行并 `instructions:render`（known-answer-replay「Replay gate registration」、engineering-gates「Replay local gate is registered」「New core objects participate in schema drift gate」）。不改 Phased_Plan（owner 为 1.1a）。
 
 - Suggested fixture level: compact - 本机脚本与控制面文档，运行时行为由前组覆盖
 - Minimal mergeable slice: 7.1a 首刀（纯脚本与单测，可独立保绿）；7.1b 依赖全部工具切片；7.2 为后继
+
+### Issue #546 risk and evidence fixture
+
+- CLI/runtime: actual shell entry from a non-repo cwd; explicit flag and environment source selection, missing/blank source and malformed invocation fail clearly. No implicit source lookup, package/profile or model dependency.
+- File/path/error: both existing destinations reject without changes; missing forcing directory/referenced file and nonregular references reject before workspace outputs. Source/target overlap and symlink destination ancestors cannot write into the readonly source/submodule. Existing unrelated workspace files survive.
+- Input/evidence: constructed seven-column 32-file forcing table, preserve all copied file bytes except NUM_OPENMP and manifest line2; START/END unchanged, forcing not copied, PREPARED hashes independently recomputed. Workspace spaces/aliases and CRLF remain supported; physical forcing-path whitespace rejects before writes because the pinned reader uses sscanf %s. Retain the initial overbroad source-space fixture/evidence and record its consumer-compatibility limitation.
+- Git/legacy: actual local clone and full pinned/detached/clean/independent-.git assertions; source HEAD/worktree/gitlink and Git-dir inventory unchanged on success and preflight failure. Inject one failing checkout after a real successful clone using a scoped Git shim that delegates all other operations to real Git: verify controlled failure/retained owned scratch, unchanged root and source/forcing hashes; never mock successful Git or mutate the submodule.
+- Review regression coverage: reject source layout/receipt/special files, invalid NUM_OPENMP cardinality, malformed UTF-8/NUL/table shape, escaping and canonical-duplicate references before outputs. Prove Git locator environment isolation and preservation-mismatch diagnostics in owned fixtures; fsmonitor regression uses an isolated source clone, with inventory captured before monitor-enabled observations, never enabling or modifying the real root submodule.
+- Verification/release: #609 must first supply actual root SHUD and full non-ancestor pinned object in CI, with explicit failure if unavailable. Parent first public CLI tracer RED then GREEN, focused tests discoverable in default vitest, independent CLI smoke, full check/test-guardrails/strict and unchanged generated schema hashes; three-seat expanded review plus exact-head eight-job CI. No solver/scientific/PI assertion or workflow edits here.
 
 ## 8. Epic 收口：PI 功能验收
 

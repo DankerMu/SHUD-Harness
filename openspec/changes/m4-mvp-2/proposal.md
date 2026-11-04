@@ -1,17 +1,17 @@
 # Proposal
 
-## Active issue fixture: #609
+## Active issue fixture: #546
 
-- Issue type: CI prerequisite defect; Fixture level: compact (test-job initialization only, no runtime/solver/schema or source mutation).
-- Scope: .github/workflows/ci.yml test job only plus this parent-owned fixture. Initialize only registered SHUD, retain its gitlink HEAD, assert commit 9a422e5eb708df7d2f8b4066a3083a031d679a82 exists before tests.
-- Selected risk packs: CI/config ordering; Git/source identity; Failure propagation; Legacy job compatibility. No new API, dependency, secret, concurrency, resource policy or scientific behavior.
-- Governing invariant: default tests receive a real readonly root SHUD object store containing the full replay pin without changing the root checkout to that pin; missing source/pin stops the job, not skips or mocks tests.
-- Reuse git submodule update --init SHUD followed by git -C SHUD cat-file -e '<full-pin>^{commit}'. No recursive/all-submodule initialization, fallback fetch, branch switch, solver compile or model call.
-- Executable RED already recorded in an isolated shallow Harness checkout: full pin query exits128 before initialization. Ordinary SHUD initialization restores root gitlink 3aec65755926c478e13ca7d4fea80715e4e90345 and pin query exits0.
-- Parent verification executes the actual YAML step in a fresh clone; validates root gitlink HEAD, full object and absence of initialized rSHUD/AutoSHUD. A missing-pin mutation must stop before the downstream sentinel; restore the actual step to GREEN.
-- Required evidence: full check/test-guardrails/strict, sibling job byte preservation, compact correctness+test-evidence review and exact-head eight-job CI. No permanent source-text test for YAML wiring.
-- Closure boundary: prerequisite PR can merge before #546 exists, but #609 remains open until #546's default real preparation tests and complete CI pass. #546 depends on this merged prerequisite.
-- Non-goals: script/test implementation and Vitest discovery belong to #546; live replay/gate registration/PI remain #547/#548/#549. No changed test thresholds, skips, workflow triggers or aggregate semantics.
+- Issue type: feature; Fixture level: expanded (raised from upstream compact because source/submodule immutability, filesystem ownership and real Git clone require sibling/error-path evidence). No dsh critical path or runtime seam changes.
+- Scope: scripts/runtime/shud-replay-prepare.sh, constructed script tests and vitest.config.ts include registration explicitly required by the issue; parent-owned OpenSpec fixture. No package/profile/package.json/solver changes.
+- Selected risk packs: CLI/API; File/path ownership; Git identity and source preservation; Input/evidence integrity; Failure handling; Test discovery; Runtime/release compatibility.
+- Governing invariant: an explicit source produces an independent clean pinned clone and input copy with exactly two byte-local rewrites plus PREPARED.json; existing destinations, source inputs, external forcing and root submodule remain untouched.
+- Public CLI: sh scripts/runtime/shud-replay-prepare.sh <workspace> [--keliya <input-dir>]; explicit flag takes precedence over SHUD_REPLAY_KELIYA. Missing/blank source fails before workspace creation; never discover a sibling checkout implicitly.
+- Source layout is the documented basin/input/keliya with basin/forcing.trimmed, not the machine-specific directory in the original forcing manifest. Validate all 32 referenced regular files before destination writes; do not copy forcing.
+- Construction mode: parent executes a public CLI tracer RED before implementation, then GREEN; add consumer-visible source-missing/existing-destination/forcing failures and byte/hash/identity preservation cases incrementally. Tests enter default discovery.
+- Preserve full pinned SHA, detached HEAD, clean porcelain, absolute independent .git, root Git-dir file inventory/gitlink bytes/revision/worktree, and all input bytes except the two specified lines. Existing task/build/run tools unchanged.
+- Required evidence: depends on routed #609 providing real root SHUD and the full pinned object in CI; missing prerequisites fail, never skip/mock. Real local clone with constructed basin input, independent CLI smoke/hash oracle, focused tests/full check/guardrail check/strict, three-seat review and exact-head CI. No real scientific run or live model required; workflow changes belong to #609.
+- Non-goals/not-selected: no replay orchestration/approvals/solver/PI (#547/#549), no new dependencies, schema, governance or profile changes, no general parser API or background service. Script diagnostics fail loudly; no destructive retry/overwrite/cleanup of user-owned paths.
 
 ## Why
 

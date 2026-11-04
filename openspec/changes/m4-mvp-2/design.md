@@ -200,6 +200,16 @@ Review focus: precise strict shapes and error paths; complete bidirectional pred
 - 准备脚本断言 `forcing.trimmed/` 含 `tsd.forc` 引用的 32 个文件（目录另有 2 项未被引用）。
 - 回放不改 ccw 路径的执行与二进制选择；但 DataProvenance 自 M4 起对所有提交解析 `tsd.forc`（D10），ccw 得 `external_files: []`，解析失败是新的提交失败点——"无 build 的 `shud_run` 逐字节不变"只对执行与二进制选择成立。
 
+#### Issue #546 implementation boundary
+
+The standalone shell entry resolves the harness root from its own location, not caller cwd. Its Node-standard-library preparation logic accepts workspace plus optional --keliya; the flag overrides the environment, but no missing-source default exists. Resolve the documented input/keliya source physically and derive the same basin's forcing.trimmed directory two parents above; never trust the old manifest directory or guess another checkout.
+
+Preflight source structure, one NUM_OPENMP line, forcing header/table referencing 32 distinct ordinary files, and both absent destinations before creating workspace outputs. Canonicalize the workspace through its nearest existing ancestor (including explicit workspace aliases) before physical overlap checks; no platform-specific /tmp or /var exceptions. Below that physical workspace, reject symlink/non-directory destination ancestors. Preserve line endings and all non-owned bytes while replacing exactly the NUM_OPENMP line and physical forcing-directory second line. The pinned SHUD reader consumes that directory with sscanf %s: reject ASCII whitespace in its physical path before writes; workspace spaces remain supported. PREPARED.json records source identity and per-file before/after SHA256, not scientific validity. Reject layouts overlapping the source/root submodule; do not overwrite or delete pre-existing paths.
+
+Clone from the local root SHUD object store with real git, detach the full pinned commit and verify HEAD, clean status and independent physical .git. Disable optional Git locks and core.fsmonitor for readonly source observations, following the existing core revision collector; record root HEAD/status, Git-dir file inventory and gitlink bytes before work and compare afterward, including failure paths after clone starts. Existing source files/forcing contents stay byte-identical. Retain owned failed scratch output with explicit diagnostics rather than inventing a cross-directory atomic transaction or retry.
+
+Tests invoke the actual public shell CLI with constructed basin files and real root SHUD object store; never mock Git success, copy scientific data into fixtures, or mutate a submodule. Parent runs the first tracer before implementation, then focused evidence/full default check and an independent successful/failure CLI smoke. vitest include gains scripts/runtime tests without coverage exclusions or threshold changes. Expanded review covers CLI parsing, source/destination siblings, no-overwrite, source preservation, input-byte fidelity and evidence hashes. #547 owns actual keliya replay; #548 owns gate/fixture registration.
+
 ### D3 `shud_build` 工具契约：构建输入 = (钉定 commit, 已批 patch)
 
 - 参数（闭合 schema，未知键拒绝）：`task_id`（必填，`planned|running` 的 `code_change` 卡）、`change_id`（可选）、`rhs_openmp`（可选布尔，缺省 `false`）。源目录固定为 `<cwd>/repos/SHUD`（不接受路径参数）。
