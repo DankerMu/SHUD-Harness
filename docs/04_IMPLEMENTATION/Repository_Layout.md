@@ -175,9 +175,9 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 
 ### 已挂载的 `verification_run`
 
-接收 `task_id`、`base_run_id`、`candidate_run_id`、非空 `reviewer_notes` 数组和 `compatibility_verdict`（`compatible|incompatible|unknown`）。从真实注册表只读查询已索引、已 collected 的运行，复核当前 running/code_change 卡、关联作业、同项目/输入、钉定构建、候选 approved CR、单线程与二进制摘要绑定；不运行求解器、不补收集、不批准变更。
+接收 `task_id`、`base_run_id`、`candidate_run_id`、非空 `reviewer_notes` 数组和 `compatibility_verdict`（`compatible|incompatible|unknown`）。从真实注册表只读查询已索引、已 collected 的运行，复核当前 running/code_change 卡、关联作业、同项目/输入、钉定构建、候选 approved CR、单线程与二进制摘要绑定；读取每个运行的构建和 provenance 前，要求 RunRecord 的 `data_id`、`build_id`、`threads`、`binary_sha256` 与对应 RunJob 严格一致，错误仅标识字段及运行/作业 id，不回显不一致值。不运行求解器、不补收集、不批准变更。
 
-工具限定本会话运行根及普通 output 目录，复用 records 的 rivqdown 原始字节 SHA256 比较器。相等写 `passed`，不相等写 `failed` 并保留两摘要；缺失或不安全产物报错，不生成判定。规范发布器排他写 `verifications/<vc_id>.json` 后，工具排序去重回写卡片链接，不改变状态或 runtime phase；回写失败保留已提交 VC 并在错误中返回其 id。`reviewed_by` 取当前 preset 投影，notes/compatibility 不覆盖确定性比较结果。字节一致不构成科学、并行正确性、性能或 PI 验收结论。
+工具限定本会话运行根及普通 output 目录；尚未绑定工作区的 RunJob `run_dir` 解析失败只返回受控运行 id 和解析阶段，不回显记录提供的路径或底层异常。复用 records 的 rivqdown 原始字节 SHA256 比较器。相等写 `passed`，不相等写 `failed` 并保留两摘要；缺失或不安全产物报错，不生成判定。规范发布器排他写 `verifications/<vc_id>.json` 后，工具排序去重回写卡片链接，不改变状态或 runtime phase；回写失败保留已提交 VC 并在错误中返回其 id。`reviewed_by` 取当前 preset 投影，notes/compatibility 不覆盖确定性比较结果。字节一致不构成科学、并行正确性、性能或 PI 验收结论。
 
 伴生首条回放测试：`packages/dsh-shud-tools/src/verification-run.test.ts`；完整契约见 [verification_run](../../openspec/changes/m4-mvp-2/specs/verification-cases/spec.md#requirement-verification_run)。
 

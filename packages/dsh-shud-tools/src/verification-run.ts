@@ -38,6 +38,8 @@ const parameters = {
   },
 } as const;
 
+const executionMirrorFields = ["data_id", "build_id", "threads", "binary_sha256"] as const;
+
 function readRecord<K extends WorkspaceRecordKind>(cwd: string, kind: K, id: string) {
   let record: WorkspaceRecordMap[K] | undefined;
   let stage: WorkspaceRecordError["stage"] = "read";
@@ -71,7 +73,12 @@ function physicalDirectory(path: string, subject: string) {
 function boundRunDirectory(physicalCwd: string, job: RunJob) {
   const expected = physicalDirectory(`${physicalCwd}/runs/${job.run_id}`, job.run_id);
   // Resolve the original spelling before appending anything: alias/.. is physical traversal.
-  const directory = physicalDirectory(job.run_dir, job.run_id);
+  let directory: string;
+  try {
+    directory = realpathSync.native(job.run_dir);
+  } catch {
+    throw new Error(`verification_run ${job.run_id}: run_dir resolution failed`);
+  }
   if (directory !== expected) {
     throw new Error(`verification_run ${job.run_id}: run_dir is outside the session workspace`);
   }
@@ -107,6 +114,13 @@ function runEvidence(cwd: string, card: TaskCard, job: RunJob, run: RunRecord) {
   }
   if (job.build_id === null) {
     throw new Error(`verification_run ${job.run_id}: build_id is required`);
+  }
+  for (const field of executionMirrorFields) {
+    if (run[field] !== job[field]) {
+      throw new Error(
+        `verification_run ${job.run_id}/${job.job_id}: RunRecord ${field} differs from RunJob`,
+      );
+    }
   }
   const build = readRecord(cwd, "build", job.build_id);
   if (build.task_id !== card.task_id) {
@@ -288,7 +302,7 @@ export function createVerificationRunTool(jobs: ShudJobRegistry): ToolDefinition
         description:
           "Compare serial baseline and candidate rivqdown output bytes for the same inputs.",
         expected_result: "Candidate rivqdown bytes are identical to the serial baseline.",
-        pass_criteria: "The SHA256 digests of the baseline and candidate rivqdown files are equal.",
+        pass_criteria: "sha256(candidate rivqdown.dat) == sha256(base rivqdown.dat)",
         base_run_id: baseId.data,
         candidate_run_id: candidateId.data,
         base_build_id: base.build.build_id,

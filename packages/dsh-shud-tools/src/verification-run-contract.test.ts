@@ -113,6 +113,28 @@ test.each([undefined, null, [], "not an object", 42])(
   },
 );
 
+test.each([undefined, ""])(
+  "session cwd %j is rejected before tool IO or registry queries",
+  async (cwd) => {
+    const h = await verificationHarness();
+    const list = vi.spyOn(h.registry, "listRunJobsByTask");
+    const collect = vi.spyOn(h.registry, "collectShud");
+    try {
+      Object.assign(h.agent.session.header, { cwd });
+      vi.clearAllMocks();
+      await rejectedUnchanged(h, verificationArgs(h), /cwd|workspace/iu);
+      expect(list).not.toHaveBeenCalled();
+      expect(collect).not.toHaveBeenCalled();
+      noToolIO();
+    } finally {
+      Object.assign(h.agent.session.header, { cwd: h.cwd });
+      list.mockRestore();
+      collect.mockRestore();
+      await h.dispose();
+    }
+  },
+);
+
 test.each(FORBIDDEN_REPORT_PHRASES)(
   "forbidden reviewer phrase %s is rejected at its note index",
   async (phrase) => {

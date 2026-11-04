@@ -51,6 +51,7 @@ test("verification_run records a passed byte replay and links it without changin
       bundle_id: null,
       case_type: "regression",
       expected_result_source: "baseline_regression",
+      pass_criteria: "sha256(candidate rivqdown.dat) == sha256(base rivqdown.dat)",
       target_code_targets: ["docs/build.md", "scripts/build.sh"],
       base_run_id: "RUN-20261022T031500-1001",
       candidate_run_id: "RUN-20261022T031500-1002",

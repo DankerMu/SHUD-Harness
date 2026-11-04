@@ -46,6 +46,7 @@ test("verification_run records and links a failed verdict for unequal rivqdown b
       change_id: h.change.change_id,
       case_type: "regression",
       expected_result_source: "baseline_regression",
+      pass_criteria: "sha256(candidate rivqdown.dat) == sha256(base rivqdown.dat)",
       bundle_id: null,
       base_run_id: "RUN-20261022T031500-1001",
       candidate_run_id: "RUN-20261022T031500-1002",

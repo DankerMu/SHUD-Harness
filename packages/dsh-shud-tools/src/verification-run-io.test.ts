@@ -2,12 +2,27 @@ import * as fs from "node:fs";
 import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { JobRecordIdSchema, RunIdSchema, RunRecordSchema } from "@shud-harness/dsh-shud-core";
+import { writeWorkspaceRecord } from "@shud-harness/dsh-shud-records";
 import { afterEach, expect, test, vi } from "vitest";
 import { resultValue } from "./report-workflow/test-harness.ts";
 import { expectToolError } from "./task-linked/test-harness.ts";
-import { snapshotQueryTree } from "../../dsh-shud-jobs/src/list-run-jobs/test-harness.ts";
-import { fixturePaths, PRIVATE, SIDES } from "./verification-run/matrix/test-harness.ts";
-import { COMPARED_PATH, verificationHarness } from "./verification-run/test-harness.ts";
+import {
+  seedQueryRun,
+  snapshotQueryTree,
+} from "../../dsh-shud-jobs/src/list-run-jobs/test-harness.ts";
+import {
+  fixturePaths,
+  PRIVATE,
+  putFixture,
+  SIDES,
+  verificationArgs,
+} from "./verification-run/matrix/test-harness.ts";
+import {
+  COMPARED_PATH,
+  OUTPUT_BYTES,
+  verificationHarness,
+} from "./verification-run/test-harness.ts";
 
 vi.mock("node:fs", async (original) => {
   const actual = await original<typeof fs>();
@@ -18,6 +33,9 @@ vi.mock("node:fs", async (original) => {
     openSync: vi.fn(actual.openSync),
     readSync: vi.fn(actual.readSync),
     closeSync: vi.fn(actual.closeSync),
+    realpathSync: Object.assign(vi.fn(actual.realpathSync), {
+      native: vi.fn(actual.realpathSync.native),
+    }),
   };
 });
 vi.mock("node:fs/promises", async (original) => {
@@ -33,6 +51,7 @@ function restoreIO() {
   vi.mocked(fs.readSync).mockImplementation(native.readSync);
   vi.mocked(fs.closeSync).mockImplementation(native.closeSync);
   vi.mocked(io.readFile).mockImplementation(nativeIO.readFile);
+  vi.mocked(fs.realpathSync.native).mockImplementation(native.realpathSync.native);
 }
 afterEach(restoreIO);
 
@@ -125,6 +144,63 @@ test("verification never reads solver logs or unrelated output artifacts", async
       return [];
     });
     for (const path of unrelated) expect(opened).not.toContain(path);
+  } finally {
+    restoreIO();
+    await h.dispose();
+  }
+});
+
+test("unbound private run_dir resolution failure hides record paths and OS causes without writes", async () => {
+  const h = await verificationHarness();
+  try {
+    const runId = RunIdSchema.parse("RUN-20261022T031500-f003");
+    const privateDirectory = join(h.root, "PRIVATE_RECORD_PATH", runId);
+    const job = await seedQueryRun(
+      h,
+      "f003",
+      {
+        ...h.candidate.job,
+        run_id: runId,
+        job_id: JobRecordIdSchema.parse("JOB-20261022T031500-f003"),
+        run_dir: privateDirectory,
+      },
+      "completed",
+    );
+    const record = RunRecordSchema.parse({
+      ...h.candidate.run,
+      run_id: job.run_id,
+      job_id: job.job_id,
+    });
+    putFixture(join(privateDirectory, "run-record.json"), record);
+    native.mkdirSync(join(privateDirectory, "output", "tiny.out"), { recursive: true });
+    native.writeFileSync(join(privateDirectory, COMPARED_PATH), OUTPUT_BYTES);
+    native.mkdirSync(join(h.cwd, "runs", runId));
+    writeWorkspaceRecord(h.cwd, "task", {
+      ...h.card,
+      linked_jobs: [h.base.job.job_id, job.job_id],
+    });
+    // Qualify actual indexed/collected evidence before injecting the unbound-root failure.
+    expect(await h.registry.listRunJobsByTask(h.card.task_id)).toContainEqual(job);
+    expect(await h.registry.collectShud(h.base.job.run_id, { readonly: true })).toEqual(h.base.run);
+    expect(await h.registry.collectShud(job.run_id, { readonly: true })).toEqual(record);
+    const before = await snapshotQueryTree(h.root);
+    let injected = 0;
+    vi.mocked(fs.realpathSync.native).mockImplementation((...args) => {
+      if (args[0] === privateDirectory) {
+        injected++;
+        throw Object.assign(new Error("PRIVATE_OS_CAUSE"), { code: "EIO" });
+      }
+      return native.realpathSync.native(...args);
+    });
+    const result = await h.invoke({ ...verificationArgs(h), candidate_run_id: runId });
+    restoreIO();
+    const message = expectToolError(result, /run_dir|directory/iu);
+    expect(injected).toBe(1);
+    expect(await snapshotQueryTree(h.root)).toEqual(before);
+    expect(message).toContain(runId);
+    expect(message).not.toContain(privateDirectory);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    if (result.isError) expect(result.error).not.toHaveProperty("cause");
   } finally {
     restoreIO();
     await h.dispose();
