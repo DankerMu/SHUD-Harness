@@ -1,16 +1,16 @@
 # Proposal
 
-## Active issue fixture: routed #581
+## Active issue fixture: routed #590
 
-- Issue type: bugfix; Fixture level: expanded (upstream level absent; shared CLI evidence gate and verdict ordering).
-- Scope: only shared pass/violated/attempted precedence in raw-guard-probes.sh, new offline mixed-evidence fixture/guardrail assertions and existing Testing_Strategy documentation. #579 cwd behavior is already merged and remains unchanged.
-- Selected risk packs: Public API/CLI/script entry; Schema/event semantics; Auth/secrets; Ordering; Legacy compatibility; Error handling; Documentation; Release/runtime compatibility; evidence lineage.
-- Governing invariant: any evidence satisfying the existing violated predicate forces FAIL before pass can be considered, for every probe; no T1 special case.
-- Reuse all existing pass, violated and attempted predicates and exit machinery. Change only branch precedence; no second judge or new breach definition.
-- Evidence floor: parent actual offline mixed immutable-deny plus same-byte completed raw write currently yields all PASS/exit0 despite qualified unchanged md5; after correction T1 FAIL/md5 PASS/exit1. Permanent tests first, generic sibling-probe coverage, old fixture bytes/exit compatibility, full guardrails/check/strict and exact-head CI.
-- Preserve event matching/session/process checks, prompts/live runner, file/shell target semantics, unchanged ordinary PASS and clean INCONCLUSIVE outcomes. Existing md5-failure fixtures retain exit1; their misleading per-probe PASS rows become FAIL under the already-global violated predicate.
-- Not selected: filesystem mutation, config/discovery, concurrency/resource limits, science experiments; no new writer, setting, timeout, retry, solver or dependency.
-- Non-goals: altering success/breach/attempt predicates, #579 rework, shell parsing, raw policy/host changes, live bypass or Web/PI acceptance. Shared change remains active through #549.
+- Issue type: bugfix; Fixture level: expanded (upstream level absent; raw-protection public waterfall, metadata path safety and controlled diagnostics). Critical Path #2.
+- Scope: only change_create task identity extraction in raw-guard decide.ts, direct Cordis waterfall regression tests and its existing Repository_Layout documentation. No change_submit, other tool branches, generic classifier, schema/config or host changes.
+- Selected risk packs: Public API/entry; File IO/path safety; Auth/secrets; Ordering; Legacy compatibility; Error handling; Documentation; Release/runtime compatibility; dsh seam/evidence lineage.
+- Governing invariant: unavailable task identity selects the fixed tasks target but never prevents checks of changes, patches and repos/SHUD; path identity failures remain independently fail-closed.
+- Reuse the adjacent verification_run identity-extraction pattern and existing canonical/containsRawPath, error facade and waterfall. No shared all-tool extractor or alternate path policy.
+- Evidence floor: actual built-plugin Cordis waterfall currently returns generic deny for a throwing task_id getter under both disjoint data/raw and four protected roots; expected exact downstream identity/one next or raw-immutable before next. First permanent tracer RED→GREEN, then boundary matrix; no content reads/writes/mkdir or private payload in decisions/logs.
+- Preserve valid exact tasks/<id>/task.json routing, missing/ordinary-invalid fixed tasks fallback, metadata-only effects and existing canonical failure codes. No persistent/shared state, new configuration or heap mechanism.
+- Not selected: schema/units/config/concurrency/resource/hydrology experiments; no record shape, state machine, setting, limit or scientific behavior changes.
+- Non-goals: native ToolRuntime/LLM accessor input, outer execution.arguments extraction, change_submit or all-tool refactoring, live bypass/Web/PI claims. Shared change remains active through #549.
 
 ## Why
 

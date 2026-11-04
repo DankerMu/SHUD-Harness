@@ -517,16 +517,21 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
     }
   }
   if (call.name === "change_create") {
+    let taskTarget = "tasks";
     try {
-      const cwd = call.cwd ?? process.cwd();
-      const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
       const args = call.arguments;
       const fields =
         args && typeof args === "object" && !Array.isArray(args)
           ? (args as Record<string, unknown>)
           : {};
       const taskId = TaskIdSchema.safeParse(fields.task_id);
-      const taskTarget = taskId.success ? `tasks/${taskId.data}/task.json` : "tasks";
+      if (taskId.success) taskTarget = `tasks/${taskId.data}/task.json`;
+    } catch {
+      // Unavailable argument identity retains the fixed tasks fallback, not an IO failure.
+    }
+    try {
+      const cwd = call.cwd ?? process.cwd();
+      const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
       // Metadata-only fixed targets: neither card bytes nor description text affect admission.
       for (const target of ["changes", "patches", taskTarget, "repos/SHUD"]) {
         const output = canonical(target, cwd);

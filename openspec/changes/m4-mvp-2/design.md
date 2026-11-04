@@ -125,6 +125,22 @@ Verification: permanent fixture/assertions RED before production edit, independe
 
 Non-goals: changing pass, violated or attempted, cwd/shell parsing, new validation or policy, discovery/retry/timeouts, actual filesystem enforcement or scientific/Web/PI acceptance.
 
+#### Routed issue #590 implementation boundary
+
+Change surface: the existing change_create branch in raw-guard decide.ts, direct real-Cordis tools/pre-execute regression coverage and the existing Repository_Layout change_create raw-boundary paragraph. Existing verification_run and change_submit branches provide the pattern but are not modified.
+
+Governing invariant: task-id field access or schema parsing failure is unavailable identity, not unavailable filesystem identity. Initialize the target to tasks, isolate identity extraction in a narrow catch, then run the unchanged canonical fixed-root checks in their own failure boundary. A valid branded id selects only tasks/<id>/task.json; missing, invalid and throwing identity retain tasks. Do not alter canonical/containsRawPath, rawRoots, target order, denial codes or path failure handling.
+
+Parent RED: built plugin in actual Cordis waterfall with a throwing task_id getter yields generic target-unavailable denial for rawDirs data/raw, changes, patches, tasks and repos/SHUD. Getter executes once, next never executes, no readFile/writeFile/mkdir occurs and canary bytes/mtime/inventory remain. Required behavior is exact downstream result/one next for disjoint data/raw and raw-immutable/no next for each fixed root.
+
+Public boundary: this is direct JavaScript invocation of tools/pre-execute, not NativeToolRuntime/model JSON. The specific non-enumerable throwing-getter fixture is rejected during native argument snapshotting before the waterfall. This is not a general accessor-rejection contract: the installed snapshot walker can evaluate enumerable JSON-valued getters. Preserve outer execution.arguments adapter behavior; do not broaden this patch into envelope extraction or claim a raw access bypass. Capture controlled logger rows and check that private getter/error payloads do not appear.
+
+Sibling and negative controls: successful valid identity must retain the exact task target and ignore another task's protected child; missing/ordinary-invalid identities retain fixed tasks. Fixed changes/patches/repos checks cannot depend on identity success. Existing and prospective targets, path aliases and sibling prefixes retain their owners. Real canonical failures, including an unavailable target or raw-root identity, must still reject before next even when task extraction throws.
+
+Evidence: first one disjoint-waterfall tracer RED before the minimal source fix, then all four raw-root cases plus valid/missing/invalid identity, downstream return/rejection identity, no-content-IO and path-failure/privacy boundaries. Parent replays the frozen built oracle after rebuilding, runs raw-guard and affected tool suites, full default check, profile smoke, live raw probes with explicit engineering-only limits, strict OpenSpec and 31 generated hash equality. Three-seat white-box review and exact-head CI gate merge.
+
+Non-goals: descriptor-only input semantics, all-tool abstraction, policy/approval changes, content reads, writes, mkdir, configuration, state, retries or host changes. Existing error owners remain; normal PR revert is rollback.
+
 #### Routed issue #582 implementation boundary
 
 Change surface: records/src/index.ts exports the already implemented workspace-paths.ts ensureDirectory and adds concise public API documentation. The helper body, all internal callers, package exports map and dependencies remain byte-identical.
