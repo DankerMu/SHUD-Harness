@@ -25,6 +25,8 @@ bundle patch（`profile/shud/cordis.patch.yml`）SHALL 插入四行 `@deepseek-a
 - reviewer 子树 SHALL 恰为 `persona`、`agent-instructions`（`maxBytes: 65536`）、`time-context`、`tool-fs`（模型可见文件工具仅 `read`，不挂 `edit`）、`tool-jobs`；SHALL NOT 挂 `tool-bash` 或任何 `tool-subagent*` 行。
 - 四个子树 SHALL NOT 挂载 `shud-role-restrict`、`tool-fs-search`、`tool-skill`、`skill-filesystem`、`tool-subagent-control`、`tool-ask-user`、`tool-todo`、`tool-web`、`tool-schedule`、`plan-mode`、`compaction`、`present` 或 `tool-goal` 行；coordinator 与 worker 子树另 SHALL NOT 挂 `tool-fs` 或 `tool-bash`。coordinator 与 worker 的角色工具面不含 `read`；PI 经 Web 工作区文件面板打开报告与 patch 文件，不经 coordinator 模型。
 
+上述文件工具选择 SHALL 通过 `tool-fs` 的显式配置实现：coder 为 `{ read: true, readImage: false, write: false, edit: true }`，reviewer 为 `{ read: true, readImage: false, write: false, edit: false }`；不得依赖钉版宿主默认值来关闭非授权工具。
+
 子代理注册表（`subagent` 行）与 provider 行 `subagent-spawn-in-process` SHALL 保持 stock bundle 的宿主平面全局行位置（`packages/bundle/web-app/cordis.patch.yml` 注释"The subagent registry and its backends STAY in the host plane"：注册表是进程单例，provider 名全局唯一），由 shud bundle patch 保持启用、各只出现一次，SHALL NOT 出现在任何 preset 子树中；coordinator preset 只添加上述三条委派工具行。子代理深度沿用 dsh `maxDepth` 设置的默认值 1，不另设。
 
 同一 preset 子树三次挂同一包不同 id 在钉版 dsh-v0.2.1-rc.2 未经实测：交付该装配的切片 SHALL 以 `--dump-config` 出现三条委派行且 `toolName` 互异为第一条断言，再以真实 Web session log 的 `request/header.data.header.tools` 证明 coordinator 看到三个委派工具。宿主拒绝同包三行时 SHALL 按 Seam-only 规则报告偏差并停止该切片，SHALL NOT fork 或修改 `../deepseek-harness`，SHALL NOT 自行改用单行加运行时 `agentPreset` 参数的备选。

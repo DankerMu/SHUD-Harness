@@ -89,6 +89,20 @@
               toolName: subagent
               agentPreset: worker
               modelSelectionSettings: false
+          - id: tool-subagent-coder
+            name: "@deepseek-ai/dsh-tool-subagent"
+            config:
+              provider: spawn
+              toolName: subagent_coder
+              agentPreset: coder
+              modelSelectionSettings: false
+          - id: tool-subagent-reviewer
+            name: "@deepseek-ai/dsh-tool-subagent"
+            config:
+              provider: spawn
+              toolName: subagent_reviewer
+              agentPreset: reviewer
+              modelSelectionSettings: false
     - id: preset-worker
       name: "@deepseek-ai/dsh-agent-preset"
       config:
@@ -107,5 +121,59 @@
               maxBytes: 65536
           - id: time-context
             name: "@deepseek-ai/dsh-time-context"
+          - id: tool-jobs
+            name: "@deepseek-ai/dsh-tool-jobs"
+    - id: preset-coder
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: coder
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: !!js >-
+                process.getBuiltinModule('node:fs').readFileSync(
+                process.getBuiltinModule('node:module').createRequire(baseUrl)
+                .resolve('@shud-harness/dsh-shud-presets/prompts/coder.md'), 'utf8')
+          - id: agent-instructions
+            name: "@deepseek-ai/dsh-agent-instructions"
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: "@deepseek-ai/dsh-time-context"
+          - id: tool-fs
+            name: "@deepseek-ai/dsh-tool-fs"
+            config:
+              read: true
+              readImage: false
+              write: false
+              edit: true
+          - id: tool-bash
+            name: "@deepseek-ai/dsh-tool-bash"
+    - id: preset-reviewer
+      name: "@deepseek-ai/dsh-agent-preset"
+      config:
+        id: reviewer
+        plugins:
+          - id: persona
+            name: "@deepseek-ai/dsh-persona"
+            config:
+              prefix: !!js >-
+                process.getBuiltinModule('node:fs').readFileSync(
+                process.getBuiltinModule('node:module').createRequire(baseUrl)
+                .resolve('@shud-harness/dsh-shud-presets/prompts/reviewer.md'), 'utf8')
+          - id: agent-instructions
+            name: "@deepseek-ai/dsh-agent-instructions"
+            config:
+              maxBytes: 65536
+          - id: time-context
+            name: "@deepseek-ai/dsh-time-context"
+          - id: tool-fs
+            name: "@deepseek-ai/dsh-tool-fs"
+            config:
+              read: true
+              readImage: false
+              write: false
+              edit: false
           - id: tool-jobs
             name: "@deepseek-ai/dsh-tool-jobs"

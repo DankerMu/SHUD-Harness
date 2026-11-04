@@ -1,17 +1,17 @@
 # Proposal
 
-## Active issue fixture: #542
+## Active issue fixture: #543
 
-- Issue type: feature; Fixture level: expanded (upstream classification retained; model instructions and inherited authorization surface). Critical Path #1. Dependencies #524/#525 delivered.
-- Scope: packages/dsh-shud-presets prompts and their existing tests/harness; parent-owned OpenSpec fixture. No profile, core, policy-gate, host, schema or dependency changes.
-- Selected risk packs: Public API/assets; Auth/permissions; Lifecycle/order; Legacy compatibility; Error handling; Documentation; Release/runtime compatibility; dsh seam and scientific-governance evidence.
-- Governing invariant: each known role receives exactly canonical inherited capabilities, never local delegations; lifecycle replacement and disposal preserve ownership. Prompt content bounds code_change without conferring approval or scientific authority.
-- Existing role derivation already supports four roles after #524; preserve role-restrict.ts unless executable evidence exposes an in-scope gap. Existing prompt export wildcard already covers new assets.
-- Must preserve coordinator first-task/PI conversation/canonical wording verbatim and worker M3 collection/wake boundary; no-build worker calls retain M3 parameters.
-- Add coder/reviewer prompt assets, coordinator ordered code_change delegation and worker build-bound submission. Canonical wording drift covers coordinator/coder/reviewer; worker retains its existing distinct collection contract.
-- Evidence: first new prompt contract RED before asset implementation, then GREEN; four-role real Cordis/ToolRuntime creation, invalid/empty allow, replacement, duplicate-event and separate-lifetime checks. Built package asset loading and lifecycle smoke, default check/profile smoke, strict fixture and exact-head CI.
-- Not selected: file mutation/path safety, schema, configuration, resource limits, persistence/rollback and hydrology experiments; no production filesystem writer, settings or scientific execution added.
-- Non-goals: bundle rows (#543), headless installer (#544), actual four-role Web surface (#545), replay behavior (#547), PI acceptance (#549). Prompt tests prove content, not model compliance; shared change remains active.
+- Issue type: feature; Fixture level: expanded (upstream retained; production composition controls inherited capabilities). Critical Path #1. Dependencies #542/#535 delivered.
+- Scope: profile/shud/cordis.patch.yml, scripts/runtime/profile-smoke.sh and its preset-check helper; parent-owned OpenSpec fixture. No packages, profile-patch.ts, host or dependency changes.
+- Selected risk packs: Config/composition; Public API/seams; Auth/secrets; Lifecycle/order; File IO/path evidence preservation; Errors; Legacy compatibility; Resource cleanup; Documentation; Release/runtime compatibility.
+- Governing invariant: composed Web configuration contains exactly four prescribed presets and three distinct coordinator delegates; permissions cannot widen through default filesystem tools, missing agentPreset, collapsed rows or nested host services.
+- First vertical: actual pinned-host dump rejects the current single-delegate tree against the new three-row assertion; then configure three rows and run that assertion first on the composed candidate. Candidate rejection/collapse stops this slice with evidence, never a host edit, fork or single-row workaround.
+- Reuse persona exported-asset Loader, global restrict/policy/raw order and existing smoke positive/negative checks. Existing 999-line smoke requires clean extraction of its JavaScript preset checks into one imported helper, not duplicated checks or a threshold exception.
+- Must preserve all installer, capture configuration, raw override, secret scanning, invalid-boot and bounded child-cleanup checks. Keep default coordinator/order1; worker tree unchanged. New coder/reviewer have no order/delegates; filesystem flags explicitly select read/edit versus read-only, with write/readImage off.
+- Evidence: same actual dump predicate for positive and mutated missing/collapsed/incorrect row controls; exact four subtrees and default, global host registry/provider, policy gate and import status. Parent runs real install/dump/smoke, default check and guard self-tests; local and exact-head CI profile smoke must pass.
+- Stage boundary: #544 owns headless four-preset disabling and its new assertions. This slice preserves the existing two-preset headless installation/atomicity checks rather than claiming four disabled rows; no installer modification or final headless acceptance claimed.
+- Not selected: schema/data migration/solver/units or new resource settings. No model/Web tool-surface proof (#545), actual orchestration (#547), shared instructions rollout or PI acceptance (#549). Shared change stays active.
 
 ## Why
 

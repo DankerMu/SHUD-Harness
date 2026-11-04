@@ -511,7 +511,7 @@
 ## 6. presets 与 profile：coder/reviewer、三条委派行、restrict 与 headless
 
 - [x] 6.1 依赖 2.4、2.5。`prompts/{coder,reviewer}.md`、`coordinator.md` 新增 code_change 流程段与 `worker.md` 的 build_id/threads 提交段（agent-presets「Preset system prompts」「code_change orchestration」）；wording 漂移测试覆盖三份 prompt；restrict 按四角色 `inherited` 绑定（agent-presets「Role tool surface restriction」）；未被 profile 引用时可独立保绿。
-- [ ] 6.2a 依赖 6.1、5.0。bundle：`preset-coder`、`preset-reviewer` 行与子树、coordinator 三条 `tool-subagent` 行（id/toolName/agentPreset 互异）、worker 不变（agent-presets「Coordinator and worker preset rows」「Preset plugin subtrees」）；`profile:smoke` 断言四 preset、三委派行、宿主 subagent/provider 各一次（shud-profile「Profile composition」「Local profile smoke」、agent-presets「Profile smoke covers presets」）。**首条断言**为 dump-config 三委派行且 `toolName` 互异；若宿主拒绝同包三行，按 Seam-only 报告偏差并停止（design D11/O4）。
+- [x] 6.2a 依赖 6.1、5.0。bundle：`preset-coder`、`preset-reviewer` 行与子树、coordinator 三条 `tool-subagent` 行（id/toolName/agentPreset 互异）、worker 不变（agent-presets「Coordinator and worker preset rows」「Preset plugin subtrees」）；`profile:smoke` 断言四 preset、三委派行、宿主 subagent/provider 各一次（shud-profile「Profile composition」「Local profile smoke」、agent-presets「Profile smoke covers presets」）。**首条断言**为 dump-config 三委派行且 `toolName` 互异；若宿主拒绝同包三行，按 Seam-only 报告偏差并停止（design D11/O4）。
 - [ ] 6.2b 依赖 6.2a。`profile-patch.ts` headless 禁用四个 preset 行（扩展既有两行逻辑，原子发布不变；shud-profile「Idempotent profile installation」）；`profile:smoke` 断言 headless 四行禁用。
 - [ ] 6.2c 依赖 6.2b、5.2、5.3、5.5。真实 Web session log 证明四角色 header 与 coordinator `header.tools` 含三委派工具、coder/reviewer 的 `header.tools` 为各自 inherited（agent-presets「Role tool surface restriction」）；`instructions/agents/shared.md` 的 Runtime Lifecycle 段（四 preset、三委派、headless 四行、治理根写保护）同步并 `pnpm run instructions:render`，CI 比对无漂移。
 
@@ -527,6 +527,15 @@
 - Errors: failed replacement remains explicit with plugin/role/tool context and no silently dropped names; later valid event may bind. Raw emit propagation does not promise host UI error visibility or projection rollback.
 - Evidence: parent runs first vertical tracer, focused matrix, build then public emitted-plugin asset/lifecycle smoke, pnpm run check, profile:smoke, OpenSpec strict and generated-hash preservation; reviewers consume results without running checks. Three expanded seats and exact-head eight-job CI before merge.
 - Non-goals/not-selected packs: production path IO, schema, config, persistence, resource budgets or solver experiments unchanged. Bundle/headless/Web/model orchestration proof remain #543/#544/#545/#547 respectively; prompt content is not actual model compliance or PI acceptance.
+
+### Issue #543 risk and evidence fixture
+
+- Config/API/order: first actual dump assertion requires exactly three coordinator tool-subagent package rows with exact ids, distinct toolNames/agentPresets, spawn and modelSelectionSettings:false. Current one-row tree must RED; configured candidate must GREEN or stop with seam evidence. No fork/single-row alternative.
+- Auth/config: exact Web four-preset trees/default/order/status; coder tool-fs read/edit only, reviewer read only, write/readImage explicitly false; no subdelegation, forbidden children, nested restrict or maxDepth override. Host subagent/provider each once globally; policy gate global/importable.
+- Errors/negative evidence: clone actual dumps and run the same predicate after removing either delegate/preset, duplicating/merging names, missing agentPreset, extra/fourth delegate, invalid subtree/order/config/import, missing/wrong default, disabled/nested/duplicated host/policy rows. Assert named failures and actual mutation, preserving old controls.
+- Legacy/file IO/resource: extract only existing preset checks into one helper to keep every touched file below1000; remove originals. Preserve all existing profile install/YAML dialect/raw byte/idempotence/atomicity, capture aliases, secret output, invalid shudBin boot and process-group cleanup scenarios. Keep existing headless two-target checks intact; new four-target headless contract remains #544.
+- Runtime/docs/release: parent exercises real temporary profile install and pinned-host dumps/smoke, pnpm run check/test-guardrails, strict fixture and generated hashes; CI profile-smoke plus all seven companion jobs green at frozen head. OpenSpec records shipped Web assembly and headless/Web-session limits; no new docs file or package behavior.
+- Non-goals/not-selected: no profile-patch.ts, package/core/policy source, schemas/dependencies, solver, persisted research records, shared.md generation, real Web tool headers/model sequence or PI approval. No silent skipped/relaxed gate.
 
 
 ## 7. 回放脚本、工作区准备与控制面登记

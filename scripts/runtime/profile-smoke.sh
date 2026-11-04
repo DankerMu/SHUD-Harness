@@ -17,9 +17,12 @@ import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { pathToFileURL } from "node:url";
 import { createServer } from "node:net";
 import { parseDocument } from "yaml";
 const root = process.argv[2];
+const { checkPresets, coordinatorDelegationErrors } = await import(
+  pathToFileURL(join(root, "scripts/runtime/profile-preset-checks.mjs")).href);
 async function run(label, executable, args, schemaDump = false, env = process.env, acceptFailure = false, limits = {}) {
   // Self-contained so the isolated cleanup regressions execute this exact implementation.
   const child = spawn(executable, args, { env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -290,116 +293,6 @@ function checkPolicyGateControls(rows, schema, label) {
       policyGateErrors(config, projection).some((error) => error.includes(expected)));
   }
 }
-function presetErrors(rows, schema, headless = false) {
-  const errors = [], all = [];
-  function visit(value, depth = 0) {
-    if (!value || typeof value !== "object") return;
-    if (!Array.isArray(value) && (value.id || value.name)) all.push({ row: value, depth });
-    for (const child of Object.values(value)) visit(child, depth + 1);
-  }
-  for (const row of rows) visit(row);
-  const require = (label, condition) => { if (!condition) errors.push(label); };
-  function global(id, name, disabled = false) {
-    const matches = all.filter(({ row }) => row.id === id || row.name === name);
-    const globals = matches.filter(({ depth }) => depth === 0);
-    require(`${id}: unique global`, globals.length === 1 && !matches.some(({ depth }) => depth > 0));
-    const row = globals[0]?.row;
-    require(`${id}: identity/status`, row?.id === id && row?.name === name && (row?.disabled === true) === disabled);
-    const entries = schema["x-cordis"]?.entries?.filter((entry) => entry.id === id) ?? [];
-    require(`${id}: import`, entries.length === 1 && ["absent", "schema"].includes(entries[0]?.status));
-    return row;
-  }
-  const restrict = global("shud-role-restrict", "@shud-harness/dsh-shud-presets");
-  require("shud-role-restrict: no config", restrict !== undefined && !Object.hasOwn(restrict, "config"));
-  for (const id of ["subagent", "subagent-spawn-in-process"]) {
-    const row = global(id, `@deepseek-ai/dsh-${id}`);
-    require(`${id}: host config`, isDeepStrictEqual(row?.config, id === "subagent" ? undefined : { providerName: "spawn" }));
-  }
-  const registries = all.filter(({ row }) => row.id === "agent-preset-registry" || row.name === "@deepseek-ai/dsh-agent-preset-registry");
-  require("preset default", headless ? registries.length === 0 : registries.length === 1 &&
-    registries[0].depth === 0 && registries[0].row.name === "@deepseek-ai/dsh-agent-preset-registry" &&
-    registries[0].row.disabled !== true && registries[0].row.config?.default === "coordinator");
-  for (const role of ["coordinator", "worker"]) {
-    const id = `preset-${role}`, matches = all.filter(({ row }) => row.id === id || row.name === "@deepseek-ai/dsh-agent-preset" && row.config?.id === role);
-    const preset = matches[0]?.row, plugins = preset?.config?.plugins;
-    require(`${id}: unique global/status`, matches.length === 1 && matches[0].depth === 0 &&
-      preset.id === id && preset.name === "@deepseek-ai/dsh-agent-preset" && (preset.disabled === true) === headless);
-    require(`${id}: config`, preset?.config?.id === role && (role !== "coordinator" || preset?.config?.order === 1) &&
-      isDeepStrictEqual(Object.keys(preset?.config ?? {}).sort(), (role === "coordinator" ? ["id", "order", "plugins"] : ["id", "plugins"])));
-    const ids = ["persona", "agent-instructions", "time-context", "tool-jobs", ...(role === "coordinator" ? ["tool-subagent"] : [])];
-    require(`${id}: child order`, Array.isArray(plugins) && isDeepStrictEqual(plugins.map((row) => row?.id), ids));
-    for (const childId of ids) {
-      const child = plugins?.find?.((row) => row?.id === childId);
-      require(`${id}/${childId}: identity/status`, child?.name === `@deepseek-ai/dsh-${childId}` && child.disabled !== true);
-      const prefix = `process.getBuiltinModule('node:fs').readFileSync(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@shud-harness/dsh-shud-presets/prompts/${role}.md'),'utf8')`;
-      const config = childId === "persona" ? { prefix } : childId === "agent-instructions" ? { maxBytes: 65536 } :
-        childId === "tool-subagent" ? { provider: "spawn", toolName: "subagent", agentPreset: "worker", modelSelectionSettings: false } : undefined;
-      const actual = childId === "persona" && typeof child?.config?.prefix === "string" ?
-        { ...child.config, prefix: child.config.prefix.replace(/('[^']*'|"[^"]*")|\s+/g, (text, literal) => literal ? text.replace(/"/g, "'") : "") } : child?.config;
-      require(`${id}/${childId}: config`, isDeepStrictEqual(actual, config));
-    }
-    const entries = schema["x-cordis"]?.entries?.filter((entry) => entry.id === id) ?? [];
-    require(`${id}: import`, entries.length === 1 && entries[0]?.status === "schema");
-  }
-  require("no records plugin", !all.some(({ row }) => row.id === "shud-records" || row.name === "@shud-harness/dsh-shud-records"));
-  const owned = rows.filter((row) => ["preset-coordinator", "preset-worker", "shud-role-restrict"].includes(row.id));
-  require("no preset machine paths", !/["'](?:\/[^/]|[A-Za-z]:\\\\)/.test(JSON.stringify(owned)));
-  return errors;
-}
-function checkPresets(rows, schema, label, headless = false) {
-  const errors = presetErrors(rows, schema, headless);
-  check(`${label}: presets: ${errors.join("; ")}`, errors.length === 0);
-  let controls = 0;
-  function reject(kind, mutate, expected) {
-    const copy = structuredClone(rows), projection = structuredClone(schema), before = JSON.stringify([copy, projection]);
-    try { mutate(copy, projection); } catch { check(`${label}: ${kind} mutation prerequisites`, false); }
-    check(`${label}: ${kind} actually mutated`, JSON.stringify([copy, projection]) !== before);
-    check(`${label}: rejects ${kind}`, presetErrors(copy, projection, headless).includes(expected));
-    controls++;
-  }
-  const find = (rows, id) => rows.find((row) => row.id === id);
-  if (headless) reject("headless default", (rows) => rows.push({ id: "agent-preset-registry", config: { default: "coordinator" } }), "preset default");
-  else for (const value of [undefined, "worker"]) reject(`default ${value ?? "missing"}`,
-    (rows) => { find(rows, "agent-preset-registry").config.default = value; }, "preset default");
-  for (const id of ["shud-role-restrict", "subagent", "subagent-spawn-in-process", "preset-coordinator", "preset-worker"]) {
-    const identity = `${id}: ${id.startsWith("preset-") ? "unique global/status" : "identity/status"}`;
-    for (const kind of ["missing", "duplicate", "nested", "disabled", "wrong-name"]) reject(`${id} ${kind}`, (rows) => {
-      const index = rows.findIndex((row) => row.id === id), row = find(rows, id);
-      if (!row) throw new Error("missing mutation target");
-      if (kind === "missing") rows.splice(index, 1);
-      if (kind === "duplicate") rows.push(structuredClone(row));
-      if (kind === "nested") { rows.splice(index, 1); rows.push({ id: "negative-preset", config: { plugins: [row] } }); }
-      if (kind === "disabled") row.disabled = id.startsWith("preset-") ? !headless : true;
-      if (kind === "wrong-name") row.name = "@invalid/wrong-package";
-    }, ["missing", "duplicate", "nested"].includes(kind) ? `${id}: ${id.startsWith("preset-") ? "unique global/status" : "unique global"}` : identity);
-    reject(`${id} import-error`, (_, schema) => { schema["x-cordis"].entries.find((entry) => entry.id === id).status = "error"; }, `${id}: import`);
-  }
-  reject("fixed restrict role", (rows) => { find(rows, "shud-role-restrict").config = { role: "coordinator" }; }, "shud-role-restrict: no config");
-  for (const id of ["subagent", "subagent-spawn-in-process"]) reject(`${id} maxDepth override`,
-    (rows) => { const row = find(rows, id); row.config = { ...row.config, maxDepth: 2 }; }, `${id}: host config`);
-  for (const role of ["coordinator", "worker"]) {
-    const id = `preset-${role}`;
-    reject(`${id} wrong preset id`, (rows) => { find(rows, id).config.id = "standard"; }, `${id}: config`);
-    reject(`${id} reversed children`, (rows) => { find(rows, id).config.plugins.reverse(); }, `${id}: child order`);
-    const ids = ["persona", "agent-instructions", "time-context", "tool-jobs", ...(role === "coordinator" ? ["tool-subagent"] : [])];
-    for (const childId of ids) for (const kind of ["missing", "extra", "disabled", "wrong-name", "wrong-config"]) reject(`${id}/${childId} ${kind}`, (rows) => {
-      const plugins = find(rows, id).config.plugins, index = plugins.findIndex((row) => row.id === childId), child = plugins[index];
-      if (!child) throw new Error("missing mutation child");
-      if (kind === "missing") plugins.splice(index, 1);
-      if (kind === "extra") plugins.push({ id: "tool-bash", name: "@deepseek-ai/dsh-tool-bash" });
-      if (kind === "disabled") child.disabled = true;
-      if (kind === "wrong-name") child.name = "@invalid/wrong-child";
-      if (kind === "wrong-config") child.config = { unexpected: true };
-    }, ["missing", "extra"].includes(kind) ? `${id}: child order` : `${id}/${childId}: ${kind === "wrong-config" ? "config" : "identity/status"}`);
-  }
-  for (const [field, value] of [["provider", "fork"], ["toolName", "delegate"], ["agentPreset", undefined], ["modelSelectionSettings", true], ["maxDepth", 2]]) {
-    reject(`coordinator delegation ${field}`, (rows) => { find(rows, "preset-coordinator").config.plugins.find((row) => row.id === "tool-subagent").config[field] = value; }, "preset-coordinator/tool-subagent: config");
-  }
-  reject("coordinator order", (rows) => { find(rows, "preset-coordinator").config.order = 2; }, "preset-coordinator: config");
-  reject("records plugin", (rows) => rows.push({ id: "shud-records", name: "@shud-harness/dsh-shud-records" }), "no records plugin");
-  reject("preset machine path", (rows) => { find(rows, "preset-worker").path = "/Users/profile-control"; }, "no preset machine paths");
-  check(`${label}: every preset negative control executed`, controls === (headless ? 91 : 92));
-}
 async function checkCapturePreflight() {
   const isolated = join(scratch, "isolated-harness");
   for (const directory of ["scripts/runtime", "profile/shud", "node_modules", "SHUD", "rSHUD", "AutoSHUD"]) {
@@ -666,6 +559,11 @@ try {
   }
   const bin = process.env.DSH_BIN;
   const dump = (await run("dump-config", process.execPath, [bin, "--profile", "shud", "--dump-config"])).stdout;
+  const composedRows = patchRows(dump, "capture cross-row config");
+  const delegationErrors = coordinatorDelegationErrors(composedRows);
+  if (delegationErrors.length) {
+    throw new Error(`coordinator three-delegation seam: ${delegationErrors.join("; ")}`);
+  }
   const schemaResult = await run("dump-config-schema", process.execPath, [bin, "--profile", "shud", "--dump-config-schema"], true);
   const schema = JSON.parse(schemaResult.stdout);
   if (schemaResult.status === 1) {
@@ -707,7 +605,6 @@ try {
   const composedJobs = patchRows(dump, "composed profile").filter((entry) => entry?.id === "shud-jobs");
   check("composed shud-jobs binary", composedJobs[0]?.config?.shudBin === shudBin);
   check("composed shud-jobs state directory", composedJobs[0]?.config?.stateDir === join(web.directory, "shud-jobs"));
-  const composedRows = patchRows(dump, "capture cross-row config");
   check("composed jobs full capture configuration", isDeepStrictEqual(composedJobs[0]?.config, desiredJobs("shud", shudBin)));
   const captureErrors = captureRowErrors(composedRows);
   check(`composed llm matches actual provider and model rows: ${captureErrors.join("; ")}`, captureErrors.length === 0);
@@ -724,7 +621,7 @@ try {
   checkToolsSchema(schema, "Web import");
   checkPolicyGate(composedRows, schema, "Web import");
   checkPolicyGateControls(composedRows, schema, "Web controls");
-  checkPresets(composedRows, schema, "Web");
+  checkPresets(check, composedRows, schema, "Web");
 
   const rawOnly = "# existing deployment bytes\r\n- id: 'shud-raw-guard'\r\n  config: { rawDirs: ['/srv/data_root/raw'] }\r\n# preserve missing final newline";
   writeFileSync(web.patch, rawOnly, { mode: 0o640 });
@@ -908,7 +805,7 @@ try {
   const headlessRows = patchRows(headlessDump, "composed headless profile");
   checkPolicyGate(headlessRows, headlessSchema, "headless import");
   checkPolicyGateControls(headlessRows, headlessSchema, "headless controls");
-  checkPresets(headlessRows, headlessSchema, "headless", true);
+  checkPresets(check, headlessRows, headlessSchema, "headless", true);
   const presetIds = ["preset-coordinator", "preset-worker"];
   function checkDisabledPatch(label, expected) {
     const rows = patchRows(readFileSync(headless.patch, "utf8"), label);
