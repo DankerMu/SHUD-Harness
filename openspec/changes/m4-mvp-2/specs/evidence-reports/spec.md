@@ -204,6 +204,14 @@ closure SHALL 在 reconcile 后求值：`science_assist` 卡求 task-cards「sci
 - **WHEN** 报告 `verification_ids` 含一个 VerificationCase，其 `artifact_refs` 中候选 rivqdown 文件在 `verification_run` 之后被删除、被替换为符号链接，或被改写一个字节使 sha256 不等于 `observed.candidate_sha256` 时调用 `report_validate`
 - **THEN** 第 (15) 项失败并指出该 `vc_id` 与该路径，报告保持 `draft`，`.json`、`.md` 与该 rivqdown 路径上的文件字节不变
 
+#### Scenario: artifact diagnostics preserve identity without disclosing secret matches
+- **WHEN** 第 (15) 项失败的 schema-valid 相对 artifact 路径含一个或多个 `REPORT_SECRET_PATTERN` 命中，或会话 cwd 本身含此类内容
+- **THEN** 诊断保留 `vc_id`、artifact 下标与相对路径的非密钥部分，替换全部命中内容，不回显解析后的绝对路径或底层异常；无命中的相对路径保持原文，第 (13) 项仍只指出所在节
+
+#### Scenario: unrelated reference failure does not suppress artifact validation
+- **WHEN** 一份 schema-valid 报告的 StackLock 或 DataProvenance 引用不可用，同时其关联 VC 的候选 artifact 已被改写
+- **THEN** 结果仍列出全部 15 项，第 (15) 项独立检查该 VC 并指出其 artifact 失败，报告保持 draft，校验不写文件
+
 #### Scenario: verification artifacts intact pass item 15
 - **WHEN** `code_change` 报告的每个 VerificationCase 的两个 `artifact_refs` 均为会话 cwd 下的普通文件、sha256 分别等于 `observed.base_sha256` 与 `observed.candidate_sha256`，其余条件齐全时调用 `report_validate`
 - **THEN** 第 (15) 项通过（不标注为不适用），15 项均通过，报告变为 `reviewed`

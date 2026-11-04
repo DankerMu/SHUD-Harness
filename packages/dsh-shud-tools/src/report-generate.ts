@@ -10,6 +10,8 @@ import type { ShudJobRegistry } from "@shud-harness/dsh-shud-jobs";
 import {
   createEvidenceReport,
   evaluateClosure,
+  readChangePatch,
+  readWorkspaceRecord,
   reconcileTaskCard,
   transitionTask,
   writeWorkspaceRecord,
@@ -74,7 +76,11 @@ async function generateReport(
   // Evidence awaits may have allowed another writer to change the card. Never discard an
   // unseen job, retry collection, or publish a report using a stale linked_jobs snapshot.
   const card = readGeneratableTask(cwd, taskId);
-  const closure = evaluateClosure(card, evidence, records, authored);
+  const closure = evaluateClosure(card, evidence, records, authored, {
+    readChange: (id) => readWorkspaceRecord(cwd, "change", id, { readonly: true }),
+    readPatch: (id) => readChangePatch(cwd, id, { readonly: true }),
+    readVerification: (id) => readWorkspaceRecord(cwd, "verification", id, { readonly: true }),
+  });
   if (!closure.ok) {
     throw new Error(`report_generate closure failed: ${JSON.stringify(closure.failures)}`);
   }
@@ -94,6 +100,8 @@ async function generateReport(
     stack_ids: [...new Set(ordered.map((record) => StackIdSchema.parse(record.stack_id)))],
     data_ids: [...new Set(ordered.map((record) => DataIdSchema.parse(record.data_id)))],
     llm_response_models: [...new Set(ordered.map((record) => record.llm.response_model))],
+    change_ids: card.type === "code_change" ? [...new Set(card.linked_changes)] : [],
+    verification_ids: card.type === "code_change" ? [...new Set(card.linked_verifications)] : [],
     decision_history: [],
     created_at: now,
     updated_at: now,

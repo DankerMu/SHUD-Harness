@@ -3,7 +3,7 @@ import { inspect } from "node:util";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { renderReport, ReportRenderError, validateReport } from "./index.ts";
 import { workspaceFileCases } from "./workspace-files-test-harness.ts";
-import { CHECK_SHAPE, realFs, SECRET } from "./report-validation-test-harness.ts";
+import { CODE_CHANGE_CHECK_SHAPE, realFs, SECRET } from "./report-validation-test-harness.ts";
 import {
   makeCodeChangeWorkspace,
   snapshotTree,
@@ -40,9 +40,14 @@ function expectReadonlyFailure(stage: string, path?: string) {
 
   const result = validateReport(workspace.cwd, workspace.report.report_id);
   expect(result.ok).toBe(false);
-  expect(result.checks.map(({ id, vacuous }) => ({ id, vacuous }))).toEqual(CHECK_SHAPE);
-  expect(result.checks.filter(({ pass }) => !pass).map(({ id }) => id)).toEqual([8, 9, 12, 13]);
-  for (const id of [8, 9, 12, 13]) {
+  expect(result.checks.map(({ id, vacuous }) => ({ id, vacuous }))).toEqual(
+    CODE_CHANGE_CHECK_SHAPE,
+  );
+  // These renderer fixtures intentionally omit artifacts; their independent check 15 also fails.
+  expect(result.checks.filter(({ pass }) => !pass).map(({ id }) => id)).toEqual([
+    8, 9, 12, 13, 14, 15,
+  ]);
+  for (const id of [8, 9, 12, 13, 14]) {
     expect(result.checks.find((check) => check.id === id)).toEqual({
       id,
       pass: false,

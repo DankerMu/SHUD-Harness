@@ -26,7 +26,7 @@ export function createReportValidateTool(): ToolDefinition {
   const tool = defineTool({
     name: "report_validate",
     description:
-      "Repair an identified report's task link and Markdown watermark, then run all thirteen canonical checks. Passing drafts become reviewed, never PI-accepted; failed checks remain useful structured output.",
+      "Repair an identified report's task link and Markdown watermark, then run all fifteen canonical checks. Passing drafts become reviewed, never PI-accepted; failed checks remain useful structured output.",
     parameters,
     output: {
       // The canonical validator owns the evolving checks/details contract.

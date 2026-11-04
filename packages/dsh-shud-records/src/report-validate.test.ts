@@ -21,10 +21,9 @@ import {
   type ValidationWorkspace,
 } from "./report-validation-test-harness.ts";
 
-// Proposed public contract: synchronous { ok, checks }, exactly thirteen ordered
-// { id, pass, vacuous, details } entries. Details are controlled discriminated facts;
-// source prose/paths/Markdown/exceptions are never diagnostic payloads. Root errors
-// expose only a controlled stage, while reference failures remain check results.
+// Public contract: synchronous { ok, checks }, exactly fifteen ordered entries.
+// Root errors expose only a controlled stage; reference failures remain check results.
+// Only artifact diagnostics may carry a secret-redacted relative path.
 vi.mock("node:fs", async (original) => {
   const actual = await original<typeof NodeFs>();
   return {
@@ -145,7 +144,7 @@ function expectRootError(stage: string, id: unknown): void {
   expect(fs.renameSync).not.toHaveBeenCalled();
 }
 
-test("returns all thirteen passing clauses, with only 4/10/11 M3-vacuous", () => {
+test("returns fifteen passing clauses with 4/10/11 M3-vacuous and 14/15 inapplicable", () => {
   const result = validate();
   expect(result.checks).toEqual(
     CHECK_SHAPE.map((entry) => ({ ...entry, pass: true, details: [] })),
@@ -223,7 +222,7 @@ describe.each([
   { kind: "run", id: 3, field: "run_id", prefix: "RUN" },
 ] as const)("$kind reference failures", ({ kind, id, field, prefix }) => {
   test.each(["missing", "parse", "schema", "identity", "read"] as const)(
-    "reports %s without aborting any of the thirteen clauses",
+    "reports %s without aborting any of the fifteen clauses",
     (stage) => {
       const input = selectInput(workspace, kind);
       const target = join(realFs.realpathSync.native(workspace.cwd), input.path);
@@ -295,7 +294,7 @@ describe.each([
   );
 });
 
-test("collects every reference failure and authored failure in the same thirteen-result response", () => {
+test("collects every reference failure and authored failure in the same fifteen-result response", () => {
   for (const { path, kind } of renderingInputs(workspace.fixture)) {
     if (kind !== "report") realFs.unlinkSync(join(workspace.cwd, path));
   }

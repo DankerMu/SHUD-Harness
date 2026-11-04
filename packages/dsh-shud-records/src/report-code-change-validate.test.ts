@@ -1,10 +1,10 @@
 import { inspect } from "node:util";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { renderReport, validateReport } from "./index.ts";
-import { CHECK_SHAPE, SECRET, realFs } from "./report-validation-test-harness.ts";
+import { CODE_CHANGE_CHECK_SHAPE, SECRET, realFs } from "./report-validation-test-harness.ts";
+import { makeCodeChangeValidationWorkspace } from "./report-validation/test-harness.ts";
 import {
   CODE_CHANGE_WORDING,
-  makeCodeChangeWorkspace,
   section,
   snapshotTree,
   type CodeChangeWorkspace,
@@ -12,7 +12,7 @@ import {
 
 let workspace: CodeChangeWorkspace;
 beforeEach(() => {
-  workspace = makeCodeChangeWorkspace();
+  workspace = makeCodeChangeValidationWorkspace();
 });
 afterEach(() => {
   realFs.rmSync(workspace.root, { recursive: true, force: true });
@@ -21,7 +21,9 @@ afterEach(() => {
 function validate() {
   const before = snapshotTree(workspace.root);
   const result = validateReport(workspace.cwd, workspace.report.report_id);
-  expect(result.checks.map(({ id, vacuous }) => ({ id, vacuous }))).toEqual(CHECK_SHAPE);
+  expect(result.checks.map(({ id, vacuous }) => ({ id, vacuous }))).toEqual(
+    CODE_CHANGE_CHECK_SHAPE,
+  );
   expect(snapshotTree(workspace.root)).toEqual(before);
   const diagnostics = inspect(result, { depth: null });
   expect(diagnostics).not.toContain(SECRET);
@@ -31,12 +33,12 @@ function validate() {
   return result;
 }
 
-test("new canonical facts retain exactly thirteen checks without adding closure or cross-object decisions", () => {
-  // File fixtures intentionally have foreign task/run references, proposed CRs,
-  // differing build dirty paths and no patches, binaries or VC output artifacts.
+test("canonical facts and artifacts pass fifteen checks without adding closure or cross-object decisions", () => {
+  // Foreign task/run references, proposed CRs and differing build dirty paths are not closure checks.
+  // Only validator fixtures add real VC artifacts; the renderer's golden fixtures remain unchanged.
   expect(validate()).toEqual({
     ok: true,
-    checks: CHECK_SHAPE.map((check) => ({ ...check, pass: true, details: [] })),
+    checks: CODE_CHANGE_CHECK_SHAPE.map((check) => ({ ...check, pass: true, details: [] })),
   });
 });
 

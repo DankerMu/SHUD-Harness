@@ -1,4 +1,14 @@
 import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  realpathSync,
+  type Stats,
+} from "node:fs";
+import {
+  CODE_CHANGE_SECTION5_WORDING,
   GOVERNANCE_INVARIANTS,
   REPORT_SECRET_PATTERN,
   ReportIdSchema,
@@ -10,6 +20,8 @@ import {
   type RunRecord,
   type StackId,
   type StackLock,
+  type VerificationCase,
+  type VerificationId,
 } from "@shud-harness/dsh-shud-core";
 import { readReportCodeChangeFacts, readReportInput, readReportRun } from "./report-inputs.ts";
 import { ReportRenderError, type ReportRenderStage } from "./report-render-error.ts";
@@ -20,9 +32,12 @@ import {
   type ReportDocument,
   type ReportSectionId,
 } from "./report-render.ts";
+import { hashDescriptor } from "./hash-descriptor.ts";
+import { regularTarget } from "./workspace-paths.ts";
 
 export type ReportValidationStage = ReportRenderStage;
-export type ReportValidationCheckId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13;
+export type ReportValidationCheckId =
+  1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
 
 type ReferenceFailure = {
   readonly code: "reference_unavailable";
@@ -31,14 +46,30 @@ type ReferenceFailure = {
   | { readonly kind: "stack"; readonly id: StackId }
   | { readonly kind: "data"; readonly id: DataId }
   | { readonly kind: "run"; readonly id: RunId }
+  | { readonly kind: "verification"; readonly id: VerificationId }
 );
 
-/** Closed diagnostic vocabulary: never source prose, metadata, paths or exception payloads. */
+type ArtifactStage =
+  "directory" | "target" | "open" | "fstat" | "identity" | "read" | "close" | "hash";
+interface ArtifactFailure {
+  readonly stage: ArtifactStage;
+  readonly cleanup_failed?: true;
+}
+
+/** Controlled facts only; artifact paths are relative and redact every canonical secret match. */
 export type ReportValidationDetail =
   | ReferenceFailure
   | { readonly code: "empty_field"; readonly field: "limitations" | "pi_questions" }
   | ({ readonly code: "forbidden_phrase" } & ForbiddenPhraseHit)
   | { readonly code: "failed_run_missing"; readonly run_id: RunId }
+  | { readonly code: "failed_verification_missing"; readonly vc_id: VerificationId }
+  | { readonly code: "code_change_wording_missing" }
+  | ({
+      readonly code: "verification_artifact_invalid";
+      readonly vc_id: VerificationId;
+      readonly artifact_index: 0 | 1;
+      readonly path: string;
+    } & ArtifactFailure)
   | {
       readonly code: "dirty_annotation_missing";
       readonly stack_id: StackId;
@@ -76,6 +107,8 @@ export interface ReportValidationResult {
     ReportValidationCheck<11>,
     ReportValidationCheck<12>,
     ReportValidationCheck<13>,
+    ReportValidationCheck<14>,
+    ReportValidationCheck<15>,
   ];
 }
 
@@ -132,6 +165,124 @@ function failedRunDetails(
   return runs
     .filter((run) => run.status === "failed" && !risks.includes(run.run_id))
     .map((run) => ({ code: "failed_run_missing", run_id: run.run_id }));
+}
+
+function failedVerificationDetails(
+  document: ReportDocument,
+  verifications: readonly VerificationCase[],
+): ReportValidationDetail[] {
+  const risks = sectionText(document, 7);
+  return verifications
+    .filter((record) => record.status === "failed" && !risks.includes(record.vc_id))
+    .map((record) => ({ code: "failed_verification_missing", vc_id: record.vc_id }));
+}
+
+function sameIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/**
+ * Preserve physical cwd traversal and every POSIX artifact component, including empty/dot
+ * components. In particular, file/. and file/ require a directory and cannot become file.
+ * Inspect all ancestors without following links, then bind the nonblocking/no-follow open
+ * to its inspected inode. Recheck the chain and file before/after the bounded descriptor read.
+ * These observations detect replacement, not an atomic snapshot of concurrent external writes.
+ */
+function inspectArtifact(
+  cwd: string,
+  relative: string,
+  expected: string,
+): ArtifactFailure | undefined {
+  let stage: ArtifactStage = "directory";
+  let fd: number | undefined;
+  let failure: ArtifactFailure | undefined;
+  try {
+    let path = realpathSync.native(cwd);
+    const directories: Array<{ path: string; stat: Stats }> = [];
+    const components = relative.split("/");
+    for (let index = 0; index < components.length; index += 1) {
+      const stat = lstatSync(path);
+      if (!stat.isDirectory()) throw new Error("Unsafe artifact ancestor");
+      directories.push({ path, stat });
+      path += `/${components[index]}`;
+    }
+    stage = "target";
+    const inspected = regularTarget(path, "Verification artifact");
+    if (inspected === undefined) throw new Error("Missing artifact");
+    stage = "open";
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    stage = "fstat";
+    const descriptor = fstatSync(fd);
+    stage = "identity";
+    if (!descriptor.isFile() || !sameIdentity(descriptor, inspected)) {
+      throw new Error("Artifact identity changed");
+    }
+    const recheck = () => {
+      for (const directory of directories) {
+        const current = lstatSync(directory.path);
+        if (!current.isDirectory() || !sameIdentity(current, directory.stat)) {
+          throw new Error("Artifact ancestor changed");
+        }
+      }
+      const current = regularTarget(path, "Verification artifact");
+      if (
+        current === undefined ||
+        !sameIdentity(current, descriptor) ||
+        current.size !== descriptor.size ||
+        current.mtimeMs !== descriptor.mtimeMs ||
+        current.ctimeMs !== descriptor.ctimeMs
+      ) {
+        throw new Error("Artifact changed");
+      }
+    };
+    recheck();
+    stage = "read";
+    const digest = hashDescriptor(fd);
+    stage = "identity";
+    recheck();
+    if (digest !== expected) failure = { stage: "hash" };
+  } catch {
+    failure = { stage };
+  } finally {
+    if (fd !== undefined) {
+      // Exactly one close attempt: a failed close leaves descriptor ownership unknown.
+      try {
+        closeSync(fd);
+      } catch {
+        failure = failure === undefined ? { stage: "close" } : { ...failure, cleanup_failed: true };
+      }
+    }
+  }
+  return failure;
+}
+
+function artifactDetails(
+  cwd: string,
+  verifications: readonly VerificationCase[],
+): ReportValidationDetail[] {
+  const details: ReportValidationDetail[] = [];
+  const flags = REPORT_SECRET_PATTERN.flags;
+  const secrets = new RegExp(
+    REPORT_SECRET_PATTERN.source,
+    flags.includes("g") ? flags : `${flags}g`,
+  );
+  for (const record of verifications) {
+    for (const index of [0, 1] as const) {
+      const path = record.artifact_refs[index];
+      const expected = index === 0 ? record.observed.base_sha256 : record.observed.candidate_sha256;
+      const failure = inspectArtifact(cwd, path, expected);
+      if (failure !== undefined) {
+        details.push({
+          code: "verification_artifact_invalid",
+          vc_id: record.vc_id,
+          artifact_index: index,
+          path: path.replace(secrets, "[REDACTED]"),
+          ...failure,
+        });
+      }
+    }
+  }
+  return details;
 }
 
 function dirtyDetails(
@@ -196,12 +347,13 @@ function secretDetails(document: ReportDocument): ReportValidationDetail[] {
 /**
  * Validate fresh same-workspace report evidence without publishing or changing state.
  * Root/routing errors throw a stage-only error; every schema-valid root receives all
- * thirteen ordered checks even if references or the canonical projection fail. Only
- * 4/10/11 are M3-vacuous. Existing Markdown, logs, artifacts and credentials are not read.
+ * fifteen ordered checks even if references or the canonical projection fail. Checks
+ * 4/10/11 are M3-vacuous; 14/15 are inapplicable without their respective references.
+ * Existing Markdown and logs are not read; VC artifacts are hashed without writes.
  * This is enumerated evidence/wording lint, not closure or PI semantic approval.
  * All report/reference reads are non-creating; missing managed directories remain absent.
- * Cited change/verification/build facts participate in the canonical document and its
- * existing checks; their read failures use render_unavailable, not additional clauses.
+ * Cited change/verification/build facts participate in the canonical document; artifact
+ * validation reads every VC independently if another reference prevents that projection.
  */
 export function validateReport(cwd: string, reportId: unknown): ReportValidationResult {
   const id = ReportIdSchema.safeParse(reportId);
@@ -230,9 +382,11 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
   const firstFailure = stacks.failures[0] ?? data.failures[0] ?? runs.failures[0];
   let renderStage = firstFailure?.stage;
   let document: ReportDocument | undefined;
+  let verifications: readonly VerificationCase[] | undefined;
   if (firstFailure === undefined) {
     try {
       const codeChangeFacts = readReportCodeChangeFacts(cwd, report);
+      verifications = codeChangeFacts.verifications.map(({ record }) => record);
       document = renderReportDocument(
         report,
         stacks.values,
@@ -244,6 +398,21 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
       renderStage = controlledStage(error);
     }
   }
+  // Reuse already-read VCs when projection facts succeeded. Otherwise load them independently:
+  // missing stacks/data/runs/changes/builds must not suppress any VC's artifact diagnostics.
+  const verificationEvidence =
+    verifications === undefined
+      ? loadReferences(
+          report.verification_ids,
+          (vcId) => readReportInput(cwd, "verification", vcId),
+          (vcId, stage) => ({
+            code: "reference_unavailable",
+            kind: "verification",
+            id: vcId,
+            stage,
+          }),
+        )
+      : { values: verifications, failures: [] };
   const unavailable: readonly ReportValidationDetail[] =
     document === undefined ? [{ code: "render_unavailable", stage: renderStage ?? "read" }] : [];
   const checks: ReportValidationResult["checks"] = [
@@ -263,12 +432,36 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
       7,
       scanForbiddenPhrases(report).map((hit) => ({ code: "forbidden_phrase", ...hit })),
     ),
-    clause(8, document === undefined ? unavailable : failedRunDetails(document, runs.values)),
+    clause(
+      8,
+      document === undefined
+        ? unavailable
+        : [
+            ...failedRunDetails(document, runs.values),
+            ...failedVerificationDetails(document, verificationEvidence.values),
+          ],
+    ),
     clause(9, document === undefined ? unavailable : dirtyDetails(document, stacks.values)),
     clause(10, [], true),
     clause(11, [], true),
     clause(12, document === undefined ? unavailable : invariantDetails(document)),
     clause(13, document === undefined ? unavailable : secretDetails(document)),
+    clause(
+      14,
+      report.change_ids.length === 0
+        ? []
+        : document === undefined
+          ? unavailable
+          : sectionText(document, 5).includes(CODE_CHANGE_SECTION5_WORDING)
+            ? []
+            : [{ code: "code_change_wording_missing" }],
+      report.change_ids.length === 0,
+    ),
+    clause(
+      15,
+      [...verificationEvidence.failures, ...artifactDetails(cwd, verificationEvidence.values)],
+      report.verification_ids.length === 0,
+    ),
   ];
   return { ok: checks.every((check) => check.pass), checks };
 }

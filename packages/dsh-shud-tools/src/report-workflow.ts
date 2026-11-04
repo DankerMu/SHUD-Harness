@@ -63,6 +63,9 @@ function readReportTask(cwd: string, taskId: TaskId): TaskCard {
 
 export function readGeneratableTask(cwd: string, taskId: TaskId): TaskCard {
   const card = readReportTask(cwd, taskId);
+  if (card.type !== "science_assist" && card.type !== "code_change") {
+    throw new Error(`report_generate task ${taskId}: unsupported type ${card.type}`);
+  }
   if (card.status !== "planned" && card.status !== "running" && card.status !== "reporting") {
     throw new Error(`report_generate task ${taskId}: invalid state ${card.status}`);
   }

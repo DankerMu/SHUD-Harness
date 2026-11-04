@@ -52,7 +52,7 @@ async function observeAdmission(ctx: Context) {
 }
 
 for (const root of ["stacks", "provenance"] as const) {
-  test(`validation of missing protected ${root} returns thirteen checks without creating any directory`, async () => {
+  test(`validation of missing protected ${root} returns fifteen checks without creating any directory`, async () => {
     const h = await reportHarness();
     try {
       const evidence = await seedEvidence(h);
