@@ -14,7 +14,7 @@ unset ALL_PROXY
 node --input-type=module - "$ROOT" <<'NODE'
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -806,7 +806,7 @@ try {
   checkPolicyGate(headlessRows, headlessSchema, "headless import");
   checkPolicyGateControls(headlessRows, headlessSchema, "headless controls");
   checkPresets(check, headlessRows, headlessSchema, "headless", true);
-  const presetIds = ["preset-coordinator", "preset-worker"];
+  const presetIds = ["preset-coordinator", "preset-worker", "preset-coder", "preset-reviewer"];
   function checkDisabledPatch(label, expected) {
     const rows = patchRows(readFileSync(headless.patch, "utf8"), label);
     for (const id of presetIds) {
@@ -820,6 +820,30 @@ try {
   checkDisabledPatch("headless first install");
   await preservedInstall("shud-probe", shudBin, "headless second install", "headless");
   const firstHeadless = readFileSync(headless.patch, "utf8");
+  const m3Source = "# M3 deployment bytes\r\n- id: shud-raw-guard\r\n  config: {rawDirs: ['/srv/m3/raw']}\r\n" +
+    `- ${JSON.stringify({ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) })}\r\n` +
+    "- {id: preset-coordinator, disabled: true} # old coordinator\r\n" +
+    "- {id: preset-worker, disabled: true} # old worker\r\n# preserve M3 trailer without final newline";
+  writeFileSync(headless.patch, m3Source);
+  chmodSync(headless.patch, 0o640);
+  const m3Manifest = hash(headless.manifest);
+  await install("M3 two-to-four preset migration", "shud-probe", shudBin, "headless");
+  const m3Updated = readFileSync(headless.patch, "utf8");
+  check("M3 migration: every old row/raw/comment byte preserved", m3Updated.startsWith(m3Source));
+  check("M3 migration: manifest bytes preserved", hash(headless.manifest) === m3Manifest);
+  check("M3 migration: mode preserved", (lstatSync(headless.patch).mode & 0o777) === 0o640);
+  check("M3 migration: CRLF preserved", !/(?<!\r)\n/.test(m3Updated));
+  checkDisabledPatch("M3 two-to-four preset migration");
+  checkJobsPatch("shud-probe", shudBin, "M3 two-to-four preset migration");
+  await preservedInstall("shud-probe", shudBin, "M3 two-to-four migration repeated", "headless");
+  const m3Rows = patchRows((await run("M3 migrated dump", process.execPath,
+    [bin, "--profile", "shud-probe", "--dump-config"])).stdout, "M3 migrated dump");
+  check("M3 migration: actual raw override preserved", isDeepStrictEqual(
+    m3Rows.find((row) => row.id === "shud-raw-guard")?.config?.rawDirs, ["/srv/m3/raw"]));
+  check("M3 migration: only coder/reviewer disabled rows appended", isDeepStrictEqual(
+    patchRows(m3Updated.slice(m3Source.length), "M3 appended rows"),
+    [{ id: "preset-coder", disabled: true }, { id: "preset-reviewer", disabled: true }]));
+  checkPresets(check, m3Rows, headlessSchema, "M3 migrated headless", true);
   const inertExpression = "(() => { throw new Error('metadata must remain inert'); })()";
   const tagged = (value) => JSON.stringify(value).replace(`:${JSON.stringify(inertExpression)}`, `: !!js ${JSON.stringify(inertExpression)}`);
   for (const style of ["block-crlf", "flow", "indented-docend", "flow-insert", "flow-missing", "block-missing"]) {
@@ -842,8 +866,8 @@ try {
     check(`${label}: inter-target comments preserved`, flow || updated.split("# between targets").length === items.length);
     check(`${label}: mode preserved`, (lstatSync(headless.patch).mode & 0o777) === 0o640);
     check(`${label}: line endings preserved`, style !== "block-crlf" || !/(?<!\r)\n/.test(updated));
-    check(`${label}: inert tags preserved`, style === "flow-insert" || updated.split("!!js").length === 3);
-    check(`${label}: inner comments preserved`, style !== "block-missing" || updated.split("# keep inside target").length === 3);
+    check(`${label}: inert tags preserved`, updated.split("!!js").length - 1 === (style === "flow-insert" ? 0 : 4));
+    check(`${label}: inner comments preserved`, style !== "block-missing" || updated.split("# keep inside target").length - 1 === 4);
     checkDisabledPatch(label, style === "flow-insert" ? undefined : overrides);
     checkJobsPatch("shud-probe", alternateBin, label);
     await preservedInstall("shud-probe", alternateBin, `${label} repeated`, "headless");
@@ -852,35 +876,71 @@ try {
     check(`${label}: actual raw override`, isDeepStrictEqual(actual.find((row) => row.id === "shud-raw-guard")?.config?.rawDirs, ["/srv/headless/raw"]));
     check(`${label}: actual presets disabled`, presetIds.every((id) => actual.filter((row) => row.id === id).length === 1 && actual.find((row) => row.id === id).disabled === true));
   }
-  const validTargets = `- ${JSON.stringify({ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) })}\n- {id: preset-coordinator, disabled: false}\n`;
-  for (const [kind, invalid, prefix = validTargets, targetDiagnostic] of [
-    ["duplicate worker", "- {id: preset-worker}\n- {id: preset-worker}\n"],
-    ["shared worker anchor", "- &worker {id: preset-worker, disabled: false}\n- {id: other, config: *worker}\n"],
-    ["aliased worker target", "- id: other\n  config: &worker {id: preset-worker, disabled: false}\n- *worker\n"],
+  const validTargets = `# DO_NOT_ECHO_USER_PATCH\n- ${JSON.stringify({ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) })}\n`;
+  for (const [kind, invalid, prefix = validTargets, targetDiagnostic, fileType = "file"] of [
     ["invalid worker YAML", "- id: preset-worker\n  config: [DO_NOT_ECHO_USER_PATCH\n"],
     ["invalid UTF-8", Buffer.from([0xff])],
-    ...["shud-jobs", ...presetIds].flatMap((id) => {
-      const desired = id === "shud-jobs" ? { id, config: desiredJobs("shud-probe", alternateBin) } : { id, disabled: true };
-      const others = [{ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) }, ...presetIds.map((id) => ({ id, disabled: false }))].filter((row) => row.id !== id).map((row) => `- ${JSON.stringify(row)}\n`).join("");
-      return ["shared", "aliased"].map((kind) => [`already-desired ${kind} ${id}`, others + (kind === "shared" ? `- &owned ${JSON.stringify(desired)}\n- {id: other, config: *owned}\n` : `- id: other\n  config: &owned ${JSON.stringify(desired)}\n- *owned\n`), "", `${kind} ${id}`]);
-    }),
+    ...["shud-jobs", ...presetIds].flatMap((id) =>
+      (id === "shud-jobs" ? [true] : [false, true]).flatMap((disabled) => {
+        const target = id === "shud-jobs" ? { id, config: desiredJobs("shud-probe", alternateBin) } : { id, disabled };
+        const others = "# DO_NOT_ECHO_USER_PATCH\n" +
+          [{ id: "shud-jobs", config: desiredJobs("shud-probe", shudBin) }, ...presetIds.map((id) => ({ id, disabled: false }))]
+            .filter((row) => row.id !== id).map((row) => `- ${JSON.stringify(row)}\n`).join("");
+        return (id === "shud-jobs" ? ["shared", "aliased"] : ["duplicate", "shared", "aliased"]).map((kind) => {
+          const row = JSON.stringify(target);
+          const source = kind === "duplicate" ? `- ${row}\n- ${row}\n` : kind === "shared"
+            ? `- &owned ${row}\n- {id: other, config: *owned}\n`
+            : `- id: other\n  config: &owned ${row}\n- *owned\n`;
+          return [`${disabled ? "already-desired" : "pending"} ${kind} ${id}`, others + source, "", `${kind} ${id}`];
+        });
+      })),
+    ["symlink patch", validTargets, "", "expected a regular patch file", "symlink"],
+    ["directory patch", validTargets, "", "expected a regular patch file", "directory"],
   ]) {
     writeFileSync(headless.patch, Buffer.concat([Buffer.from(prefix), Buffer.isBuffer(invalid) ? invalid : Buffer.from(invalid)]));
-    const before = [hash(headless.patch), hash(headless.manifest)], stat = lstatSync(headless.patch);
+    chmodSync(headless.patch, 0o640);
+    const held = `${headless.patch}.nonregular`;
+    if (fileType !== "file") {
+      renameSync(headless.patch, held);
+      if (fileType === "symlink") symlinkSync(held, headless.patch);
+      else mkdirSync(headless.patch);
+    }
+    const contentPath = fileType === "file" ? headless.patch : held;
+    const before = [hash(contentPath), hash(headless.manifest)];
+    const metadataPaths = [headless.patch, headless.manifest, ...(fileType === "file" ? [] : [held])];
+    const stats = metadataPaths.map((path) => lstatSync(path));
+    const entries = readdirSync(headless.directory).sort();
     const env = { ...process.env, PROFILE_TEMPLATE: "headless" };
-    for (const stage of ["precheck", "writer", "installer"]) {
-      const label = `headless ${kind} ${stage}`, args = [headless.patch, alternateBin, join(headless.directory, "shud-jobs")];
-      const result = stage === "installer" ? await install(label, "shud-probe", alternateBin, "headless", true) :
-        await run(label, process.execPath, [join(root, "scripts/runtime/profile-patch.ts"), ...(stage === "precheck" ? ["--check"] : []), ...args], false, env, true);
-      const diagnostic = `${result.stdout}\n${result.stderr}`, after = lstatSync(headless.patch);
-      check(`${label}: rejected`, result.status !== 0);
-      check(`${label}: controlled file/target diagnostic`, diagnostic.includes(`${headless.patch}:`) && !diagnostic.includes("DO_NOT_ECHO_USER_PATCH") && (!targetDiagnostic || diagnostic.includes(targetDiagnostic)));
-      check(`${label}: no partial jobs/preset/manifest write`, hash(headless.patch) === before[0] && hash(headless.manifest) === before[1]);
-      check(`${label}: mode/inode/mtime unchanged`, after.mode === stat.mode && after.ino === stat.ino && after.mtimeMs === stat.mtimeMs);
+    try {
+      for (const stage of ["precheck", "writer", "installer"]) {
+        const label = `headless ${kind} ${stage}`, args = [headless.patch, alternateBin, join(headless.directory, "shud-jobs")];
+        const result = stage === "installer" ? await install(label, "shud-probe", alternateBin, "headless", true) :
+          await run(label, process.execPath, [join(root, "scripts/runtime/profile-patch.ts"), ...(stage === "precheck" ? ["--check"] : []), ...args], false, env, true);
+        const diagnostic = `${result.stdout}\n${result.stderr}`;
+        check(`${label}: rejected`, result.status !== 0);
+        const location = diagnostic.indexOf(`${headless.patch}:`);
+        check(`${label}: controlled file/line/target diagnostic`, location >= 0 &&
+          /^[1-9][0-9]*:/.test(diagnostic.slice(location + headless.patch.length + 1)) &&
+          !diagnostic.includes("DO_NOT_ECHO_USER_PATCH") && (!targetDiagnostic || diagnostic.includes(targetDiagnostic)));
+        check(`${label}: no partial jobs/preset/manifest write`, hash(contentPath) === before[0] && hash(headless.manifest) === before[1]);
+        for (const [index, path] of metadataPaths.entries()) {
+          const after = lstatSync(path), stat = stats[index];
+          check(`${label}: ${path} mode/inode/mtime unchanged`, after.mode === stat.mode && after.ino === stat.ino && after.mtimeMs === stat.mtimeMs);
+        }
+        check(`${label}: no temporary files left`, isDeepStrictEqual(readdirSync(headless.directory).sort(), entries));
+        if (fileType === "directory") check(`${label}: patch directory remains empty`, readdirSync(headless.patch).length === 0);
+      }
+    } finally {
+      if (fileType !== "file") {
+        if (fileType === "symlink") unlinkSync(headless.patch);
+        else rmdirSync(headless.patch);
+        renameSync(held, headless.patch);
+      }
     }
   }
   writeFileSync(headless.patch, firstHeadless);
-  const webOverrides = "\n# deliberate Web user disables\n- {id: preset-coordinator, disabled: true, config: {description: keep}}\n- {id: preset-worker, disabled: true}\n";
+  const webOverrides = "\n# deliberate Web user disables\n" +
+    presetIds.map((id) => `- {id: ${id}, disabled: true, config: {description: keep}}\n`).join("");
   writeFileSync(web.patch, migrated + webOverrides);
   await preservedInstall("shud", shudBin, "Web preserves deliberate preset overrides");
   writeFileSync(web.patch, migrated);

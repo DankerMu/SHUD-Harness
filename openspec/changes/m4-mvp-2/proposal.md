@@ -1,17 +1,17 @@
 # Proposal
 
-## Active issue fixture: #543
+## Active issue fixture: #544
 
-- Issue type: feature; Fixture level: expanded (upstream retained; production composition controls inherited capabilities). Critical Path #1. Dependencies #542/#535 delivered.
-- Scope: profile/shud/cordis.patch.yml, scripts/runtime/profile-smoke.sh and its preset-check helper; parent-owned OpenSpec fixture. No packages, profile-patch.ts, host or dependency changes.
-- Selected risk packs: Config/composition; Public API/seams; Auth/secrets; Lifecycle/order; File IO/path evidence preservation; Errors; Legacy compatibility; Resource cleanup; Documentation; Release/runtime compatibility.
-- Governing invariant: composed Web configuration contains exactly four prescribed presets and three distinct coordinator delegates; permissions cannot widen through default filesystem tools, missing agentPreset, collapsed rows or nested host services.
-- First vertical: actual pinned-host dump rejects the current single-delegate tree against the new three-row assertion; then configure three rows and run that assertion first on the composed candidate. Candidate rejection/collapse stops this slice with evidence, never a host edit, fork or single-row workaround.
-- Reuse persona exported-asset Loader, global restrict/policy/raw order and existing smoke positive/negative checks. Existing 999-line smoke requires clean extraction of its JavaScript preset checks into one imported helper, not duplicated checks or a threshold exception.
-- Must preserve all installer, capture configuration, raw override, secret scanning, invalid-boot and bounded child-cleanup checks. Keep default coordinator/order1; worker tree unchanged. New coder/reviewer have no order/delegates; filesystem flags explicitly select read/edit versus read-only, with write/readImage off.
-- Evidence: same actual dump predicate for positive and mutated missing/collapsed/incorrect row controls; exact four subtrees and default, global host registry/provider, policy gate and import status. Parent runs real install/dump/smoke, default check and guard self-tests; local and exact-head CI profile smoke must pass.
-- Stage boundary: #544 owns headless four-preset disabling and its new assertions. This slice preserves the existing two-preset headless installation/atomicity checks rather than claiming four disabled rows; no installer modification or final headless acceptance claimed.
-- Not selected: schema/data migration/solver/units or new resource settings. No model/Web tool-surface proof (#545), actual orchestration (#547), shared instructions rollout or PI acceptance (#549). Shared change stays active.
+- Issue type: feature; Fixture level: expanded (upstream retained; user-patch ownership, atomic publication and headless authorization assembly). Critical Path #1. Dependency #543 delivered.
+- Scope: scripts/runtime/profile-patch.ts, profile-smoke.sh and the canonical profile-preset-checks.mjs helper introduced by #543; parent-owned OpenSpec fixture. No bundle, package, host, dependency or quality-gate configuration changes.
+- Selected risk packs: Config/API; Auth/secrets; File IO/path safety; Publication/order; Resource cleanup; Error handling; Legacy compatibility; Documentation; Release/runtime compatibility.
+- Governing invariant: headless owns only disabled on four unique preset targets plus the existing whole jobs target; validate all five before one atomic publication. Any unsafe target leaves patch/manifest bytes and metadata unchanged, including already-desired values.
+- Reuse current parser/source-range editor and original-source alias preflight (history 5297ee59); extend target type/list only unless executable evidence exposes an in-scope defect. Web semantics, jobs capture and all non-owned bytes remain unchanged.
+- First vertical: actual headless installation/dump exposes enabled coder/reviewer; the extended permanent headless predicate rejects them before the production target-list change, then the same profile reinstalls to four disabled rows.
+- Evidence: M3 two-target migration preserves original rows/raw/comments; repeated same settings preserve bytes/inode/mtime/mode. Four-role duplicate/shared/aliased and invalid YAML/UTF-8/path fixtures reject through precheck/writer/installer without partial jobs or preset publication.
+- Parent independent writer smoke observes one rename for a valid five-target update, zero for rejection/precheck/no-op, and matching preserved bytes. Existing dialect/flow/CRLF/document-end/Loader metadata controls remain; no new parser or retry.
+- Default check, real profile smoke, guard self-tests, strict validation, generated preservation, three-seat review and exact-head CI gate merge. #545 owns actual Web tools/shared instructions; #547 model replay; #549 PI acceptance.
+- Not selected: schema/research-data migration, new concurrency/locking/timers, solver/units or new resource limits. Existing single-process synchronous transaction is preserved; no claim of external-writer isolation or actual PI approval.
 
 ## Why
 

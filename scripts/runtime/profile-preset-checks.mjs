@@ -109,9 +109,7 @@ export function presetErrors(rows, schema, headless = false) {
         registries[0].row.name === "@deepseek-ai/dsh-agent-preset-registry" &&
         registries[0].row.disabled !== true &&
         registries[0].row.config?.default === "coordinator");
-  const roles = headless
-    ? ["coordinator", "worker"]
-    : ["coordinator", "worker", "coder", "reviewer"];
+  const roles = ["coordinator", "worker", "coder", "reviewer"];
   for (const role of roles) {
     const id = `preset-${role}`,
       matches = all.filter(
@@ -214,9 +212,7 @@ export function checkPresets(check, rows, schema, label, headless = false) {
     controls++;
   }
   const find = (rows, id) => rows.find((row) => row.id === id);
-  const roles = headless
-    ? ["coordinator", "worker"]
-    : ["coordinator", "worker", "coder", "reviewer"];
+  const roles = ["coordinator", "worker", "coder", "reviewer"];
   if (headless)
     reject(
       "headless default",
@@ -475,7 +471,7 @@ export function checkPresets(check, rows, schema, label, headless = false) {
     },
     "no preset machine paths",
   );
-  check(`${label}: every preset negative control executed`, controls === (headless ? 156 : 283));
+  check(`${label}: every preset negative control executed`, controls === (headless ? 280 : 283));
   check(
     `${label}: every delegation seam negative control executed`,
     seamControls === (headless ? 0 : 35),

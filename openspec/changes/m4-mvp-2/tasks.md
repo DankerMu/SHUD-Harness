@@ -512,7 +512,7 @@
 
 - [x] 6.1 依赖 2.4、2.5。`prompts/{coder,reviewer}.md`、`coordinator.md` 新增 code_change 流程段与 `worker.md` 的 build_id/threads 提交段（agent-presets「Preset system prompts」「code_change orchestration」）；wording 漂移测试覆盖三份 prompt；restrict 按四角色 `inherited` 绑定（agent-presets「Role tool surface restriction」）；未被 profile 引用时可独立保绿。
 - [x] 6.2a 依赖 6.1、5.0。bundle：`preset-coder`、`preset-reviewer` 行与子树、coordinator 三条 `tool-subagent` 行（id/toolName/agentPreset 互异）、worker 不变（agent-presets「Coordinator and worker preset rows」「Preset plugin subtrees」）；`profile:smoke` 断言四 preset、三委派行、宿主 subagent/provider 各一次（shud-profile「Profile composition」「Local profile smoke」、agent-presets「Profile smoke covers presets」）。**首条断言**为 dump-config 三委派行且 `toolName` 互异；若宿主拒绝同包三行，按 Seam-only 报告偏差并停止（design D11/O4）。
-- [ ] 6.2b 依赖 6.2a。`profile-patch.ts` headless 禁用四个 preset 行（扩展既有两行逻辑，原子发布不变；shud-profile「Idempotent profile installation」）；`profile:smoke` 断言 headless 四行禁用。
+- [x] 6.2b 依赖 6.2a。`profile-patch.ts` headless 禁用四个 preset 行（扩展既有两行逻辑，原子发布不变；shud-profile「Idempotent profile installation」）；`profile:smoke` 断言 headless 四行禁用。
 - [ ] 6.2c 依赖 6.2b、5.2、5.3、5.5。真实 Web session log 证明四角色 header 与 coordinator `header.tools` 含三委派工具、coder/reviewer 的 `header.tools` 为各自 inherited（agent-presets「Role tool surface restriction」）；`instructions/agents/shared.md` 的 Runtime Lifecycle 段（四 preset、三委派、headless 四行、治理根写保护）同步并 `pnpm run instructions:render`，CI 比对无漂移。
 
 - Suggested fixture level: expanded - 生产 profile 配置、安装器写入、角色工具面（Critical Path #1）
@@ -536,6 +536,14 @@
 - Legacy/file IO/resource: extract only existing preset checks into one helper to keep every touched file below1000; remove originals. Preserve all existing profile install/YAML dialect/raw byte/idempotence/atomicity, capture aliases, secret output, invalid shudBin boot and process-group cleanup scenarios. Keep existing headless two-target checks intact; new four-target headless contract remains #544.
 - Runtime/docs/release: parent exercises real temporary profile install and pinned-host dumps/smoke, pnpm run check/test-guardrails, strict fixture and generated hashes; CI profile-smoke plus all seven companion jobs green at frozen head. OpenSpec records shipped Web assembly and headless/Web-session limits; no new docs file or package behavior.
 - Non-goals/not-selected: no profile-patch.ts, package/core/policy source, schemas/dependencies, solver, persisted research records, shared.md generation, real Web tool headers/model sequence or PI approval. No silent skipped/relaxed gate.
+
+### Issue #544 risk and evidence fixture
+
+- Config/API/auth: actual headless dump must contain four uniquely disabled presets and no registry/default; canonical helper rejects any one enabled/missing/duplicate target while Web four-preset expectations stay unchanged. Start with actual two-disabled RED, then minimal writer target-list GREEN.
+- File IO/publication/order: all five targets validate before a single rename. M3 two-preset patch upgrades only missing new targets; existing jobs/preset/raw/comment bytes stay. Same configuration is a bytes/inode/mtime/mode no-op; Web deliberate disabled overrides remain untouched.
+- Errors/path/secrets: each preset duplicate/shared anchor/alias and already-desired shared/alias case must reject precheck/writer/installer with jobs also needing update, controlled file/target diagnostics, no private marker, zero patch/manifest or metadata changes. Retain invalid YAML/UTF-8/nonregular-path cases.
+- Resource/legacy: parent independent CLI writer oracle observes exactly one rename for valid five-target update, none for rejected/precheck/no-op and no temp leftovers. Existing atomic publisher, cleanup, source-range dialect, inert tags, flow/CRLF/indent/document-end/missing disabled-field tests are reused, not rewritten or relaxed.
+- Runtime/docs: focused real install/dump and independent writer smoke, default check/profile:smoke/test-guardrails/strict/generated hashes, three-seat whitebox review and exact-head8job CI. Schema/new concurrency/solver/resource-setting packs not selected because unchanged; no bundle/packages/host changes or Web/PI claims.
 
 
 ## 7. 回放脚本、工作区准备与控制面登记
