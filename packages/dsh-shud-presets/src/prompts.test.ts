@@ -132,6 +132,13 @@ describe("coordinator prompt orchestration contract", () => {
     expect(wait).toMatch(/collected|已收集/i);
   });
 
+  it("retains the returned task identity while task creation persists the source pin internally", () => {
+    const creation = paragraphMatching(coordinator, /\btask_create\b.*\bcode_change\b/);
+    expect(creation).toMatch(/retain.*returned\s+task_id/i);
+    expect(creation).not.toMatch(/\b(?:retain|keep)\b[^.\n]*\bsource_base_commit\b/i);
+    expect(creation).toMatch(/tool.*(?:pin|persist).*source_base_commit.*internally/i);
+  });
+
   it("orders the eight code_change stages through explicit delegates and preserves PI approval", () => {
     const text = coordinator.replace(/`/g, "").replace(/\r/g, "");
     const flow = text

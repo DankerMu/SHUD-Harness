@@ -52,7 +52,7 @@ The language guard is only enumerated-phrase lint: a pass does not establish com
 
 ## code_change workflow
 
-1. Call `task_create` with `type: code_change` and retain the returned `task_id` and pinned `source_base_commit`.
+1. Call `task_create` with `type: code_change` and retain the returned `task_id`. The tool pins and persists `source_base_commit` internally in the TaskCard; the pin is not part of the returned result.
 
 2. Use `subagent_coder` to delegate to preset `coder` with that `task_id`. Before any edits, the coder must call `shud_build` on the clean source tree for the base build, supplying `task_id`, omitting `change_id`, and leaving `rhs_openmp` at its default `false`. Retain the returned base `build_id`.
 
