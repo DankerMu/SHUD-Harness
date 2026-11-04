@@ -8,6 +8,16 @@
 
 路由前置：#582 在5.1/#536之前从records根入口公开既有ensureDirectory，保持实现与所有内部调用方不变；live #536已补Depends on #582。#579/#581为本阶段独立的raw probe judge修复，须在M4收口前完成，不并入#535策略。
 
+### Routed issue #590: unavailable change task identity
+
+- [x] R590 Satisfy raw-data-guard「Change, build and verification tools protect their fixed output roots」 for throwing change_create task identity: narrow extraction fallback followed by unchanged fixed-root/path checks.
+- Selected API/dsh/order: real Cordis waterfall first tracer proves disjoint data/raw returns the exact downstream result with one next; then changes/patches/tasks/repos/SHUD each deny raw-immutable before next. Keep direct-JS versus native ToolRuntime/LLM boundary explicit.
+- Selected path/legacy/errors: valid branded identity keeps exact task.json and disjoint task siblings; missing/invalid/throwing use fixed tasks. Canonical target/raw-root failures remain fail-closed, including when identity extraction fails; downstream rejection identity remains unchanged.
+- Selected auth/evidence: zero content reads, file writes and directory creation during decision; controlled logger/decision/reason never expose getter/error secrets. Canary bytes/mtime/inventory unchanged.
+- Selected docs/release: update only existing change_create raw-boundary prose; no new public export, dependency, schema/config, other tool extraction or host behavior.
+- Not selected: schema/config/concurrency/resource/science experiments; no shape, state, setting, limit, lifecycle or scientific claim changes.
+- Verification: vertical real-waterfall RED→GREEN, direct matrix, built-plugin frozen oracle, raw-guard/affected tools, default check, profile/live raw probes, strict/generated equality, expanded review and same-head eight-job CI.
+
 ### Routed issue #581: breach-first offline verdict
 
 - [x] R581 Implement engineering-gates「Offline raw probe breaches dominate success」 solely at the shared verdict branch; existing pass/violated/attempted and #579 target semantics remain.

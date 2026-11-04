@@ -45,6 +45,18 @@
 - **WHEN** 以 `task_id: "TASK-0001"` 调用 `verification_run`、以缺失 `change_id` 调用 `change_submit`，或 `arguments` 为 `null`；rawDirs 分别为 `tasks` 与 `changes`
 - **THEN** 不拼接非法 id 路径、不抛错，按固定根 `tasks` 或 `changes` 判定为 raw-immutable 拒绝；rawDirs 改为 `data/raw` 时委托下一个监听器，由工具参数校验拒绝
 
+#### Scenario: unavailable change task identity still checks every fixed target
+- **WHEN** a direct JavaScript tools/pre-execute call to change_create has a task_id getter that throws, and rawDirs is respectively changes, patches, tasks or repos/SHUD
+- **THEN** identity extraction uses fixed tasks, every applicable fixed target remains protected, and the guard returns raw-immutable before next without content reads, writes, mkdir or private error payloads in decisions/logs
+
+#### Scenario: disjoint unavailable task identity preserves downstream behavior
+- **WHEN** the same direct waterfall call has only disjoint data/raw configured
+- **THEN** next is called exactly once and its returned result or rejection is preserved; native ToolRuntime or model support for accessor-bearing JSON is not implied
+
+#### Scenario: identity fallback does not swallow path failures
+- **WHEN** change_create task identity is unavailable and a configured raw root or fixed target cannot be canonically resolved
+- **THEN** the existing path failure boundary remains fail-closed and next is not called
+
 #### Scenario: argument text does not affect the decision
 - **WHEN** rawDirs 为 `data/raw`，`change_create` 的 `description` 含 `data/raw/x` 文本
 - **THEN** 不因参数文本而拒绝，继续到下一个监听器
