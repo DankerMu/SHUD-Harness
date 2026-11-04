@@ -20,7 +20,7 @@ for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR
 }
 
 function git(directory, ...arguments_) {
-  return execFileSync('git', ['-C', directory, '-c', `core.hooksPath=${devNull}`, ...arguments_], {
+  return execFileSync('git', ['-C', directory, '-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false', ...arguments_], {
     env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 60000, maxBuffer: 16 * 1024 * 1024,
   }).trim();
@@ -111,6 +111,9 @@ try {
   const basin = dirname(dirname(source));
   const forcing = join(basin, 'forcing.trimmed');
   if (!stat(forcing)?.isDirectory()) throw new Error(`missing/unsafe forcing.trimmed directory: ${forcing}`);
+  if (/[ \t\r\n\v\f]/.test(forcing)) {
+    throw new Error(`physical forcing path contains whitespace: ${forcing}; move the source basin to a path without whitespace for the pinned SHUD reader`);
+  }
 
   workspace = physicalWorkspace(isAbsolute(args[0]) ? args[0] : `${process.cwd()}${sep}${args[0]}`);
   checkAncestors(workspace);

@@ -28,7 +28,7 @@ type ConstructedInput = {
 };
 
 function git(directory: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", directory, ...args], {
+  return execFileSync("git", ["-C", directory, "-c", "core.fsmonitor=false", ...args], {
     env: gitEnv,
     encoding: "utf8",
     timeout: 10000,
@@ -56,8 +56,7 @@ function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function rootState() {
-  const rootShud = join(harness, "SHUD");
+function rootState(rootShud = join(harness, "SHUD")) {
   const gitDir = git(rootShud, "rev-parse", "--absolute-git-dir");
   const dotGit = join(rootShud, ".git");
   return {
@@ -71,7 +70,7 @@ function rootState() {
 }
 
 function constructedInput(root: string): ConstructedInput {
-  const basin = join(root, "constructed basin");
+  const basin = join(root, "constructed-basin");
   const source = join(basin, "input", "keliya");
   const forcing = join(basin, "forcing.trimmed");
   fs.mkdirSync(source, { recursive: true });
@@ -82,8 +81,8 @@ function constructedInput(root: string): ConstructedInput {
     "# constructed input\r\nSTART  12053\r\nNUM_OPENMP\t1\r\nEND\t12143\r\n# keep  spacing \r\n";
   const stations = Array.from({ length: 32 }, (_, index) => `station-${index + 1}.csv`);
   const table =
-    "ID\tLon\tLat\tFilename\r\n" +
-    stations.map((name, index) => `${index + 1}\t80.5\t35.5\t${name}\r\n`).join("");
+    "ID\tLon\tLat\tX\tY\tZ\tFilename\r\n" +
+    stations.map((name, index) => `${index + 1}\t80.5\t35.5\t0\t0\t1000\t${name}\r\n`).join("");
   const originalForc = `32 19510101\r\n/obsolete/machine/forcing\r\n${table}`;
   const expectedForc = `32 19510101\r\n${forcing}\r\n${table}`;
   const unchanged = Buffer.from([0, 255, 13, 10, 32, 128]);
@@ -128,19 +127,23 @@ function tree(directory: string, prefix = ""): Record<string, string | Buffer> {
     if (entry.isDirectory()) {
       result[key] = "directory";
       Object.assign(result, tree(path, key));
+    } else if (entry.isSymbolicLink()) {
+      result[key] = fs.readlinkSync(path);
+    } else if (entry.isFile()) {
+      result[key] = fs.readFileSync(path);
     } else {
-      result[key] = entry.isSymbolicLink() ? fs.readlinkSync(path) : fs.readFileSync(path);
+      result[key] = `special:${fs.lstatSync(path).mode}`;
     }
   }
   return result;
 }
 
-function invoke(cwd: string, args: string[], overrides: NodeJS.ProcessEnv = {}) {
+function invoke(cwd: string, args: string[], overrides: NodeJS.ProcessEnv = {}, entry = script) {
   const env: NodeJS.ProcessEnv = { ...gitEnv };
   delete env.SHUD_REPLAY_KELIYA;
   Object.assign(env, overrides);
   const before = rootState();
-  const result = spawnSync("sh", [script, ...args], {
+  const result = spawnSync("sh", [entry, ...args], {
     cwd,
     env,
     encoding: "utf8",
@@ -166,6 +169,17 @@ function expectPreflightFailure(
   expect(result.status, result.stderr).not.toBe(0);
   expect(result.stderr).toMatch(diagnostic);
   expect(tree(fixture.root)).toEqual(before);
+}
+
+function isolatedHarness(root: string) {
+  const isolated = join(root, "isolated-harness");
+  const runtime = join(isolated, "scripts", "runtime");
+  const entry = join(runtime, "shud-replay-prepare.sh");
+  const repo = join(isolated, "SHUD");
+  fs.mkdirSync(runtime, { recursive: true });
+  fs.copyFileSync(script, entry);
+  git(root, "clone", "--local", "--no-hardlinks", "--", join(harness, "SHUD"), repo);
+  return { entry, repo };
 }
 
 test("prepares an independent pinned checkout and exactly two input rewrites without changing sources", () => {
@@ -298,6 +312,20 @@ test("rejects 32 forcing rows that reference only 31 distinct files before creat
       [fixture.workspace, "--keliya", fixture.source],
       /distinct|duplicate|32.*(?:file|reference)/i,
     );
+  });
+}, 120000);
+
+test("rejects a physical forcing path with whitespace before creating outputs", () => {
+  withFixture((fixture) => {
+    const basin = join(fixture.root, "physical basin");
+    fs.renameSync(fixture.basin, basin);
+    const source = join(basin, "input", "keliya");
+    const before = tree(fixture.root);
+    const result = invoke(fixture.cwd, [fixture.workspace, "--keliya", source]);
+    expect(result.status, result.stderr).not.toBe(0);
+    expect(result.stderr).toMatch(/forcing.*(?:whitespace|space)/i);
+    expect(result.stderr).toMatch(/move|relocat|without/i);
+    expect(tree(fixture.root)).toEqual(before);
   });
 }, 120000);
 
@@ -485,5 +513,257 @@ test("retains a real clone and preserves sources when checkout fails", () => {
     expect(git(checkout, "remote", "get-url", "origin")).toBe(join(harness, "SHUD"));
     expect(fs.existsSync(join(fixture.workspace, "input"))).toBe(false);
     expect(bytes(fixture.basin)).toEqual(sourceBefore);
+  });
+}, 120000);
+
+test("does not invoke a configured fsmonitor command while observing the source repository", () => {
+  withFixture((fixture) => {
+    const { entry, repo } = isolatedHarness(fixture.root);
+    const monitor = join(fixture.root, "fsmonitor-command");
+    const sentinel = join(fixture.root, "fsmonitor-invoked");
+    fs.writeFileSync(
+      monitor,
+      '#!/bin/sh\nprintf "%s\\n" invoked > "$SHUD_REPLAY_MONITOR_SENTINEL"\n' +
+        "printf 'fixture-token\\0/\\0'\n",
+      { mode: 0o755 },
+    );
+    git(repo, "config", "core.fsmonitor", monitor);
+    git(repo, "config", "core.fsmonitorHookVersion", "2");
+    const before = rootState(repo);
+    const inputBefore = bytes(fixture.basin);
+    expect(fs.existsSync(sentinel)).toBe(false);
+    const result = invoke(
+      fixture.cwd,
+      [fixture.workspace, "--keliya", fixture.source],
+      { SHUD_REPLAY_MONITOR_SENTINEL: sentinel },
+      entry,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(fs.existsSync(sentinel)).toBe(false);
+    expect(rootState(repo)).toEqual(before);
+    expect(bytes(fixture.basin)).toEqual(inputBefore);
+    expect(git(join(fixture.workspace, "repos", "SHUD"), "rev-parse", "HEAD")).toBe(pinnedCommit);
+  });
+}, 120000);
+
+test.each([
+  "missing directory",
+  "wrong layout",
+  "non-directory",
+  "existing PREPARED",
+  "symlink input",
+  "special input",
+])(
+  "rejects source with %s before creating outputs",
+  (kind) => {
+    withFixture((fixture) => {
+      let source = fixture.source;
+      if (kind === "missing directory") {
+        source = join(fixture.root, "nonexistent-source");
+      } else if (kind === "wrong layout") {
+        source = join(fixture.root, "misplaced-keliya");
+        fs.renameSync(fixture.source, source);
+      } else if (kind === "non-directory") {
+        fs.rmSync(source, { recursive: true });
+        fs.writeFileSync(source, "not a source directory\n");
+      } else if (kind === "existing PREPARED") {
+        fs.writeFileSync(join(source, "PREPARED.json"), '{"keep":"existing metadata"}\n');
+      } else if (kind === "symlink input") {
+        fs.symlinkSync(join(source, "keliya.mesh"), join(source, "linked.mesh"));
+      } else {
+        execFileSync("mkfifo", [join(source, "special.mesh")], { timeout: 10000 });
+      }
+      expectPreflightFailure(
+        fixture,
+        [fixture.workspace, "--keliya", source],
+        /ENOENT|directory|PREPARED|ordinary/i,
+      );
+    });
+  },
+  120000,
+);
+
+test.each(["missing", "duplicate"])(
+  "rejects %s NUM_OPENMP lines before outputs",
+  (kind) => {
+    withFixture((fixture) => {
+      fs.writeFileSync(
+        join(fixture.source, "keliya.cfg.para"),
+        kind === "missing"
+          ? fixture.originalCfg.replace("NUM_OPENMP 8\r\n", "")
+          : fixture.originalCfg + "NUM_OPENMP 4\r\n",
+      );
+      expectPreflightFailure(
+        fixture,
+        [fixture.workspace, "--keliya", fixture.source],
+        /exactly one.*NUM_OPENMP|NUM_OPENMP.*(?:one|exactly)/i,
+      );
+    });
+  },
+  120000,
+);
+
+test.each([
+  {
+    name: "invalid UTF-8",
+    mutate: (value: string) => Buffer.concat([Buffer.from(value), Buffer.from([0xc3, 0x28])]),
+    diagnostic: /utf|encoded/i,
+  },
+  {
+    name: "NUL",
+    mutate: (value: string) => value.replace("obsolete", "obsolete\0"),
+    diagnostic: /forc|reference/i,
+  },
+  {
+    name: "wrong declared count",
+    mutate: (value: string) => value.replace("32 19510101", "31 19510101"),
+    diagnostic: /32|reference/i,
+  },
+  {
+    name: "missing lines",
+    mutate: () => "32 19510101\r\n/unused\r\n",
+    diagnostic: /32|reference/i,
+  },
+  {
+    name: "wrong header",
+    mutate: (value: string) => value.replace("Filename", "File"),
+    diagnostic: /Filename|table/i,
+  },
+  {
+    name: "too few rows",
+    mutate: (value: string) => value.split("\r\n").slice(0, -2).join("\r\n") + "\r\n",
+    diagnostic: /32|table/i,
+  },
+  {
+    name: "too many rows",
+    mutate: (value: string) => value + "33\t80.5\t35.5\t0\t0\t1000\tstation-1.csv\r\n",
+    diagnostic: /32|table/i,
+  },
+  {
+    name: "short row",
+    mutate: (value: string) => value.replace("1\t80.5\t35.5\t0\t0\t1000\t", "1\t"),
+    diagnostic: /matching|table/i,
+  },
+  {
+    name: "wide row",
+    mutate: (value: string) =>
+      value.replace("1\t80.5\t35.5\t0\t0\t1000\t", "1\t80.5\t35.5\t0\t0\t1000\t0\t"),
+    diagnostic: /matching|table/i,
+  },
+])(
+  "rejects a manifest with $name before outputs",
+  ({ mutate, diagnostic }) => {
+    withFixture((fixture) => {
+      fs.writeFileSync(join(fixture.source, "keliya.tsd.forc"), mutate(fixture.originalForc));
+      expectPreflightFailure(fixture, [fixture.workspace, "--keliya", fixture.source], diagnostic);
+    });
+  },
+  120000,
+);
+
+test.each(["absolute", "escaping", "canonical alias"])(
+  "rejects a %s forcing reference without source changes",
+  (kind) => {
+    withFixture((fixture) => {
+      const outside = join(fixture.root, "outside.csv");
+      fs.writeFileSync(outside, "keep outside forcing bytes\n");
+      const filename =
+        kind === "absolute"
+          ? join(fixture.forcing, "station-1.csv")
+          : kind === "escaping"
+            ? "../../outside.csv"
+            : "./station-1.csv";
+      fs.writeFileSync(
+        join(fixture.source, "keliya.tsd.forc"),
+        fixture.originalForc.replace("station-32.csv", filename),
+      );
+      expectPreflightFailure(
+        fixture,
+        [fixture.workspace, "--keliya", fixture.source],
+        /unsafe|distinct/i,
+      );
+    });
+  },
+  120000,
+);
+
+test.each([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+])(
+  "isolates %s from source observation and destination creation",
+  (variable) => {
+    withFixture((fixture) => {
+      const bogus = join(fixture.root, "bogus-git-location");
+      fs.mkdirSync(bogus);
+      fs.writeFileSync(join(bogus, "keep"), "keep bogus locator bytes\n");
+      const before = tree(bogus);
+      const sourceBefore = bytes(fixture.basin);
+      const result = invoke(fixture.cwd, [fixture.workspace, "--keliya", fixture.source], {
+        [variable]: join(bogus, "redirect-target"),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const checkout = join(fixture.workspace, "repos", "SHUD");
+      expect(git(checkout, "rev-parse", "HEAD")).toBe(pinnedCommit);
+      expect(git(checkout, "rev-parse", "--absolute-git-dir")).toBe(join(checkout, ".git"));
+      expect(git(checkout, "remote", "get-url", "origin")).toBe(join(harness, "SHUD"));
+      expect(tree(bogus)).toEqual(before);
+      expect(bytes(fixture.basin)).toEqual(sourceBefore);
+    });
+  },
+  120000,
+);
+
+test("reports an isolated source preservation mismatch after a real clone and retains outputs", () => {
+  withFixture((fixture) => {
+    const { entry, repo } = isolatedHarness(fixture.root);
+    const realGit = execFileSync("sh", ["-c", "command -v git"], {
+      env: gitEnv,
+      encoding: "utf8",
+      timeout: 10000,
+    }).trim();
+    expect(isAbsolute(realGit)).toBe(true);
+    const marker = join(repo, ".git", "injected-preservation-marker");
+    const bin = join(fixture.root, "preservation-shim");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(
+      join(bin, "git"),
+      '#!/bin/sh\nfor arg do\n  if [ "$arg" = clone ]; then\n' +
+        '    "$SHUD_REPLAY_REAL_GIT" "$@" || exit "$?"\n' +
+        '    printf "%s\\n" injected > "$SHUD_REPLAY_PRESERVATION_MARKER"\n' +
+        '    exit 0\n  fi\ndone\nexec "$SHUD_REPLAY_REAL_GIT" "$@"\n',
+      { mode: 0o755 },
+    );
+    const before = rootState(repo);
+    const inputBefore = bytes(fixture.basin);
+    const result = invoke(
+      fixture.cwd,
+      [fixture.workspace, "--keliya", fixture.source],
+      {
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+        SHUD_REPLAY_REAL_GIT: realGit,
+        SHUD_REPLAY_PRESERVATION_MARKER: marker,
+      },
+      entry,
+    );
+    expect(result.status, result.stderr).not.toBe(0);
+    expect(result.stderr).toMatch(/root SHUD.*(?:preservation|changed)/i);
+    expect(result.stderr).toMatch(/retain|kept/i);
+    expect(result.stderr).toContain(fixture.workspace);
+    expect(fs.readFileSync(marker, "utf8")).toBe("injected\n");
+    expect(rootState(repo)).toEqual({
+      ...before,
+      inventory: [...before.inventory, "injected-preservation-marker"].sort(),
+    });
+    const checkout = join(fixture.workspace, "repos", "SHUD");
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(pinnedCommit);
+    expect(git(checkout, "remote", "get-url", "origin")).toBe(repo);
+    expect(fs.existsSync(join(fixture.workspace, "input", "keliya", "PREPARED.json"))).toBe(true);
+    expect(bytes(fixture.basin)).toEqual(inputBefore);
   });
 }, 120000);
