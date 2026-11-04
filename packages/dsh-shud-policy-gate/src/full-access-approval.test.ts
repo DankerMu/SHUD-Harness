@@ -26,6 +26,7 @@ import {
   CHANGE_ID,
   REPORT_ID,
   snapshotFile,
+  writeChangeSentinel,
   writeProposedChange,
   writeReport,
 } from "./test-harness.ts";
@@ -106,7 +107,11 @@ async function profileOverrides() {
   };
 }
 
-async function mountApprovalHarness(realChangeTools = false, rawDirs?: (cwd: string) => string[]) {
+async function mountApprovalHarness(
+  realChangeTools = false,
+  rawDirs?: (cwd: string) => string[],
+  approvalService = true,
+) {
   const config = await profileOverrides();
   const cwd = await mkdtemp(join(tmpdir(), "shud-full-access-approval-"));
   const ctx = new Context();
@@ -144,7 +149,7 @@ async function mountApprovalHarness(realChangeTools = false, rawDirs?: (cwd: str
     await ctx.plugin(SessionStore);
     await ctx.plugin(SessionProjectionRegistry);
     await ctx.plugin(SystemPrompt);
-    await ctx.plugin(ApprovalService, config.approval);
+    if (approvalService) await ctx.plugin(ApprovalService, config.approval);
     // Only the filesystem executor's composition default is consumed; no shell runs.
     ctx.provide("shell", {
       sandboxMode: config.startup,
@@ -158,7 +163,10 @@ async function mountApprovalHarness(realChangeTools = false, rawDirs?: (cwd: str
         throw new Error("This approval regression must not execute a shell");
       },
     });
-    await ctx.plugin(PermissionPresetService, config.permission);
+    // Keep the genuine profile-configured plugin registered. Without approval its required
+    // injection cannot activate; never substitute a provider or claim a selected permission mode.
+    const permissionFiber = ctx.plugin(PermissionPresetService, config.permission);
+    if (approvalService) await permissionFiber;
     await ctx.plugin(ToolRuntime, { mode: "native" });
     if (rawDirs) await ctx.plugin(rawGuard, { rawDirs: rawDirs(cwd) });
     await ctx.plugin(policyGate);
@@ -473,7 +481,8 @@ test("held high-risk change_submit approves only after allowed-once with the exe
   const h = await mountApprovalHarness(true);
   try {
     const fixture = await writeProposedChange(h.cwd);
-    const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath];
+    const sibling = await writeChangeSentinel(h.cwd, fixture.change);
+    const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath, ...sibling.paths];
     const before = await Promise.all(paths.map(snapshotFile));
     const held = h.hold();
     h.ctx.permissionPresets.set(h.session, "danger-full-access");
@@ -535,6 +544,7 @@ test("held high-risk change_submit approves only after allowed-once with the exe
     expect(approved.updated_at).not.toBe(fixture.change.updated_at);
     expect(await snapshotFile(fixture.taskPath)).toEqual(before[1]);
     expect(await snapshotFile(fixture.patchPath)).toEqual(before[2]);
+    expect(await Promise.all(sibling.paths.map(snapshotFile))).toEqual(sibling.before);
     expect(decisions(h.session)).toMatchObject([
       { data: { id: asked[0]?.data.id, outcome: "allowed-once" } },
     ]);
@@ -549,7 +559,8 @@ test.each(["rejected", "cancelled", "unavailable"] as const)(
     const h = await mountApprovalHarness(true);
     try {
       const fixture = await writeProposedChange(h.cwd);
-      const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath];
+      const sibling = await writeChangeSentinel(h.cwd, fixture.change);
+      const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath, ...sibling.paths];
       const before = await Promise.all(paths.map(snapshotFile));
       // No answerer exercises the real ApprovalService unavailable outcome.
       const held = outcome === "unavailable" ? undefined : h.hold();
@@ -587,6 +598,7 @@ test("change_submit rechecks patch bytes changed while high-risk approval is hel
   const h = await mountApprovalHarness(true);
   try {
     const fixture = await writeProposedChange(h.cwd);
+    const sibling = await writeChangeSentinel(h.cwd, fixture.change);
     const changeBefore = await snapshotFile(fixture.changePath);
     const taskBefore = await snapshotFile(fixture.taskPath);
     const patchBefore = await snapshotFile(fixture.patchPath);
@@ -601,6 +613,7 @@ test("change_submit rechecks patch bytes changed while high-risk approval is hel
     expect(await snapshotFile(fixture.changePath)).toEqual(changeBefore);
     expect(await snapshotFile(fixture.taskPath)).toEqual(taskBefore);
     expect(await snapshotFile(fixture.patchPath)).toEqual(patchBefore);
+    expect(await Promise.all(sibling.paths.map(snapshotFile))).toEqual(sibling.before);
     await writeFile(fixture.patchPath, "abd");
     const mutatedPatch = await snapshotFile(fixture.patchPath);
     held.answer.resolve("allowed-once");
@@ -615,6 +628,7 @@ test("change_submit rechecks patch bytes changed while high-risk approval is hel
     expect(await snapshotFile(fixture.changePath)).toEqual(changeBefore);
     expect(await snapshotFile(fixture.taskPath)).toEqual(taskBefore);
     expect(await snapshotFile(fixture.patchPath)).toEqual(mutatedPatch);
+    expect(await Promise.all(sibling.paths.map(snapshotFile))).toEqual(sibling.before);
     expect(readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true })).toEqual(
       fixture.change,
     );
@@ -889,3 +903,46 @@ test.each(["patches", "tasks", "repos/SHUD", "changes/CHG-20261102T090000-ffff.j
     }
   },
 );
+
+test("high-risk change_submit without ApprovalService fails closed before actual handler dispatch", async () => {
+  const h = await mountApprovalHarness(true, undefined, false);
+  try {
+    expect(h.ctx.get("approval")).toBeUndefined();
+    // The real permission plugin requires approval injection and is therefore inactive.
+    expect(h.ctx.get("permissionPresets")).toBeUndefined();
+    const fixture = await writeProposedChange(h.cwd);
+    const sibling = await writeChangeSentinel(h.cwd, fixture.change);
+    const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath, ...sibling.paths];
+    const before = await Promise.all(paths.map(snapshotFile));
+    const held = h.hold();
+    h.session.append("turn/start", { turn: 1 });
+    const operation = h.call("change_submit");
+    expect(readCallerPresetId(operation.agent)).toBe("coder");
+    expect(h.ctx.tools.schemas(operation.agent).map((tool) => tool.name)).toContain(
+      "change_submit",
+    );
+    expect(await Promise.race([operation.done, held.dispatched, h.watchdog])).toMatchObject({
+      kind: "settled",
+      result: {
+        isError: true,
+        error: { message: `${policyGate.CHANGE_APPROVAL_REASON_PREFIX} ${CHANGE_ID}` },
+      },
+    });
+    expect(h.executions).toEqual([]);
+    expect(held.requests).toEqual([]);
+    // No service means no approval/request or approval audit pair, not an unavailable decision.
+    expect(h.session.snapshotEvents().filter((event) => event.type === "approval/asked")).toEqual(
+      [],
+    );
+    expect(decisions(h.session)).toEqual([]);
+    expect(h.logs.filter((row) => row.name === "shud-policy-gate").map((row) => row.args)).toEqual([
+      [`ask change_submit change-approval ${CHANGE_ID} numerical_implementation`],
+    ]);
+    expect(readWorkspaceRecord(h.cwd, "change", CHANGE_ID, { readonly: true })).toEqual(
+      fixture.change,
+    );
+    expect(await Promise.all(paths.map(snapshotFile))).toEqual(before);
+  } finally {
+    await h.dispose();
+  }
+});

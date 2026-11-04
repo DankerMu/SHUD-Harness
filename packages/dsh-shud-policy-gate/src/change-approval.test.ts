@@ -364,3 +364,41 @@ test("throwing change identity accessor asks without leaking exception or touchi
     await h.dispose();
   }
 });
+
+test.each(["data/raw", "changes"])(
+  "raw-before-policy handles throwing change identity against raw %s",
+  async (raw) => {
+    const h = await createPolicyHarness({ preset: "coder", rawDirs: [raw] });
+    try {
+      // Exercise the public waterfall, not native argument materialization, which rejects getters.
+      const input = Object.defineProperty({}, "change_id", {
+        get() {
+          throw new Error("PRIVATE_CHANGE_ID_ACCESSOR");
+        },
+      });
+      vi.clearAllMocks();
+      const decision = await h.decide("change_submit", input);
+      if (raw === "changes") {
+        expect(decision.kind).toBe("deny");
+        expect(h.policyLogs()).toEqual([]);
+        expect(
+          h.logs.filter((row) => row.name === "shud-raw-guard").map((row) => row.args),
+        ).toEqual([["deny change_submit raw-immutable"]]);
+      } else {
+        const display = expectAsk(decision);
+        expect(display.reason).toBe(`${CHANGE_APPROVAL_REASON_PREFIX} ${INVALID_CHANGE_ID_MARKER}`);
+        expect(h.policyLogs()).toEqual([["ask change_submit change-approval"]]);
+        expect(h.logs.filter((row) => row.name === "shud-raw-guard")).toEqual([]);
+      }
+      expect(JSON.stringify(decision)).not.toContain("PRIVATE_CHANGE_ID_ACCESSOR");
+      expect(JSON.stringify(h.logs)).not.toContain("PRIVATE_CHANGE_ID_ACCESSOR");
+      expect(h.next).not.toHaveBeenCalled();
+      expect(h.request).not.toHaveBeenCalled();
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+      noWrites();
+      expect(native.readdirSync(h.cwd)).toEqual([]);
+    } finally {
+      await h.dispose();
+    }
+  },
+);

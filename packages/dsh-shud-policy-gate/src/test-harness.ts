@@ -141,6 +141,24 @@ export async function writeProposedChange(cwd: string, overrides: Partial<Change
   return { change, changePath, patchPath, taskPath };
 }
 
+export async function writeChangeSentinel(cwd: string, original: ChangeRequest) {
+  const change = ChangeRequestSchema.parse({
+    ...original,
+    change_id: "CHG-20261102T090000-ffff",
+    patch_path: "patches/CHG-20261102T090000-ffff.patch",
+    // Independent SHA256 known-answer vector for the exact five bytes "hello".
+    patch_sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    description: "Unrelated retained change and patch sentinel.",
+  });
+  const paths = [
+    join(cwd, "changes", `${change.change_id}.json`),
+    join(cwd, change.patch_path),
+  ] as const;
+  await writeFile(paths[0], `${JSON.stringify(change)}\n`);
+  await writeFile(paths[1], "hello");
+  return { change, paths, before: await Promise.all(paths.map(snapshotFile)) };
+}
+
 export function expectAsk(decision: PreToolDecision) {
   expect(decision.kind).toBe("ask");
   if (decision.kind !== "ask") throw new Error("Expected policy approval request");

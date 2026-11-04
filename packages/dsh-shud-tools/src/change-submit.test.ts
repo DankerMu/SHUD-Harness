@@ -9,6 +9,7 @@ import {
   failure,
   snapshotFile,
   submitHarness,
+  writeChangeSentinel,
   writeProposedChange,
 } from "./change-submit/test-harness.ts";
 
@@ -214,16 +215,24 @@ test("canonical rename failure preserves proposed CR and reports only controlled
   const h = await submitHarness();
   try {
     const fixture = await writeProposedChange(h.cwd);
-    const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath];
+    const sibling = await writeChangeSentinel(h.cwd, fixture.change);
+    const paths = [fixture.changePath, fixture.taskPath, fixture.patchPath, ...sibling.paths];
     const before = await Promise.all(paths.map(snapshotFile));
+    vi.mocked(fs.renameSync).mockClear();
     vi.mocked(fs.renameSync).mockImplementation((from, to) => {
       if (to === fixture.changePath)
         throw Object.assign(new Error("PRIVATE_RENAME_CAUSE"), { code: "EIO" });
       native.renameSync(from, to);
     });
     failure(await h.submit(), /write/iu);
+    expect(vi.mocked(fs.renameSync).mock.calls.map(([, target]) => target)).toEqual([
+      fixture.changePath,
+    ]);
     expect(await Promise.all(paths.map(snapshotFile))).toEqual(before);
-    expect(native.readdirSync(join(h.cwd, "changes"))).toEqual([`${CHANGE_ID}.json`]);
+    expect(native.readdirSync(join(h.cwd, "changes")).sort()).toEqual([
+      `${CHANGE_ID}.json`,
+      `${sibling.change.change_id}.json`,
+    ]);
   } finally {
     await h.dispose();
   }

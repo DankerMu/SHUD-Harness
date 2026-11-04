@@ -488,16 +488,22 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
     return options.rawDirs.some((raw) => containsRawPath(canonical(raw, cwd), tasks)) ? DENY : NEXT;
   }
   if (call.name === "change_submit") {
+    let targetPath = "changes";
     try {
-      const cwd = call.cwd ?? process.cwd();
       const args = call.arguments;
       const fields =
         args && typeof args === "object" && !Array.isArray(args)
           ? (args as Record<string, unknown>)
           : {};
       const id = ChangeIdSchema.safeParse(fields.change_id);
+      if (id.success) targetPath = `changes/${id.data}.json`;
+    } catch {
+      // Unavailable argument identity uses the same fixed fallback as an invalid branded id.
+    }
+    try {
+      const cwd = call.cwd ?? process.cwd();
       // Approval rewrites only this JSON; malformed identity falls back to the changes root.
-      const target = canonical(id.success ? `changes/${id.data}.json` : "changes", cwd);
+      const target = canonical(targetPath, cwd);
       return options.rawDirs.some((raw) => containsRawPath(canonical(raw, cwd), target))
         ? DENY
         : NEXT;

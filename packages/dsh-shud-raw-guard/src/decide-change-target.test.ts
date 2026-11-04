@@ -188,3 +188,24 @@ test("unavailable physical identity fails closed without content reads", () => {
   expect(decide(["unrelated"])).toMatchObject({ kind: "deny" });
   noContentIO();
 });
+
+test.each(["data/raw", "changes"])(
+  "throwing change identity falls back to changes against raw %s",
+  (raw) => {
+    // Public decision seam: native ToolRuntime rejects accessor-bearing non-JSON inputs earlier.
+    const input = Object.defineProperty({}, "change_id", {
+      get() {
+        throw new Error("PRIVATE_CHANGE_ID_ACCESSOR");
+      },
+    });
+    const decision = decide([raw], input);
+    if (raw === "changes") {
+      expect(decision).toMatchObject({ kind: "deny", code: "raw-immutable" });
+    } else {
+      expect(decision).toEqual({ kind: "next", code: "unrelated" });
+    }
+    expect(JSON.stringify(decision)).not.toContain("PRIVATE_CHANGE_ID_ACCESSOR");
+    noContentIO();
+    expect(native.readdirSync(cwd)).toEqual([]);
+  },
+);

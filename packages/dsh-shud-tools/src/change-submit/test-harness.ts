@@ -6,10 +6,11 @@ import { createToolHarness } from "../test-harness.ts";
 import {
   CHANGE_ID,
   snapshotFile,
+  writeChangeSentinel,
   writeProposedChange,
 } from "../../../dsh-shud-policy-gate/src/test-harness.ts";
 
-export { CHANGE_ID, snapshotFile, writeProposedChange };
+export { CHANGE_ID, snapshotFile, writeChangeSentinel, writeProposedChange };
 export async function submitHarness() {
   const h = await createToolHarness({ pumpPollMs: 60_000 });
   return {
