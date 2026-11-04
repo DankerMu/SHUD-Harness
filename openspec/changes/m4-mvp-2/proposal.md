@@ -1,17 +1,17 @@
 # Proposal
 
-## Active issue fixture: #544
+## Active issue fixture: #545
 
-- Issue type: feature; Fixture level: expanded (upstream retained; user-patch ownership, atomic publication and headless authorization assembly). Critical Path #1. Dependency #543 delivered.
-- Scope: scripts/runtime/profile-patch.ts, profile-smoke.sh and the canonical profile-preset-checks.mjs helper introduced by #543; parent-owned OpenSpec fixture. No bundle, package, host, dependency or quality-gate configuration changes.
-- Selected risk packs: Config/API; Auth/secrets; File IO/path safety; Publication/order; Resource cleanup; Error handling; Legacy compatibility; Documentation; Release/runtime compatibility.
-- Governing invariant: headless owns only disabled on four unique preset targets plus the existing whole jobs target; validate all five before one atomic publication. Any unsafe target leaves patch/manifest bytes and metadata unchanged, including already-desired values.
-- Reuse current parser/source-range editor and original-source alias preflight (history 5297ee59); extend target type/list only unless executable evidence exposes an in-scope defect. Web semantics, jobs capture and all non-owned bytes remain unchanged.
-- First vertical: actual headless installation/dump exposes enabled coder/reviewer; the extended permanent headless predicate rejects them before the production target-list change, then the same profile reinstalls to four disabled rows.
-- Evidence: M3 two-target migration preserves original rows/raw/comments; repeated same settings preserve bytes/inode/mtime/mode. Four-role duplicate/shared/aliased and invalid YAML/UTF-8/path fixtures reject through precheck/writer/installer without partial jobs or preset publication.
-- Parent independent writer smoke observes one rename for a valid five-target update, zero for rejection/precheck/no-op, and matching preserved bytes. Existing dialect/flow/CRLF/document-end/Loader metadata controls remain; no new parser or retry.
-- Default check, real profile smoke, guard self-tests, strict validation, generated preservation, three-seat review and exact-head CI gate merge. #545 owns actual Web tools/shared instructions; #547 model replay; #549 PI acceptance.
-- Not selected: schema/research-data migration, new concurrency/locking/timers, solver/units or new resource limits. Existing single-process synchronous transaction is preserved; no claim of external-writer isolation or actual PI approval.
+- Issue type: runtime evidence and documentation; Fixture level: expanded (upstream retained; actual model-visible authorization surfaces). Critical Path #1. Dependencies #544/#537/#538/#540 delivered.
+- Scope: real temporary Web sessions and secret-screened canonical evidence in PR; instructions/agents/shared.md Runtime Lifecycle and its stale profile-smoke matrix wording, then generated AGENTS.md/CLAUDE.md via renderer. Parent-owned OpenSpec fixture. No package/profile/runtime code changes.
+- Selected risk packs: Public Web API/seams; Auth/secrets; Session identity/order; Resource cleanup; Error/evidence integrity; Legacy compatibility; Documentation/generated consistency; Runtime/release compatibility.
+- Governing invariant: all four actual session identities bind to canonical stored roles and request/header tool sets; coordinator makes each explicit delegate call, child parent/catalog identities match, worker/coder/reviewer advertise no delegation tools and create no nested child.
+- Characterization mode: use the unchanged delivered product and actual DMXAPI model, not a fabricated behavioral RED. Freeze the session-evidence judge; qualify wrong role/parent, missing/extra tool, absent delegation or nested-child mutations and restore original evidence to GREEN.
+- Reuse WebHost public HTTP lifecycle, per-session export flush, bounded canonical-log reading and secret screening. One exported temporary DSH_HOME is shared by install/start; own scratch workspace, no solver/domain task or scientific edits. Prompt asks only an engineering role-surface audit.
+- Exact expected tools come from normative role collections, not model prose or a dump-derived union. Persist request/header seq/tool excerpts and stored session header/catalog linkage; system/message is the prompt carrier, never the request header.
+- Update instructions only after real evidence succeeds; retain raw→policy order, inherited/local ownership, rebinding/disposal and unknown-role boundaries, four-preset/five-target headless contract. Renderer alone writes generated files.
+- Required evidence: three real coordinator delegation calls, four canonical role headers/tools, no nested delegates/children, stored-log paths and screened excerpts; full check/profile smoke/render drift/strict and exact-head CI plus critical-path review.
+- Non-goals/not-selected: no business schema/solver/research-data writes, new concurrency/resource policies, approval decisions, replay (#547), PI acceptance (#549), or browser-click evidence. Public Web HTTP/session-log proof is not PI operation. Assembly defects route to their owning issue, never patched into this docs slice.
 
 ## Why
 
