@@ -148,12 +148,17 @@ for (const target of ["changes", "patches", "tasks", "task-directory"]) {
 
 test("native preflight error hides private OS payload and the unclaimed candidate", async () => {
   const before = fileSnapshot(taskPath(h, id));
+  const patches = join(native.realpathSync.native(h.cwd), "patches");
+  let failures = 0;
   vi.mocked(fs.mkdirSync).mockImplementation((...args) => {
-    if (String(args[0]) === join(h.cwd, "patches"))
+    if (String(args[0]) === patches) {
+      failures++;
       throw Object.assign(new Error(PRIVATE), { code: "EIO" });
+    }
     return native.mkdirSync(...args);
   });
   const message = expectToolError(await call(), /patches/iu);
+  expect(failures).toBe(1);
   expect(message).not.toContain(PRIVATE);
   expect(message).not.toContain(first);
   noChangeObjects(h);

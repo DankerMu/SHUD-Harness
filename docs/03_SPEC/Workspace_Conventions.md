@@ -63,6 +63,8 @@ readonly 查询不创建缺失的 cwd、托管根或对象，也不回退到词�
 
 cwd 必须是字符串；非字符串不得隐式回退到进程 cwd，也不得先调用对象的字符串转换。空字符串仍保留旧有相对路径语义，不作为非字符串处理。此检查位于共享托管根边界，不改变 StackLock 配置/仓库元数据采集等调用方原有的校验与观察顺序。
 
+`task_create(code_change)`、`change_create` 与 `shud_build` 共用 source-checkout 边界：在既有受控目录校验内，先对原始 cwd 做 native realpath，再定位并校验固定 `repos/SHUD` 检出与 HEAD，返回同一个物理工作区供后续记录读取、输出目录预检、构建 producer、发布与回滚使用。源码 HEAD、dirty diff 和 patch 必须来自记录实际落盘的工作区，不能把词法同名检出的证据写入物理工作区。品牌/参数校验及已有 TaskCard 的资格检查仍先于 Git；`science_assist` 不进入 source-checkout，也不新增检出存在要求，保留 cwd 尚不存在时的递归创建行为。
+
 原始数据目录 `<data_root>/raw/` **必须位于 workspace root 之外**（ADR-0004 治理不变式：dsh `workspace-write` 沙箱下由 Seatbelt 拒写，`data/raw` 字节保护不依赖字符串扫描）。M3 DataProvenance 记录提交输入副本的文件级 sha256，不在此定义原始数据语义分类。布局以 [Repository Layout §2](../04_IMPLEMENTATION/Repository_Layout.md#2-运行时资产不进代码仓) 为准。
 
 ### 1.3 映射关系

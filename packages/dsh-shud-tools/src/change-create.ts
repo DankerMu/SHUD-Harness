@@ -107,7 +107,7 @@ export function createChangeCreateTool(): ToolDefinition {
       }
       const initial = readEligibleTask(cwd, id.data);
       const pin = initial.source_base_commit;
-      const { sourceDir, head } = await readSourceCheckout(cwd);
+      const { cwd: physicalCwd, sourceDir, head } = await readSourceCheckout(cwd);
       if (head !== pin) {
         throw new Error(`Source checkout repos/SHUD drifted from pinned base ${pin}: HEAD ${head}`);
       }
@@ -118,7 +118,7 @@ export function createChangeCreateTool(): ToolDefinition {
 
       // Git awaits may have admitted other card writers. Reject changed eligibility or pin
       // before directory effects; no await occurs anywhere in the publication stretch below.
-      readEligibleTask(cwd, id.data, head);
+      readEligibleTask(physicalCwd, id.data, head);
       const now = new Date();
       const derived = deriveChangeRequest({
         change_id: createBrandedId("CHG", now),
@@ -133,7 +133,7 @@ export function createChangeCreateTool(): ToolDefinition {
       // A pure candidate is not an owned object. Directory failures never expose its id.
       for (const target of ["changes", "patches", "tasks", `tasks/${id.data}`]) {
         try {
-          ensureDirectory(join(cwd, target), "Change output");
+          ensureDirectory(join(physicalCwd, target), "Change output");
         } catch {
           throw new Error(`change_create directory preflight failed: ${target}`);
         }
@@ -141,7 +141,7 @@ export function createChangeCreateTool(): ToolDefinition {
 
       let change: ChangeRequest | undefined;
       try {
-        change = createChangeRequest(cwd, derived.record);
+        change = createChangeRequest(physicalCwd, derived.record);
       } catch (error) {
         // The canonical publisher knows the actual collision-reallocated id, including
         // a committed record whose temporary-name cleanup failed before returning.
@@ -149,15 +149,15 @@ export function createChangeCreateTool(): ToolDefinition {
       }
       if (change === undefined) throw new Error("change_create CR publication failed");
       try {
-        writeChangePatch(cwd, change.change_id, observation.patch);
+        writeChangePatch(physicalCwd, change.change_id, observation.patch);
       } catch {
         throw new Error(
           `change_create ${change.change_id}: patch publication failed; prior commits retained`,
         );
       }
       try {
-        const current = readEligibleTask(cwd, id.data, head);
-        writeWorkspaceRecord(cwd, "task", {
+        const current = readEligibleTask(physicalCwd, id.data, head);
+        writeWorkspaceRecord(physicalCwd, "task", {
           ...transitionTask(current, { type: "change_create" }, now),
           linked_changes: [...new Set([...current.linked_changes, change.change_id])].sort(),
         });

@@ -14,6 +14,19 @@ vi.mock("node:fs", async (original) => {
   return { ...actual, mkdirSync: vi.fn(actual.mkdirSync) };
 });
 const nativeFs = await vi.importActual<typeof fs>("node:fs");
+const passingValidation = {
+  ok: true,
+  checks: CHECK_SHAPE.map((entry) => ({ ...entry, pass: true, details: [] })),
+};
+const lexicalValidation = {
+  ok: false,
+  checks: CHECK_SHAPE.map((entry) => ({
+    ...entry,
+    pass: entry.id !== 7,
+    details:
+      entry.id === 7 ? [{ code: "forbidden_phrase", field: "summary", phrase: "普遍改进" }] : [],
+  })),
+};
 let workspace: ValidationWorkspace;
 beforeEach(() => {
   vi.mocked(fs.mkdirSync).mockReset().mockImplementation(nativeFs.mkdirSync);
@@ -37,7 +50,7 @@ test.each(["ordinary", "alias", "physical-parent"] as const)(
       nativeFs.mkdirSync(dirname(path), { recursive: true });
       const value =
         input.kind === "report"
-          ? { ...input.value, summary: "LEXICAL_REPORT_SENTINEL" }
+          ? { ...input.value, summary: "LEXICAL_REPORT_SENTINEL 普遍改进" }
           : input.kind === "run"
             ? { ...input.value, resources: { wall_seconds: 999, peak_memory_mb: null } }
             : input.value;
@@ -54,11 +67,13 @@ test.each(["ordinary", "alias", "physical-parent"] as const)(
       "utf8",
     );
     vi.mocked(fs.mkdirSync).mockClear();
+    expect(renderReport(physical, workspace.fixture.report.report_id)).toBe(golden);
+    expect(validateReport(physical, workspace.fixture.report.report_id)).toEqual(passingValidation);
+    expect(validateReport(workspace.root, workspace.fixture.report.report_id)).toEqual(
+      lexicalValidation,
+    );
     expect(renderReport(cwd, workspace.fixture.report.report_id)).toBe(golden);
-    expect(validateReport(cwd, workspace.fixture.report.report_id)).toEqual({
-      ok: true,
-      checks: CHECK_SHAPE.map((entry) => ({ ...entry, pass: true, details: [] })),
-    });
+    expect(validateReport(cwd, workspace.fixture.report.report_id)).toEqual(passingValidation);
     expect(fs.mkdirSync).not.toHaveBeenCalled();
     expect(workspace.snapshot()).toEqual(before);
     for (const { path, bytes, mtimeNs } of decoys) {
@@ -67,6 +82,52 @@ test.each(["ordinary", "alias", "physical-parent"] as const)(
     }
   },
 );
+
+test("missing physical reports rejects render and validation despite a qualified lexical report", () => {
+  const physical = nativeFs.realpathSync.native(workspace.cwd);
+  nativeFs.mkdirSync(join(physical, "child"));
+  const alias = join(workspace.root, "cwd-alias");
+  nativeFs.symlinkSync(join(physical, "child"), alias);
+  const cwd = `${alias}/..`;
+  expect(nativeFs.realpathSync.native(cwd)).toBe(physical);
+  const decoys = renderingInputs(workspace.fixture).map((input) => {
+    const path = join(workspace.root, input.path);
+    nativeFs.mkdirSync(dirname(path), { recursive: true });
+    nativeFs.writeFileSync(
+      path,
+      JSON.stringify(
+        input.kind === "report"
+          ? { ...input.value, summary: "LEXICAL_REPORT_SENTINEL 普遍改进" }
+          : input.value,
+      ),
+    );
+    return {
+      path,
+      bytes: nativeFs.readFileSync(path),
+      mtimeNs: nativeFs.statSync(path, { bigint: true }).mtimeNs,
+    };
+  });
+  expect(validateReport(physical, workspace.fixture.report.report_id)).toEqual(passingValidation);
+  expect(validateReport(workspace.root, workspace.fixture.report.report_id)).toEqual(
+    lexicalValidation,
+  );
+  nativeFs.rmSync(join(physical, "reports"), { recursive: true });
+  const before = workspace.snapshot();
+  const entries = nativeFs.readdirSync(physical, { recursive: true }).sort();
+  vi.mocked(fs.mkdirSync).mockClear();
+
+  expect(() => renderReport(cwd, workspace.fixture.report.report_id)).toThrow(/missing/u);
+  expect(() => validateReport(cwd, workspace.fixture.report.report_id)).toThrow(/missing/u);
+
+  expect(fs.mkdirSync).not.toHaveBeenCalled();
+  expect(nativeFs.existsSync(join(physical, "reports"))).toBe(false);
+  expect(nativeFs.readdirSync(physical, { recursive: true }).sort()).toEqual(entries);
+  expect(workspace.snapshot()).toEqual(before);
+  for (const { path, bytes, mtimeNs } of decoys) {
+    expect(nativeFs.readFileSync(path)).toEqual(bytes);
+    expect(nativeFs.statSync(path, { bigint: true }).mtimeNs).toBe(mtimeNs);
+  }
+});
 
 test.each(["stacks", "provenance", "runs"] as const)(
   "missing physical %s never falls back to complete lexical report references",

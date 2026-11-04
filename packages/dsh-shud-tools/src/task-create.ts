@@ -42,10 +42,9 @@ export function createTaskCreateTool(): ToolDefinition {
         throw new Error("task_create requires the calling session's cwd (workspace)");
       }
       const owner = readCallerPresetId(exec.agent);
-      const sourceBaseCommit =
-        args.type === "code_change" ? (await readSourceCheckout(cwd)).head : null;
+      const checkout = args.type === "code_change" ? await readSourceCheckout(cwd) : undefined;
       const now = new Date().toISOString();
-      const card = createTaskCard(cwd, {
+      const card = createTaskCard(checkout?.cwd ?? cwd, {
         ...args,
         status: "planned",
         runtime_phase: null,
@@ -57,7 +56,7 @@ export function createTaskCreateTool(): ToolDefinition {
         linked_reports: [],
         linked_changes: [],
         linked_verifications: [],
-        source_base_commit: sourceBaseCommit,
+        source_base_commit: checkout?.head ?? null,
         stack_id: null,
         data_id: null,
         created_at: now,
