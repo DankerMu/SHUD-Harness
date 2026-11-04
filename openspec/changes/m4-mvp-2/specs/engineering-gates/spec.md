@@ -98,6 +98,20 @@ The repository SHALL declare the exact external binary `make` in the existing Kn
 - **WHEN** instructions:render and the instruction drift check run
 - **THEN** the canonical prerequisite and both generated instruction files state that shud_build and its integration tests require system make, not an npm dependency
 
+### Requirement: Replay preparation tests have a real CI source object store
+
+The CI test job SHALL initialize only the registered SHUD submodule before running default tests and SHALL assert that commit `9a422e5eb708df7d2f8b4066a3083a031d679a82` exists in that local object store. The submodule HEAD SHALL remain the root repository's gitlink revision, not the replay pin. Missing initialization or pin SHALL fail the job before tests; no skip, mocked Git, alternate-source fetch or solver build SHALL replace this prerequisite. Other jobs and test/aggregate semantics SHALL remain unchanged.
+
+#### Scenario: Fresh test checkout exposes both gitlink and replay object
+
+- **WHEN** the test job starts from an uninitialized shallow Harness checkout
+- **THEN** only SHUD is initialized at the recorded gitlink, the full replay pin resolves as a commit, and default tests can clone the real local source
+
+#### Scenario: Missing replay object stops before tests
+
+- **WHEN** the initialized SHUD object store lacks the required full pin
+- **THEN** the prerequisite exits nonzero before the test command and does not fetch an alternate source or change the submodule HEAD
+
 
 ### Requirement: Replay local gate is registered
 

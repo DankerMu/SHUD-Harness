@@ -1,17 +1,17 @@
 # Proposal
 
-## Active issue fixture: #545
+## Active issue fixture: #609
 
-- Issue type: runtime evidence and documentation; Fixture level: expanded (upstream retained; actual model-visible authorization surfaces). Critical Path #1. Dependencies #544/#537/#538/#540 delivered.
-- Scope: real temporary Web sessions and secret-screened canonical evidence in PR; instructions/agents/shared.md Runtime Lifecycle and its stale profile-smoke matrix wording, then generated AGENTS.md/CLAUDE.md via renderer. Parent-owned OpenSpec fixture. No package/profile/runtime code changes.
-- Selected risk packs: Public Web API/seams; Auth/secrets; Session identity/order; Resource cleanup; Error/evidence integrity; Legacy compatibility; Documentation/generated consistency; Runtime/release compatibility.
-- Governing invariant: all four actual session identities bind to canonical stored roles and request/header tool sets; coordinator makes each explicit delegate call, child parent/catalog identities match, worker/coder/reviewer advertise no delegation tools and create no nested child.
-- Characterization mode: use the unchanged delivered product and actual DMXAPI model, not a fabricated behavioral RED. Freeze the session-evidence judge; qualify wrong role/parent, missing/extra tool, absent delegation or nested-child mutations and restore original evidence to GREEN.
-- Reuse WebHost public HTTP lifecycle, per-session export flush, bounded canonical-log reading and secret screening. One exported temporary DSH_HOME is shared by install/start; own scratch workspace, no solver/domain task or scientific edits. Prompt asks only an engineering role-surface audit.
-- Exact expected tools come from normative role collections, not model prose or a dump-derived union. Persist request/header seq/tool excerpts and stored session header/catalog linkage; system/message is the prompt carrier, never the request header.
-- Update instructions only after real evidence succeeds; retain raw→policy order, inherited/local ownership, rebinding/disposal and unknown-role boundaries, four-preset/five-target headless contract. Renderer alone writes generated files.
-- Required evidence: three real coordinator delegation calls, four canonical role headers/tools, no nested delegates/children, stored-log paths and screened excerpts; full check/profile smoke/render drift/strict and exact-head CI plus critical-path review.
-- Non-goals/not-selected: no business schema/solver/research-data writes, new concurrency/resource policies, approval decisions, replay (#547), PI acceptance (#549), or browser-click evidence. Public Web HTTP/session-log proof is not PI operation. Assembly defects route to their owning issue, never patched into this docs slice.
+- Issue type: CI prerequisite defect; Fixture level: compact (test-job initialization only, no runtime/solver/schema or source mutation).
+- Scope: .github/workflows/ci.yml test job only plus this parent-owned fixture. Initialize only registered SHUD, retain its gitlink HEAD, assert commit 9a422e5eb708df7d2f8b4066a3083a031d679a82 exists before tests.
+- Selected risk packs: CI/config ordering; Git/source identity; Failure propagation; Legacy job compatibility. No new API, dependency, secret, concurrency, resource policy or scientific behavior.
+- Governing invariant: default tests receive a real readonly root SHUD object store containing the full replay pin without changing the root checkout to that pin; missing source/pin stops the job, not skips or mocks tests.
+- Reuse git submodule update --init SHUD followed by git -C SHUD cat-file -e '<full-pin>^{commit}'. No recursive/all-submodule initialization, fallback fetch, branch switch, solver compile or model call.
+- Executable RED already recorded in an isolated shallow Harness checkout: full pin query exits128 before initialization. Ordinary SHUD initialization restores root gitlink 3aec65755926c478e13ca7d4fea80715e4e90345 and pin query exits0.
+- Parent verification executes the actual YAML step in a fresh clone; validates root gitlink HEAD, full object and absence of initialized rSHUD/AutoSHUD. A missing-pin mutation must stop before the downstream sentinel; restore the actual step to GREEN.
+- Required evidence: full check/test-guardrails/strict, sibling job byte preservation, compact correctness+test-evidence review and exact-head eight-job CI. No permanent source-text test for YAML wiring.
+- Closure boundary: prerequisite PR can merge before #546 exists, but #609 remains open until #546's default real preparation tests and complete CI pass. #546 depends on this merged prerequisite.
+- Non-goals: script/test implementation and Vitest discovery belong to #546; live replay/gate registration/PI remain #547/#548/#549. No changed test thresholds, skips, workflow triggers or aggregate semantics.
 
 ## Why
 
