@@ -2,7 +2,7 @@
 
 ## Active issue fixture: #539
 
-- Issue type: feature; Fixture level: expanded (agree upstream). Dependency #534 is merged. Critical Paths #2/#4: public run arguments must preserve raw admission and the existing durable submission transaction.
+- Issue type: feature; Fixture level: expanded (agree upstream). Dependency #534 and routed CI prerequisite #592 are merged. Critical Paths #2/#4: public run arguments must preserve raw admission and the existing durable submission transaction.
 - Scope: tools shud-run.ts argument schema/validation/conditional forwarding and its tests, active fixture and existing tool documentation. No jobs/records/core/raw implementation, schema projection, profile/preset or dependency changes.
 - Selected risk packs: Public API / CLI / script entry; File IO / path safety / overwrite; Schema / columns / units / field names; Auth / permissions / secrets; Concurrency / shared state / ordering; Legacy compatibility / examples; Error handling / rollback / partial outputs; Documentation / migration notes; Release / packaging / dependency compatibility; Scientific governance / PI gate / evidence lineage; Hydrology runtime / SHUD compatibility; dsh seam / profile governance.
 - Governing invariant: valid optional build_id/threads reach the existing registry unchanged; invalid values fail before tool-owned workspace IO or task reconciliation. The registry alone owns build resolution, run-local binary, environment overlay, durable identities and rollback. Omitted parameters preserve the old configured-binary path and inherited environment.

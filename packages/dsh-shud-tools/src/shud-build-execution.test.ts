@@ -132,7 +132,7 @@ const failures = [
     body: "printf '%s\\n' last-build-failure >&2\n\texit 2",
     expected: /make failed \(exit 2\)/u,
   },
-  { name: "make signal", body: "kill -TERM $$PPID", expected: /make.*signal SIGTERM/u },
+  { name: "make signal", body: "kill -KILL $$PPID", expected: /make.*signal SIGKILL/u },
   { name: "missing artifact", body: "true", expected: /executable/iu },
   { name: "directory artifact", body: "mkdir shud", expected: /ordinary executable/iu },
   { name: "symlink artifact", body: "ln -s Makefile shud", expected: /ordinary executable/iu },

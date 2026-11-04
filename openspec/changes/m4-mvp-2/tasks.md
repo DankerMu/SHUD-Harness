@@ -394,6 +394,13 @@
 
 - [x] 5.2 依赖 2.6、3.1、5.1、路由 #586。`shud_build`（检出校验含 HEAD 钉定与 realpath == toplevel、CR 可选契约与 patch sha 校验、`git archive` + `ls-tree` 一致性断言 + `git apply`（`GIT_CEILING_DIRECTORIES`，apply 后断言生效）到 `builds/.tmp-<id>/src/`、`make` 白名单环境与同步执行、`print-cxx.mk` 采 compiler、临时目录 rename、失败清理、`repos/SHUD` 零写入；shud-build「Workspace source checkout validation」「shud_build」「Build workspace files」）；以真实临时 git 仓库 + 假 `Makefile` 行使，含被忽略源文件不进入构建、工作树陈旧 `shud` 不被发布；raw-guard 为 `builds` 根与 `repos/SHUD` 为 raw 时 deny；工具挂载按 shud-run-tools「Report and task tools are mounted by dsh-shud-tools」；`CONTEXT.md` 增"候选二进制 ⇔ 钉定 commit + 已批 patch"不变量并指向本测试。
 
+### Issue #592 risk and evidence fixture
+
+- Error handling / rollback / partial outputs selected: replace only the native make fault injection TERM with KILL and require actual SIGKILL; preserve one make invocation, controlled error, no temporary/published build and source/card bytes/mtime. Exit2 remains an error-code path and must not satisfy the signal assertion.
+- Legacy compatibility / examples selected: real ToolRuntime/Git/make test and adjacent nonzero/artifact cases remain; full default gate and exact-head Linux CI prove integration. Production APIs, schemas, raw/approval behavior, dependencies, resource ownership and scientific execution are unchanged, so their risk packs are not selected.
+- Documentation / migration notes selected: retain the observed CI failure and finite Linux/Darwin controls in PR evidence, with no claimed GNU internal root cause. Existing build-failure specification gets an explicit actual-signal scenario; no new architecture decision.
+- [x] 5.2a 路由 #592：修正真实 make 信号故障注入及精确 SIGKILL 断言；保留全部清理与不变性检查。父级运行该测试文件、默认 check、OpenSpec strict，compact review 与同提交 Linux 全 CI；独立合并后恢复 #539。
+
 ### Issue #538 risk and evidence fixture
 
 - Public API/schema/release: register the real closed change_submit tool in the existing plugin in the same delivery as policy ask. Only branded change_id accepted; unknown/root/null/type errors, missing cwd/callId reject. Result carries canonical change_id/approved/approval_ref. Existing report/change/build/run tools still mount; no new package/config/API dependency.
