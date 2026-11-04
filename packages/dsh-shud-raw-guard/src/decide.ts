@@ -560,6 +560,37 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
       };
     }
   }
+  if (call.name === "verification_run") {
+    let taskTarget = "tasks";
+    try {
+      const args = call.arguments;
+      const fields =
+        args && typeof args === "object" && !Array.isArray(args)
+          ? (args as Record<string, unknown>)
+          : {};
+      const taskId = TaskIdSchema.safeParse(fields.task_id);
+      if (taskId.success) taskTarget = `tasks/${taskId.data}/task.json`;
+    } catch {
+      // Unavailable argument identity retains the fixed tasks fallback, not an IO failure.
+    }
+    try {
+      const cwd = call.cwd ?? process.cwd();
+      const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
+      // Metadata-only publication targets; no card or verification bytes are read.
+      for (const target of ["verifications", taskTarget]) {
+        const output = canonical(target, cwd);
+        if (rawRoots.some((raw) => containsRawPath(raw, output))) return DENY;
+      }
+      return NEXT;
+    } catch (error) {
+      if (error instanceof PathUnavailable) throw error;
+      return {
+        kind: "deny",
+        code: "raw-target-unavailable",
+        reason: "Verification targets cannot be safely resolved; execution denied.",
+      };
+    }
+  }
   if (
     call.name === "report_generate" ||
     call.name === "report_validate" ||
