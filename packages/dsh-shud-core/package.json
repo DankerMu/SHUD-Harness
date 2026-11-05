@@ -1,7 +1,7 @@
 {
   "name": "@shud-harness/dsh-shud-core",
   "version": "0.9.0",
-  "description": "SHUD-Harness domain layer: 8 core object Zod schemas and runtime-agnostic governance rules",
+  "description": "SHUD-Harness domain layer: 9 exported core-record Zod schemas (excluding supporting schemas) and runtime-agnostic governance rules",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
