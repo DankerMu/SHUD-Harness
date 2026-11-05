@@ -8,7 +8,7 @@
 ## 2. Default resource bound
 
 - [x] 2.1 Add the canonical ceiling and matching CPU-aware default worker setting, document the resource boundary in Testing_Strategy, and verify actual resolved CPU cases 1/2/4/14/64 with a throwaway probe; retain byte-identical test/runtime sources and all other runner/constraint settings.
-- [ ] 2.2 Run the original `pnpm run check` with no worker override, verify all 8555 current tests plus only the two existing skips, original candidate/native assertions and coverage floor, schema/docs/strict checks; perform expanded review and exact-head eight-job CI before merge.
+- [x] 2.2 Run the original `pnpm run check` with no worker override, verify all 8555 current tests plus only the two existing skips, original candidate/native assertions and coverage floor, schema/docs/strict checks; perform expanded review and exact-head eight-job CI before merge. Delivered in PR #625 (merge a084f1d3), three seats with no findings, CI 42083409462 with eight successful jobs.
 
 ## Risk mapping
 
