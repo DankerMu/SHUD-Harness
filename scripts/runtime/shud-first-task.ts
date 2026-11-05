@@ -4,22 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { zstdDecompressSync } from "node:zlib";
-import { parseDocument } from "yaml";
 import { processStart } from "../../packages/dsh-shud-jobs/src/process-identity.ts";
 import type { ShudProcessGroup } from "../../packages/dsh-shud-jobs/src/process-group.ts";
-import type { FirstTaskEvidence, FirstTaskLog } from "./shud-first-task-evidence.ts";
-import {
-  extendPrefix,
-  object,
-  requireFact,
-  text,
-  type CanonicalEvent,
-} from "./shud-restart-evidence.ts";
+import type { FirstTaskEvidence } from "./shud-first-task-evidence.ts";
+import { extendPrefix, object, requireFact, text } from "./shud-restart-evidence.ts";
 import {
   WebHost,
   BUFFER_LIMIT,
-  canonicalLog,
   cleanupOwnedRuns,
   command,
   cwdOf,
@@ -32,6 +23,15 @@ import {
   save,
   screen,
 } from "./shud-web-driver.ts";
+import {
+  readLog,
+  storedLog,
+  regular,
+  type StoredLog,
+  type SessionLog,
+} from "./shud-session-log.ts";
+import { configurationRows, effectiveConfig } from "./shud-runtime-config.ts";
+import { responseModel } from "./shud-evidence-events.ts";
 
 const ROOT = fs.realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.."));
 const COMPLETE_MS = 15 * 60_000;
@@ -43,15 +43,6 @@ interface Config {
   patch?: string;
   source: string;
   hashes: Record<string, string>;
-}
-interface StoredLog extends FirstTaskLog {
-  byteLength: number;
-}
-function regular(path: string, label: string): void {
-  requireFact(
-    fs.lstatSync(path).isFile() && fs.realpathSync(path) === path,
-    `Unsafe ${label}: regular physical file required`,
-  );
 }
 /** External ancestor aliases are allowed; the supplied final component must be ordinary. */
 function physicalInputFile(path: string, label: string): string {
@@ -150,77 +141,7 @@ function preflight(argv: string[]): Config {
   for (const path of [workspace, source, shudBin, dshBin, ...(patch ? [patch] : [])]) screen(path);
   return { workspace, shudBin, dshBin, patch, source, hashes: original };
 }
-function readLog(home: string, id: string, limit = BUFFER_LIMIT): StoredLog {
-  const path = canonicalLog(home, id);
-  regular(path, "canonical log");
-  const input = readFileBounded(path, limit).bytes;
-  let bytes: Buffer;
-  if (path.endsWith(".zstd")) {
-    const chunks: Buffer[] = [];
-    let offset = 0;
-    let total = 0;
-    while (offset < input.length) {
-      requireFact(total < limit, "Canonical log exceeds byte budget");
-      const decoded: unknown = zstdDecompressSync(input.subarray(offset), {
-        info: true,
-        maxOutputLength: limit - total,
-      });
-      const value = object(decoded);
-      const chunk = value.buffer;
-      const consumed = object(value.engine).bytesWritten;
-      requireFact(
-        Buffer.isBuffer(chunk) &&
-          typeof consumed === "number" &&
-          consumed > 0 &&
-          consumed <= input.length - offset,
-        "Malformed canonical compression frame",
-      );
-      total += chunk.length;
-      requireFact(total <= limit, "Canonical log exceeds byte budget");
-      chunks.push(chunk);
-      offset += consumed;
-    }
-    bytes = Buffer.concat(chunks, total);
-  } else bytes = input;
-  const source = bytes.toString("utf8");
-  screen(source);
-  const rows = source
-    .trimEnd()
-    .split("\n")
-    .map((line) => object(JSON.parse(line) as unknown));
-  const header = rows.shift();
-  requireFact(
-    header?.type === "session" && header.version === 4 && header.id === id,
-    "Canonical stored header identity mismatch",
-  );
-  const events = rows.map((row): CanonicalEvent => {
-    requireFact(
-      typeof row.type === "string" &&
-        typeof row.seq === "number" &&
-        typeof row.time === "number" &&
-        "data" in row,
-      "Malformed stored canonical event",
-    );
-    return { type: row.type, seq: row.seq, time: row.time, data: row.data };
-  });
-  const prefix = { events, asOfSeq: events.length - 1 };
-  extendPrefix({ asOfSeq: -1, events: [] }, prefix);
-  return { ...prefix, header, canonicalLog: path, flushedThroughSeq: -1, byteLength: bytes.length };
-}
-async function storedLog(
-  host: WebHost,
-  home: string,
-  id: string,
-  limit = BUFFER_LIMIT,
-): Promise<StoredLog> {
-  // Export accepts the actual bare child UUID and flushes that live session directly.
-  // HEAD of the root with descendants=true alone does NOT flush child logs.
-  await host.flush(id);
-  const log = readLog(home, id, limit);
-  log.flushedThroughSeq = log.asOfSeq;
-  return log;
-}
-function childIds(root: FirstTaskLog): string[] {
+function childIds(root: SessionLog): string[] {
   let child: string | undefined;
   for (const event of root.events) {
     if (event.type !== "subagent/catalog") continue;
@@ -274,79 +195,6 @@ function captureCommits(): FirstTaskEvidence["actualStack"]["commits"] {
   }
   return result;
 }
-function configurationRows(source: string, label: string): Record<string, unknown>[] {
-  try {
-    const document = parseDocument(source, {
-      prettyErrors: false,
-      merge: false,
-      schema: "core",
-      customTags: [{ tag: "tag:yaml.org,2002:js", resolve: (value: string) => value }],
-    });
-    requireFact(
-      document.errors.length === 0 && document.warnings.length === 0,
-      `Invalid ${label} YAML`,
-    );
-    const value: unknown = document.toJS({ maxAliasCount: 100 });
-    requireFact(Array.isArray(value), `${label} must be a sequence`);
-    return value.map(object);
-  } catch {
-    throw new Error(`Invalid ${label} YAML or mapping entry shape`);
-  }
-}
-function effectiveConfig(source: string) {
-  const rows = configurationRows(source, "effective profile");
-  function row(id: string) {
-    const found = rows.filter((entry) => entry.id === id && entry.disabled !== true);
-    requireFact(found.length === 1, "Missing or ambiguous required effective profile row");
-    return object(found[0].config);
-  }
-  const coordinator = row("preset-coordinator");
-  requireFact(
-    coordinator.id === "coordinator" && Array.isArray(coordinator.plugins),
-    "Missing effective coordinator composition",
-  );
-  const delegates = coordinator.plugins
-    .map(object)
-    .filter(
-      (entry) =>
-        entry.id === "tool-subagent" &&
-        entry.disabled !== true &&
-        entry.name === "@deepseek-ai/dsh-tool-subagent",
-    );
-  requireFact(delegates.length === 1, "Missing effective coordinator delegation binding");
-  const delegate = object(delegates[0].config);
-  requireFact(
-    delegate.provider === "spawn" &&
-      delegate.agentPreset === "worker" &&
-      delegate.toolName === "subagent",
-    "Effective delegation must explicitly configure spawn/worker",
-  );
-  const jobs = row("shud-jobs");
-  const llm = object(jobs.llm);
-  requireFact(
-    llm.base_url === row("llm-deepseek").baseURL &&
-      llm.request_alias === row("agent-default-model").model,
-    "Effective model capture route mismatch",
-  );
-  return {
-    provider: "spawn",
-    agentPreset: "worker",
-    toolName: "subagent",
-    base_url: text(llm.base_url),
-    request_alias: text(llm.request_alias),
-  };
-}
-function responseModel(worker: FirstTaskLog): string {
-  const run = worker.events.find(
-    (event) => event.type === "tool/call" && object(event.data).name === "shud_run",
-  );
-  requireFact(run, "Missing worker model provenance");
-  const headers = worker.events.filter(
-    (event) => event.type === "request/header" && event.seq < run.seq,
-  );
-  requireFact(headers.length > 0, "Missing worker request model metadata");
-  return text(object(object(object(headers[headers.length - 1].data).header).config).model);
-}
 
 async function run(config: Config, abort: AbortSignal): Promise<void> {
   const workspace = config.workspace;
@@ -369,6 +217,11 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
   };
   delete env.ALL_PROXY;
   const groups = new Map<number, ShudProcessGroup>();
+  const runPolicy = {
+    minRuns: 1,
+    maxRuns: 1,
+    expectedArgv: () => [config.shudBin, "-o", "output/ccw.out", "ccw"],
+  };
   const owners = new Set<string>();
   let host: WebHost | undefined;
   let approvals: { healthy(): void; close(): Promise<void> } | undefined;
@@ -397,7 +250,7 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
     const job = readPrivateJob(workspace, run);
     requireFact(job.run_dir === run, "Private run path ownership mismatch");
     if (job.pid && job.pid_started_at && job.owner_session && owners.has(job.owner_session))
-      ownRunGroup(job, config.shudBin, owners, groups);
+      ownRunGroup(job, runPolicy, owners, groups);
   }
   function logBudget(replacing: string): number {
     let remaining = BUFFER_LIMIT;
@@ -437,6 +290,7 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
         env,
         abort,
       ),
+      ["worker"],
     );
     const configPath = join(evidenceDir, "effective-config.json");
     save(configPath, composed);
@@ -564,9 +418,7 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
       delegationBinding: {
         parentSessionId: rootId,
         configPath,
-        provider: composed.provider,
-        agentPreset: composed.agentPreset,
-        toolName: composed.toolName,
+        ...composed.delegations[0],
       },
       inputs: {
         before: config.hashes,
@@ -635,7 +487,7 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
       }
     }
     cleanupErrors.push(
-      ...(await cleanupOwnedRuns(workspace, config.shudBin, owners, groups, !host || host.exited)),
+      ...(await cleanupOwnedRuns(workspace, runPolicy, owners, groups, !host || host.exited)),
     );
     if (host) {
       try {

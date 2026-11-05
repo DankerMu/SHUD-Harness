@@ -436,7 +436,11 @@ async function runCase(
     cleanupErrors.push(
       ...(await cleanupOwnedRuns(
         workspace,
-        config.shudBin,
+        {
+          minRuns: 1,
+          maxRuns: 1,
+          expectedArgv: () => [config.shudBin, "-o", "output/ccw.out", "ccw"],
+        },
         new Set(sessionId ? [sessionId] : []),
         groups,
         hosts.every((host) => host.exited),
