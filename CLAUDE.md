@@ -101,6 +101,7 @@ SHUD-Harness/
 | SHUD ccw tiny（本机） | `pnpm run shud:tiny` | exit 0 + `.dat` 产出，<2 min | block（本机） |
 | SHUD ccw 重启恢复（本机，需 SHUD 与 `DMXAPI_KEY`） | `pnpm run shud:restart` | SIGTERM / SIGKILL 两用例 PASS；SHUD 连续存活、五条恢复断言成立，通知必须 `delivered`（`unreachable` 判 FAIL）；RunRecord 含退出码与非空产物清单，证据取 session log / 运行目录 / 索引 | block（本机） |
 | 首任务 ccw → EvidenceReport（本机，需 SHUD 与 `DMXAPI_KEY`） | `pnpm run shud:first-task <scratch-workspace>` | Web/HTTP 单提示主链 exit 0；worker 等待并成功收集；同提交的 `approval/asked` 与 `approval/decided: allowed-once`、done TaskCard、Accepted by PI Markdown、StackLock llm 三字段与三 submodule 修订、四句不变式均成立；显式工作区可在 TMPDIR，脚本自动 Allow once 仅为工程证据，不是 PI 验收 | block（本机，CI 不运行） |
+| keliya known-answer 回放（本机，需 SHUD 工具链、`DMXAPI_KEY`、`SHUD_BIN`、`SUNDIALS_ROOT`、`SHUD_REPLAY_KELIYA`） | `pnpm run shud:replay <scratch-workspace>` | 唯一通过判据：[Replay acceptance criteria](openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)；显式工作区；自动审批仅为工程证据，不替代 PI 验收 | block（本机，CI 不运行） |
 | 闸自证 | `pnpm run test-guardrails` | 每闸拒违规、收干净输入 | block |
 
 ## Runtime Lifecycle

@@ -1,18 +1,13 @@
 # Proposal
 
-## Active issue fixture: #547
+## Active issue fixture: #548
 
-- Issue type: feature; Fixture level: expanded (raised from upstream compact because this script now owns a real two-session approval answerer, cross-session evidence joins and failure cleanup of two build-bound native groups). Review the script boundaries, not the already-shipped domain implementations.
-- Prerequisites: #541/#545/#546 and routed #614 are merged; #614's independent specification is archived. This does not satisfy #549 PI acceptance.
-- Scope: scripts/runtime/shud-replay.sh, shud-replay.ts and focused evidence/approval/test modules; package.json script; exact knip entry registration. Minimal shared runtime extraction/migration is included to reuse the existing canonical decoder, approval transport and process ownership checks rather than create second implementations.
-- The necessary shared callers are shud-first-task.ts, shud-first-task-approval.ts, shud-web-driver.ts and affected restart callers/tests. Preserve M3 behavior, all current failure/ownership guards and the one-run ccw contracts. No packages, profile, host, dependency or control-plane registration edits.
-- Selected risk packs: public CLI/API; config/setup; path/ownership; evidence/schema identity; auth/secrets; concurrency/order; bounded discovery/resources; legacy compatibility; errors/cleanup; release/test discovery; documentation via this existing decision fixture.
-- Governing oracle: known-answer-replay「Replay local acceptance script」「Replay acceptance criteria」 and agent-presets「code_change orchestration」 remain unchanged. Every acceptance row is required; no inferred fields on RunRecord, no model prose as proof, no short commit or changed expected result.
-- One explicit fresh workspace and one coordinator prompt; explicit key/SHUD_BIN/SUNDIALS_ROOT/keliya preflight before preparation/session. Give the design document path and five-file allowance, never the upstream patch/diff. Do not pre-author the scientific candidate.
-- Exactly one change_submit and one report_submit may receive engineering allowed-once, bound to the actual owned caller/callId/asked id and current business record; any third ask fails with tool/call identity. Opt-in is not a grant, and this answerer is not PI acceptance.
-- Preserve source submodule revisions/worktree/gitlink or directory inventory, ccw/raw hashes, external forcing, private clone base HEAD/git-dir, and original failure evidence. Stop only freshly proven owned host/solver resources; no bare historical PID signalling or success after uncertain cleanup.
-- Required evidence: tests-first constructed full-positive and consumer-visible negative vectors, real preflight CLI, bounded decoder/transport/cleanup regressions, default check/profile smoke/strict/generated preservation, real installed Web/model/two-build/two-run replay with canonical logs and file oracle, shared M3 runtime smoke, expanded three-seat review and exact-head CI.
-- Non-goals: #548 gate/matrix registration, #549 PI operation/Epic archival, new policies/role prompts/tool implementations, host upgrade, scientific/parallel/performance claims, retries to hide a failed replay, or copying an upstream known-answer implementation.
+- Issue type: documentation/control-plane registration; fixture level: none under the workflow's documentation-only exception. No executable code, runtime policy, dependency or threshold change; the parent owns this bounded docs/config-mirror update.
+- Prerequisite: #547 merged as PR #621 after real installed replay, bounded white-box review and exact-head CI. This does not satisfy #549 PI acceptance.
+- Scope: Testing_Strategy Verification Matrix/Enforcement Index, Test_Fixtures_And_Command_Matrix keliya fixture, constraints.yaml verification/readiness mirror, canonical instructions/agents/shared.md matrix and renderer-owned AGENTS.md/CLAUDE.md; existing proposal/tasks bookkeeping only.
+- Single oracle: known-answer-replay「Replay acceptance criteria」is linked, never copied into another checklist. Register the command as local block with explicit workspace and all four environment prerequisites; CI does not run the real replay.
+- Required evidence: instructions:render plus drift/line-budget checks; actual missing-argument CLI preflight; parsed mirror/command/link/CI-absence audit; schema:check and unchanged generated schemas; docs:check, default check, strict OpenSpec and exact-head CI.
+- Non-goals: Phased_Plan, Migration_Plan, ADR/PI acceptance, runtime implementation, generated schema edits or M4 archival. The existing D13 is the decision record; no new architecture decision is introduced.
 
 ## Why
 
