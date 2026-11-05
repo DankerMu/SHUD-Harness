@@ -271,6 +271,63 @@ test("answers exactly one owned coder change and root report on the original pee
   }
 });
 
+test.each(["unknown", "reviewer"])(
+  "does not grant an owned change request attributed to %s through real WS/HTTP",
+  async (createdBy) => {
+    const h = approvalFixture();
+    const remote = await peer();
+    let close: (() => Promise<void>) | undefined;
+    let rejected = false;
+    try {
+      const proposed = JSON.stringify({
+        ...object(JSON.parse(fs.readFileSync(h.changePath, "utf8")) as unknown),
+        created_by: createdBy,
+      });
+      fs.writeFileSync(h.changePath, proposed);
+      const transport = await openOwnedApprovals(remote.host, h.state.authorize, {
+        streamId: "creator-binding-test",
+        healthy: h.state.healthy,
+      });
+      close = transport.close;
+      remote.send({ type: "waterfall", eventId: "creator-mismatch", ...h.changeRequest });
+      // Wait for rejection or actual publication, never close early enough to
+      // suppress an erroneous grant that is still being processed.
+      await expect
+        .poll(() => {
+          try {
+            h.state.healthy();
+          } catch {
+            rejected = true;
+          }
+          return rejected || remote.published.length > 0;
+        })
+        .toBe(true);
+      expect(remote.published.map((entry) => entry.outcome)).not.toContainEqual({
+        kind: "result",
+        value: "allowed-once",
+      });
+      expect(rejected).toBe(true);
+      expect(fs.readFileSync(h.changePath, "utf8")).toBe(proposed);
+      expect(JSON.parse(proposed) as unknown).toMatchObject({
+        status: "proposed",
+        approval_ref: null,
+        approved_at: null,
+        created_by: createdBy,
+      });
+    } finally {
+      try {
+        if (close) {
+          if (rejected) await expect(close()).rejects.toThrow();
+          else await close();
+        }
+      } finally {
+        await remote.dispose();
+        h.dispose();
+      }
+    }
+  },
+);
+
 test("successive roster cancellations preserve the same strict WS peer and owned approval handler", async () => {
   const h = approvalFixture();
   const remote = await peer(

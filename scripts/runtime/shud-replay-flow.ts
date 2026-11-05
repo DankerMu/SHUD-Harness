@@ -262,8 +262,7 @@ export function assertReplayFlow(e: ReplayEvidence, r: ReplayRecords): void {
       );
       const leftBinding = bindings.get(text(left.log.header.id));
       const rightBinding = bindings.get(text(right.log.header.id));
-      // Both child lifetimes are catalog/result/settlement-bound above. Independent
-      // sessions may overlap: their local seq values never establish cross-session order.
+      // Dependent child stages use settlement and dispatch bindings from the root log.
       if (!leftBinding)
         requireFact(
           rightBinding && completed.seq < rightBinding.call.seq,
@@ -273,6 +272,11 @@ export function assertReplayFlow(e: ReplayEvidence, r: ReplayRecords): void {
         requireFact(
           leftBinding.settled.seq < right.event.seq,
           `Causal settlement order ${leftName} -> ${rightName}`,
+        );
+      else
+        requireFact(
+          leftBinding.settled.seq < rightBinding.call.seq,
+          `Causal dependent settlement order ${leftName} -> ${rightName}`,
         );
     }
   }

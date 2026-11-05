@@ -5,7 +5,7 @@ import {
   refreshReplayRunArtifacts,
   type ReplayFixture,
 } from "./replay/test-harness.ts";
-import { data } from "./shud-evidence-events.ts";
+import { calls, data, resultFor, validateLog } from "./shud-evidence-events.ts";
 import { object } from "./shud-restart-evidence.ts";
 
 const negatives: {
@@ -323,7 +323,7 @@ test("accepts raw absent both before and after, without fabricating a raw root",
   expect(assertReplayEvidence(snapshot).status).toBe("PASS");
 });
 
-test("accepts overlapping child lifetimes when their record-producing calls retain the required order", () => {
+test("rejects base-worker dispatch before the change coder returns despite ordered producer calls", () => {
   const { snapshot } = makeReplayFixture();
   const root = snapshot.root;
   const coder = snapshot.children.find((child) => child.header.id === "coder-base")!;
@@ -343,5 +343,107 @@ test("accepts overlapping child lifetimes when their record-producing calls reta
   root.events.forEach((event, seq) => {
     event.seq = seq;
   });
+  // D13:856 forbids dispatching the base worker alongside the change coder.
+  const retained = structuredClone(snapshot);
+  expect(() => assertReplayEvidence(snapshot)).toThrow();
+  expect(snapshot).toEqual(retained);
+});
+
+const serialBoundaries = [
+  {
+    name: "approved change to base worker",
+    previous: "coder-base",
+    producer: "change_submit",
+    next: "worker-base",
+    consumer: "shud_run",
+  },
+  {
+    name: "base collection to candidate coder",
+    previous: "worker-base",
+    producer: "shud_collect",
+    next: "coder-candidate",
+    consumer: "shud_build",
+  },
+  {
+    name: "candidate collection to reviewer",
+    previous: "worker-candidate",
+    producer: "shud_collect",
+    next: "reviewer",
+    consumer: "verification_run",
+  },
+];
+
+test.each(
+  serialBoundaries.flatMap((boundary) =>
+    (["before producer", "before settlement"] as const).map((ordering) => ({
+      ...boundary,
+      ordering,
+    })),
+  ),
+)("rejects $name dispatch $ordering despite correctly delayed consumer work", (boundary) => {
+  const { snapshot } = makeReplayFixture();
+  const root = snapshot.root;
+  const previous = snapshot.children.find((log) => log.header.id === boundary.previous)!;
+  const next = snapshot.children.find((log) => log.header.id === boundary.next)!;
+  const producer = calls(previous, boundary.producer)[0];
+  const produced = resultFor(previous, producer, "TOOL_RESULT");
+  const consumer = calls(next, boundary.consumer)[0];
+  const dispatch = root.events.find(
+    (event) => event.type === "tool/call" && data(event).callId === `dispatch-${boundary.next}`,
+  )!;
+  const notice = root.events.find(
+    (event) =>
+      event.type === "user/message" &&
+      object(data(event).source).senderSessionId === boundary.previous,
+  )!;
+  // Move the entire advertised invocation, catalog and bound result, not just
+  // its timestamp. The child is created early but delays its producer work.
+  const block = root.events.splice(dispatch.seq - 1, 4);
+  expect(block.map((event) => event.type)).toEqual([
+    "assistant/message",
+    "tool/call",
+    "subagent/catalog",
+    "tool/result",
+  ]);
+  const start = boundary.ordering === "before producer" ? producer.time - 8 : produced.time + 1;
+  for (const [index, offset] of [0, 1, 3, 4].entries()) block[index].time = start + offset;
+  next.header.createdAt = start + 2;
+  data(block[2]).childCreatedAt = next.header.createdAt;
+  if (boundary.ordering === "before settlement") {
+    previous.events.at(-1)!.time = block[3].time + 1;
+    notice.time = previous.events.at(-1)!.time + 1;
+  }
+  root.events.splice(root.events.indexOf(notice), 0, ...block);
+  root.events.forEach((event, seq) => {
+    event.seq = seq;
+  });
+  root.asOfSeq = root.events.length - 1;
+  root.flushedThroughSeq = root.asOfSeq;
+  for (const log of [root, ...snapshot.children]) {
+    validateLog(log, snapshot.home);
+    expect(
+      log.events.every((event, index) => index === 0 || log.events[index - 1].time <= event.time),
+    ).toBe(true);
+  }
+  expect(consumer.time).toBeGreaterThan(produced.time);
+  expect(dispatch.seq).toBeLessThan(notice.seq);
+  expect(next.events[0].time).toBeGreaterThan(Number(next.header.createdAt));
+  if (boundary.ordering === "before producer") expect(dispatch.time).toBeLessThan(producer.time);
+  else expect(dispatch.time).toBeGreaterThan(produced.time);
+  const retained = structuredClone(snapshot);
+  expect(() => assertReplayEvidence(snapshot)).toThrow();
+  expect(snapshot).toEqual(retained);
+});
+
+test("accepts ordered base build and approved change production within the same coder session", () => {
+  const { snapshot } = makeReplayFixture();
+  const coder = snapshot.children.find((log) => log.header.id === "coder-base")!;
+  const build = calls(coder, "shud_build")[0];
+  const create = calls(coder, "change_create")[0];
+  const submit = calls(coder, "change_submit")[0];
+  expect(resultFor(coder, build, "TOOL_RESULT").seq).toBeLessThan(create.seq);
+  expect(resultFor(coder, create, "TOOL_RESULT").seq).toBeLessThan(submit.seq);
+  const retained = structuredClone(snapshot);
   expect(assertReplayEvidence(snapshot).status).toBe("PASS");
+  expect(snapshot).toEqual(retained);
 });

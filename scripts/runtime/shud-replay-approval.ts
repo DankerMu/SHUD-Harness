@@ -137,6 +137,7 @@ export function replayApprovalState(
         requireFact(
           change.change_id === id &&
             change.task_id === taskId &&
+            change.created_by === "coder" &&
             change.status === "proposed" &&
             change.approval_ref === null &&
             change.base_commit === REPLAY_COMMIT &&
