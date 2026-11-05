@@ -117,6 +117,8 @@ test.each([0, 13])(
         );
       }, "immediate native exit durable terminal publication before collection");
       expect(await registry.collectShud(record.run_id)).toMatchObject({ exit_code: code });
+      // Admit the missing-service notification transition before reading the terminal record.
+      await registry.pollOnce();
       const terminal = RunJobSchema.parse(
         JSON.parse(await readFile(join(record.run_dir, "run-job.json"), "utf8")),
       );
@@ -126,6 +128,8 @@ test.each([0, 13])(
         status: "collected",
         exit_code: code,
         finished_at: terminal.finished_at,
+        // The notification dispatcher owns detail independently of native exit and collection.
+        notify: expect.objectContaining({ status: "pending", attempts: 0, at: null }) as unknown,
       });
       expect(Number(await readFile(join(record.run_dir, "wrapper.pid"), "utf8"))).toBe(record.pid);
       const invocation = await ready(record.run_dir);
