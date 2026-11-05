@@ -1,17 +1,18 @@
 # Proposal
 
-## Active issue fixture: #546
+## Active issue fixture: #547
 
-- Issue type: feature; Fixture level: expanded (raised from upstream compact because source/submodule immutability, filesystem ownership and real Git clone require sibling/error-path evidence). No dsh critical path or runtime seam changes.
-- Scope: scripts/runtime/shud-replay-prepare.sh, constructed script tests and vitest.config.ts include registration explicitly required by the issue; parent-owned OpenSpec fixture. No package/profile/package.json/solver changes.
-- Selected risk packs: CLI/API; File/path ownership; Git identity and source preservation; Input/evidence integrity; Failure handling; Test discovery; Runtime/release compatibility.
-- Governing invariant: an explicit source produces an independent clean pinned clone and input copy with exactly two byte-local rewrites plus PREPARED.json; existing destinations, source inputs, external forcing and root submodule remain untouched.
-- Public CLI: sh scripts/runtime/shud-replay-prepare.sh <workspace> [--keliya <input-dir>]; explicit flag takes precedence over SHUD_REPLAY_KELIYA. Missing/blank source fails before workspace creation; never discover a sibling checkout implicitly.
-- Source layout is the documented basin/input/keliya with basin/forcing.trimmed, not the machine-specific directory in the original forcing manifest. Validate all 32 referenced regular files before destination writes; do not copy forcing.
-- Construction mode: parent executes a public CLI tracer RED before implementation, then GREEN; add consumer-visible source-missing/existing-destination/forcing failures and byte/hash/identity preservation cases incrementally. Tests enter default discovery.
-- Preserve full pinned SHA, detached HEAD, clean porcelain, absolute independent .git, root Git-dir file inventory/gitlink bytes/revision/worktree, and all input bytes except the two specified lines. Existing task/build/run tools unchanged.
-- Required evidence: depends on routed #609 providing real root SHUD and the full pinned object in CI; missing prerequisites fail, never skip/mock. Real local clone with constructed basin input, independent CLI smoke/hash oracle, focused tests/full check/guardrail check/strict, three-seat review and exact-head CI. No real scientific run or live model required; workflow changes belong to #609.
-- Non-goals/not-selected: no replay orchestration/approvals/solver/PI (#547/#549), no new dependencies, schema, governance or profile changes, no general parser API or background service. Script diagnostics fail loudly; no destructive retry/overwrite/cleanup of user-owned paths.
+- Issue type: feature; Fixture level: expanded (raised from upstream compact because this script now owns a real two-session approval answerer, cross-session evidence joins and failure cleanup of two build-bound native groups). Review the script boundaries, not the already-shipped domain implementations.
+- Prerequisites: #541/#545/#546 and routed #614 are merged; #614's independent specification is archived. This does not satisfy #549 PI acceptance.
+- Scope: scripts/runtime/shud-replay.sh, shud-replay.ts and focused evidence/approval/test modules; package.json script; exact knip entry registration. Minimal shared runtime extraction/migration is included to reuse the existing canonical decoder, approval transport and process ownership checks rather than create second implementations.
+- The necessary shared callers are shud-first-task.ts, shud-first-task-approval.ts, shud-web-driver.ts and affected restart callers/tests. Preserve M3 behavior, all current failure/ownership guards and the one-run ccw contracts. No packages, profile, host, dependency or control-plane registration edits.
+- Selected risk packs: public CLI/API; config/setup; path/ownership; evidence/schema identity; auth/secrets; concurrency/order; bounded discovery/resources; legacy compatibility; errors/cleanup; release/test discovery; documentation via this existing decision fixture.
+- Governing oracle: known-answer-replay「Replay local acceptance script」「Replay acceptance criteria」 and agent-presets「code_change orchestration」 remain unchanged. Every acceptance row is required; no inferred fields on RunRecord, no model prose as proof, no short commit or changed expected result.
+- One explicit fresh workspace and one coordinator prompt; explicit key/SHUD_BIN/SUNDIALS_ROOT/keliya preflight before preparation/session. Give the design document path and five-file allowance, never the upstream patch/diff. Do not pre-author the scientific candidate.
+- Exactly one change_submit and one report_submit may receive engineering allowed-once, bound to the actual owned caller/callId/asked id and current business record; any third ask fails with tool/call identity. Opt-in is not a grant, and this answerer is not PI acceptance.
+- Preserve source submodule revisions/worktree/gitlink or directory inventory, ccw/raw hashes, external forcing, private clone base HEAD/git-dir, and original failure evidence. Stop only freshly proven owned host/solver resources; no bare historical PID signalling or success after uncertain cleanup.
+- Required evidence: tests-first constructed full-positive and consumer-visible negative vectors, real preflight CLI, bounded decoder/transport/cleanup regressions, default check/profile smoke/strict/generated preservation, real installed Web/model/two-build/two-run replay with canonical logs and file oracle, shared M3 runtime smoke, expanded three-seat review and exact-head CI.
+- Non-goals: #548 gate/matrix registration, #549 PI operation/Epic archival, new policies/role prompts/tool implementations, host upgrade, scientific/parallel/performance claims, retries to hide a failed replay, or copying an upstream known-answer implementation.
 
 ## Why
 

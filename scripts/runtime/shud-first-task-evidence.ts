@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { join } from "node:path";
 import {
   DataProvenanceSchema,
   EvidenceReportSchema,
@@ -18,19 +18,24 @@ import { GOVERNANCE_INVARIANTS } from "../../packages/dsh-shud-core/src/governan
 // Runtime scripts require the normal workspace build, as do shud:tiny/restart.
 // The source renderer's transitive dependencies are not Node strip-only compatible.
 import { renderReportDocument } from "../../packages/dsh-shud-records/lib/report-render.js";
-import { object, text, type CanonicalEvent } from "./shud-restart-evidence.ts";
+import { object, text } from "./shud-restart-evidence.ts";
+import type { SessionLog } from "./shud-session-log.ts";
+import {
+  data,
+  calls,
+  onlyCall,
+  argumentsOf,
+  resultFor,
+  resultText,
+  resultObject,
+  validateLog,
+  successfulValidation,
+} from "./shud-evidence-events.ts";
 
-export interface FirstTaskLog {
-  header: Record<string, unknown>;
-  events: CanonicalEvent[];
-  asOfSeq: number;
-  canonicalLog: string;
-  flushedThroughSeq: number;
-}
 export interface FirstTaskEvidence {
   workspace: string;
   home: string;
-  root: FirstTaskLog;
+  root: SessionLog;
   delegationBinding?: {
     parentSessionId: string;
     configPath: string;
@@ -38,7 +43,7 @@ export interface FirstTaskEvidence {
     agentPreset: string;
     toolName: string;
   };
-  children: FirstTaskLog[];
+  children: SessionLog[];
   files: Record<string, unknown>;
   actualStack: {
     commits: Record<"SHUD" | "rSHUD" | "AutoSHUD", string>;
@@ -66,87 +71,12 @@ type Predicate =
   | "STACK"
   | "INVARIANTS"
   | "INPUTS";
-type EventLog = Pick<FirstTaskLog, "events">;
+type EventLog = Pick<SessionLog, "events">;
 function fact(value: unknown, code: Predicate): asserts value {
   if (!value)
     throw Object.assign(new Error(`First-task predicate failed: ${code}`), {
       code: `FIRST_TASK_${code}`,
     });
-}
-function data(event: CanonicalEvent): Record<string, unknown> {
-  return object(event.data);
-}
-function calls(log: EventLog, name: string): CanonicalEvent[] {
-  return log.events.filter((event) => event.type === "tool/call" && data(event).name === name);
-}
-function onlyCall(log: EventLog, name: string, code: Predicate): CanonicalEvent {
-  const values = calls(log, name);
-  fact(values.length === 1, code);
-  return values[0];
-}
-function argumentsOf(call: CanonicalEvent): Record<string, unknown> {
-  return object(JSON.parse(text(data(call).arguments)) as unknown);
-}
-function resultFor(log: EventLog, call: CanonicalEvent, code: Predicate): CanonicalEvent {
-  const id = text(data(call).callId);
-  const results = log.events.filter(
-    (event) => event.type === "tool/result" && object(data(event).message).toolCallId === id,
-  );
-  fact(results.length === 1, "TOOL_RESULT");
-  const event = results[0];
-  const value = data(event);
-  const message = object(value.message);
-  fact(
-    message.role === "tool" &&
-      object(message.source).kind === "tool" &&
-      object(message.source).callId === id,
-    "TOOL_RESULT",
-  );
-  fact(event.seq > call.seq, "ORDER");
-  fact(!value.error && message.isError === false, code);
-  return event;
-}
-function resultText(event: CanonicalEvent): string {
-  const content = object(data(event).message).content;
-  fact(Array.isArray(content), "TOOL_RESULT");
-  return content
-    .map((part: unknown) => {
-      const item = object(part);
-      return item.type === "text" ? text(item.text) : "";
-    })
-    .join("");
-}
-function resultObject(event: CanonicalEvent): Record<string, unknown> {
-  return object(JSON.parse(resultText(event)) as unknown);
-}
-function validateLog(log: FirstTaskLog, home: string): void {
-  fact(
-    log.header.type === "session" &&
-      log.header.version === 4 &&
-      typeof log.header.id === "string" &&
-      /^[A-Za-z0-9-]+$/u.test(log.header.id) &&
-      Number.isSafeInteger(log.asOfSeq) &&
-      log.asOfSeq >= -1 &&
-      log.events.length === log.asOfSeq + 1 &&
-      log.flushedThroughSeq >= log.asOfSeq &&
-      Number.isSafeInteger(log.flushedThroughSeq) &&
-      log.events.every((event, i) => event.seq === i && Number.isFinite(event.time)),
-    "CANONICAL_LOG",
-  );
-  const path = relative(join(home, "sessions"), log.canonicalLog);
-  fact(
-    isAbsolute(log.canonicalLog) &&
-      !isAbsolute(path) &&
-      !path.split(sep).includes("..") &&
-      path.split(sep).length === 3 &&
-      path.split(sep)[1] === log.header.id &&
-      /^session\.v4\.jsonl(?:\.zstd)?$/u.test(path.split(sep)[2]),
-    "CANONICAL_LOG",
-  );
-  const ids = log.events
-    .filter((event) => event.type === "tool/call")
-    .map((event) => text(data(event).callId));
-  fact(new Set(ids).size === ids.length, "TOOL_RESULT");
 }
 function parseFiles(files: Record<string, unknown>) {
   const tasks = new Map<string, TaskCard>();
@@ -167,22 +97,6 @@ function parseFiles(files: Record<string, unknown>) {
       provenance.set(path, DataProvenanceSchema.parse(value));
   }
   return { tasks, jobs, records, reports, stacks, provenance };
-}
-function successfulValidation(log: EventLog, reportId: string) {
-  const validations = calls(log, "report_validate").filter(
-    (call) => argumentsOf(call).report_id === reportId,
-  );
-  fact(validations.length > 0, "REPORT_VALIDATION");
-  const validated = validations.map((call) => ({
-    call,
-    result: resultFor(log, call, "REPORT_VALIDATION"),
-  }));
-  const validation = validated.find(({ result }) => {
-    const output = resultObject(result);
-    return output.report_id === reportId && output.ok === true && output.status === "reviewed";
-  });
-  fact(validation, "REPORT_VALIDATION");
-  return validation;
 }
 
 /** Authorization is limited to this live canonical call's successfully validated report. */
@@ -500,6 +414,10 @@ export function assertFirstTaskEvidence(evidence: FirstTaskEvidence) {
   try {
     return assertSnapshot(evidence);
   } catch (error) {
+    if (error instanceof Error && "predicate" in error && typeof error.predicate === "string")
+      throw Object.assign(new Error(`First-task predicate failed: ${error.predicate}`), {
+        code: `FIRST_TASK_${error.predicate}`,
+      });
     if (
       error instanceof Error &&
       "code" in error &&

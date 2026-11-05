@@ -38,8 +38,8 @@ export function screen(value: string): void {
     "Secret detected; evidence suppressed",
   );
 }
-export function save(path: string, value: unknown): void {
-  const bytes = JSON.stringify(value, null, 2) + "\n";
+export function save(path: string, value: unknown, space: 0 | 2 = 2): void {
+  const bytes = JSON.stringify(value, null, space) + "\n";
   requireFact(Buffer.byteLength(bytes) <= BUFFER_LIMIT, "Retained evidence exceeds byte budget");
   screen(bytes);
   fs.writeFileSync(path, bytes, { mode: 0o600 });
@@ -600,10 +600,16 @@ export function readPrivateJob(
   return parsed.data;
 }
 
+export interface NativeRunPolicy {
+  minRuns: number;
+  maxRuns: number;
+  expectedArgv(job: RunJob): readonly string[];
+}
+
 /** Capture only a live, cwd/command/wrapper/owner-bound leader; never signal by ledger PID. */
 export function ownRunGroup(
   job: RunJob,
-  shudBin: string,
+  policy: NativeRunPolicy,
   owners: ReadonlySet<string>,
   groups: Map<number, ShudProcessGroup>,
   budget?: { remaining: number },
@@ -613,7 +619,7 @@ export function ownRunGroup(
       owners.has(job.owner_session) &&
       job.pid &&
       job.pid_started_at &&
-      JSON.stringify(job.command) === JSON.stringify([shudBin, "-o", "output/ccw.out", "ccw"]),
+      JSON.stringify(job.command) === JSON.stringify(policy.expectedArgv(job)),
     "Cleanup run ownership mismatch",
   );
   if (groups.has(job.pid)) return true;
@@ -636,7 +642,7 @@ export function ownRunGroup(
 /** Discover durable admissions even after a lost submission result; retain every unsafe identity. */
 export async function cleanupOwnedRuns(
   workspace: string,
-  shudBin: string,
+  policy: NativeRunPolicy,
   owners: ReadonlySet<string>,
   groups: Map<number, ShudProcessGroup>,
   hostsStopped: boolean,
@@ -653,17 +659,17 @@ export async function cleanupOwnedRuns(
       const entries: string[] = assertStopped ? fs.readdirSync(runs) : [];
       const budget = assertStopped ? undefined : { remaining: BUFFER_LIMIT };
       if (assertStopped) {
-        if (entries.length !== 1)
+        if (entries.length < policy.minRuns || entries.length > policy.maxRuns)
           errors.push("Private workspace contains unexpected additional or missing runs");
       } else {
         for (const name of directoryNames(runs, budget)) {
-          if (entries.length) {
+          if (entries.length >= policy.maxRuns) {
             errors.push("Unsafe additional private runs: undiscovered ownership remains unproved");
             break;
           }
           entries.push(name);
         }
-        if (!entries.length)
+        if (entries.length < policy.minRuns)
           errors.push("Private workspace contains unexpected additional or missing runs");
       }
       for (const name of entries) {
@@ -671,7 +677,7 @@ export async function cleanupOwnedRuns(
           const job = readPrivateJob(workspace, join(runs, name), budget);
           if (!assertStopped)
             requireFact(job.run_dir === join(runs, name), "Cleanup run path ownership mismatch");
-          if (!ownRunGroup(job, shudBin, owners, groups, budget)) {
+          if (!ownRunGroup(job, policy, owners, groups, budget)) {
             requireFact(
               assertStopped,
               "Historical group quiescence unproved; descendants may remain live",
