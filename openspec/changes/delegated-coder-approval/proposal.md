@@ -7,7 +7,7 @@ Fixture level: expanded; upstream level absent; permissions, persisted policy an
 Blast radius: accidentally making a non-authorized child ask-capable, false approval provenance, lost fail-closed behavior, or misleading model context.
 Selected risk packs: Public API; Config; Internal projection/source schema; Auth; Ordering/shared state; Compatibility; Error handling; Packaging; Documentation.
 Evidence floor: real ApprovalService/ToolRuntime RED/GREEN, real Web delegated-child allowed/rejected evidence, focused lifecycle cases, default check/profile smoke/guardrails, strict fixture validation and three-seat review.
-PI selected bounded public-seam opt-in in [comment 6647569703](https://github.com/DankerMu/SHUD-Harness/issues/614#issuecomment-6647569703); this does not authorize a host upgrade or grant.
+PI selected bounded public-seam opt-in in [comment 6647569703](https://github.com/DankerMu/SHUD-Harness/issues/614#issuecomment-6647569703) and explicitly authorized policy-neutral delegation wording in [comment 6649912974](https://github.com/DankerMu/SHUD-Harness/issues/614#issuecomment-6649912974); neither decision authorizes a host upgrade, cancellation or grant.
 
 ## Why
 

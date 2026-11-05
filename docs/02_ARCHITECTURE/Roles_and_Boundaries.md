@@ -177,7 +177,7 @@ Coder 不负责：
 
 初始化通知以 `shud-coder-approval` 标明 child policy sequence 与 live parent 的 ask 观察，不冒充 PI 点击或用户切换。恢复、clear/compact、角色切换、插件重载都不重新授权；已有持久 ask 保留，后来显式 never 优先。移除插件只停止未来初始化，不迁移或重写历史策略；运维要关闭既有会话审批，应使用宿主现有的显式 policy 控制，而不是手改 canonical log。
 
-审批请求属于 coder child 会话；需要在相应 child 视图处理，不能以 root 视图没有卡片推断没有请求。工程 WebSocket owner answerer 与 canonical asked/decided/result 关联只证明传输和工程决定，不证明浏览器展示、真人点击、科学正确性或 #549 的 PI 功能验收。运行时上下文在模型准入刷新时重新读取当前策略，ask 必须说明 answerer/allowed-once，never 保留宿主拒绝说明，sandbox 限制不变。
+审批请求属于 coder child 会话；需要在相应 child 视图处理，不能以 root 视图没有卡片推断没有请求。工程 WebSocket owner answerer 与 canonical asked/decided/result 关联只证明传输和工程决定，不证明浏览器展示、真人点击、科学正确性或 #549 的 PI 功能验收。按 PI 的[第二次上下文归属决定](https://github.com/DankerMu/SHUD-Harness/issues/614#issuecomment-6649912974)，SHUD 仅提供政策无关的固定委派/sandbox 说明：宿主政策允许请求时，才需要实际 answerer 与 allowed-once；不重复声明当前 ask/never 或当前角色。宿主 `approval:policy` 独占当前值，并在模型准入时刷新；已完成的同一 assembly 即使跨插件卸载/重载也保留真实的静态边界，不依赖 SHUD 动态 provider、原文缓存或取消在途准备。never 仍实际拒绝，sandbox 限制与业务写入规则不变。
 
 Presets 的 host-only projection schema 单独钉 `zod` 4.4.3，以匹配钉版公开 `dsh-session-projection` 的 schema 类型；root/core/domain schemas 仍为 4.6.7，没有领域 schema 降级或 host 升级。安装沿用锁文件和 `autoInstallPeers: false`；既有 host peer-closure 缺口不是静默安装 peer 或放宽依赖检查的授权。完整工程闸与 PI 验收状态由关联 issue/PR 记录，本节不宣称全部检查或 PI 已通过。
 

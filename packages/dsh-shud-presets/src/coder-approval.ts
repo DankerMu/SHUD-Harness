@@ -51,7 +51,6 @@ function delegatedCoder(agent: Agent): boolean {
 
 export function apply(ctx: Context): void {
   const seen = new WeakSet<Agent>();
-  const explanations = new WeakMap<Agent, string>();
   let active = true;
   ctx.effect(() => () => {
     active = false;
@@ -77,44 +76,29 @@ export function apply(ctx: Context): void {
     },
   });
 
-  // Distinct registered name is essential: admission refresh re-resolves providers by name.
+  // Accepted assemblies can outlive this plugin. Only the host owns mutable policy context.
   const contextName = "shud-coder-approval:delegation";
-  function explanation(agent: Agent | undefined): string {
-    if (!agent) return "";
-    const original = explanations.get(agent);
-    if (original === undefined) return "";
-    if (!delegatedCoder(agent) || currentPolicy(agent) !== "ask") return original;
-    return (
-      "You are a delegated coder. SHUD approval policy is ask: operations requiring approval " +
-      "must reach an available answerer; only allowed-once permits that one action. No answerer " +
-      "or any other outcome fails closed. This policy is not an approval or a PI click. Your sandbox " +
-      "scope remains fixed at delegation and cannot be widened from inside this session. " +
-      "If access exceeds that sandbox, state the limitation for the delegating agent; do not retry it."
-    );
-  }
-  ctx.systemPrompt.context({
-    name: contextName,
-    order: ctx.systemPrompt.getContextOrder("SUBAGENT_DELEGATION"),
-    text: ({ agent }) => explanation(agent),
-  });
+  const delegationExplanation =
+    "This session's delegated sandbox scope was fixed at delegation and cannot be widened " +
+    "from inside this session. When the host approval policy permits asking, operations requiring " +
+    "approval need an available answerer; only allowed-once permits that one action. If the host " +
+    "policy forbids asking, no answerer is available, or the outcome is not allowed-once, the " +
+    "operation fails closed. This explanation does not grant an action or represent a PI click. " +
+    "If access exceeds the fixed sandbox, state the limitation for the delegating agent; do not retry it.";
   ctx.on("system-prompt/assemble", async (_assembly, context, next) => {
     const assembly = await next();
-    // The provider is global but its entry is routed only from an accepted host delegation entry.
-    const contexts = assembly.contexts.filter((entry) => entry.name !== contextName);
     // Disposal cannot cancel an entered waterfall; it must revoke routing after the await.
-    if (!active) return { ...assembly, contexts };
+    if (!active) return assembly;
     const agent = context.agent;
-    const original = contexts.find((entry) => entry.name === "subagent:delegation");
-    if (agent && delegatedCoder(agent) && original) {
-      explanations.set(agent, original.text);
-      return {
-        ...assembly,
-        contexts: contexts.map((entry) =>
-          entry === original ? { ...entry, name: contextName, text: explanation(agent) } : entry,
-        ),
-      };
-    }
-    return { ...assembly, contexts };
+    if (!agent || !delegatedCoder(agent)) return assembly;
+    const original = assembly.contexts.find((entry) => entry.name === "subagent:delegation");
+    if (!original) return assembly;
+    return {
+      ...assembly,
+      contexts: assembly.contexts.map((entry) =>
+        entry === original ? { ...entry, name: contextName, text: delegationExplanation } : entry,
+      ),
+    };
   });
 
   ctx.on("agent/created", ({ agent, source, signal }) => {

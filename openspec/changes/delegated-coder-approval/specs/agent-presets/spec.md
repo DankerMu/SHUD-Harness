@@ -51,7 +51,7 @@ The initialization SHALL happen once before the child's first execution through 
 
 ### Requirement: Delegated coder policy evidence matches actual behavior
 
-A delegated coder with current ask policy SHALL receive truthful runtime-context wording that requests still require an answerer and only allowed-once grants one action. It SHALL NOT simultaneously be told that every required approval is automatically rejected. The fixed sandbox boundary SHALL remain stated. Other roles, never-policy contexts and unrelated prompt content SHALL remain unchanged.
+A delegated coder SHALL receive a policy-independent explanation of fixed delegation/sandbox and actual answerer/allowed-once boundaries. SHUD SHALL NOT duplicate a mutable current-policy or current-role assertion in this explanation. The host's existing approval-policy context SHALL remain the sole source of the current ask/never value at admission, including after a policy change, plugin disposal or remount while a previously accepted assembly is retained. The combined model-visible context SHALL NOT contradict that current policy or lose the fixed delegation boundary. Other roles' assembly, the host policy and sandbox contexts, and unrelated prompt content SHALL remain unchanged. This PI-authorized wording revision does not change any approval policy, grant, business-write or recovery requirement.
 
 Engineering evidence SHALL distinguish policy initialization, answerer delivery and actual decision. Real Web evidence SHALL bind the root/child relationship, child policy history and SHUD provenance, tool callId, approval request/decision ids and final tool result in canonical session logs. A configuration dump or asked/decided pair alone SHALL NOT prove answerer delivery, browser display or a PI click. Engineering approval SHALL NOT satisfy #549 PI acceptance.
 
@@ -64,13 +64,20 @@ Engineering evidence SHALL distinguish policy initialization, answerer delivery 
 #### Scenario: Policy changes between assembly and admission remain truthful
 
 - **WHEN** a delegated coder's explicit policy changes from ask to never or never to ask after assembly but before model admission
-- **THEN** the refreshed context reflects the current policy, rather than restoring stale automatic-rejection wording or retaining stale ask wording
+- **THEN** the host policy context reflects the current value and the SHUD delegation explanation remains policy-independent, rather than retaining stale ask or automatic-rejection claims
 - **AND** the sandbox boundary and unrelated runtime-context facts remain unchanged
 
-#### Scenario: Non-coder and never context remains unchanged
+#### Scenario: Non-coder context and never enforcement remain unchanged
 
-- **WHEN** the caller is not a delegated coder or its current policy is never or unknown
-- **THEN** this feature does not alter the delegation explanation or other assembled content
+- **WHEN** the caller is not a delegated coder, or an explicit/restored never policy governs a coder
+- **THEN** non-coder assembly remains unchanged and the host's current policy context remains authoritative
+- **AND** never still rejects required asks before answerer dispatch without business writes; SHUD's policy-independent explanation does not claim an opt-in or grant
+
+#### Scenario: Accepted assembly survives plugin disposal and remount truthfully
+
+- **WHEN** a delegated coder has completed assembly and preparation retains that same assembly while the plugin is disposed or reapplied and policy changes in either direction
+- **THEN** actual admission refresh of that same assembly retains nonempty fixed delegation/sandbox guidance and the current host policy without stale policy or role claims
+- **AND** this causes no policy writes, grants, automatic reinitialization, retained registration or cancellation of unrelated work
 
 #### Scenario: Real child approval transport is separately demonstrated
 
