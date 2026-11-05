@@ -2,7 +2,7 @@ import { expect, test } from "vitest";
 import { makeReplayFixture } from "./replay/test-harness.ts";
 import type { ReplayDiagnosticFailure } from "./replay/session/test-harness.ts";
 import { assertReplayEvidence } from "./shud-replay-evidence.ts";
-import { data } from "./shud-evidence-events.ts";
+import { data, responseModel } from "./shud-evidence-events.ts";
 import { object } from "./shud-restart-evidence.ts";
 
 const ordinaryCalls: Omit<ReplayDiagnosticFailure, "eventError">[] = [
@@ -30,6 +30,12 @@ const ordinaryCalls: Omit<ReplayDiagnosticFailure, "eventError">[] = [
     callId: "diagnostic-job-output",
     // This completed error cannot supply the required correct-id terminal wait.
     arguments: { wait: true },
+  },
+  {
+    sessionId: "worker-base",
+    name: "shud_run",
+    callId: "diagnostic-unbound-run",
+    arguments: { input_dir: "." },
   },
 ];
 
@@ -105,3 +111,32 @@ test.each([undefined, null, 0, "false"])(
     expect(snapshot).toEqual(retained);
   },
 );
+
+test("rejects a failed required run producer even when its durable records claim success", () => {
+  const { snapshot } = makeReplayFixture();
+  const worker = snapshot.children.find((log) => log.header.id === "worker-base")!;
+  const result = worker.events.find(
+    (event) =>
+      event.type === "tool/result" && object(data(event).message).toolCallId === "call-run-base",
+  )!;
+  object(data(result).message).isError = true;
+  const retained = structuredClone(snapshot);
+  expect(() => assertReplayEvidence(snapshot)).toThrow();
+  expect(snapshot).toEqual(retained);
+});
+
+test("the single-worker model helper rejects the early read-only worker selected by current replay assembly", () => {
+  const { snapshot } = makeReplayFixture(
+    "passed",
+    [],
+    {},
+    {
+      incidentalWorkers: ["readonly"],
+    },
+  );
+  const firstWorker = snapshot.children.find((child) => child.header.agentPreset === "worker")!;
+  expect(firstWorker.header.id).toBe("worker-readonly");
+  // Reproduces the existing CLI's selection, not the desired assembly contract.
+  // M3's deliberate one-worker helper is unchanged by the replay repair.
+  expect(() => responseModel(firstWorker)).toThrow("Missing worker model provenance");
+});

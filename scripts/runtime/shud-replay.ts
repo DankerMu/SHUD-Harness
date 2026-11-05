@@ -25,6 +25,7 @@ import {
 import { regular, type StoredLog } from "./shud-session-log.ts";
 import { effectiveConfig } from "./shud-runtime-config.ts";
 import {
+  assembleReplayEvidence,
   capturePreservation,
   cloneReceipt,
   collectReplayFiles,
@@ -34,12 +35,12 @@ import {
   rememberReplayBuilds,
   preparedInputReceipt,
   type ReplayBuildBinding,
+  type ReplayAssemblyInput,
 } from "./shud-replay-snapshot.ts";
-import type { PreservationState, ReplayEvidence } from "./shud-replay-evidence.ts";
+import type { PreservationState } from "./shud-replay-evidence.ts";
 import { REPLAY_FILES } from "./shud-replay-contract.ts";
 import { replayReady } from "./shud-replay-flow.ts";
 import { openReplayApprovals } from "./shud-replay-approval.ts";
-import { responseModel } from "./shud-evidence-events.ts";
 
 const ROOT = fs.realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.."));
 const COMPLETE_MS = 30 * 60_000;
@@ -221,13 +222,7 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
         close(): Promise<void>;
       }
     | undefined;
-  let composed:
-    | {
-        base_url: string;
-        request_alias: string;
-        delegations: { provider: string; agentPreset: string; toolName: string }[];
-      }
-    | undefined;
+  let composed: ReplayAssemblyInput["configuration"] | undefined;
   let failure: unknown, outcome: unknown;
   let completed = false;
   let stage = "preservation-before";
@@ -443,32 +438,17 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
     );
     const files = collectReplayFiles(workspace);
     if (logs && before && after && composed && rootId) {
-      const worker = logs.children.find((child) => child.header.agentPreset === "worker");
-      requireFact(worker, "Missing worker model metadata");
-      const snapshot: ReplayEvidence = {
+      const snapshot = assembleReplayEvidence({
         workspace,
         home,
-        ...logs,
+        rootId,
+        configPath: join(evidenceDir, "effective-config.json"),
+        logs,
         files,
-        delegationBindings: composed.delegations.map((entry) => ({
-          ...entry,
-          parentSessionId: rootId,
-          configPath: join(evidenceDir, "effective-config.json"),
-        })),
-        actualStack: {
-          commits: {
-            SHUD: before.clone!.head,
-            rSHUD: before.repositories.rSHUD.head,
-            AutoSHUD: before.repositories.AutoSHUD.head,
-          },
-          llm: {
-            base_url: composed.base_url,
-            request_alias: composed.request_alias,
-            response_model: responseModel(worker),
-          },
-        },
-        preservation: { before, after },
-      };
+        before,
+        after,
+        configuration: composed,
+      });
       save(join(evidenceDir, "replay-evidence.json"), snapshot, 0);
       const { assertReplayEvidence } = await import("./shud-replay-evidence.ts");
       outcome = assertReplayEvidence(snapshot);

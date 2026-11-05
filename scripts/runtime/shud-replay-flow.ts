@@ -20,10 +20,69 @@ import {
   isCanonicalHarnessRole,
   isRoleToolIdAllowed,
 } from "../../packages/dsh-shud-core/src/governance/role-tool-map.ts";
+import type {
+  BuildRecord,
+  RunJob,
+  RunRecord,
+  StackLock,
+} from "../../packages/dsh-shud-core/src/schemas/index.ts";
 
 interface OwnedEvent {
   log: SessionLog;
   event: CanonicalEvent;
+}
+
+/** Bind the durable run to its successful owner call, not an incidental attempt or worker. */
+function replayRunProducer(
+  logs: readonly SessionLog[],
+  job: RunJob,
+  record: RunRecord,
+  stack: StackLock,
+): OwnedEvent {
+  const owners = logs.filter((log) => log.header.id === job.owner_session);
+  requireFact(
+    owners.length === 1 && owners[0].header.agentPreset === "worker",
+    `Worker run args ${job.run_id}`,
+  );
+  const log = owners[0];
+  const prefix = `SHUD running: job_id=${job.job_id}, run_id=${job.run_id}, dsh_job_id=${job.dsh_job_id}, run_dir=${job.run_dir}.\n`;
+  const producers = calls(log, "shud_run").filter((call) => {
+    const completed = completedResultFor(log, call, "TOOL_RESULT");
+    const value = data(completed);
+    if (value.error || object(value.message).isError !== false) return false;
+    const args = argumentsOf(call);
+    return (
+      args.task_id === job.task_id &&
+      args.build_id === job.build_id &&
+      resultText(resultFor(log, call, "TOOL_RESULT")).startsWith(prefix)
+    );
+  });
+  requireFact(producers.length === 1, `Worker submission result ${job.run_id}`);
+  const event = producers[0];
+  const args = argumentsOf(event);
+  requireFact(
+    args.input_dir === job.input_dir &&
+      args.threads === 1 &&
+      args.end_days === undefined &&
+      (args.project === undefined || args.project === "keliya"),
+    `Worker run args ${job.run_id}`,
+  );
+  let header: CanonicalEvent | undefined;
+  for (let index = log.events.length - 1; index >= 0; index--) {
+    const entry = log.events[index];
+    if (entry.type === "request/header" && entry.seq < event.seq) {
+      header = entry;
+      break;
+    }
+  }
+  requireFact(header, `Missing worker request model metadata ${job.run_id}`);
+  const model = text(object(object(data(header).header).config).model);
+  requireFact(
+    job.llm.response_model === model && record.llm.response_model === model,
+    `Run model identity ${job.run_id}`,
+  );
+  requireFact(stack.llm.response_model === model, `Stack model identity ${stack.stack_id}`);
+  return { log, event };
 }
 
 /** Also evaluated while an ask is pending: no transport callback is required to detect excess. */
@@ -246,6 +305,30 @@ export function assertReplayFlow(e: ReplayEvidence, r: ReplayRecords): void {
     requireFact(values.length === 1, `Expected one ${name} invocation`);
     return values[0];
   }
+  function buildProducer(build: BuildRecord): OwnedEvent {
+    const producers = logs.flatMap((log) =>
+      calls(log, "shud_build")
+        .filter((call) => {
+          const completed = completedResultFor(log, call, "TOOL_RESULT");
+          const value = data(completed);
+          if (value.error || object(value.message).isError !== false) return false;
+          const args = argumentsOf(call);
+          return (
+            args.task_id === r.task.task_id &&
+            (build.change_id === null
+              ? args.change_id === undefined
+              : args.change_id === build.change_id) &&
+            resultObject(resultFor(log, call, "TOOL_RESULT")).build_id === build.build_id
+          );
+        })
+        .map((event) => ({ log, event })),
+    );
+    requireFact(
+      producers.length === 1,
+      `TOOL_RESULT: expected one successful build producer ${build.build_id}`,
+    );
+    return producers[0];
+  }
   function result(value: OwnedEvent) {
     return resultFor(value.log, value.event, "TOOL_RESULT");
   }
@@ -287,14 +370,10 @@ export function assertReplayFlow(e: ReplayEvidence, r: ReplayRecords): void {
       resultObject(result(task)).task_id === r.task.task_id,
     "Task creation identity",
   );
-  const base = one("shud_build", (args) => args.change_id === undefined);
+  const base = buildProducer(r.base);
   const create = one("change_create");
   const change = one("change_submit");
-  const candidate = one("shud_build", (args) => args.change_id === r.change.change_id);
-  requireFact(
-    logs.reduce((count, log) => count + calls(log, "shud_build").length, 0) === 2,
-    "Expected exactly two build calls",
-  );
+  const candidate = buildProducer(r.candidate);
   for (const [call, build] of [
     [base, r.base],
     [candidate, r.candidate],
@@ -327,25 +406,8 @@ export function assertReplayFlow(e: ReplayEvidence, r: ReplayRecords): void {
   const collected: OwnedEvent[] = [];
   const submitted: OwnedEvent[] = [];
   for (const [index, job] of r.jobs.entries()) {
-    const run = one("shud_run", (args) => args.build_id === job.build_id);
-    const args = argumentsOf(run.event);
-    requireFact(
-      run.log.header.id === job.owner_session &&
-        run.log.header.agentPreset === "worker" &&
-        args.task_id === r.task.task_id &&
-        args.input_dir === job.input_dir &&
-        args.threads === 1 &&
-        args.end_days === undefined &&
-        (args.project === undefined || args.project === "keliya"),
-      `Worker run args ${job.run_id}`,
-    );
+    const run = replayRunProducer(logs, job, r.runs[index], r.stacks[index]);
     const submittedResult = result(run);
-    requireFact(
-      resultText(submittedResult).startsWith(
-        `SHUD running: job_id=${job.job_id}, run_id=${job.run_id}, dsh_job_id=${job.dsh_job_id}, run_dir=${job.run_dir}.\n`,
-      ),
-      `Worker submission result ${job.run_id}`,
-    );
     const waits = calls(run.log, "job_output").filter(
       (call) => argumentsOf(call).job_id === job.dsh_job_id && argumentsOf(call).wait === true,
     );
@@ -372,10 +434,6 @@ export function assertReplayFlow(e: ReplayEvidence, r: ReplayRecords): void {
     submitted.push(run);
     collected.push(collect);
   }
-  requireFact(
-    logs.reduce((count, log) => count + calls(log, "shud_run").length, 0) === 2,
-    "Expected two run calls",
-  );
   const verify = one("verification_run");
   const verificationArgs = argumentsOf(verify.event),
     verificationOutput = resultObject(result(verify));

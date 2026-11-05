@@ -20,13 +20,65 @@ import {
   type SessionLog,
 } from "./shud-session-log.ts";
 import type { WebHost } from "./shud-web-driver.ts";
-import type { PreservationState } from "./shud-replay-evidence.ts";
-import { argumentsOf, calls, data, resultFor, resultObject } from "./shud-evidence-events.ts";
+import type { PreservationState, ReplayEvidence } from "./shud-replay-evidence.ts";
+import {
+  argumentsOf,
+  calls,
+  completedResultFor,
+  data,
+  resultFor,
+  resultObject,
+} from "./shud-evidence-events.ts";
 import { REPLAY_COMMIT } from "./shud-replay-contract.ts";
 
 export interface ReplayBuildBinding {
   taskId: string;
   changeId: string | null;
+}
+
+export interface ReplayAssemblyInput {
+  workspace: string;
+  home: string;
+  rootId: string;
+  configPath: string;
+  logs: { root: SessionLog; children: SessionLog[] };
+  files: Record<string, unknown>;
+  before: PreservationState;
+  after: PreservationState;
+  configuration: {
+    base_url: string;
+    request_alias: string;
+    delegations: { provider: string; agentPreset: string; toolName: string }[];
+  };
+}
+
+/** Package complete evidence before judging; observed per-run models remain in canonical logs. */
+export function assembleReplayEvidence(input: ReplayAssemblyInput): ReplayEvidence {
+  const { workspace, home, rootId, configPath, logs, files, before, after, configuration } = input;
+  requireFact(before.clone, "Missing private clone receipt");
+  return {
+    workspace,
+    home,
+    ...logs,
+    files,
+    delegationBindings: configuration.delegations.map((entry) => ({
+      ...entry,
+      parentSessionId: rootId,
+      configPath,
+    })),
+    actualStack: {
+      commits: {
+        SHUD: before.clone.head,
+        rSHUD: before.repositories.rSHUD.head,
+        AutoSHUD: before.repositories.AutoSHUD.head,
+      },
+      llm: {
+        base_url: configuration.base_url,
+        request_alias: configuration.request_alias,
+      },
+    },
+    preservation: { before, after },
+  };
 }
 
 export function rememberReplayBuilds(
@@ -53,10 +105,6 @@ export function rememberReplayBuilds(
       "Cleanup build caller ownership",
     );
     for (const call of calls(child, "shud_build")) {
-      requireFact(
-        child.header.agentPreset === "coder" && argumentsOf(call).task_id === taskId,
-        "Cleanup build task/role binding",
-      );
       if (
         !child.events.some(
           (event) =>
@@ -65,6 +113,12 @@ export function rememberReplayBuilds(
         )
       )
         continue;
+      const completed = completedResultFor(child, call, "SHUD_BUILD");
+      if (object(data(completed).message).isError === true) continue;
+      requireFact(
+        child.header.agentPreset === "coder" && argumentsOf(call).task_id === taskId,
+        "Cleanup build task/role binding",
+      );
       const output = resultObject(resultFor(child, call, "SHUD_BUILD"));
       const changeId =
         argumentsOf(call).change_id === undefined ? null : text(argumentsOf(call).change_id);

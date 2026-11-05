@@ -25,6 +25,7 @@ export interface ReplayDiagnosticFailure {
   callId: string;
   arguments: Record<string, unknown>;
   eventError: boolean;
+  model?: string;
 }
 
 export interface ReplayCollectionScenario {
@@ -33,16 +34,31 @@ export interface ReplayCollectionScenario {
   baseCollection?: "missing" | "failed";
 }
 
+export interface ReplayModelScenario {
+  incidentalWorkers?: readonly ("readonly" | "failed-attempt")[];
+  responseModels?: readonly [string, string];
+  lateHeaderModel?: string;
+}
+
 /** Canonical event envelopes, with local sequences and one shared causal clock. */
 export function replayLogs(
   records: ReplayRecords,
   paths: { workspace: string; home: string; prompt: string },
   diagnostics: readonly ReplayDiagnosticFailure[] = [],
   collections: ReplayCollectionScenario = {},
+  models: ReplayModelScenario = {},
 ) {
   const { task, change, builds, runs, verification, report } = records;
   let clock = Date.parse("2026-11-02T09:00:00Z");
   const children: SessionLog[] = [];
+  const requestModels = new Map(
+    runs.map(({ job }) => [String(job.owner_session), job.llm.response_model]),
+  );
+  requestModels.set("worker-readonly", "fixture-readonly-model");
+  requestModels.set("worker-failed-attempt", "fixture-failed-attempt-model");
+  function requestModel(log: SessionLog): string {
+    return requestModels.get(String(log.header.id)) ?? "fixture-model";
+  }
   function append(log: SessionLog, type: string, data: unknown) {
     const event = {
       type,
@@ -78,16 +94,11 @@ export function replayLogs(
       canonicalLog: `${paths.home}/sessions/2026-11-02/${id}/session.v4.jsonl.zstd`,
     };
   }
-  function start(log: SessionLog, role: Role, text: string) {
-    append(log, "turn/start", { turn: 1 });
-    if (role !== "coordinator") {
-      append(log, "subagent/descriptor", { version: 3, provider: "spawn", mode: "one-shot" });
-    }
-    append(log, "step/start", { turn: 1, step: 1 });
+  function requestHeader(log: SessionLog, role: Role, reason: "initial" | "change" = "initial") {
     append(log, "request/header", {
-      reason: "initial",
+      reason,
       header: {
-        config: { provider: "fixture", model: "fixture-model" },
+        config: { provider: "fixture", model: requestModel(log) },
         tools: [
           ...tools[role],
           ...(role === "coordinator" && collections.observers?.includes("coordinator")
@@ -100,6 +111,14 @@ export function replayLogs(
         })),
       },
     });
+  }
+  function start(log: SessionLog, role: Role, text: string) {
+    append(log, "turn/start", { turn: 1 });
+    if (role !== "coordinator") {
+      append(log, "subagent/descriptor", { version: 3, provider: "spawn", mode: "one-shot" });
+    }
+    append(log, "step/start", { turn: 1, step: 1 });
+    requestHeader(log, role);
     append(log, "system/message", {
       turn: 1,
       step: 1,
@@ -128,7 +147,7 @@ export function replayLogs(
       message: {
         id: `${id}-assistant`,
         role: "assistant",
-        source: { kind: "model", provider: "fixture", model: "fixture-model" },
+        source: { kind: "model", provider: "fixture", model: requestModel(log) },
         content: [block],
       },
       stream: [
@@ -247,8 +266,17 @@ export function replayLogs(
     result(root, callId, `started subagent ${id}`);
     start(child, role, instruction);
     for (const diagnostic of diagnostics.filter((entry) => entry.sessionId === id)) {
+      const previousModel = requestModel(child);
+      if (diagnostic.model) {
+        requestModels.set(id, diagnostic.model);
+        requestHeader(child, role, "change");
+      }
       call(child, diagnostic.name, diagnostic.callId, diagnostic.arguments);
       result(child, diagnostic.callId, "Synthetic ordinary tool failure", diagnostic);
+      if (diagnostic.model) {
+        requestModels.set(id, previousModel);
+        requestHeader(child, role, "change");
+      }
     }
     work(child);
     append(child, "step/end", { turn: 1, step: 1 });
@@ -349,6 +377,10 @@ export function replayLogs(
           `SHUD running: job_id=${job.job_id}, run_id=${job.run_id}, dsh_job_id=${job.dsh_job_id}, run_dir=${job.run_dir}.\nUse job_output to wait for completion.`,
           job.submitted_at!,
         );
+        if (models.lateHeaderModel) {
+          requestModels.set(String(worker.header.id), models.lateHeaderModel);
+          requestHeader(worker, "worker", "change");
+        }
         invoke(
           worker,
           "job_output",
@@ -373,6 +405,21 @@ export function replayLogs(
       },
     );
   }
+  for (const kind of models.incidentalWorkers ?? [])
+    delegate(
+      `worker-${kind}`,
+      "worker",
+      "Inspect jobs without producing a replay run.",
+      (worker) => {
+        if (kind === "readonly") invoke(worker, "job_list", "call-readonly-jobs", {}, []);
+        else {
+          call(worker, "shud_run", "call-unbound-submission", { input_dir: "." });
+          result(worker, "call-unbound-submission", "Synthetic unbound submission failure", {
+            eventError: true,
+          });
+        }
+      },
+    );
   runWorker(0);
   delegate(
     "coder-candidate",

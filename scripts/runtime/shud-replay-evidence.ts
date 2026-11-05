@@ -34,7 +34,7 @@ export interface ReplayEvidence {
   files: Record<string, unknown>;
   actualStack: {
     commits: Record<"SHUD" | "rSHUD" | "AutoSHUD", string>;
-    llm: { base_url: string; request_alias: string; response_model: string };
+    llm: { base_url: string; request_alias: string };
   };
   preservation: { before: PreservationState; after: PreservationState };
 }
@@ -156,7 +156,8 @@ export function assertReplayEvidence(snapshot: ReplayEvidence) {
     );
   for (const stack of r.stacks) {
     requireFact(
-      isDeepStrictEqual(stack.llm, snapshot.actualStack.llm),
+      stack.llm.base_url === snapshot.actualStack.llm.base_url &&
+        stack.llm.request_alias === snapshot.actualStack.llm.request_alias,
       `Stack model identity ${stack.stack_id}`,
     );
     for (const name of ["SHUD", "rSHUD", "AutoSHUD"] as const)

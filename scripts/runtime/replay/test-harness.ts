@@ -36,6 +36,7 @@ import {
   replayLogs,
   type ReplayCollectionScenario,
   type ReplayDiagnosticFailure,
+  type ReplayModelScenario,
 } from "./session/test-harness.ts";
 import type { ReplayEvidence } from "../shud-replay-evidence.ts";
 import { argumentsOf, calls, data, resultFor } from "../shud-evidence-events.ts";
@@ -346,8 +347,18 @@ export function makeReplayFixture(
   verificationStatus: "passed" | "failed" = "passed",
   diagnostics: readonly ReplayDiagnosticFailure[] = [],
   collections: ReplayCollectionScenario = {},
+  models: ReplayModelScenario = {},
 ): ReplayFixture {
   const records = replayRecords(verificationStatus);
+  if (models.responseModels)
+    for (const [index, run] of records.runs.entries()) {
+      const model = models.responseModels[index];
+      run.stack.llm.response_model = model;
+      run.job.llm.response_model = model;
+      run.record.llm.response_model = model;
+    }
+  if (models.responseModels)
+    records.report.llm_response_models = [...new Set(models.responseModels)];
   const sourceCfg = "START\t12053\nEND\t12143\nNUM_OPENMP\t8\n";
   const preparedCfg = "START\t12053\nEND\t12143\nNUM_OPENMP\t1\n";
   const stations = records.runs[0].data.sources.external_files
@@ -451,7 +462,7 @@ export function makeReplayFixture(
       ["/fixture/basin/forcing.trimmed/unreferenced-34.csv", HELLO_SHA256],
     ]),
   };
-  const logs = replayLogs(records, { workspace, home, prompt }, diagnostics, collections);
+  const logs = replayLogs(records, { workspace, home, prompt }, diagnostics, collections, models);
   const snapshot: ReplayEvidence = {
     workspace,
     home,
@@ -463,7 +474,7 @@ export function makeReplayFixture(
         rSHUD: preservation.repositories.rSHUD.head,
         AutoSHUD: preservation.repositories.AutoSHUD.head,
       },
-      llm: records.runs[0].stack.llm,
+      llm: { base_url: "https://example.invalid", request_alias: "fixture-model" },
     },
     preservation: { before: preservation, after: structuredClone(preservation) },
   };
