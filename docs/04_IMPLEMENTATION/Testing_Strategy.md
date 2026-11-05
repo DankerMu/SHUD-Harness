@@ -28,11 +28,21 @@ status: frozen
 | M1 | core schema 正反例、policy-gate 决策表、raw-guard 单测 + 5 探针、profile `--dump-config` 自检、docs link | schema-only | PR |
 | M2 | `shud_run`/`shud_collect`、durable JobRegistry 落盘与对账、SIGTERM/SIGKILL 重启用例、RunRecord 产出 | dummy-runner + ccw tiny | PR（dummy）/ nightly·manual（ccw） |
 | M3 | TaskCard 状态机、StackLock 三仓库 + llm 三字段、EvidenceReport 语言护栏与水印、PI decision 负例 | 1 成功 + 1 失败 RunRecord，带可解析 TaskCard/StackLock/DataProvenance 引用；无 metrics/figure/AnalysisPlan 产物 | PR |
-| M4 | ChangeRequest/VerificationCase、openMP RHS 回放与 serial baseline 一致性、故意注入错误 patch 被拦截 | old-output | PR/nightly |
+| M4 | ChangeRequest/VerificationCase/BuildRecord 与回放证据正反例；真实 N=1 known-answer 回放 | 构造证据 + keliya 回放 | PR（构造测试）/ block（真实回放仅本机） |
 | M5 | AnalysisPlan OAT 批次、失败参数集可见、汇总表可复算 | dummy-batch | PR |
 | M6 | 各项评估的一页文档链接检查 | none | PR |
 
 Fixture 与命令矩阵见 [Test_Fixtures_And_Command_Matrix.md](Test_Fixtures_And_Command_Matrix.md)。原阶段测试计划 Phase_By_Phase_Test_Plan 与 CI 映射 CICD_Release 已删（见 tag archive/zero-v0.8.3）；CI 内容以 Phased_Plan v2 M1 为准。
+
+### Verification Matrix：M4 本机回放
+
+其余命令与级别见根 [Verification Matrix](../../AGENTS.md#verification-matrix)；回放通过判据只维护在下列规范链接中。
+
+| 面 | Command | 通过判据 | 级别 |
+|---|---|---|---|
+| keliya known-answer 回放（需 SHUD 工具链、`DMXAPI_KEY`、绝对可执行 `SHUD_BIN`、`SUNDIALS_ROOT` 与显式 `SHUD_REPLAY_KELIYA`） | `pnpm run shud:replay <scratch-workspace>` | [Replay acceptance criteria](../../openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria) | block（本机，CI 不运行） |
+
+工作区参数必填；缺前置在准备/建会话前失败，不跳过。自动 Allow once 仅为工程证据，不替代 Epic 收口时的 PI Web 操作与明确验收。
 
 ## 2. Schema 测试
 
@@ -46,6 +56,8 @@ Fixture 与命令矩阵见 [Test_Fixtures_And_Command_Matrix.md](Test_Fixtures_A
 - AnalysisPlan；
 - EvidenceReport；
 - ChangeRequest。
+
+M4 的 ChangeRequest、VerificationCase、BuildRecord 已注册于 `scripts/schema/registry.ts`，由 `pnpm run schema:generate` 投影 Markdown 与 JSON Schema；semantic-level floor 的路径表、等级顺序与风险映射也由同一生成入口投影。`pnpm run schema:check` 已纳入默认 `check`，校验这些对象与常量的漂移；不手编 `docs/generated/`，不提供 profile/运行时 floor 覆写。
 
 ## 3. 传输层测试
 
@@ -310,6 +322,7 @@ gh pr view "$PR" --repo "$REPO" --json headRefOid,state,mergedAt,mergeCommit,mer
 | ccw tiny 闭环 | `scripts/runtime/shud-tiny.sh` | 本机 `pnpm run shud:tiny` | block |
 | ccw 重启恢复 / 五条作业不变量 | `scripts/runtime/shud-restart.sh` | 本机 `pnpm run shud:restart`（需 SHUD 与 `DMXAPI_KEY`；SIGTERM / SIGKILL 两用例，通知必须 delivered） | block（本机） |
 | 首任务调用链 / 报告审批与文件联合判据 | `scripts/runtime/shud-first-task.sh` | 本机 `pnpm run shud:first-task <scratch-workspace>`（需 SHUD 与 `DMXAPI_KEY`；独立 Web profile，审计与文件同时通过；CI 不运行，自动 Allow once 不代替 PI 验收） | block（本机） |
+| keliya known-answer 回放 | `scripts/runtime/shud-replay.sh`；[Replay acceptance criteria](../../openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria) | 本机 `pnpm run shud:replay <scratch-workspace>`（需 SHUD 工具链、`DMXAPI_KEY`、`SHUD_BIN`、`SUNDIALS_ROOT`、`SHUD_REPLAY_KELIYA`；CI 不运行；自动审批不是 PI 验收） | block（本机） |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
 | PI 功能验收（Epic #210 / M3 Epic #423 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 亲自操作与明确验收记录；工程门禁及运行时审批权限不变 | gate |
 | 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |

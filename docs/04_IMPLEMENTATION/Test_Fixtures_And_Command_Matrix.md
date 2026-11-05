@@ -20,6 +20,7 @@ status: frozen
 | dummy-batch | AnalysisPlan/AnalysisProgressPayload（Heatmap 出 MVP；最小 OAT 见 Phased_Plan M5） | 否 |
 | old-output fixture | rSHUD backward compatibility | 部分依赖 rSHUD |
 | ccw tiny | 真实 SHUD/rSHUD 闭环 | 是 |
+| [keliya replay](#7-keliya-known-answer-回放) | M4 N=1 known-answer 工程回放 | 是；本机 block，CI 不运行 |
 | report fixture | M3 EvidenceReport 渲染/校验/语言护栏；不含 M4 导出 | 否 |
 
 ---
@@ -201,3 +202,26 @@ no metrics, figure or AnalysisPlan progress artifacts
 | timeout | dummy job sleep 超时 | RunJob.timed_out + ErrorRecord |
 | parser_error | 删除 required output | ErrorRecord + report limitation |
 | secret_leak_attempt | env 中放 fake secret | artifact/log/report 不包含 secret |
+
+---
+
+## 7. keliya known-answer 回放
+
+来源必须显式设置 `SHUD_REPLAY_KELIYA`，指向 basin 的 `input/keliya` 目录；本地已知来源例为仓库根相对路径 `../openMP/SHUD/Basins/keliya/input/keliya`，不是脚本默认值，也不会自动猜测兄弟仓库。准备脚本独立调用时也接受 `--keliya <dir>`，显式参数优先于环境变量。
+
+`scripts/runtime/shud-replay-prepare.sh` 是唯一准备入口；`shud:replay` 自动调用它，勿先准备同一目标再运行完整闸。只在新的显式 scratch workspace 建独立 `repos/SHUD` clone 与 `input/keliya` 副本，已有目标拒绝覆盖。准备期仅改副本两处：
+
+| 文件 | 改写 |
+|---|---|
+| `keliya.cfg.para` | `NUM_OPENMP` 行改为 `NUM_OPENMP\t1`；原 `START 12053`、`END 12143` 窗口不改 |
+| `keliya.tsd.forc` | 第二行改为同一 basin 的 `forcing.trimmed/` 物理绝对路径 |
+
+`input/keliya/PREPARED.json` 记录来源与两项改写前后 SHA256。`forcing.trimmed/` 保持在 workspace 外，不复制进输入副本；必须含表格引用的 32 个普通文件（目录另有两项未引用），目录路径不得含 pinned SHUD 无法解析的 ASCII 空白。回放不传 `end_days`，不把 ccw tiny 的 30 天 END 套用到该窗口。
+
+完整闸从仓库根执行，先经环境变量提供 `DMXAPI_KEY`（不写入文件）、绝对可执行普通文件 `SHUD_BIN`、已存在绝对目录 `SUNDIALS_ROOT` 与上述显式来源；本机须有 SHUD 构建工具链及仓库旁的 `../openMP/docs/p1e/p1e_strict_omp_design.md`：
+
+```sh
+pnpm run shud:replay /absolute/path/to/empty-scratch-workspace
+```
+
+这是 **block（本机，CI 不运行）**。通过判据唯一正文为 [Replay acceptance criteria](../../openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)，本页不复制清单。退出 1 时保留工作区与 canonical session log，不改称 INCONCLUSIVE；自动 Allow once 不代替 PI 验收，N=1 比较不构成并行正确性、性能或模型改进结论。
