@@ -328,7 +328,7 @@ gh pr view "$PR" --repo "$REPO" --json headRefOid,state,mergedAt,mergeCommit,mer
 | 首任务调用链 / 报告审批与文件联合判据 | `scripts/runtime/shud-first-task.sh` | 本机 `pnpm run shud:first-task <scratch-workspace>`（需 SHUD 与 `DMXAPI_KEY`；独立 Web profile，审计与文件同时通过；CI 不运行，自动 Allow once 不代替 PI 验收） | block（本机） |
 | keliya known-answer 回放 | `scripts/runtime/shud-replay.sh`；[Replay acceptance criteria](../../openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria) | 本机 `pnpm run shud:replay <scratch-workspace>`（需 SHUD 工具链、`DMXAPI_KEY`、`SHUD_BIN`、`SUNDIALS_ROOT`、`SHUD_REPLAY_KELIYA`；CI 不运行；自动审批不是 PI 验收） | block（本机） |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
-| PI 功能验收（Epic #210 / M3 Epic #423 在 Epic 收口，其余在 merge 前） | GitHub PR / Epic | GitHub rulesets（PR required）+ PI 亲自操作与明确验收记录；工程门禁及运行时审批权限不变 | gate |
+| PI 功能验收（Epic #210 / M3 #423 / M4 #515 按各自 Epic 收口契约，其余在 merge 前） | GitHub PR / Epic；M4 见 [既定验收要求](../../openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-epic-close-pi-acceptance-for-replay) 与 [#549](https://github.com/DankerMu/SHUD-Harness/issues/549) | GitHub rulesets（PR required）+ PI 亲自操作与明确验收记录；各 issue 工程门禁、审查、CI 及运行时审批权限不变，自动工程审批和子 PR 合并不代替 PI 验收 | gate |
 | 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
 | docs 随代码改 | PR 模板 | review-only | review-only |
 | 科学措辞规则（测试常量与枚举短语 lint） | `packages/dsh-shud-core/src/governance/wording.ts` 及其测试 | `pnpm run test`（纳入默认 `check`）；报告门禁的机器边界为四句不变式逐字出现且模型撰写字段无禁止短语，完整报告校验器另行交付；guard 通过 ≠ 语义合规，仍由 PI 审阅 | block |
