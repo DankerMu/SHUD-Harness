@@ -171,6 +171,17 @@ Coder 不负责：
 
 治理目录必须经对应领域工具写入，raw-guard 对模型 edit/write/shell 写治理根 deny；此 shell 保护是启发式而非沙箱强隔离，其局限与摘要复核见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
 
+### 6.1 Delegated coder 审批与运维边界
+
+`shud-coder-approval` 按 [ADR-0013](../adr/proposed/0013-delegated-coder-approval.md) 的 PI 授权，仅在新 child 的 awaited 创建边界初始化一次：必须是 fresh/unseeded、当前 coder、精确 live parent 所拥有、无历史 turn，且唯一 child-owned policy 为 delegation-origin never。最终同步边界的 parent override/config 必须明确为 ask；缺服务、未知来源或 parent never 不推断为授权。此初始化不是 grant，不扩大 sandbox 或工具面；只有实际 answerer 的 allowed-once 才能放行一次操作，没有 answerer 或 rejected/cancelled/unavailable 均 fail closed。
+
+初始化通知以 `shud-coder-approval` 标明 child policy sequence 与 live parent 的 ask 观察，不冒充 PI 点击或用户切换。恢复、clear/compact、角色切换、插件重载都不重新授权；已有持久 ask 保留，后来显式 never 优先。移除插件只停止未来初始化，不迁移或重写历史策略；运维要关闭既有会话审批，应使用宿主现有的显式 policy 控制，而不是手改 canonical log。
+
+审批请求属于 coder child 会话；需要在相应 child 视图处理，不能以 root 视图没有卡片推断没有请求。工程 WebSocket owner answerer 与 canonical asked/decided/result 关联只证明传输和工程决定，不证明浏览器展示、真人点击、科学正确性或 #549 的 PI 功能验收。运行时上下文在模型准入刷新时重新读取当前策略，ask 必须说明 answerer/allowed-once，never 保留宿主拒绝说明，sandbox 限制不变。
+
+Presets 的 host-only projection schema 单独钉 `zod` 4.4.3，以匹配钉版公开 `dsh-session-projection` 的 schema 类型；root/core/domain schemas 仍为 4.6.7，没有领域 schema 降级或 host 升级。安装沿用锁文件和 `autoInstallPeers: false`；既有 host peer-closure 缺口不是静默安装 peer 或放宽依赖检查的授权。完整工程闸与 PI 验收状态由关联 issue/PR 记录，本节不宣称全部检查或 PI 已通过。
+
+
 ## 7. Reviewer Agent
 
 Reviewer 不是 “科学 Critic”。v0.6 中它只做两类检查：

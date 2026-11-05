@@ -10,6 +10,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./coder-approval": {
+      "types": "./lib/coder-approval.d.ts",
+      "default": "./lib/coder-approval.js"
+    },
     "./prompts/*.md": "./prompts/*.md",
     "./package.json": "./package.json"
   },
@@ -22,7 +26,8 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@shud-harness/dsh-shud-core": "workspace:*"
+    "@shud-harness/dsh-shud-core": "workspace:*",
+    "zod": "4.4.3"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh": "0.2.1-rc.2"

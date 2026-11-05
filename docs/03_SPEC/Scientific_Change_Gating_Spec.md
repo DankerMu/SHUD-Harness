@@ -146,6 +146,8 @@ interface ChangeRequestScientificAdditions {
 
 **M4 `change_submit`：** role-tool-surface 未 deny 后，策略门先按品牌 id 只读校验 CR 与 patch。两者可读且 patch SHA256 不符即 deny `change-patch-mismatch`，不弹卡；高风险五档返回 ask，displayReason 包含 floor_categories，文件缺失或损坏仍先 ask，执行时再明确失败。pure_engineering/io_format 在证据可读且摘要匹配时 next。工具执行时再次复核 patch，只有宿主放行后才原子写 proposed → approved、approval_ref = 本次 exec.callId。rejected/cancelled/unavailable 均不执行、CR 不变；danger-full-access 仍 ask。`change_create` 本身不 ask，候选 `shud_build` 只接受已批且摘要匹配的 CR。
 
+Delegated coder 的 ask 可达性另由 [Coder 审批与运维边界](../02_ARCHITECTURE/Roles_and_Boundaries.md#61-delegated-coder-审批与运维边界) 的一次性初始化控制；这不改变上述 CR admission/写入规则，不覆盖 parent、显式或 restored never，也不把工程 answerer 的 allowed-once 当作 #549 PI 验收。
+
 ## 5. Comment required rules
 
 PI decision comment 必填：

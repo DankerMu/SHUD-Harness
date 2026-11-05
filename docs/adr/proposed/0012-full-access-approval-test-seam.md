@@ -13,7 +13,7 @@ kind: architecture
 
 ## 选择与边界
 
-仅 `packages/dsh-shud-policy-gate/src/full-access-approval.test.ts` 可具名运行时导入下列已发布包的公开能力：
+原始授权路径为 `packages/dsh-shud-policy-gate/src/full-access-approval.test.ts`。[ADR-0013](0013-delegated-coder-approval.md) 将此唯一例外迁移到 `packages/dsh-shud-policy-gate/src/approval/test-harness.ts`，原回归改为调用该规范 harness，不保留旧路径导入许可。唯一允许的具名能力仍是：
 
 | 包 | 唯一允许的运行时名称 | 用途 |
 | --- | --- | --- |
@@ -23,7 +23,7 @@ kind: architecture
 | @deepseek-ai/dsh-session-projection | SessionProjectionRegistry | 折叠真实权限状态 |
 | @deepseek-ai/dsh-system-prompt | SystemPrompt | 满足真实 ToolRuntime/ApprovalService 装配，不伪造内部 prompt 服务 |
 
-既有 Cordis、ToolRuntime、defineTool 和测试专用 createScope 规则不变。禁止这些新能力的 default、namespace、其它具名、空声明与副作用导入；同名文件在其它目录、其它测试、共享 harness、生产文件均无例外。宿主 checkout 路径（含类型）、内部 subpath、agent-loop-testkit 和其它未授权宿主运行时入口继续被拒。类型导入仍遵守 ADR-0006 的 declaration-level 规则。
+既有 Cordis、ToolRuntime、defineTool 和测试专用 createScope 规则不变。禁止这些新能力的 default、namespace、其它具名、空声明与副作用导入；除 ADR-0013 指定的规范 harness 外，同名文件在其它目录、其它测试、其它共享 harness、生产文件均无构造器例外。宿主 checkout 路径（含类型）、内部 subpath、agent-loop-testkit 和其它未授权宿主运行时入口继续被拒。类型导入仍遵守 ADR-0006 的 declaration-level 规则。
 
 `eslint.config.mjs` 使用精确文件路径和能力名称实施此边界；`scripts/guardrails/test-guardrails.sh` 保留原有具化 fixture 的 type-aware CLI 自证。需要注入精确授权路径的正反例改用 ESLint API `lintText`：正常加载仓库配置，仅在该自证实例追加 `disableTypeChecked`，以独立解析所提供的 fixture 字节，避免 typed project 重用同路径真实文件的 SourceFile。导入限制是语法规则，仍使用该精确路径的原配置；不覆盖真实测试文件、不放宽限制、不允许空诊断冒充反例。生产 lint 与完整质量闸仍保持 type-aware，原有正反例及精确 rule/severity 校验不变。
 
@@ -42,7 +42,7 @@ kind: architecture
 
 测试使用真实 ToolRuntime 和 SHUD policy-gate，把 report_submit/report_decide 的执行端限制为计数边界，不复制报告状态机；Agent 和不执行命令的 filesystem executor 仅提供服务所需的外部身份/默认模式。真实 approval/request answerer 持有未完成的响应，测试与工具实际结算竞速，断言 full-access 仍被选中、请求实际到达、工具尚未执行且没有决定事件，随后仅 allowed-once 放行一次。拒绝、取消与未安装 answerer 的不可用路径均断言不执行。finally 取消请求、释放响应、在 watchdog 界限内观察操作、dispose Cordis 并删除自有临时目录；watchdog 超时不代表操作已经结算。
 
-覆盖还包括三种模式的实际 knob 转换和重复选择无事件追加、环境选定 full-access 的初始 ask 与真实 dispatch、旧 full-access/never 会话事件 replay 后保持原策略及历史，直到显式公开预设重选才追加 ask 并允许审批。所有 helper 留在这个精确授权文件；不扩展共享 harness 或生产导入许可。
+覆盖还包括三种模式的实际 knob 转换和重复选择无事件追加、环境选定 full-access 的初始 ask 与真实 dispatch、旧 full-access/never 会话事件 replay 后保持原策略及历史，直到显式公开预设重选才追加 ask 并允许审批。服务装配 helper 按 ADR-0013 迁移到唯一的精确授权 harness，不复制装配或扩大构造器的生产导入许可。
 
 ## 证据限制
 
