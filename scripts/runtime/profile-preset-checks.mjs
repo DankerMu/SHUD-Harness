@@ -91,6 +91,12 @@ export function presetErrors(rows, schema, headless = false) {
   const restrict = global("shud-role-restrict", "@shud-harness/dsh-shud-presets");
   require("shud-role-restrict: no config", restrict !== undefined &&
     !Object.hasOwn(restrict, "config"));
+  const coderApproval = global(
+    "shud-coder-approval",
+    "@shud-harness/dsh-shud-presets/coder-approval",
+  );
+  require("shud-coder-approval: no config", coderApproval !== undefined &&
+    !Object.hasOwn(coderApproval, "config"));
   for (const id of ["subagent", "subagent-spawn-in-process"]) {
     const row = global(id, `@deepseek-ai/dsh-${id}`);
     require(`${id}: host config`, isDeepStrictEqual(
@@ -181,6 +187,7 @@ export function presetErrors(rows, schema, headless = false) {
       "preset-coder",
       "preset-reviewer",
       "shud-role-restrict",
+      "shud-coder-approval",
     ].includes(row.id),
   );
   require("no preset machine paths", !/["'](?:\/[^/]|[A-Za-z]:\\\\)/.test(JSON.stringify(owned)));
@@ -230,6 +237,7 @@ export function checkPresets(check, rows, schema, label, headless = false) {
       );
   for (const id of [
     "shud-role-restrict",
+    "shud-coder-approval",
     "subagent",
     "subagent-spawn-in-process",
     ...roles.map((role) => `preset-${role}`),
@@ -269,6 +277,13 @@ export function checkPresets(check, rows, schema, label, headless = false) {
       find(rows, "shud-role-restrict").config = { role: "coordinator" };
     },
     "shud-role-restrict: no config",
+  );
+  reject(
+    "coder approval config",
+    (rows) => {
+      find(rows, "shud-coder-approval").config = { policy: "ask" };
+    },
+    "shud-coder-approval: no config",
   );
   for (const id of ["subagent", "subagent-spawn-in-process"])
     reject(
@@ -471,7 +486,8 @@ export function checkPresets(check, rows, schema, label, headless = false) {
     },
     "no preset machine paths",
   );
-  check(`${label}: every preset negative control executed`, controls === (headless ? 280 : 283));
+  // Coder approval adds five identity/status mutations, one import error and one config mutation.
+  check(`${label}: every preset negative control executed`, controls === (headless ? 287 : 290));
   check(
     `${label}: every delegation seam negative control executed`,
     seamControls === (headless ? 0 : 35),

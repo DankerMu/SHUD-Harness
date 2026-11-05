@@ -164,8 +164,8 @@ for source in @deepseek-ai/dsh-tools @deepseek-ai/cordis @deepseek-ai/dsh-jobs @
   expect_seam "eslint runtime seam inline type re-export $source" allow registry.ts "export { type HostType } from '$source';"
 done
 
-# ADR-0012: inject syntax at the exact authorized path without overwriting the real regression.
-APPROVAL_TEST="packages/dsh-shud-policy-gate/src/full-access-approval.test.ts"
+# ADR-0013: exact canonical harness; never overwrite its real source during syntax checks.
+APPROVAL_TEST="packages/dsh-shud-policy-gate/src/approval/test-harness.ts"
 for binding in \
   "@deepseek-ai/dsh-permission-presets:PermissionPresetService" \
   "@deepseek-ai/dsh-user-approval:ApprovalService" \
@@ -179,6 +179,7 @@ for binding in \
   expect_seam "eslint approval other test $symbol" no-restricted-imports seam.test.ts "$capability"
   expect_seam "eslint approval other package same basename $symbol" no-restricted-imports full-access-approval.test.ts "$capability"
   expect_seam "eslint approval helper $symbol" no-restricted-imports test-harness.ts "$capability"
+  expect_seam "eslint approval former regression $symbol" no-restricted-imports seam.test.ts "$capability" "packages/dsh-shud-policy-gate/src/full-access-approval.test.ts"
   expect_seam "eslint approval other named $source" no-restricted-imports seam.test.ts "import { UnlistedCapability } from '$source'; export { UnlistedCapability };" "$APPROVAL_TEST"
   expect_seam "eslint approval default $source" no-restricted-imports seam.test.ts "import host from '$source'; export { host };" "$APPROVAL_TEST"
   expect_seam "eslint approval namespace $source" no-restricted-imports seam.test.ts "import * as host from '$source'; export { host };" "$APPROVAL_TEST"
@@ -194,6 +195,29 @@ expect_seam "eslint approval preserves unrelated host denial" no-restricted-impo
 expect_seam "eslint approval preserves testkit denial" no-restricted-imports seam.test.ts "import '@deepseek-ai/dsh-agent-loop-testkit';" "$APPROVAL_TEST"
 expect_seam "eslint approval preserves checkout runtime denial" no-restricted-imports seam.test.ts "import '../../../../deepseek-harness/packages/core/session/src/index.ts';" "$APPROVAL_TEST"
 expect_seam "eslint approval preserves checkout type denial" no-restricted-imports seam.test.ts "import type { Session } from '../../../../deepseek-harness/packages/core/session/src/index.ts'; export type { Session };" "$APPROVAL_TEST"
+
+# ADR-0013 grants only the initialization setter in one production file.
+CODER_APPROVAL="packages/dsh-shud-presets/src/coder-approval.ts"
+APPROVAL_SOURCE="@deepseek-ai/dsh-user-approval"
+SETTER="import { setApprovalPolicy } from '$APPROVAL_SOURCE'; export { setApprovalPolicy };"
+expect_seam "eslint coder initialization setter" allow registry.ts "$SETTER" "$CODER_APPROVAL"
+expect_seam "eslint coder setter wrong production path" no-restricted-imports coder-approval.ts "$SETTER"
+expect_seam "eslint coder setter test path" no-restricted-imports seam.test.ts "$SETTER"
+expect_seam "eslint coder setter harness path" no-restricted-imports seam.test.ts "$SETTER" "$APPROVAL_TEST"
+for symbol in ApprovalService UnlistedCapability; do
+  expect_seam "eslint coder forbidden named $symbol" no-restricted-imports registry.ts "import { $symbol } from '$APPROVAL_SOURCE'; export { $symbol };" "$CODER_APPROVAL"
+done
+expect_seam "eslint coder default" no-restricted-imports registry.ts "import host from '$APPROVAL_SOURCE'; export { host };" "$CODER_APPROVAL"
+expect_seam "eslint coder namespace" no-restricted-imports registry.ts "import * as host from '$APPROVAL_SOURCE'; export { host };" "$CODER_APPROVAL"
+expect_seam "eslint coder wildcard export" no-restricted-imports registry.ts "export * from '$APPROVAL_SOURCE';" "$CODER_APPROVAL"
+expect_seam "eslint coder side effect" no-restricted-syntax registry.ts "import '$APPROVAL_SOURCE';" "$CODER_APPROVAL"
+expect_seam "eslint coder empty import" no-restricted-syntax registry.ts "import {} from '$APPROVAL_SOURCE';" "$CODER_APPROVAL"
+expect_seam "eslint coder empty export" no-restricted-syntax registry.ts "export {} from '$APPROVAL_SOURCE';" "$CODER_APPROVAL"
+expect_seam "eslint coder inline-only type" no-restricted-syntax registry.ts "import { type ApprovalService } from '$APPROVAL_SOURCE'; export type { ApprovalService };" "$CODER_APPROVAL"
+expect_seam "eslint coder declaration type" allow registry.ts "import type { ApprovalService } from '$APPROVAL_SOURCE'; export type { ApprovalService };" "$CODER_APPROVAL"
+expect_seam "eslint coder package subpath" no-restricted-imports registry.ts "import '$APPROVAL_SOURCE/internal';" "$CODER_APPROVAL"
+expect_seam "eslint coder preserves unrelated host denial" no-restricted-imports registry.ts "import '@deepseek-ai/dsh-agent';" "$CODER_APPROVAL"
+expect_seam "eslint coder preserves checkout denial" no-restricted-imports registry.ts "import '../../../../deepseek-harness/packages/interaction/user-approval/src/index.ts';" "$CODER_APPROVAL"
 rm -rf "$SEAM_DIR"
 
 # 3 jscpd (duplicate block planted in an isolated dir, scanned directly)

@@ -35,8 +35,8 @@ const HOST_SCOPE_IMPORT = {
     "Only named createScope in *.test.ts or test-harness.ts may import dsh-scope at runtime (ADR-0006).",
 };
 
-// ADR-0012: real approval integration in this one regression, never production or other tests.
-const FULL_ACCESS_TEST_IMPORTS = [
+// ADR-0013: canonical real-service test composition, never production or other tests.
+const APPROVAL_HARNESS_IMPORTS = [
   ["@deepseek-ai/dsh-permission-presets", "PermissionPresetService"],
   ["@deepseek-ai/dsh-user-approval", "ApprovalService"],
   ["@deepseek-ai/dsh-session", "SessionStore"],
@@ -46,7 +46,7 @@ const FULL_ACCESS_TEST_IMPORTS = [
   name,
   allowImportNames: [capability],
   allowTypeImports: true,
-  message: `Only named ${capability} is authorized in the full-access regression (ADR-0012).`,
+  message: `Only named ${capability} is authorized in the canonical approval harness (ADR-0013).`,
 }));
 
 // no-restricted-imports cannot check allowImportNames when there are no specifiers.
@@ -141,7 +141,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["packages/dsh-shud-policy-gate/src/full-access-approval.test.ts"],
+    files: ["packages/dsh-shud-policy-gate/src/approval/test-harness.ts"],
     rules: {
       "no-restricted-imports": [
         "error",
@@ -149,7 +149,7 @@ export default tseslint.config(
           paths: [
             HOST_MESSAGE_IMPORT,
             { ...HOST_SCOPE_IMPORT, allowImportNames: ["createScope"] },
-            ...FULL_ACCESS_TEST_IMPORTS,
+            ...APPROVAL_HARNESS_IMPORTS,
           ],
           patterns: [
             HOST_IMPORT_PATTERNS[0],
@@ -165,7 +165,41 @@ export default tseslint.config(
         "error",
         emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name),
         emptyRuntimeImportRestriction(HOST_SCOPE_IMPORT.name),
-        ...FULL_ACCESS_TEST_IMPORTS.map(({ name }) => emptyRuntimeImportRestriction(name)),
+        ...APPROVAL_HARNESS_IMPORTS.map(({ name }) => emptyRuntimeImportRestriction(name)),
+        INLINE_TYPE_RUNTIME_IMPORT,
+      ],
+    },
+  },
+  {
+    files: ["packages/dsh-shud-presets/src/coder-approval.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            HOST_MESSAGE_IMPORT,
+            HOST_SCOPE_IMPORT,
+            {
+              name: "@deepseek-ai/dsh-user-approval",
+              allowImportNames: ["setApprovalPolicy"],
+              allowTypeImports: true,
+              message: "Only named setApprovalPolicy initializes fresh coders (ADR-0013).",
+            },
+          ],
+          patterns: [
+            HOST_IMPORT_PATTERNS[0],
+            {
+              ...HOST_IMPORT_PATTERNS[1],
+              regex:
+                "^@deepseek-ai/(?!(?:dsh-tools|cordis|dsh-jobs|dsh-jobs-local|dsh-llm|dsh-scope|dsh-user-approval)$)",
+            },
+          ],
+        },
+      ],
+      "no-restricted-syntax": [
+        "error",
+        emptyRuntimeImportRestriction(HOST_MESSAGE_IMPORT.name),
+        emptyRuntimeImportRestriction("@deepseek-ai/dsh-user-approval"),
         INLINE_TYPE_RUNTIME_IMPORT,
       ],
     },

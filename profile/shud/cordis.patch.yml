@@ -61,6 +61,8 @@
       name: "@shud-harness/dsh-shud-tools"
     - id: shud-role-restrict
       name: "@shud-harness/dsh-shud-presets"
+    - id: shud-coder-approval
+      name: "@shud-harness/dsh-shud-presets/coder-approval"
     - id: preset-coordinator
       name: "@deepseek-ai/dsh-agent-preset"
       config:
