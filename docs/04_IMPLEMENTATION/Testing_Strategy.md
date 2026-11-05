@@ -93,6 +93,10 @@ M2 原生进程 fixture 的清理失败由共享测试诊断入口保留嵌套 `
 
 M4 受控 Git runner 的环境集成测试要求 PATH 中有系统 C 编译器 `cc`（Darwin 可用 Xcode Command Line Tools，Linux 可用 GCC/Clang）；缺失时测试失败，不跳过。测试将 `scripts/fixtures/git-environment.c` 编译到临时目录，在原生 `main` 读取子进程 `environ` 后 `execv` 真 Git，避免 Node/Python 在 Darwin 初始化时注入 `__CF_USER_TEXT_ENCODING` 干扰精确白名单断言。trace 记录全部环境键名，但仅记录七个白名单键及 apply ceiling 的值；编译产物与 trace 随 fixture 清理，不提交二进制、不新增 npm 依赖。
 
+默认 Vitest 文件级 worker 数为 `min(4, max(1, availableParallelism() - 1))`：上限由 `constraints.yaml` 的 `thresholds.test_file_workers_max` 定义，`vitest.config.ts` 按既有镜像约定同步；小主机至少保留一个 worker，其余情形为编排和原生子进程预留一个可用 CPU。#624 的受控负载复现及四 worker 全量对照支持降低原生/Git fixture 的资源争用；这不是已定位具体 OS 机制，也不保证任意外部负载或多个独立 runner 同时运行时不会超时。
+
+此默认限制只改变测试文件之间的调度，不改变单个测试内的并发、测试发现、隔离、pool、5000 ms 测试 deadline、hook deadline 或 80% 覆盖率门槛；原生构建证据仍直接执行已发布的普通可执行文件，保留日志、编译器身份、目录清单和二进制输出断言。诊断 CLI override 不代表默认门禁，不以重试、跳过、提高 timeout 或改用显式解释器代替原生执行来换取通过。
+
 持久化屏障 oracle（#471）须先准备真实 exit evidence 与门闩，再放行注册表的 timer 工作，随后让手动 tick 与已挂起工作重叠；只控制 interval，不冻结 Date、原生执行或 timeout。同一条目依次挂起初始 metadata 与发布前 metadata 检查，两处都证明仍为 running、未完成且终态写入尝试/成功数为零，同时另一条目可完成；释放后恰好一次尝试及成功写入。失败保留清理前阶段、门闩/写入计数、持久状态与有界错误摘要，原异常经 cause 保留。受控 RED 与旧 tail 先排空的 GREEN 对照证明：手动 tick join 已读到“无 exit、进程仍活”的旧工作足以触发原屏障判定，但不代表生产发布绕过；历史全量失败无 failing trace，成因仍未分类，不据此改生产调度器或声称已重建历史原因。
 
 ccw fixture 按入口验收（完整布局见 [matrix §4](Test_Fixtures_And_Command_Matrix.md#4-ccw-tiny)）：
