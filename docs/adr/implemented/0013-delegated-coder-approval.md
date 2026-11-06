@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 kind: architecture
 ---
 
@@ -43,6 +43,10 @@ Presets directly pins `zod` 4.4.3 solely for its bounded host-only projection sc
 
 ## Evidence and operational limits
 
-The first implementation tranche adds one held change_submit tracer: business files remain unchanged before allowed-once, then only the existing CR approval transition writes approved/approval_ref. The existing full-access suite continues using the extracted composition. This ADR records contracts, not unrun GREEN results. The parent owns focused verification, remaining lifecycle/error/context matrices, import guardrail self-tests, profile smoke, build and real Web allowed/rejected evidence under the [expanded fixture](../../../openspec/changes/delegated-coder-approval/tasks.md).
+The first implementation tranche adds one held change_submit tracer: business files remain unchanged before allowed-once, then only the existing CR approval transition writes approved/approval_ref. The existing full-access suite continues using the extracted composition. This ADR records contracts, not unrun GREEN results. The parent owns focused verification, remaining lifecycle/error/context matrices, import guardrail self-tests, profile smoke, build and real Web allowed/rejected evidence under the [expanded fixture](../../../openspec/changes/archive/2026-11-05-delegated-coder-approval/tasks.md).
 
 Ask is permission to request a decision, never permission to execute. Absent/unavailable/cancelled/rejected answerers remain fail-closed. Global mounting does not grant headless approvals. Child approval transport is associated with the child session; HTTP/WS answerer evidence is not browser rendering, a human click, scientific correctness, or #549 PI acceptance. #547 remains dependent on completing #614's full fixture, including real admission-time context and transport evidence.
+
+## Acceptance record
+
+The PI explicitly accepted this record on 2026-11-06 during the post-M4 cleanup; it moved from `proposed/` to `implemented/` (status `accepted`). Acceptance confirms only the decision and boundaries recorded here; it does not ratify any acceptance evidence, widen the stated scope, or replace any Epic's PI functional acceptance.
