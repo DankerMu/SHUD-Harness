@@ -10,8 +10,8 @@
 
 ## 2. Verification and delivery
 
-- [ ] 2.1 `pnpm run check`, `pnpm run test-guardrails` and `openspec validate instruction-hot-path-budget --strict` are green on the PR head.
-- [ ] 2.2 Review, then CI `all-checks-passed`, then the PI decides whether to merge. Archive the change after merge.
+- [x] 2.1 Local verification on both PR heads: `pnpm run check` exit 0 (8555 passed / 2 skipped, `check_paths: OK (6 files)`); `pnpm run test-guardrails` 289 passed / 0 failed; `openspec validate instruction-hot-path-budget --strict` valid. The PR is split to stay within the size limit: #634 (relocation, 310 counted lines) and #636 (byte budget). #636 replaces the stacked #635, which GitHub closed when #634's branch was deleted.
+- [x] 2.2 CI `all-checks-passed` succeeded on #634 and #636; the PI authorized merging both in session; both were merged with merge commits. Archived after merge, which syncs the engineering-gates delta (1 modified, 1 added requirement).
 
 ## Risk pack mapping
 
