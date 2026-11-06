@@ -45,7 +45,7 @@
     "@deepseek-ai/dsh-timeout": "0.2.1-rc.2",
     "@deepseek-ai/dsh-workspace": "0.2.1-rc.2",
     "@types/node": "24.19.2",
-    "vitest": "5.0.5",
+    "vitest": "5.1.0",
     "typescript": "5.9.3"
   }
 }
