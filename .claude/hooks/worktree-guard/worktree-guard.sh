@@ -12,9 +12,10 @@ root="${CLAUDE_PROJECT_DIR:-$PWD}"
 manifest="$root/.worktree-guard.json"
 [ -f "$manifest" ] || exit 0
 
-WTG_INPUT="$input" WTG_ROOT="$root" WTG_MANIFEST="$manifest" python3 - <<'PY'
+WTG_INPUT="$input" WTG_ROOT="$root" WTG_MANIFEST="$manifest" python3 -I - <<'PY'
 import json
 import os
+import re
 import sys
 
 data = json.loads(os.environ.get("WTG_INPUT") or "{}")
@@ -40,6 +41,15 @@ candidates = [
     for key in ("file_path", "path", "notebook_path")
     if tool_input.get(key)
 ]
+# Codex apply_patch carries no path field: the targets are the patch headers
+# inside tool_input.command (shape captured from codex-cli 0.158).
+command = tool_input.get("command")
+if isinstance(command, str) and (
+    data.get("tool_name") == "apply_patch" or command.lstrip().startswith("*** Begin Patch")
+):
+    candidates += re.findall(
+        r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+?)\s*$", command, re.M
+    )
 if not candidates:
     sys.exit(0)
 
