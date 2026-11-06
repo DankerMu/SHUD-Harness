@@ -284,7 +284,7 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 - 代码质量：`review` · `entropy-review` · `repo-entropy-audit` · `improve-codebase-architecture` · `control-plane-auditor`
 - 工具：`gh-create-issue` · `git-worktree-workflows` · `project-documentation` · `eng-init`（本控制面的生成器，incremental 模式更新）
 
-**Agents**（Codex 投影在 `.codex/agents/`，Claude 投影在本机 .claude/agents，gitignored）：`implementer` · `reviewer` · `verifier` · `explorer` · `monitor`（CI 等 harness 外长等待交它看护，主线不空转）· `issue-scribe`（主线发现 follow-up 事项时调用：只读取证→按关键词和证据路径查重→落一条结构化 issue，绝不顺手修）
+**Agents**（Claude / omp 投影在本机 .claude/agents、.omp/agents，gitignored；不安装 Codex 投影）：`implementer` · `reviewer` · `verifier` · `explorer` · `monitor`（CI 等 harness 外长等待交它看护，主线不空转）· `issue-scribe`（主线发现 follow-up 事项时调用：只读取证→按关键词和证据路径查重→落一条结构化 issue，绝不顺手修）
 
 **Hooks**（脚本在 `.claude/hooks/` 与 `.codex/hooks/`，条目在 `.claude/settings.json` 与 `.codex/hooks.json`，均已跟踪）：
 
@@ -310,7 +310,7 @@ Canonical 角色枚举 (唯一权威源: `docs/02_ARCHITECTURE/Roles_and_Boundar
 ## Codex Notes
 
 - 仓库级指令集中在根 `AGENTS.md`；子树需细化时新增 scoped `AGENTS.md`，勿膨胀根文件。
-- Codex runtime 安装：skills -> `.agents/skills/`，agents -> `.codex/agents/`；改 canonical 后重装，勿编辑投影副本。
+- Codex runtime：本仓库不再安装 my-agents pack 的 Codex 投影（agents / pack skills）；仅保留项目自有的 `.codex/hooks.json` 条目（large-file-guard、no-bypass）。改 canonical 后重装，勿编辑投影副本。
 
 <对话风格>
 自然段落写作，克制标题、列表与加粗。禁止在结尾进行"如果你.../需要我.../可以的话..."式追问。
