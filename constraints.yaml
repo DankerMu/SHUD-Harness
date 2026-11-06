@@ -67,6 +67,7 @@ thresholds:
   test_file_workers_max: 4 # vitest.config.ts CPU-aware default file-worker ceiling
   pr_diff_lines_max: 400 # CI block; size-exempt logged; label grant/revoke triggers full-CI reevaluation
   agents_md_max_lines: 320 # rendered AGENTS.md budget (instructions:check / docs-gate)
+  agents_md_max_bytes: 29000 # rendered AGENTS.md byte budget; measured 26191 on 2026-11-06 after Runtime Lifecycle relocation, +10% rounded up
 
 naming:
   forbidden_pattern: '(_v[0-9]+|_new|_old|_backup|_temp|_copy|_final)(\.|/|$)'
