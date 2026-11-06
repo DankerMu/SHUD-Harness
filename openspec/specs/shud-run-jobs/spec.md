@@ -262,7 +262,7 @@ The shared exit evidence reader used by settlement, recovery, cancellation and c
 - **THEN** 拒绝新修改，等待已接收索引修改完成后才尝试删除 `lock` 并关闭内核锁描述符；删除失败仍尝试关闭，保留原错误并明确区分 guard 已释放与关闭结果不确定，不重复清理、不改索引或永久协调 inode；非 shud 作业的父类 teardown 仍由整体注册表释放等待，行为不变
 
 ### Requirement: Shud job submission
-`shud_run` 调用期间注册表 SHALL 同步完成提交，顺序为：分配 `job_id`/`run_id`；创建 `<session cwd>/runs/<run_id>/`，创建前后各以 `lstat` 确认 `runs/` 与 `runs/<run_id>` 均为真实目录（不是符号链接）且 `runs/<run_id>` 由本次非递归 `mkdir` 新建；把输入目录完整复制到 `input/<project>/`（M2 恒为完整复制）；有 `end_days` 时只在副本的 `<project>.cfg.para` 中改写 `END`；采集 StackLock（会话 cwd 下 `stacks/` 已有指纹相等的 lock 时复用其 `stack_id`、不改写该文件，否则以排他创建写 `stacks/<stack_id>.json`，见 stack-lock「Deterministic capture at shud_run submission」），并在同一步骤由副本生成 DataProvenance、在写 `run-job.json` 之前原子写 `provenance/<data_id>.json`（见 data-provenance；`stacks/` 与 `provenance/` 的路径安全遵循 task-cards「TaskCard workspace file」的工作区文件安全规则）；原子写 `run-job.json`（`status: created`，其 `stack_id`、`data_id` 为上一步的 id，`task_id` 为提交请求携带的值或 `null`）并加入活动索引；写 `status: submitted`；经父类 `start` 以无 owner、`kind: shud`、label `<run_id>`（有 `label` 时为 `<run_id> <label>`）登记，并把 `stdout.log` 作为输出源——登记前注册表 SHALL 以自身构造时的无作用域上下文经父类 `attachController` 挂载一个全局层控制器，父类 `start` 返回或抛错后立即释放（无 owner 作业只能由全局控制器放行；该控制器 SHALL NOT 常驻），因此登记不依赖 `tool-jobs` 是否挂载或挂在哪一层；包装进程 spawn 后写 `pid`、`pid_started_at` 与 `status: running`。运行目录复核失败、复制失败、StackLock 采集或 DataProvenance 生成失败，或父类 `start` 抛错时，注册表 SHALL 删除本次运行目录（含部分副本）、已加入的索引条目与本次写入的 DataProvenance 文件，并以说明原因的错误失败，使 `shud_run` 返回工具错误；此时 SHALL NOT 留下 RunJob、RunRecord、索引条目或本次的 DataProvenance 文件。回滚 SHALL NOT 删除 `stacks/` 中的任何 StackLock 文件：被复用的 lock 属于其它运行，本次新写的 lock 是与运行无关的环境记录，可能已被并发提交复用。SHALL NOT 修改原输入目录。注册表 SHALL 把 `owner_session` 记为调用所属会话 id，`dsh_job_id` 记为本次登记 id 并追加到 `dsh_job_ids`。
+`shud_run` 调用期间注册表 SHALL 同步完成提交，顺序为：分配 `job_id`/`run_id`；创建 `<session cwd>/runs/<run_id>/`，创建前后各以 `lstat` 确认 `runs/` 与 `runs/<run_id>` 均为真实目录（不是符号链接）且 `runs/<run_id>` 由本次非递归 `mkdir` 新建；把输入目录完整复制到 `input/<project>/`（M2 恒为完整复制）；有 `end_days` 时只在副本的 `<project>.cfg.para` 中改写 `END`；提交请求携带 `build_id` 时按「Build-referenced execution」解析并校验 `builds/<build_id>/` 的 BuildRecord 与二进制、把二进制原子复制为 `runs/<run_id>/bin/shud`，并把该 BuildRecord 作为 StackLock 采集的构建源（见 stack-lock），未携带时不读取 `builds/`、不创建 `bin/`；采集 StackLock（会话 cwd 下 `stacks/` 已有指纹相等的 lock 时复用其 `stack_id`、不改写该文件，否则以排他创建写 `stacks/<stack_id>.json`，见 stack-lock「Deterministic capture at shud_run submission」），并在同一步骤由副本生成 DataProvenance、在写 `run-job.json` 之前原子写 `provenance/<data_id>.json`（见 data-provenance；`stacks/` 与 `provenance/` 的路径安全遵循 task-cards「TaskCard workspace file」的工作区文件安全规则）；原子写 `run-job.json`（`status: created`，其 `stack_id`、`data_id` 为上一步的 id，`task_id` 为提交请求携带的值或 `null`，`build_id`、`threads` 为提交请求携带的值或 `null`，`binary_sha256` 见「Build-referenced execution」）并加入活动索引；写 `status: submitted`；经父类 `start` 以无 owner、`kind: shud`、label `<run_id>`（有 `label` 时为 `<run_id> <label>`）登记，并把 `stdout.log` 作为输出源——登记前注册表 SHALL 以自身构造时的无作用域上下文经父类 `attachController` 挂载一个全局层控制器，父类 `start` 返回或抛错后立即释放（无 owner 作业只能由全局控制器放行；该控制器 SHALL NOT 常驻），因此登记不依赖 `tool-jobs` 是否挂载或挂在哪一层；包装进程 spawn 后写 `pid`、`pid_started_at` 与 `status: running`。运行目录复核失败、复制失败、构建解析或校验失败、构建二进制复制失败、StackLock 采集或 DataProvenance 生成失败，或父类 `start` 抛错时，注册表 SHALL 删除本次运行目录（含部分副本）、已加入的索引条目与本次写入的 DataProvenance 文件，并以说明原因的错误失败，使 `shud_run` 返回工具错误；此时 SHALL NOT 留下 RunJob、RunRecord、索引条目或本次的 DataProvenance 文件。回滚 SHALL NOT 删除 `stacks/` 中的任何 StackLock 文件：被复用的 lock 属于其它运行，本次新写的 lock 是与运行无关的环境记录，可能已被并发提交复用。SHALL NOT 修改原输入目录。注册表 SHALL 把 `owner_session` 记为调用所属会话 id，`dsh_job_id` 记为本次登记 id 并追加到 `dsh_job_ids`。
 
 为保持原输入不变，提交预检 SHALL 在创建运行目录或采集证据之前拒绝 `stacks/` 或 `provenance/` 写入根等于或位于已解析原始输入树内的布局；已存在的写入根 SHALL 使用 native realpath 的实际物理拼写，不能因输入符号链接或大小写别名漏检。输入仅位于写入根的子目录而发布位置不在输入树内时，SHALL NOT 仅据该反向包含关系拒绝；既有 StackLock 文件枚举等独立校验保持不变。
 
@@ -326,6 +326,14 @@ The shared exit evidence reader used by settlement, recovery, cancellation and c
 - **WHEN** 输入为 stacks-input、provenance-input 或 provenance 的子目录，而写入根不在原输入树内
 - **THEN** 不因 capture-root/input 包含判据拒绝，沿既有复制、采集与提交契约执行；不绕过其它既有路径/记录校验
 
+#### Scenario: build-referenced submission records the build
+- **WHEN** 以合法 `build_id`（其 BuildRecord 与二进制均有效）和 `threads: 1` 成功提交
+- **THEN** `run-job.json` 在 `status: created` 的首次写入中已含该 `build_id`、`threads: 1` 与等于 BuildRecord `binary_sha256` 的 `binary_sha256`，`runs/<run_id>/bin/shud` 存在，最终 `status` 为 `running`
+
+#### Scenario: build failure rolls back before stack capture
+- **WHEN** 提交携带的 `build_id` 在会话 cwd 下没有 `builds/<build_id>/build-record.json`
+- **THEN** `shud_run` 返回指出该构建的工具错误，`runs/<run_id>/` 不存在，`active.json` 与 `completed.json` 均无该 `run_id`，`stacks/` 与 `provenance/` 下没有本次新文件，不调用 producer
+
 ### Requirement: Concurrent runs
 多个 shud 作业 SHALL 可以同时处于 `running`，各自使用独立运行目录；注册表 SHALL NOT 设 shud 专属并发上限或排队。同时活动的无 owner 作业数受父类 `maxConcurrentJobsPerOwner`（无 owner 桶）约束；超出时 `shud_run` SHALL 返回说明已达上限的工具错误，且按「Shud job submission」清理，不排队、不启动 SHUD。
 
@@ -338,7 +346,7 @@ The shared exit evidence reader used by settlement, recovery, cancellation and c
 - **THEN** 工具返回含上限说明的错误，不存在新的运行目录、索引条目或 SHUD 进程
 
 ### Requirement: Detached execution and exit capture
-shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不经宿主 subprocess 服务）。包装进程 SHALL 先以"写临时文件再 rename"写出 `wrapper.pid`（自身 pid），再在运行目录内执行 `<shudBin> -o output/<project>.out <project>`，stdout/stderr 分别写入 `stdout.log`/`stderr.log`；SHUD 结束后包装进程 SHALL 以"写临时文件再 rename"写出 `exit_code`；包装进程 SHALL NOT 捕获信号，被 kill 时不写 `exit_code`。`run-job.json` SHALL 记录包装进程 `pid` 与其启动时间。宿主进程退出 SHALL NOT 终止包装进程或 SHUD。
+shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不经宿主 subprocess 服务）。包装进程 SHALL 先以"写临时文件再 rename"写出 `wrapper.pid`（自身 pid），再在运行目录内执行 `<shud 可执行文件> -o output/<project>.out <project>`，其中可执行文件为配置的 `shudBin`，或提交引用构建时经「Build-referenced execution」复制到运行目录的 `<run_dir>/bin/shud` 绝对路径（SHALL NOT 直接执行 `builds/<build_id>/shud`），stdout/stderr 分别写入 `stdout.log`/`stderr.log`；SHUD 结束后包装进程 SHALL 以"写临时文件再 rename"写出 `exit_code`；包装进程 SHALL NOT 捕获信号，被 kill 时不写 `exit_code`。提交携带 `threads` 时，包装进程（因而 SHUD）的环境 SHALL 在宿主环境之上追加 `OMP_NUM_THREADS=<threads>` 与 `SHUD_RHS_THREADS=<threads>`；未携带时 SHALL NOT 设置这两个变量（继承宿主环境中已有的值）。`run-job.json` SHALL 记录包装进程 `pid` 与其启动时间。宿主进程退出 SHALL NOT 终止包装进程或 SHUD。
 
 #### Scenario: exit code file
 - **WHEN** 以一个立即 `exit 13` 的伪 `shudBin` 运行作业
@@ -375,6 +383,14 @@ shud 作业 SHALL 由注册表直接启动的 `/bin/sh` 包装进程运行（不
 #### Scenario: already quiescent wrapper group during abort
 - **WHEN** 包装进程已退出但尚未被宿主回收，进程组只剩僵尸或已为空
 - **THEN** 依据静止证据完成回收与回滚，不因无需发送的进程组信号导致错误；仍存活成员的真实权限失败不得被吞掉
+
+#### Scenario: threads exported to the wrapper environment
+- **WHEN** 宿主环境未设置 `OMP_NUM_THREADS` 与 `SHUD_RHS_THREADS`，以 `threads: 1` 提交一个把自身环境写入输出文件的伪 SHUD；另以不带 `threads` 的同一伪 SHUD 提交
+- **THEN** 前者记录的环境含 `OMP_NUM_THREADS=1` 与 `SHUD_RHS_THREADS=1`；后者记录的环境不含这两个变量
+
+#### Scenario: wrapper executes the run-local binary copy
+- **WHEN** 以合法 `build_id` 提交一个把自身 `$0` 写入输出文件的伪 SHUD
+- **THEN** 记录的 `$0` 为 `<run_dir>/bin/shud` 的绝对路径，而不是 `builds/<build_id>/shud`
 
 ### Requirement: Cancellation
 对 shud 作业的 kill（模型以 `dsh_job_id` 调用 `job_kill`，或 Web 作业卡的 kill）SHALL 先在 `run-job.json` 写 `cancel_requested_at`，再对包装进程组发送 SIGTERM，宽限期（core 常量）后仍存活则 SIGKILL。结算 SHALL 为 first-wins：结算时 `exit_code` 已存在则按退出码结算，否则作业状态置 `cancelled`。被 kill 的作业 SHALL 照常 collect 并按「At-least-once wake」唤醒发起会话。
@@ -755,3 +771,58 @@ collectShud SHALL 接受可选只读模式 `{readonly:true}`，供报告生成�
 #### Scenario: readonly keeps admission and drain boundaries
 - **WHEN** 在未就绪/已关闭/D7 在途时调用只读模式，或关闭时已有只读请求停在记录 IO
 - **THEN** 未接纳请求按规范拒绝；D7 接纳时事实不被排队期间完成覆盖；已接纳读取完成或失败后才释放所有权
+
+### Requirement: Build-referenced execution
+提交请求 SHALL 可携带可选 `build_id`（品牌 `BuildId`）与可选 `threads`（正整数），二者由 `shud_run` 校验后传入；注册表 SHALL 在任何文件系统操作之前再次以 core 品牌 schema 校验 `build_id`、以正整数校验 `threads`，非法值 SHALL 以说明原因的错误失败且不创建运行目录。携带 `build_id` 时，注册表 SHALL 在输入复制（含 `END` 改写）之后、StackLock 采集之前依次执行：(1) 读取 `<session cwd>/builds/<build_id>/build-record.json`，路径安全遵循 task-cards「TaskCard workspace file」的工作区文件安全规则（`builds/`、`builds/<build_id>/` 与记录文件均以 `lstat` 确认不是符号链接），经 core BuildRecord schema 校验，文件内 `build_id` SHALL 等于请求值；(2) BuildRecord 的 `task_id` SHALL 等于本次请求的 `task_id`，或本次请求未携带 `task_id`；(3) `builds/<build_id>/shud` SHALL 为普通文件（`lstat`，不是符号链接）且对宿主进程可执行，其内容 sha256 SHALL 等于 BuildRecord 的 `binary_sha256`；(4) 把该文件复制为运行目录内的 `<run_dir>/bin/shud`：先在 `<run_dir>/bin/` 写临时文件，再 rename 为 `shud`，最终权限 SHALL 为 `0755`，副本内容 sha256 SHALL 等于 BuildRecord 的 `binary_sha256`；(5) 以该副本的绝对路径替代配置的 `shudBin` 作为包装进程执行的 SHUD 可执行文件（见「Detached execution and exit capture」），提交后 `builds/<build_id>/shud` 的变化 SHALL NOT 影响本次运行；并把已校验的 BuildRecord 交给 StackLock 采集作为构建源（`repos.SHUD` 与 `build_id` 的记录及指纹规则见 stack-lock）。任一步失败（含复制、rename、权限设置或副本校验失败）时 SHALL 按「Shud job submission」的回滚规则以指明失败检查项（含 `build_id`）的错误失败：不留运行目录、索引条目或本次 DataProvenance 文件，SHALL NOT 调用 producer、SHALL NOT 启动包装进程。注册表 SHALL NOT 创建、修改或删除 `builds/` 下的任何文件或目录。携带 `threads` 时包装进程环境追加 `OMP_NUM_THREADS` 与 `SHUD_RHS_THREADS`（见「Detached execution and exit capture」）。RunJob SHALL 在 `status: created` 的首次写入中记录 `build_id`、`threads`（各为请求值或 `null`）与 `binary_sha256`（`build_id` 非 null 时为 BuildRecord 的 `binary_sha256`，否则为 `null`；非 null 当且仅当 `build_id` 非 null），后续状态写入与 collect SHALL 原样继承（字段契约见 run-records「RunJob record」）。未携带 `build_id` 时 SHALL NOT 读取或访问 `builds/`、SHALL NOT 创建 `<run_dir>/bin/`，执行配置的 `shudBin`；此时与 build/threads 相关的行为（二进制选择、包装进程执行与线程环境）与引入本要求之前相同（执行与二进制选择逐字节不变），但提交路径本身不是逐字节不变：无 `build_id` 的提交同样按 data-provenance「Provenance generation at submission」解析副本中的 `<project>.tsd.forc` 生成 `sources.external_files`（ccw 为 `[]`），`tsd.forc` 缺失或解析失败是新的提交失败点并按「Shud job submission」回滚；未携带 `threads` 时 SHALL NOT 设置上述两个环境变量。
+
+#### Scenario: build binary replaces configured shudBin
+- **WHEN** 配置 `shudBin` 为一个立即 `exit 13` 的伪 SHUD，`builds/<build_id>/shud` 为一个立即 `exit 0` 的可执行文件且其 sha256 与 BuildRecord 的 `binary_sha256` 相同，以该 `build_id` 提交
+- **THEN** 运行目录的 `exit_code` 为 `0`，`<run_dir>/bin/shud` 为权限 `0755`、sha256 等于 `binary_sha256` 的普通文件，不存在残留临时文件，`run-job.json` 的 `build_id` 为该 id、`binary_sha256` 为 BuildRecord 的值
+
+#### Scenario: binary hash mismatch rolls back
+- **WHEN** `builds/<build_id>/shud` 在构建后被改写，其 sha256 不等于 BuildRecord 的 `binary_sha256` 时以该 `build_id` 提交
+- **THEN** 提交失败并指出 sha256 不匹配，`runs/<run_id>/` 不存在，活动与完成索引均无该 `run_id`，不启动包装进程，`builds/<build_id>/` 字节不变
+
+#### Scenario: unsafe or non-executable binary rejected
+- **WHEN** `builds/<build_id>/shud` 为指向有效可执行文件的符号链接、目录，或无执行权限的普通文件时以该 `build_id` 提交
+- **THEN** 提交失败并指出 `builds/<build_id>/shud` 的失败检查项，不留运行目录或索引条目，不读取符号链接目标
+
+#### Scenario: invalid build record rejected
+- **WHEN** `build-record.json` 无法通过 BuildRecord schema、文件内 `build_id` 与目录名不同，或 `builds/<build_id>` 为符号链接时以该 `build_id` 提交
+- **THEN** 提交失败并指出 `build_id` 与失败原因，不留运行目录、索引条目或本次 DataProvenance 文件，`stacks/` 下无新文件
+
+#### Scenario: build belongs to another task
+- **WHEN** BuildRecord 的 `task_id` 为 `TASK-A`，提交请求携带 `task_id: TASK-B` 与该 `build_id`
+- **THEN** 提交失败并指出 `task_id` 不相容，不留运行目录或索引条目
+
+#### Scenario: unlinked submission may reference a task build
+- **WHEN** BuildRecord 的 `task_id` 为 `TASK-A`，提交请求不带 `task_id` 而携带该 `build_id`，其余校验均通过
+- **THEN** 提交成功，`run-job.json` 的 `task_id` 为 `null`、`build_id` 为该 id
+
+#### Scenario: no build_id never touches builds
+- **WHEN** 会话 cwd 下 `builds/` 为损坏的符号链接或不存在，提交请求不带 `build_id`
+- **THEN** 提交照常成功，执行配置的 `shudBin`，`run-job.json` 的 `build_id` 与 `binary_sha256` 均为 `null`，运行目录内没有 `bin/`，`builds/` 未被创建或访问
+
+#### Scenario: no-build submission still parses tsd.forc
+- **WHEN** 不带 `build_id` 与 `threads` 提交一个输入副本缺少 `<project>.tsd.forc` 的项目
+- **THEN** 提交失败并指出 `tsd.forc`，`runs/<run_id>/` 不存在，活动与完成索引均无该 `run_id`，不启动包装进程；同一项目补齐合法 `tsd.forc` 后提交成功，执行配置的 `shudBin` 且环境不新增 `OMP_NUM_THREADS` 或 `SHUD_RHS_THREADS`
+
+#### Scenario: binary copy failure rolls back
+- **WHEN** BuildRecord 与 `builds/<build_id>/shud` 校验均通过，但写入 `<run_dir>/bin/` 临时文件或 rename 为 `bin/shud` 失败
+- **THEN** 提交失败并指出复制失败，`runs/<run_id>/`（含 `bin/`）不存在，活动与完成索引均无该 `run_id`，`stacks/` 与 `provenance/` 下无本次新文件，不启动包装进程，`builds/<build_id>/` 字节不变
+
+#### Scenario: later change to the build binary does not affect a submitted run
+- **WHEN** 以合法 `build_id` 提交成功后，`builds/<build_id>/shud` 被改写或删除
+- **THEN** 本次运行仍执行 `<run_dir>/bin/shud`，其 sha256 仍等于 `run-job.json` 的 `binary_sha256`
+
+#### Scenario: thread selection is independent of build selection
+- **WHEN** a submission omits build_id but supplies threads 2 while the host has different OMP_NUM_THREADS and SHUD_RHS_THREADS values
+- **THEN** it executes configured shudBin without accessing builds or creating bin, records build_id/binary_sha256 as null and threads as 2, and the wrapper receives both thread variables as "2"; unrelated host variables and the parent environment remain unchanged
+
+#### Scenario: omitted threads preserve inherited values
+- **WHEN** a submission omits threads and the host already defines the two thread environment variables
+- **THEN** the wrapper inherits those values without overriding them, while RunJob and RunRecord record threads as null
+
+#### Scenario: accepted binary preparation drains before ownership release
+- **WHEN** registry disposal begins while an admitted build binary copy or its rollback is still in progress
+- **THEN** new admission is closed and stateDir ownership is not released until the accepted preparation and safe rollback or publication have completed

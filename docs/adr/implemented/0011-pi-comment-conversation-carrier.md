@@ -52,7 +52,7 @@ M4 `change_submit` 复用宿主审批卡，没有 comment 通道；高风险 CR 
 
 PI 的拒绝理由只经对话由 coordinator 转述给 coder，不写入 ChangeRequest、TaskCard、patch 或任何其它工作区文件；修改后由 coder 生成新的 CR，不给旧 CR 加修订链。此条仅属于 CR 路由，报告 `report_decide` 仍须带非空 comment 与明确 disposition，经第二张卡核对后逐字持久化。
 
-该消费者是 M4 实现契约，不表示本 ADR 迁移时工具已经交付。权威来源为 [policy-gate「M4 approval comment deviation」](../../../openspec/changes/m4-mvp-2/specs/policy-gate/spec.md#requirement-m4-approval-comment-deviation)、[change-requests「change_submit」](../../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_submit) 与 [design D5/D15](../../../openspec/changes/m4-mvp-2/design.md#d15-偏离登记独立于功能-pr-之外可审计)。M4 不新建 comment 表单或审批服务，不改 M3 已有报告状态机与审计关联。
+该消费者是 M4 实现契约，不表示本 ADR 迁移时工具已经交付。权威来源为 [policy-gate「M4 approval comment deviation」](../../../openspec/specs/policy-gate/spec.md#requirement-m4-approval-comment-deviation)、[change-requests「change_submit」](../../../openspec/specs/change-requests/spec.md#requirement-change_submit) 与 [design D5/D15](../../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md#d15-偏离登记独立于功能-pr-之外可审计)。M4 不新建 comment 表单或审批服务，不改 M3 已有报告状态机与审计关联。
 
 ## 证据与限制
 

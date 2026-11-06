@@ -240,7 +240,7 @@ TaskCard 不能仅因为 LLM 认为“完成了”而关闭。closure 由两层�
 | benchmark | baseline 与 candidate 的 RunRecord 均存在且 stack_id/data_id 可比；差异摘要 artifact 存在 |
 | code_change | 下列 M4 六子句全部成立；review note 由 VerificationCase 字段承载，不另造对象 |
 
-**M4 code_change closure**（[task-cards 权威契约](../../openspec/changes/m4-mvp-2/specs/task-cards/spec.md#requirement-code_change-closure-predicate)；实现不以 LLM 为据）：
+**M4 code_change closure**（[task-cards 权威契约](../../openspec/specs/task-cards/spec.md#requirement-code_change-closure-predicate)；实现不以 LLM 为据）：
 
 0. `linked_jobs` 非空，且本次 report_generate 参数的 observations、limitations、pi_questions 各至少一条；limitations 仅计模型传入条目，不用模板补充凑数。
 1. 至少一个 linked CR 属本卡、status 为 approved，且对应 patch 安全可读、SHA256 匹配。

@@ -57,11 +57,11 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 
 ## 4. M4 MVP-2
 
-**交付契约**（[Epic #515](https://github.com/DankerMu/SHUD-Harness/issues/515)，[m4-mvp-2](../../openspec/changes/m4-mvp-2/proposal.md)，不是完成状态）：ChangeRequest、VerificationCase、BuildRecord；code_change TaskCard 与确定性 closure；coder/reviewer preset 与四角色工具面；change_create/change_submit/shud_build/verification_run；构建绑定运行与报告事实表。coder 在 scratch workspace 内 `repos/SHUD` 的独立本地 clone 修改已跟踪文件，不使用 git worktree add、不修改根 submodule（D15(8)，M4 范围裁剪、非放宽 baseline）。
+**已交付**（[Epic #515](https://github.com/DankerMu/SHUD-Harness/issues/515)，[m4-mvp-2 归档](../../openspec/changes/archive/2026-11-05-m4-mvp-2/proposal.md)）：ChangeRequest、VerificationCase、BuildRecord；code_change TaskCard 与确定性 closure；coder/reviewer preset 与四角色工具面；change_create/change_submit/shud_build/verification_run；构建绑定运行与报告事实表。coder 在 scratch workspace 内 `repos/SHUD` 的独立本地 clone 修改已跟踪文件，不使用 git worktree add、不修改根 submodule（D15(8)，M4 范围裁剪、非放宽 baseline）。
 
 **回放素材**：SHUD 钉定切片前 `9a422e5eb708df7d2f8b4066a3083a031d679a82`；提供 P1e StrictOMP 设计文档与五文件清单，不给上游 diff，由 coder 重导出。base 从干净钉定 commit 构建，candidate 从同一归档加已批 patch 构建。keliya 输入只在副本改 NUM_OPENMP=1 与外部 forcing 路径，窗口保留 12053–12143，不传 end_days。
 
-**工程验收门**：ADR-0002 D4，目标命令 `pnpm run shud:replay <scratch-workspace>`（由 #547 交付、本机阻断、CI 不运行），必须满足 [Replay acceptance criteria 全部判据](../../openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)：
+**工程验收门**：ADR-0002 D4，命令 `pnpm run shud:replay <scratch-workspace>`（由 #547 交付、本机阻断、CI 不运行），必须满足 [Replay acceptance criteria 全部判据](../../openspec/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)：
 
 - TaskCard/CR/两个 BuildRecord 的 base commit 均为上述完整 sha；恰一个 approved CR，文件集限五文件且含 Makefile 与 MD_rhs_core.cpp，numerical_implementation/high。
 - 恰两个成功 BuildRecord：base 无 CR/patch、rhs_openmp=false；candidate 绑定已批 CR/patch、rhs_openmp=true，make.stdout.log 有 `-fopenmp` 编译链接证据。
@@ -71,7 +71,7 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 
 前置为本机 SHUD 工具链、SHUD_BIN、SUNDIALS_ROOT、DMXAPI_KEY 与 keliya 来源；缺项明确失败。VC failed 或任何判据不成立均 exit 1，不降为 INCONCLUSIVE。bitwise 一致只证明 N=1 与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论；不做性能复现。
 
-**PI 功能验收**：按 Epic 安排在 #549 收口，由 PI 在 Web 亲自完成 CR 卡与报告卡各至少一次操作，证据记 Migration_Plan；另立验收 ADR，PI 明确通过后转 implemented。子 PR 工程合并、脚本自动审批不等于 PI 验收，模型能否重导出切片仍是实测项；PI 通过前 Epic 保持 open、change 未归档。此计划不自行批准 ADR-0011 的状态转换（#517 另需 PI 确认）。
+**PI 功能验收已通过**：PI 在 Web 亲自操作两次 CR 审批卡（含线程接线修复）与一次报告审批卡，报告 accepted、TaskCard done，随后明确通过并授权 M4 收尾；完整证据、原失败候选与限制见 [M4 PI acceptance](../Migration_Plan_dsh.md#m4-pi-acceptance)，安排登记于 [ADR-0014](../adr/implemented/0014-m4-epic-acceptance.md)。该人工修复流程与上述恰两次自动审批的工程脚本分别记账，不把旧候选重写为通过，也不放宽脚本判据。结论仅限固定 keliya 输入/时间窗的 rivqdown 一致；不是并行正确性、性能或科学有效性证明。#517 的 ADR-0011 确认独立于本次 PI 功能验收。
 
 ## 5. 全程不变式
 

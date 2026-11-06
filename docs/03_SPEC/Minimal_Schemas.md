@@ -9,7 +9,7 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 > 其他文档（Research_Object_Model、SPEC_v0.8_Final、Execution_Jobs_Runs 等）若与本文件冲突，以本文件为准。
 > 进入实现后，Zod schema 必须与此一一对应。
 
-> **Canonical Source 说明：** Support schema（Artifact、ErrorRecord、PiGate、PiGateDecision、NotificationRecord、ReportExport、AnalysisProgressPayload、User、Session、AuditEvent、LockRecord、IdempotencyRecord 等）的权威定义不在本文件，见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md)。本文件的 M4 修订依据 [m4-mvp-2](../../openspec/changes/m4-mvp-2/design.md)，是实现组的字段基线，不表示相关运行时或生成投影已交付；实现与投影由对应子 issue 同步。
+> **Canonical Source 说明：** Support schema（Artifact、ErrorRecord、PiGate、PiGateDecision、NotificationRecord、ReportExport、AnalysisProgressPayload、User、Session、AuditEvent、LockRecord、IdempotencyRecord 等）的权威定义不在本文件，见 [Support_Schema_Contracts.md](Support_Schema_Contracts.md)。本文件的 M4 修订依据 [m4-mvp-2](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md)；相关实现与生成投影已随对应子 issue 交付，当前契约见各节的 canonical spec 链接。
 
 > **M2 修订来源：** RunJob（§4）与 RunRecord（§5）已按 OpenSpec [m2-run-chain「Run identifiers / RunJob record / RunRecord record」](../../openspec/specs/run-records/spec.md) tasks 4.1–4.2 与 `packages/dsh-shud-core/src/schemas/run-job.ts`、`packages/dsh-shud-core/src/schemas/run-record.ts` 对齐。该修订不改变其余对象的当前契约。
 >
@@ -55,7 +55,7 @@ updated_at: 2026-10-27T08:00:05Z
 - `reviewer`、`type`/`status`/`runtime_phase` 枚举与其余字段保持不变；`theory_bundle_ids` 仍为可选非空字符串数组（数组可为空），`runtime_phase` 仍允许缺省或 `null`。根对象与 `inference_budget` 的未知键仍接受后剥离，不改为严格拒绝。
 - 新建卡的 `stack_id`、`data_id` 显式为 `null`；后续提交回填品牌引用。StackLock、DataProvenance、EvidenceReport 的对象对齐与回填流程不在本刀交付。
 
-**M4 扩展：** `linked_changes`、`linked_verifications` 分别为品牌 `CHG-`、`VC-` 数组，码点升序且唯一；M3 文件缺键按 `[]` 解析，不改写原文件。`source_base_commit` 缺键按 `null` 解析；`code_change` 必须为完整的 40 位小写十六进制 commit，其它类型必须为 `null`。建卡时从会话工作区 `repos/SHUD` 的 HEAD 钉定，后续变更、构建与验证均复核，不由模型指定。状态/链接语义见 [M4 task-cards](../../openspec/changes/m4-mvp-2/specs/task-cards/spec.md)。
+**M4 扩展：** `linked_changes`、`linked_verifications` 分别为品牌 `CHG-`、`VC-` 数组，码点升序且唯一；M3 文件缺键按 `[]` 解析，不改写原文件。`source_base_commit` 缺键按 `null` 解析；`code_change` 必须为完整的 40 位小写十六进制 commit，其它类型必须为 `null`。建卡时从会话工作区 `repos/SHUD` 的 HEAD 钉定，后续变更、构建与验证均复核，不由模型指定。状态/链接语义见 [M4 task-cards](../../openspec/specs/task-cards/spec.md)。
 
 **废弃字段**: 单个 `owner`（歧义）、嵌套 `linked_objects`（过深）。
 
@@ -141,7 +141,7 @@ uncertainty_notes: null
 
 **M3 对齐处置（#431）：** `data_id` 复用 `DataIdSchema`，拒绝旧 `DATA-NNNN`、`DATA-<UUID>` 与大写 hex。删除 `sources.terrain` / `mesh` / `forcing` / `observations` 分类，改为 `input_root` + `files`；删除 `preprocess` 对象及其开放 `params`，不保留兼容分支。旧 `event_window` 数组、无 sha256 的文件条目和已删除字段均拒绝。此刀仅交付 schema/type 与生成文档投影，不交付输入遍历、hash 计算、持久化或提交接线。
 
-**M4 外部 forcing：** `sources.external_files` 条目为 `{path, sha256, size_bytes}`，`path` 必须为规范绝对路径，摘要与非负整数字节数沿用 `files` 约束。生成器在副本清单完成后增量解析必需的 `<project>.tsd.forc`：严格 UTF-8，支持 LF、CRLF 与无末尾换行；首行首 token 为完整非负安全十进制整数，后续首行字段不作日期或科学校验；第二整行去除首尾空白后为目录，保留内部空格；第三行末列必须为 `Filename`，非空数据行列数与表头一致，原始行数在去重前必须等于站点数。零站点仍须有合法目录与表头且无数据行。相对目录从运行 cwd 按物理遍历解析，再以 native realpath 规范化；目录根别名可解析，但随后每个路径型 `Filename` 按 SHUD 的目录 + `/` + 文件名拼接逐组件检查，保留 `..` 遍历语义，拒绝中间或末尾链接、缺失及非普通文件，不作 rSHUD fallback、tilde/环境展开或前导 `/` 覆盖目录。每个规范文件路径分别与物理副本根比较：内部引用由 `files` 覆盖，内部目录越出副本的引用必须计入外部，外部目录引用回副本的文件不得重复；只有所有引用均在副本内或引用集合为空时才为 `[]`。全部引用通过预检后，仅流式哈希被引用的外部普通文件，按实际读取字节计数、规范路径去重及码点升序记录，不扫描外部目录、不复制或修改文件、不新增审批。解析或路径/读取失败均使提交失败，由既有调用方回滚，不能降级为空或部分清单；诊断只含受控阶段与相关路径，不携带原始异常或 manifest 载荷。副本哈希、解析与外部哈希共用逐文件关闭的流生命周期，全部成功前不分配或发布 provenance，已有证据不变；不承诺外部并发修改的快照隔离。此规则也作用于无 build 提交；ccw 的 forcing 位于副本内，keliya 回放引用外部 32 个文件。详见 [M4 provenance 契约](../../openspec/changes/m4-mvp-2/specs/data-provenance/spec.md)。
+**M4 外部 forcing：** `sources.external_files` 条目为 `{path, sha256, size_bytes}`，`path` 必须为规范绝对路径，摘要与非负整数字节数沿用 `files` 约束。生成器在副本清单完成后增量解析必需的 `<project>.tsd.forc`：严格 UTF-8，支持 LF、CRLF 与无末尾换行；首行首 token 为完整非负安全十进制整数，后续首行字段不作日期或科学校验；第二整行去除首尾空白后为目录，保留内部空格；第三行末列必须为 `Filename`，非空数据行列数与表头一致，原始行数在去重前必须等于站点数。零站点仍须有合法目录与表头且无数据行。相对目录从运行 cwd 按物理遍历解析，再以 native realpath 规范化；目录根别名可解析，但随后每个路径型 `Filename` 按 SHUD 的目录 + `/` + 文件名拼接逐组件检查，保留 `..` 遍历语义，拒绝中间或末尾链接、缺失及非普通文件，不作 rSHUD fallback、tilde/环境展开或前导 `/` 覆盖目录。每个规范文件路径分别与物理副本根比较：内部引用由 `files` 覆盖，内部目录越出副本的引用必须计入外部，外部目录引用回副本的文件不得重复；只有所有引用均在副本内或引用集合为空时才为 `[]`。全部引用通过预检后，仅流式哈希被引用的外部普通文件，按实际读取字节计数、规范路径去重及码点升序记录，不扫描外部目录、不复制或修改文件、不新增审批。解析或路径/读取失败均使提交失败，由既有调用方回滚，不能降级为空或部分清单；诊断只含受控阶段与相关路径，不携带原始异常或 manifest 载荷。副本哈希、解析与外部哈希共用逐文件关闭的流生命周期，全部成功前不分配或发布 provenance，已有证据不变；不承诺外部并发修改的快照隔离。此规则也作用于无 build 提交；ccw 的 forcing 位于副本内，keliya 回放引用外部 32 个文件。详见 [M4 provenance 契约](../../openspec/specs/data-provenance/spec.md)。
 
 ---
 
@@ -321,7 +321,7 @@ created_at: "2026-10-27T09:00:00Z"
 updated_at: "2026-10-27T09:00:00Z"
 ```
 
-M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [M3 报告契约](../../openspec/specs/evidence-reports/spec.md)；M4 扩展依据 [M4 报告契约](../../openspec/changes/m4-mvp-2/specs/evidence-reports/spec.md)。根对象与嵌套 PiGateDecision 均严格拒绝未知字段；除 `change_ids`、`verification_ids` 缺键按 `[]` 解析外，以上字段全部必填。
+M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [报告契约](../../openspec/specs/evidence-reports/spec.md)，其中已同步 M4 扩展。根对象与嵌套 PiGateDecision 均严格拒绝未知字段；除 `change_ids`、`verification_ids` 缺键按 `[]` 解析外，以上字段全部必填。
 
 - `report_id` 从 `REPORT-NNNN` 改为品牌 `ReportId`；`task_id` 为品牌 `TaskId`。品牌格式为 `<PREFIX>-YYYYMMDDTHHMMSS-xxxx`，UTC 秒与 4 位小写 hex。
 - `linked_runs` 改为非空品牌 `RunId[]`，允许重复；新增 `stack_ids: StackId[]`、`data_ids: DataId[]`、`llm_response_models: string[]`，三者均非空且拒绝重复。schema 保留调用方顺序，不排序、不静默去重。后续生成器从关联 RunRecord 取引用并去重，不由 schema 读取运行记录。
@@ -338,7 +338,7 @@ M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据
 
 ## 8. ChangeRequest
 
-M4 严格对象，依据 [ChangeRequest record](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-changerequest-record)：
+M4 严格对象，依据 [ChangeRequest record](../../openspec/specs/change-requests/spec.md#requirement-changerequest-record)：
 
 ```yaml
 change_id: CHG-20261102T093000-4a1f   # 品牌 ChangeId；UTC 秒 + 4 位小写 hex
@@ -390,7 +390,7 @@ created_at: 2026-04-25T16:00:00Z
 
 ## 10. VerificationCase
 
-M4 严格对象，字段权威见 [VerificationCase record](../../openspec/changes/m4-mvp-2/specs/verification-cases/spec.md#requirement-verificationcase-record)。全部字段如下：
+M4 严格对象，字段权威见 [VerificationCase record](../../openspec/specs/verification-cases/spec.md#requirement-verificationcase-record)。全部字段如下：
 
 | 字段 | 类型与约束 |
 |---|---|
@@ -417,7 +417,7 @@ M4 只生产 regression / baseline_regression / passed 或 failed，拒绝 agent
 
 ## 11. BuildRecord
 
-M4 严格对象，字段权威见 [BuildRecord record](../../openspec/changes/m4-mvp-2/specs/shud-build/spec.md#requirement-buildrecord-record)。全部字段如下：
+M4 严格对象，字段权威见 [BuildRecord record](../../openspec/specs/shud-build/spec.md#requirement-buildrecord-record)。全部字段如下：
 
 | 字段 | 类型与约束 |
 |---|---|

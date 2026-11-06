@@ -8,7 +8,7 @@ canonical_for: [scientific-semantic-levels]
 **状态**：v0.8.3 P0 补充规范  
 **目标**：根据科学语义风险对 ChangeRequest 分级，并决定是否需要 Theory-to-Code Bundle、VerificationCase 和 PI approval。
 
-本页 M4 已知答案回放的具体范围以 [m4-mvp-2 policy-gate](../../openspec/changes/m4-mvp-2/specs/policy-gate/spec.md) 与下列 M4 注记为准；这是实现契约，不表示工具已交付。M3 报告终态审批保持 [M3 policy-gate 契约](../../openspec/specs/policy-gate/spec.md)。通用 bundle/search 规则保留为后续范围，不冒充 M4 生产者。
+本页 M4 已知答案回放的具体范围以 [policy-gate](../../openspec/specs/policy-gate/spec.md) 与下列 M4 注记为准；相关工具已交付，人工功能验收见 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M3 报告终态审批契约保持不变。通用 bundle/search 规则保留为后续范围，不冒充 M4 生产者。
 
 ## 1. Semantic level
 
@@ -78,7 +78,7 @@ floors:
    命中 output_semantics 时即使 effective_level 被更高 floor 覆盖，bundle 仍须含 output registry
    patch 项（[Preflight §1](Preflight_And_Mutation_Boundary_Spec.md) output_semantics 行）。类别不因枚举序被吞（对抗审查 A05-4）。
 
-**M4 确定性落地（保留规则 2/6 原文）：** 每个路径取全部匹配条目的最大 floor，不采用首匹配；未匹配路径按规则 2 取 `numerical_implementation`。例如 `src/classes/Model_Control.cpp` 同时命中两档，最大值为 numerical_implementation，而 `floor_categories` 同时保留 output_semantics 与 numerical_implementation，按七档顺序去重排序。`Makefile`、`README.md` 未匹配同样取 numerical_implementation。`files_changed` 由工具观测生成，不接受模型路径列表；观测使用受控 git 的 porcelain `-z`，拒绝未忽略 untracked、删除、重命名，只接受已跟踪修改。申报低于 floor 自动抬升，不提供 M4 降级入口；Mapping 自动增补与 CommandTrace 对账不在本轮实现。floor/categories/风险校验只有一个 core 来源，具体规则见 [Semantic level floor](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-semantic-level-floor)。
+**M4 确定性落地（保留规则 2/6 原文）：** 每个路径取全部匹配条目的最大 floor，不采用首匹配；未匹配路径按规则 2 取 `numerical_implementation`。例如 `src/classes/Model_Control.cpp` 同时命中两档，最大值为 numerical_implementation，而 `floor_categories` 同时保留 output_semantics 与 numerical_implementation，按七档顺序去重排序。`Makefile`、`README.md` 未匹配同样取 numerical_implementation。`files_changed` 由工具观测生成，不接受模型路径列表；观测使用受控 git 的 porcelain `-z`，拒绝未忽略 untracked、删除、重命名，只接受已跟踪修改。申报低于 floor 自动抬升，不提供 M4 降级入口；Mapping 自动增补与 CommandTrace 对账不在本轮实现。floor/categories/风险校验只有一个 core 来源，具体规则见 [Semantic level floor](../../openspec/specs/change-requests/spec.md#requirement-semantic-level-floor)。
 
 ## 1.2 参数语义下限（无 ChangeRequest 的 search 任务）
 

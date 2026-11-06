@@ -74,7 +74,7 @@ SHUD-Harness/
 - 运行时：`pnpm run profile:smoke`（dsh 启动 + 路由断言）、`pnpm run shud:tiny`（ccw 30 天）本机运行；CI 有 npm 版 dsh（`profile-smoke` job），无 SHUD。
 - 环境：`DMXAPI_KEY` 只经环境变量；本机跑 dsh/gh 前 `unset ALL_PROXY`；`DSH_HOME` 指向临时目录避免污染真实会话。
 - 流程：一个 issue 一个分支/worktree，走 `subagent-workflow`；PR ≤400 行（CI 阻断，`size-exempt` label 记录例外）；提交信息 conventional（commit-msg 钩子）；通常 merge 需 CI `all-checks-passed` + PI 功能验收。**Epic #210 例外**见 [ADR-0005](docs/adr/implemented/0005-epic-210-acceptance.md)。**M3 Epic #423** 按既定 OpenSpec 安排在 Epic 收口统一 PI 功能验收（[ADR-0010，Accepted/已实施](docs/adr/implemented/0010-m3-epic-acceptance.md)）：子 PR 完成规定工程验证与审查后可 merge、关闭实现 issue；该例外仅限此 Epic，Epic 关闭、ADR 转 implemented 与 OpenSpec 归档仍以 PI 明确通过为前提，自动工程审批不替代 PI 操作；PI 已于 2026-11-01 [通过 M3 阶段验收](docs/Migration_Plan_dsh.md#m3-pi-acceptance)。
-- **M4 Epic #515** 的 PI 功能验收按既定 [Epic-close PI acceptance for replay](openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-epic-close-pi-acceptance-for-replay) 由 [#549](https://github.com/DankerMu/SHUD-Harness/issues/549) 在 Epic 收口执行：PI 亲自操作 Web 的 CR 与报告审批卡并明确给出验收结果后，才能关闭 Epic、迁移验收 ADR 与归档 OpenSpec。各子 PR 仍须满足其规定工程验证、审查与 CI，运行时审批不省略；子 PR 合并、自动 Allow once 和 #517 的 ADR 确认均不代表 M4 功能验收通过。这是既定时点的同步，不新增或扩大合并/审批例外。
+- **M4 Epic #515** 按既定 [Epic-close PI acceptance for replay](openspec/specs/known-answer-replay/spec.md#requirement-epic-close-pi-acceptance-for-replay) 由 [#549](https://github.com/DankerMu/SHUD-Harness/issues/549) 在 Epic 收口验收；PI 已亲自操作 Web 的 CR 与报告审批卡并明确通过，见 [M4 验收记录](docs/Migration_Plan_dsh.md#m4-pi-acceptance) 与 [ADR-0014](docs/adr/implemented/0014-m4-epic-acceptance.md)。各子 PR 的工程验证、审查、CI 与运行时审批要求不变；自动 Allow once、子 PR 合并和 #517 的 ADR 确认不代替 PI 验收。单案例 rivqdown 一致不构成并行正确性、性能或模型改进结论。
 - PR 标签增删（包括非 `size-exempt` 标签）触发完整 CI，接受其 runner 成本；同一 PR 的新事件会取消仍在途的旧 run。`size-exempt` 授予/撤销无需空提交或 close/reopen，豁免仍须在 PR 写明理由；`all-checks-passed` 仍要求所有依赖 job success，failed/cancelled/skipped 均失败，不改分支保护。
 - 本地证据：所有写入者（含 issue、PR 审查、design/stage-pipeline）先读当前 [project profile](openspec/project-profile.md) 的本地证据契约；`.workplans/` 不交付、不强制入库，禁止为格式闸重写已消费的 oracle/证据字节。
 
@@ -102,7 +102,7 @@ SHUD-Harness/
 | SHUD ccw tiny（本机） | `pnpm run shud:tiny` | exit 0 + `.dat` 产出，<2 min | block（本机） |
 | SHUD ccw 重启恢复（本机，需 SHUD 与 `DMXAPI_KEY`） | `pnpm run shud:restart` | SIGTERM / SIGKILL 两用例 PASS；SHUD 连续存活、五条恢复断言成立，通知必须 `delivered`（`unreachable` 判 FAIL）；RunRecord 含退出码与非空产物清单，证据取 session log / 运行目录 / 索引 | block（本机） |
 | 首任务 ccw → EvidenceReport（本机，需 SHUD 与 `DMXAPI_KEY`） | `pnpm run shud:first-task <scratch-workspace>` | Web/HTTP 单提示主链 exit 0；worker 等待并成功收集；同提交的 `approval/asked` 与 `approval/decided: allowed-once`、done TaskCard、Accepted by PI Markdown、StackLock llm 三字段与三 submodule 修订、四句不变式均成立；显式工作区可在 TMPDIR，脚本自动 Allow once 仅为工程证据，不是 PI 验收 | block（本机，CI 不运行） |
-| keliya known-answer 回放（本机，需 SHUD 工具链、`DMXAPI_KEY`、`SHUD_BIN`、`SUNDIALS_ROOT`、`SHUD_REPLAY_KELIYA`） | `pnpm run shud:replay <scratch-workspace>` | 唯一通过判据：[Replay acceptance criteria](openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)；显式工作区；自动审批仅为工程证据，不替代 PI 验收 | block（本机，CI 不运行） |
+| keliya known-answer 回放（本机，需 SHUD 工具链、`DMXAPI_KEY`、`SHUD_BIN`、`SUNDIALS_ROOT`、`SHUD_REPLAY_KELIYA`） | `pnpm run shud:replay <scratch-workspace>` | 唯一通过判据：[Replay acceptance criteria](openspec/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)；显式工作区；自动审批仅为工程证据，不替代 PI 验收 | block（本机，CI 不运行） |
 | 闸自证 | `pnpm run test-guardrails` | 每闸拒违规、收干净输入 | block |
 
 ## Runtime Lifecycle
