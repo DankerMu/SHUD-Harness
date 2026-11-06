@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 kind: architecture
 ---
 
@@ -9,7 +9,7 @@ kind: architecture
 
 [#511](https://github.com/DankerMu/SHUD-Harness/issues/511) 的 full-access 预设在钉版 dsh 0.2.1-rc.2 中把 approval policy 设为 never。真实 ApprovalService 在发出 approval/request 之前自动拒绝；仅替换 approval.request 的既有测试无法发现该问题。asked/decided 日志也不能单独证明审批请求曾到达 answerer。
 
-[ADR-0006](../implemented/0006-dsh-jobs-seam-imports.md) 默认禁止这些宿主服务的运行时导入。本记录按 [full-access-pi-approval design](../../../openspec/changes/archive/2026-11-01-full-access-pi-approval/design.md) 为一个行为回归提出窄例外，不扩大生产 seam，也不宣称已获 PI 接受。
+[ADR-0006](../implemented/0006-dsh-jobs-seam-imports.md) 默认禁止这些宿主服务的运行时导入。本记录按 [full-access-pi-approval design](../../../openspec/changes/archive/2026-11-01-full-access-pi-approval/design.md) 为一个行为回归提出窄例外，不扩大生产 seam；PI 对本记录的接受见下文接受记录。
 
 ## 选择与边界
 
@@ -47,3 +47,7 @@ kind: architecture
 ## 证据限制
 
 父工作流负责运行 focused RED/GREEN、完整质量闸及隔离的 full-access Web 验证，并将实际命令、结果和限制记录在关联 PR；本 ADR 不维护瞬时验证状态。测试不能替代真实 Web 卡显示、session 文件持久化恢复或 PI 功能验收；执行计数边界不声称验证报告/TaskCard 写入。既有报告决定测试不替换或删除。
+
+## 接受记录
+
+PI 于 2026-11-06 在 M4 收口后的遗留清理中明确接受本记录，随即由 `proposed/` 转入 `implemented/`（status `accepted`）。接受只确认本记录描述的决策与边界，不追认任何验收证据，不扩大既定范围，也不替代各 Epic 的 PI 功能验收。

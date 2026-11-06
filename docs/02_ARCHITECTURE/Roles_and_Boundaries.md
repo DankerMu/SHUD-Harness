@@ -173,7 +173,7 @@ Coder 不负责：
 
 ### 6.1 Delegated coder 审批与运维边界
 
-`shud-coder-approval` 按 [ADR-0013](../adr/proposed/0013-delegated-coder-approval.md) 的 PI 授权，仅在新 child 的 awaited 创建边界初始化一次：必须是 fresh/unseeded、当前 coder、精确 live parent 所拥有、无历史 turn，且唯一 child-owned policy 为 delegation-origin never。最终同步边界的 parent override/config 必须明确为 ask；缺服务、未知来源或 parent never 不推断为授权。此初始化不是 grant，不扩大 sandbox 或工具面；只有实际 answerer 的 allowed-once 才能放行一次操作，没有 answerer 或 rejected/cancelled/unavailable 均 fail closed。
+`shud-coder-approval` 按 [ADR-0013](../adr/implemented/0013-delegated-coder-approval.md) 的 PI 授权，仅在新 child 的 awaited 创建边界初始化一次：必须是 fresh/unseeded、当前 coder、精确 live parent 所拥有、无历史 turn，且唯一 child-owned policy 为 delegation-origin never。最终同步边界的 parent override/config 必须明确为 ask；缺服务、未知来源或 parent never 不推断为授权。此初始化不是 grant，不扩大 sandbox 或工具面；只有实际 answerer 的 allowed-once 才能放行一次操作，没有 answerer 或 rejected/cancelled/unavailable 均 fail closed。
 
 初始化通知以 `shud-coder-approval` 标明 child policy sequence 与 live parent 的 ask 观察，不冒充 PI 点击或用户切换。恢复、clear/compact、角色切换、插件重载都不重新授权；已有持久 ask 保留，后来显式 never 优先。移除插件只停止未来初始化，不迁移或重写历史策略；运维要关闭既有会话审批，应使用宿主现有的显式 policy 控制，而不是手改 canonical log。
 
