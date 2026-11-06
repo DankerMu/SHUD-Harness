@@ -224,4 +224,4 @@ no metrics, figure or AnalysisPlan progress artifacts
 pnpm run shud:replay /absolute/path/to/empty-scratch-workspace
 ```
 
-这是 **block（本机，CI 不运行）**。通过判据唯一正文为 [Replay acceptance criteria](../../openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)，本页不复制清单。退出 1 时保留工作区与 canonical session log，不改称 INCONCLUSIVE；自动 Allow once 不代替 PI 验收，N=1 比较不构成并行正确性、性能或模型改进结论。
+这是 **block（本机，CI 不运行）**。通过判据唯一正文为 [Replay acceptance criteria](../../openspec/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)，本页不复制清单。退出 1 时保留工作区与 canonical session log，不改称 INCONCLUSIVE；自动 Allow once 不代替 PI 验收，N=1 比较不构成并行正确性、性能或模型改进结论。

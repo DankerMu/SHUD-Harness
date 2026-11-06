@@ -40,7 +40,7 @@ workspace/
   runs/<run_id>/
 ```
 
-M4 新增的目标布局如下；由 [m4-mvp-2](../../openspec/changes/m4-mvp-2/design.md) 对应实现组交付，不因本页新增即视为已创建：
+M4 已交付的布局如下；设计依据为 [m4-mvp-2](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md)，实际目录由各领域操作按需创建，不因安装 profile 即全部存在：
 
 ```text
 workspace/
@@ -209,7 +209,7 @@ resolve path
 
 **M4 治理根写保护：** 相对会话 cwd 固定九根 `tasks stacks provenance reports runs changes patches verifications builds`，不可配置。模型 write/edit/str_replace_editor（非 view）目标命中即 deny `governance-immutable`；bash/pwsh 触及且被既有写 denylist 判为写也 deny，只读触及 next。与角色或 sandbox_permissions 无关，raw 同时命中时优先执行 raw 规则；`repos/` 不在集合中。
 
-这是启发式保护，不是工作区内的沙箱强隔离。绕过 shell denylist 的写法仍可能改写治理记录，`repos/SHUD/.git` 篡改亦不在 M4 威胁模型内。补偿为 ask 前、change_submit 执行时、shud_build 与 closure 的 patch 摘要复核、运行二进制摘要复核，以及回放对 approval_ref 与 session log 的交叉核对；不宣称密码学审批证明。边界见 [design D15(9)/D16](../../openspec/changes/m4-mvp-2/design.md#d16-治理根写保护critical-path-23)。
+这是启发式保护，不是工作区内的沙箱强隔离。绕过 shell denylist 的写法仍可能改写治理记录，`repos/SHUD/.git` 篡改亦不在 M4 威胁模型内。补偿为 ask 前、change_submit 执行时、shud_build 与 closure 的 patch 摘要复核、运行二进制摘要复核，以及回放对 approval_ref 与 session log 的交叉核对；不宣称密码学审批证明。边界见 [design D15(9)/D16](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md#d16-治理根写保护critical-path-23)。
 
 ## 9.1 Operational UX artifact paths
 

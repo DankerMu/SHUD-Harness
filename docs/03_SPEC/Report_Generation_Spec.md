@@ -11,7 +11,7 @@ canonical_for: [language-guard, reviewer-checklist]
 
 M3 设计依据见 [m3-mvp-1 design D7/D8](../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d7-evidencereport-生成模板与水印)，当前契约以 [evidence-reports](../../openspec/specs/evidence-reports/spec.md) 为准。`dsh-shud-tools` 已挂载 `report_generate`、`report_validate` 与 PI 终态工具 `report_submit` / `report_decide`；生成与校验不代行终态审批。已挂载工具用法见 [Repository Layout](../04_IMPLEMENTATION/Repository_Layout.md)。
 
-M4 实现基线为 [m4-mvp-2 evidence-reports](../../openspec/changes/m4-mvp-2/specs/evidence-reports/spec.md)。`report_generate` 已接入规范 code_change closure，`report_validate` 已执行下列 15 项检查；工程回放不等于求解器运行、Web 审批或 PI 科学验收。M3 science_assist 的报告字节、七态水印与审批状态机保持不变。
+M4 实现契约为 [evidence-reports](../../openspec/specs/evidence-reports/spec.md)。`report_generate` 已接入规范 code_change closure，`report_validate` 已执行下列 15 项检查；自动工程审批不等于 PI 验收，人工回放与限制见 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M3 science_assist 的报告字节、七态水印与审批状态机保持不变。
 
 ## 1. 报告定位
 
@@ -98,7 +98,7 @@ M4 校验结果为 `{ report_id, status, ok, checks }`，成功与检查失败�
 
 comment 先表示为 JSON literal，再与其余五列一起经过既有结构化 metadata 单次转义：null 显示为 `null`，字符串 `"null"` 保留引号；原始空白、换行、反斜杠和引号以 JSON 转义保留。HTML、管道、反引号、反斜杠与物理换行不会生成新表格列或物理标题，模板样式文本不递归替换。该路径不是模型撰写的 prose；comment 不进入 §6 observations 或自动提升为科学解释，禁止用语检查仍只扫描原四个模型撰写字段，整份 Markdown 的密钥检查仍覆盖 §10。
 
-M4 在 §3 增加三个确定性事实表段：ChangeRequest（含 floor_categories、patch 路径/摘要、状态与 approval_ref）、VerificationCase（两 run/build 引用、两个 SHA256、判定与 reviewer 字段）、BuildRecord（先 base 后 candidate，含 source_commit、rhs_openmp、make_argv、compiler、patch_sha256、binary_sha256）；StackLock 仅在 build_id 非 null 时展示该行。不内联 patch、编译日志或求解器输出；字段清单遵循 [Deterministic facts table](../../openspec/changes/m4-mvp-2/specs/evidence-reports/spec.md#requirement-deterministic-facts-table)。
+M4 在 §3 增加三个确定性事实表段：ChangeRequest（含 floor_categories、patch 路径/摘要、状态与 approval_ref）、VerificationCase（两 run/build 引用、两个 SHA256、判定与 reviewer 字段）、BuildRecord（先 base 后 candidate，含 source_commit、rhs_openmp、make_argv、compiler、patch_sha256、binary_sha256）；StackLock 仅在 build_id 非 null 时展示该行。不内联 patch、编译日志或求解器输出；字段清单遵循 [Deterministic facts table](../../openspec/specs/evidence-reports/spec.md#requirement-deterministic-facts-table)。
 
 code_change 报告 §5 逐字渲染 core 措辞常量（模板文本，不进入禁止短语集）：
 

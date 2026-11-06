@@ -378,3 +378,77 @@ A7 时 PI 确认看到卡片，报告仍 reviewed、决定历史为空、任务 
 - 初始 A5 只读文件/哈希提示超出产品角色工具面，已纠正为报告确定性来源投影加工程侧独立核对；没有为验收扩大角色权限。模型曾误数产物，规范 manifest 与工程核对为准。功能验收不把报告中每一句科学解释认证为正确。
 
 PI 的逐项与总验收回执、只读审计在本地 `.workplans/issue-452/manual-acceptance-20261101/` 保留，不入库也不重写旧证据；本节保留审查所需路径、序列、六字段与明确结论。工程检查、#511 自动 Web 探针与 PI 亲自操作三类证据分别记账。
+
+### M4 automatic engineering replay
+
+`pnpm run shud:replay <scratch-workspace>` 的既有工程回执为 PASS / engineering-only，公开摘要见 [#549 comment 6666519017](https://github.com/DankerMu/SHUD-Harness/issues/549#issuecomment-6666519017) 与 [PR #621](https://github.com/DankerMu/SHUD-Harness/pull/621)。这是脚本自动处理两次 allowed-once 的独立环境，**不是 PI 手工验收**；历史失败尝试仍为 FAIL，不因后续通过而改写。
+
+| 工程证据 | ID |
+|---|---|
+| Root / Task / CR | `session-c3f7dffa-47a0-46fd-bdfb-e1602da3d4ee` / `TASK-20261105T150426-80a9` / `CHG-20261105T151230-e8f3` |
+| Base build / run | `BUILD-20261105T150436-baf7` / `RUN-20261105T151258-8edb` |
+| Candidate build / run | `BUILD-20261105T151358-1f93` / `RUN-20261105T151428-fbd9` |
+| Verification / report | `VC-20261105T151552-f530` passed / `REPORT-20261105T151614-0c91` accepted |
+
+### M4 PI acceptance
+
+PI 在 Web 亲自完成 CR 与报告审批，逐步确认运行及修复后，明确表示「好的，本项通过，M4还有要验收的嘛」；获知必需手工场景已完成后，再授权「ok，那就收尾m4，完成剩余工作，停止服务」。这构成 [#549](https://github.com/DankerMu/SHUD-Harness/issues/549) / [Epic #515](https://github.com/DankerMu/SHUD-Harness/issues/515) 的功能验收与收口授权，按 [ADR-0014](adr/implemented/0014-m4-epic-acceptance.md) 登记，不从报告 accepted 单独推导阶段验收。收口对话日期为 2026-11-05；下列原始事件和 ID 的 `2026-11-06` / `Z` 时间戳原样保留，不编造本地时区换算。
+
+环境为 SHUD-Harness `39ae10c6`、dsh `dsh-v0.2.1-rc.2`、`deepseek-flash-guan` / DMXAPI；SHUD source pin 为 `9a422e5eb708df7d2f8b4066a3083a031d679a82`。此手工环境未启动自动 answerer。工作区为 `/Users/danker/shud-m4-pi-20261105-4ai11wie/workspace`，DSH_HOME 为其同级 `dsh-home`；canonical log 根为该 home 下 `sessions/--Users-danker-shud-m4-pi-20261105-4ai11wie-workspace--/`，各会话日志为 `<session-id>/session.v4.jsonl.zstd`。
+
+| 会话用途 / 角色 | Session ID（所有 child 的 parent 均为下列 root） |
+|---|---|
+| Root coordinator | `session-b8d8049f-9f06-473e-be8f-69f857f7b6e7` |
+| Base coder / worker | `1525e2f2-25c5-43ae-ae39-696f662ca7ac` / `c4df5821-a893-4436-a021-8ef0c57ac10b` |
+| 初始 CR coder / build coder / worker | `dfe5214b-d085-477a-87c3-d0e209a38151` / `2369d172-6ba0-4273-be77-cd9fd1308b1c` / `135cfdb6-c34f-446f-bda2-bc0b0e17c09d` |
+| 修复 CR coder / 另一 coder / 修复 worker | `0fb5217b-f5f0-48a8-86cb-e560cb98dc60` / `0e883b76-2b4e-4c14-8b88-b93b977821ce` / `c88dc0e4-acd6-4aca-9e20-a5967cb2f96c` |
+| 后续 coder / reviewer | `38f97f75-6d84-4cf5-8b3f-f162ba83d1c5` / `29a52da2-294f-42d4-8680-a2d6b2acf605` |
+
+三组实际审批摘录如下：前两行属于初始 CR coder，第三、四行属于修复 CR coder，最后两行属于 root。`seq` 仅在各自会话内有序，不能跨会话排序；`approval_ref` 是执行 callId，经 asked.callId → asked.id → decided.id 关联，不是审批 id。
+
+```jsonl
+{"seq":497,"type":"approval/asked","data":{"id":"ae83af00-eba8-4518-86d1-beaadce6ec8a","toolName":"change_submit","callId":"call_00_ET_WiWnMrwrNtaiRnHSfm6L4606","reason":"PI approval required for change CHG-20261106T010801-d0bc"}}
+{"seq":498,"type":"approval/decided","data":{"id":"ae83af00-eba8-4518-86d1-beaadce6ec8a","outcome":"allowed-once"}}
+{"seq":244,"type":"approval/asked","data":{"id":"91d02891-6228-4bc1-8803-859c3ba19577","toolName":"change_submit","callId":"call_00_sIeHbT14Y5iYZc17Xz928614","reason":"PI approval required for change CHG-20261106T023649-3ff0"}}
+{"seq":245,"type":"approval/decided","data":{"id":"91d02891-6228-4bc1-8803-859c3ba19577","outcome":"allowed-once"}}
+{"seq":282,"type":"approval/asked","data":{"id":"ca31e848-bc2d-4b93-97c5-787c452ce5a6","toolName":"report_submit","callId":"call_00_Iki1UzsVhTHgDSNNQGNC0837","reason":"PI approval required for report REPORT-20261106T031230-7f3c"}}
+{"seq":283,"type":"approval/decided","data":{"id":"ca31e848-bc2d-4b93-97c5-787c452ce5a6","outcome":"allowed-once"}}
+```
+
+| 手工链路持久结果 | ID / 状态 |
+|---|---|
+| Task | `TASK-20261106T004614-fca9` done |
+| Base build / run | `BUILD-20261106T004622-6665` / `RUN-20261106T015744-07ba` |
+| 初始 CR / build / run（保留历史，不是最终比较对象） | `CHG-20261106T010801-d0bc` / `BUILD-20261106T020609-506d` / `RUN-20261106T021043-caa0` |
+| 修复 CR / build / run | `CHG-20261106T023649-3ff0` approved / `BUILD-20261106T024305-265a` / `RUN-20261106T024721-0907` |
+| Verification | `VC-20261106T030226-e84c` passed，`compatibility_verdict=compatible` |
+| Report / decision | `REPORT-20261106T031230-7f3c` accepted / `DEC-20261106T032106-d5dd` |
+
+初始 candidate 虽请求 `threads=1`、输入 `NUM_OPENMP=1`，CLI 默认值经 `max(1,2)` 覆盖为配置/banner 2，且未消费环境 override，故 N=1 前提不成立；**没有测得实际 in-region team size 2**。PI 要求核查后，新建修复 CR、重新人工审批，再完成 fresh build/run；修复消费既有 `SHUD_RHS_THREADS`，最终请求、输入、StrictOMP 与后续设置 banner 均为 1，仍不是 in-region team 测量。修复 patch SHA256 为 `103409341bebf6e788c58e3632509f798cd16ff58b095980e68b92513506c358`。旧 CR/build/run 及十份冻结文件保持原字节；不把旧候选追认为合格，也不要求带修复的手工流程符合自动单次回放的调用数量。
+
+最终比较只覆盖固定 keliya 输入、窗口 12053–12143 的 `output/keliya.out/keliya.rivqdown.dat`；base/candidate 的 SHA256 均为 `479584ae877f768b65d8c09f9e0d9e7c8b12c7dd759557367b4253cf3df3c374`。Base 是 OpenMP-disabled SERIAL build；candidate 启用 StrictOMP，只有单线程请求/配置/日志证据。PI 明确接受这一不对称及解释边界。
+
+Root `report_generate` call/result seq271/272（`call_00_JV7yCC9WTqfBIlFasuGV0512`）生成 draft；`report_validate` seq276/277（`call_00_ET_13mSAHcUbyuo9wjQjbTl6271`）返回 reviewed、`ok=true`，15 项 pass，其中 4/10/11 为 vacuous；`report_submit` seq281/284 使用上述人工 allowed-once 后返回 accepted。没有 `report_decide` 工具调用；决定由 submit 写入，六字段为：
+
+```json
+{"decision_id":"DEC-20261106T032106-d5dd","report_id":"REPORT-20261106T031230-7f3c","approval_ref":"call_00_Iki1UzsVhTHgDSNNQGNC0837","outcome":"accepted","comment":null,"decided_at":"2026-11-06T03:21:06.158Z"}
+```
+
+工作区原件为 `tasks/<task_id>/task.json`、`changes/<change_id>.json`、`patches/<change_id>.patch`、`builds/<build_id>/build-record.json`、`runs/<run_id>/{run-job,run-record}.json`、`verifications/<vc_id>.json`、`reports/<report_id>.{json,md}`。报告验收后只读检查的 SHA256：
+
+| 原件 | SHA256 |
+|---|---|
+| Accepted report JSON / Markdown | `49ca2d9d00903efbe7dbc11f2e1715599e73ec04b3b85e514a588bf424e979c3` / `3a19d1e789ead950bc7cd4f6df28ed7e427ef3048c4dbc1b2c0271df413e6eed` |
+| Task / Verification | `45855fb051934931c93788068aace20c800da80c9e033a7366a0759ca533d084` / `c4b0de705abb3a87f9f1a275a139598025ed250ff1cf985b1217e3508b613f90` |
+| Root canonical log（提取时） | `fccf9a993120a47e5de3fff76c62c8e50efff6a9bdca99f14a1f8ea4041f7d10` |
+
+保留的限制：
+
+- 三次运行均 collected、succeeded、exit_code=0；notify 均 unreachable/3，闭环依赖 worker 显式等待/收集。Root 与十个 child 均 completed。没有自动 wake 成功主张，不放宽独立 `shud:restart` 的 delivered 门。
+- 仅目标产物一致，不证明所有产物或一般程序等价、多线程正确性、跨线程确定性、性能提升、科学有效性或模型改进。numerical_health 与 peak_memory_mb 为 null，`DY.dat` 为空，`time.csv` 不参与比较；wall_seconds 是观测窗口，不是求解器耗时。
+- Accepted Markdown 第 368 行的「实跑 2」是历史措辞不精确，不升级为实际 team 测量事实。Task 标题/goal 仍描述第一步 baseline，报告中的 PI questions 又提已裁定范围及额外指标；均保留原件，不据此重开或扩张 M4 必需验收。
+- #549 可选的人工 Reject 分支未执行，不声称覆盖；候选 patch 未合入上游 SHUD 或 submodule。验收不代表报告每句科学解释正确，不替代工程门与审查。
+
+原始回执保留于本地 `.workplans/issue-549/` 的 `manual-closure-sessions.json`、`manual-report-inspection.json`、`manual-verification-confirmation.json`、`manual-thread-repair-*.json`、`manual-pi-functional-approval.json` 与 `engineering-evidence-receipt.json`；本节已发布离开本机仍可审查的事件、标识、结果和边界，不以本地路径代替摘要。服务已按 PI 授权停止：所属宿主进程及 56134 监听消失，`active.json=[]`，owner lock 移除、永久 `.lock-guard` 保留；`manual-service-shutdown.json` 记录旧候选与 accepted report/task/VC 字节未变，scratch/home 原件保留。
+
+收口规范已同步至 [canonical known-answer-replay](../openspec/specs/known-answer-replay/spec.md#requirement-epic-close-pi-acceptance-for-replay)，历史设计与任务在 [2026-11-05-m4-mvp-2 archive](../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md) 保留；归档日期与原始事件时间分别记账。

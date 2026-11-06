@@ -158,7 +158,7 @@ verification:
     evidence: "Web session logs join worker collection and report_submit asked/allowed-once; done task, accepted Markdown, StackLock llm fields and three revisions, verbatim invariants; automatic approval is engineering evidence, not PI acceptance"
   - surface: "SHUD keliya known-answer replay (local block; requires SHUD toolchain, DMXAPI_KEY, SHUD_BIN, SUNDIALS_ROOT and SHUD_REPLAY_KELIYA; CI does not run)"
     command: "pnpm run shud:replay <scratch-workspace>"
-    evidence: "Single pass/fail source: openspec/changes/m4-mvp-2/specs/known-answer-replay/spec.md — Replay acceptance criteria; automatic approval is engineering evidence, not PI acceptance"
+    evidence: "Single pass/fail source: openspec/specs/known-answer-replay/spec.md — Replay acceptance criteria; automatic approval is engineering evidence, not PI acceptance"
   - surface: "guardrail self-test"
     command: "pnpm run test-guardrails"
 

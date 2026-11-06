@@ -25,7 +25,7 @@ benchmark improvement → general improvement
 
 ## M4 实现范围
 
-[M4 VerificationCase 契约](../../openspec/changes/m4-mvp-2/specs/verification-cases/spec.md) 与 [Minimal_Schemas §10](Minimal_Schemas.md#10-verificationcase) 是本次实现字段基线；下文通用 Theory-to-Code schema 保留为后续规划，不是第二套 M4 对象。以下为 design D15(1)/(6) 的 M4 范围裁剪、非放宽 baseline：
+[M4 VerificationCase 契约](../../openspec/specs/verification-cases/spec.md) 与 [Minimal_Schemas §10](Minimal_Schemas.md#10-verificationcase) 是本次实现字段基线；下文通用 Theory-to-Code schema 保留为后续规划，不是第二套 M4 对象。以下为 design D15(1)/(6) 的 M4 范围裁剪、非放宽 baseline：
 
 - 旧 `id` / `verification_case_id` 统一为品牌 `vc_id: VC-YYYYMMDDTHHMMSS-xxxx`；必填 `task_id`、`change_id`，不保留别名。
 - `bundle_id` 允许非空字符串或 null，M4 生产者恒写 null；不生产 bundle，不保留 `target_equations`、numerical_scheme/mapping 等无生产者字段。

@@ -591,7 +591,9 @@
 
 ## 8. Epic 收口：PI 功能验收
 
-- [ ] 8.1 依赖 1.2、7.2。PI 在 Web 亲自完成一次回放（CR 卡与报告卡各至少一次操作），证据记 `docs/Migration_Plan_dsh.md`；新决策记录 `docs/adr/proposed/00NN-m4-epic-acceptance.md`（沿 ADR-0010 模式，PI 通过后转 implemented）；`shud:replay` 自动审批与子 PR 合并不表述为 PI 验收；bitwise 一致不表述为并行正确性/性能/模型改进（known-answer-replay「Epic-close PI acceptance for replay」）。
+- [x] 8.1 依赖 1.2、7.2。PI 在 Web 亲自完成一次回放（CR 卡与报告卡各至少一次操作），证据记 `docs/Migration_Plan_dsh.md`；新决策记录 `docs/adr/implemented/0014-m4-epic-acceptance.md`（沿 ADR-0010 模式，PI 通过后转 implemented）；`shud:replay` 自动审批与子 PR 合并不表述为 PI 验收；bitwise 一致不表述为并行正确性/性能/模型改进（known-answer-replay「Epic-close PI acceptance for replay」）。
+
+交付记录：PI 在验收对话明确“好的，本项通过，M4还有要验收的嘛”，并授权“ok，那就收尾m4，完成剩余工作，停止服务”。手工会话 `session-b8d8049f-9f06-473e-be8f-69f857f7b6e7` 的报告 `REPORT-20261106T031230-7f3c` 已 accepted、任务 `TASK-20261106T004614-fca9` 已 done，修正候选的 `VC-20261106T030226-e84c` 为 passed；CR 与报告审批事件、旧候选保留及证据限制见上述 Migration_Plan 与 ADR-0014。本项是 PI 手工验收，不是自动回放审批；可选 Reject 分支未执行。仅固定 keliya 输入/窗口与 rivqdown 比较，候选单线程配置/日志不等于实测区域内线程数，不主张多线程正确性、性能或模型改进；notify unreachable 不放宽独立 restart delivered 闸。
 
 - Suggested fixture level: none - 手工验收记录
 - Minimal mergeable slice: atomic - 一次完整验收与其证据记录

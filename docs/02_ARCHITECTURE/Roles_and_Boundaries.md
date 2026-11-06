@@ -146,7 +146,7 @@ Worker 不直接写长期 memory，不决定科学结论。代码修改与 patch
 
 ## 6. Coder Agent
 
-Coder 是代码变更执行者，一般职责包括在任务隔离且独占的 runtime 工作副本中修改代码、编写或更新配套测试，不直接修改 source reference 或主分支。M4 工作范围具体限定在 scratch workspace 内 `repos/SHUD` 的独立本地 clone；不得用 `git worktree add` 写根 submodule 元数据，也不直接修改根 submodule。以下是 [M4 agent-presets](../../openspec/changes/m4-mvp-2/specs/agent-presets/spec.md) 的额外实现契约，不表示 preset 已交付（D15(4)/(8)，M4 范围裁剪、非放宽 baseline）。回放的五文件切片与 VerificationCase 不替代其它代码任务的配套测试职责。
+Coder 是代码变更执行者，一般职责包括在任务隔离且独占的 runtime 工作副本中修改代码、编写或更新配套测试，不直接修改 source reference 或主分支。M4 工作范围具体限定在 scratch workspace 内 `repos/SHUD` 的独立本地 clone；不得用 `git worktree add` 写根 submodule 元数据，也不直接修改根 submodule。以下是已交付的 [M4 agent-presets](../../openspec/specs/agent-presets/spec.md) 实现契约（D15(4)/(8)，M4 范围裁剪、非放宽 baseline）。回放的五文件切片与 VerificationCase 不替代其它代码任务的配套测试职责。
 
 M4 Coder 负责：
 

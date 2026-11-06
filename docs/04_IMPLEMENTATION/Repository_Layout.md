@@ -79,7 +79,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 
 当前接受 `input_dir`、可选 `project`、`end_days`、`label`、品牌 `task_id`、品牌 `build_id` 与正安全整数 `threads`；未知参数（包括 `workdir`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
 
-**M4 扩参契约（#534 运行时与 #539 shud_run 工具参数均已交付）**：新增可选品牌 `build_id` 与正整数 `threads`；零、负数、小数、字符串或非法品牌在文件系统操作前拒绝。未知参数的负例保留 workdir，不再以合法整数 threads 作未知键。注册表解析本工作区 `builds/<build_id>/build-record.json`，校验普通可执行二进制及 SHA256，复制到 `runs/<run_id>/bin/shud` 并执行副本；RunJob/RunRecord 原样记录 build_id、threads、binary_sha256，StackLock 记录构建来源。threads 提供时设置 OMP_NUM_THREADS/SHUD_RHS_THREADS，缺省不新增环境变量；无 build 沿用配置 shudBin。M4 对所有提交新增 tsd.forc 解析与外部 forcing 只读哈希，缺失或解析失败拒绝，不把无 build 路径称为完全无行为变化。详见 [shud_run arguments](../../openspec/changes/m4-mvp-2/specs/shud-run-tools/spec.md#requirement-shud_run-arguments)。
+**M4 扩参契约（#534 运行时与 #539 shud_run 工具参数均已交付）**：新增可选品牌 `build_id` 与正整数 `threads`；零、负数、小数、字符串或非法品牌在文件系统操作前拒绝。未知参数的负例保留 workdir，不再以合法整数 threads 作未知键。注册表解析本工作区 `builds/<build_id>/build-record.json`，校验普通可执行二进制及 SHA256，复制到 `runs/<run_id>/bin/shud` 并执行副本；RunJob/RunRecord 原样记录 build_id、threads、binary_sha256，StackLock 记录构建来源。threads 提供时设置 OMP_NUM_THREADS/SHUD_RHS_THREADS，缺省不新增环境变量；无 build 沿用配置 shudBin。M4 对所有提交新增 tsd.forc 解析与外部 forcing 只读哈希，缺失或解析失败拒绝，不把无 build 路径称为完全无行为变化。详见 [shud_run arguments](../../openspec/specs/shud-run-tools/spec.md#requirement-shud_run-arguments)。
 
 回放传 `input_dir: input/keliya`、task_id、build_id、`threads: 1`，不传 end_days；运行副本的完整 cfg 字节保持不变，包括准备后的 START、END 与 NUM_OPENMP，不因指定 threads 改写 cfg。N=1 是 VerificationCase 的准入条件，不把工具正安全整数 schema 收窄为只接受 1（D15(3)，M4 范围裁剪、非放宽 baseline）。
 
@@ -131,7 +131,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 
 raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json（非法、缺失或提取不可用的 id 回退 tasks）及 `repos/SHUD`：身份提取失败仍继续检查全部固定根，目标落入 raw 即拒绝，不相交则委托下一个监听器；canonical/物理路径身份不可用仍 fail-closed，不读取卡片内容。抛错 getter 的回归仅覆盖直接 JS `tools/pre-execute` 边界；本回归使用的不可枚举抛错 getter 在 native 参数快照阶段即被拒绝，这不是普遍 accessor 拒绝契约，也不代表模型输入绕过。`task_create` 仍只检查 tasks。两工具不调用 LLM、不发起审批、不自行批准变更，也不承诺外部 Git 并发写入者之间的快照隔离。
 
-工具注册与角色装配不等于完整 M4 回放链路已交付：当前 profile 已挂载 coordinator/worker/coder/reviewer 四个 preset，coordinator 的 subagent/subagent_coder/subagent_reviewer 分别委派 worker/coder/reviewer；`change_submit` 与 `shud_build` 已挂载（见下文）。四角色真实 Web 工具面与三条委派身份链见 [#545 / PR #608](https://github.com/DankerMu/SHUD-Harness/pull/608)，不据此声称变更审批或完整回放已通过。详细契约见 [change_create](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_create)。
+当前 profile 已挂载 coordinator/worker/coder/reviewer 四个 preset，coordinator 的 subagent/subagent_coder/subagent_reviewer 分别委派 worker/coder/reviewer；`change_submit` 与 `shud_build` 已挂载（见下文）。四角色真实 Web 工具面与三条委派身份链见 [#545 / PR #608](https://github.com/DankerMu/SHUD-Harness/pull/608)；完整人工回放及限制另见 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)，不以工具装配或自动审批代替 PI 验收。详细契约见 [change_create](../../openspec/specs/change-requests/spec.md#requirement-change_create)。
 
 ### 已挂载的 `change_submit`
 
@@ -149,7 +149,7 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 
 四角色 presets 与三条 coordinator 委派行已装配；配置 dump 只证明装配与表达式，#545 的 canonical session log 证明实际工具面与委派身份，不证明 Web 变更审批卡往返。真实 ToolRuntime、宿主 ApprovalService 与 canonical 文件读写的自动答复测试，以及 built-plugin smoke，只证明工程审批边界；不声称 PI 功能验收或科学有效性。
 
-伴生测试入口：`packages/dsh-shud-policy-gate/src/full-access-approval.test.ts`、`change-approval.test.ts`，`packages/dsh-shud-tools/src/change-submit.test.ts` 与 `packages/dsh-shud-raw-guard/src/decide-change-target.test.ts`。完整契约见 [change_submit](../../openspec/changes/m4-mvp-2/specs/change-requests/spec.md#requirement-change_submit) 与 [高风险变更审批策略](../../openspec/changes/m4-mvp-2/specs/policy-gate/spec.md#requirement-change_submit-asks-for-high-risk-change-requests)。
+伴生测试入口：`packages/dsh-shud-policy-gate/src/full-access-approval.test.ts`、`change-approval.test.ts`，`packages/dsh-shud-tools/src/change-submit.test.ts` 与 `packages/dsh-shud-raw-guard/src/decide-change-target.test.ts`。完整契约见 [change_submit](../../openspec/specs/change-requests/spec.md#requirement-change_submit) 与 [高风险变更审批策略](../../openspec/specs/policy-gate/spec.md#requirement-change_submit-asks-for-high-risk-change-requests)。
 
 ### 已挂载的 `shud_build`
 
@@ -171,7 +171,7 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 - **只读与权限边界**：`shud_build` 不改写 `repos/SHUD` 的文件、Git index/HEAD，也不改变 TaskCard 的状态、phase 或链接。raw-guard 在执行前按物理路径保护固定的 `builds` 与 `repos/SHUD`；policy-gate 允许 coder，拒绝 worker/reviewer/coordinator，不由构建处理器自行审批。工具注册不使当前 profile 自动具备 coder/reviewer presets。
 - **可信命名空间边界**：临时目录排他分配、等待后的目录身份复核与规范清理保护协作构建；所有权变化时拒绝继续写入或删除外来目录。这不是对任意敌对外部写入者的原子快照或 rename-no-replace 保证。工程集成使用真实 ToolRuntime/Git/tar/make/编译器探测及假 Makefile 生成的脚本可执行文件，不据此宣称真实 SHUD 求解器已编译、真实 Web 链路已验收或 PI 已批准。
 
-伴生测试入口：`packages/dsh-shud-tools/src/shud-build.test.ts`；完整契约见 [shud_build](../../openspec/changes/m4-mvp-2/specs/shud-build/spec.md#requirement-shud_build)。
+伴生测试入口：`packages/dsh-shud-tools/src/shud-build.test.ts`；完整契约见 [shud_build](../../openspec/specs/shud-build/spec.md#requirement-shud_build)。
 
 ### 已挂载的 `verification_run`
 
@@ -179,7 +179,7 @@ raw-guard 在执行前只按元数据检查 changes、patches、确切 task.json
 
 工具限定本会话运行根及普通 output 目录；尚未绑定工作区的 RunJob `run_dir` 解析失败只返回受控运行 id 和解析阶段，不回显记录提供的路径或底层异常。复用 records 的 rivqdown 原始字节 SHA256 比较器。相等写 `passed`，不相等写 `failed` 并保留两摘要；缺失或不安全产物报错，不生成判定。规范发布器排他写 `verifications/<vc_id>.json` 后，工具排序去重回写卡片链接，不改变状态或 runtime phase；回写失败保留已提交 VC 并在错误中返回其 id。`reviewed_by` 取当前 preset 投影，notes/compatibility 不覆盖确定性比较结果。字节一致不构成科学、并行正确性、性能或 PI 验收结论。
 
-伴生首条回放测试：`packages/dsh-shud-tools/src/verification-run.test.ts`；完整契约见 [verification_run](../../openspec/changes/m4-mvp-2/specs/verification-cases/spec.md#requirement-verification_run)。
+伴生首条回放测试：`packages/dsh-shud-tools/src/verification-run.test.ts`；完整契约见 [verification_run](../../openspec/specs/verification-cases/spec.md#requirement-verification_run)。
 
 ### 本机 Web 重启验收
 
@@ -222,7 +222,7 @@ $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指
 <data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```
 
-M4 新目录由 [m4-mvp-2](../../openspec/changes/m4-mvp-2/design.md) 分项实现；本文不预先链接未生成的 schema 或未创建的测试。M4 回放源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写；通用 `task_create(code_change)` 钉定的是调用方检出的当前有效 HEAD。九个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
+M4 新目录由 [m4-mvp-2](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md) 分项实现，工程交付与人工功能验收已记入 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M4 回放源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写；通用 `task_create(code_change)` 钉定的是调用方检出的当前有效 HEAD。九个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
 
 ## 3. 与 dsh 的边界
 

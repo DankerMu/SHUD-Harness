@@ -97,8 +97,8 @@ status: living
 | 准入搜索 | `accepted_for_search` | bundle 状态：允许下游校准/搜索的前置门 | [Controlled_Search_Boundary_Spec](../docs/03_SPEC/Controlled_Search_Boundary_Spec.md) |
 | 校准 ≠ 结构验证 | calibration vs structural validation | 校准结果必须标注 calibration，不得表述为模型结构改进 | Verification_Case_Spec + CLAUDE.md Governance Rules |
 | 已知答案回放 | known-answer replay | M4 第二任务：只给 P1e 设计与五文件清单、不提供上游 diff，由 coder 从切片前 base 重导出，经 CR 审批、两次运行、VC 与报告审批评价 Harness 治理链路 | [Phased_Plan M4](../docs/04_IMPLEMENTATION/Phased_Plan.md#4-m4-mvp-2) |
-| 基线 / 已知答案 | base / known answer | base 是 9a422e5 全 sha 的干净 serial 构建及其本次输出；known answer 指上游已交付切片作为回放背景，不是把上游 diff 或历史性能数字交给模型复制 | [M4 design D2/D13](changes/m4-mvp-2/design.md) |
-| 回放本机闸 | `shud:replay` | M4 目标脚本：Web 单提示、恰两次自动审批与文件/session log 联合判据；N=1 bitwise passed 才成功，自动审批不是 PI 功能验收 | [known-answer-replay](changes/m4-mvp-2/specs/known-answer-replay/spec.md) |
+| 基线 / 已知答案 | base / known answer | base 是 9a422e5 全 sha 的干净 serial 构建及其本次输出；known answer 指上游已交付切片作为回放背景，不是把上游 diff 或历史性能数字交给模型复制 | [M4 design D2/D13](changes/archive/2026-11-05-m4-mvp-2/design.md) |
+| 回放本机闸 | `shud:replay` | M4 目标脚本：Web 单提示、恰两次自动审批与文件/session log 联合判据；N=1 bitwise passed 才成功，自动审批不是 PI 功能验收 | [known-answer-replay](specs/known-answer-replay/spec.md) |
 
 ## 7. 记忆与技能
 

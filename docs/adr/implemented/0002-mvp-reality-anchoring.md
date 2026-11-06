@@ -42,7 +42,7 @@ kind: architecture
 | 3 | SMTP 发件账号 | PI 自有 Gmail + 应用专用密码（smtp.gmail.com:587，发件人 = 收件人 = PI 邮箱）；凭据经 SMTP_* 环境变量注入（Config_Secrets §4，SecretRef purpose=smtp），不入 git/对象/报告 |
 | 4 | 金样 eval plan B | 分层递进：① 提示工程迭代一轮（限单 issue 尺寸）→ ② 治理关键节点（closure 判定 / gate 判定 / language guard）经 zero 按功能选模型切强模型，其余调用留 GLM → ③ 整体能力性不达标（非治理单点）才换供应商/模型重议（回 revisit 触发器 1） |
 
-**开放项 1 的 M4 加注（2026-11-02，design D15(5)/(8)）：** 本次已知答案回放采用切片前 base `9a422e5eb708df7d2f8b4066a3083a031d679a82`（`226e3ab` 的父提交），取代本次任务使用上表切片后 `3341368d` / `7a1dc8f` 的安排；重导出需要 base 在切片之前，不能把已含实现的树当作模型重导出证据。源码为 scratch workspace 内 `repos/SHUD` 的独立本地 clone，不使用会写根 submodule 元数据的 git worktree add，根 submodule 不变。keliya 与 D4 的 serial baseline 正确性门保留，不做性能复现。详见 [M4 design D2/D13](../../../openspec/changes/m4-mvp-2/design.md)。这是 M4 范围裁剪、非放宽 baseline，不改变本 ADR 的 accepted 状态。
+**开放项 1 的 M4 加注（2026-11-02，design D15(5)/(8)）：** 本次已知答案回放采用切片前 base `9a422e5eb708df7d2f8b4066a3083a031d679a82`（`226e3ab` 的父提交），取代本次任务使用上表切片后 `3341368d` / `7a1dc8f` 的安排；重导出需要 base 在切片之前，不能把已含实现的树当作模型重导出证据。源码为 scratch workspace 内 `repos/SHUD` 的独立本地 clone，不使用会写根 submodule 元数据的 git worktree add，根 submodule 不变。keliya 与 D4 的 serial baseline 正确性门保留，不做性能复现。详见 [M4 design D2/D13](../../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md)。这是 M4 范围裁剪、非放宽 baseline，不改变本 ADR 的 accepted 状态。
 
 **M1 开工三决**（同场定案，细节固化于 openspec change `m1-foundation` 与 Phased_Plan M1）：
 ① zero M1 **不 fork**——保持根目录 submodule 钉 13e25c1 相对引用，引用技术形态由策略门 spike 条 1 实测确认，fork 决策挂 ADR-0001 触发器；
