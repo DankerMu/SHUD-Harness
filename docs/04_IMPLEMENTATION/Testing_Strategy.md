@@ -296,9 +296,9 @@ gh pr view "$PR" --repo "$REPO" --json headRefOid,state,mergedAt,mergeCommit,mer
 
 本索引是根指令要求实施、审查、提交前必须阅读并遵守的完整规则清单；以下路径均相对仓库根目录。
 
-生成指令由 `pnpm run instructions:render` 更新；`pnpm run instructions:check`（默认 `docs:check` / CI docs-gate 的一部分）同时核对两份生成物字节，并从 `constraints.yaml` 的 `thresholds.agents_md_max_lines` 读取 AGENTS.md 行数上限，当前为 320。按 LF 计物理行，末尾未换行的非空行也计一行；配置缺失、非正整数或重复时失败，不使用默认值。CLAUDE.md 仅核对生成一致性，不施加该上限。
+生成指令由 `pnpm run instructions:render` 更新；`pnpm run instructions:check`（默认 `docs:check` / CI docs-gate 的一部分）同时核对两份生成物字节，并从 `constraints.yaml` 的 `thresholds.agents_md_max_lines` 读取 AGENTS.md 行数上限（当前 320），从 `thresholds.agents_md_max_bytes` 读取字节上限（当前 29000）。按 LF 计物理行，末尾未换行的非空行也计一行；字节数取生成物原始字节长度。任一配置缺失、非正整数或重复时失败，不使用默认值。CLAUDE.md 仅核对生成一致性，不施加这两项上限。
 
-边界自证：`python3 scripts/instructions/test-render-line-budget.py` 以临时根目录实际渲染后检查，覆盖 320 通过 / 321 拒绝、配置阈值、CLAUDE 独立超限、缺失/非法/重复配置、末尾未换行与两份生成物漂移；CI docs-gate 与 `pnpm run test-guardrails` 均执行，Python 标准库即可，无须安装 Node 依赖。
+边界自证：`python3 scripts/instructions/test-render-line-budget.py` 以临时根目录实际渲染后检查，覆盖 320 通过 / 321 拒绝、字节恰好等于上限通过 / 多 1 字节拒绝、两项配置阈值、CLAUDE 独立超限、缺失/非法/重复配置、末尾未换行与两份生成物漂移；CI docs-gate 与 `pnpm run test-guardrails` 均执行，Python 标准库即可，无须安装 Node 依赖。
 
 | 规则 | 位置 | 校验 | 级别 |
 |---|---|---|---|

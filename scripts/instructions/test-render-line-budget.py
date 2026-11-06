@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the instruction budget through real renders in temporary roots.
+"""Exercise the instruction line and byte budgets through real renders in temporary roots.
 
 Usage: python3 scripts/instructions/test-render-line-budget.py
 No checker imports or third-party packages are required.
@@ -13,6 +13,11 @@ import unittest
 from pathlib import Path
 
 RENDERER = Path(__file__).resolve().with_name("render.sh")
+UNBOUNDED_BYTES = 10_000_000  # isolates line cases from the byte budget
+
+
+def budget_config(lines: object = 320, max_bytes: object = UNBOUNDED_BYTES) -> str:
+    return f"thresholds:\n  agents_md_max_lines: {lines}\n  agents_md_max_bytes: {max_bytes}\n"
 
 
 class RenderLineBudgetTests(unittest.TestCase):
@@ -50,7 +55,7 @@ class RenderLineBudgetTests(unittest.TestCase):
             sources = root / "instructions" / "agents"
             sources.mkdir(parents=True)
             (root / "constraints.yaml").write_text(
-                f"thresholds:\n  agents_md_max_lines: {limit}\n", encoding="utf-8",
+                budget_config(limit), encoding="utf-8",
             )
             for name in ("shared.md", "codex.md", "claude.md"):
                 (sources / name).write_bytes(b"")
@@ -133,6 +138,53 @@ class RenderLineBudgetTests(unittest.TestCase):
                     accepted=accepted, final_newline=False,
                 )
 
+    def assert_byte_budget(
+        self, *, limit: int, agents_bytes: int, claude_bytes: int, accepted: bool,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="instruction-byte-budget-") as directory:
+            root = Path(directory)
+            sources = root / "instructions" / "agents"
+            sources.mkdir(parents=True)
+            (root / "constraints.yaml").write_text(budget_config(320, limit), encoding="utf-8")
+            for name in ("shared.md", "codex.md", "claude.md"):
+                (sources / name).write_bytes(b"")
+            self.require_render(root)
+            for fragment, output, target in (
+                ("codex.md", "AGENTS.md", agents_bytes),
+                ("claude.md", "CLAUDE.md", claude_bytes),
+            ):
+                overhead = len((root / output).read_bytes())
+                self.assertGreater(target, overhead + 1, "FIXTURE ERROR: target below framing")
+                (sources / fragment).write_bytes(b"x" * (target - overhead - 1) + b"\n")
+            self.require_render(root)
+            for output, expected in (("AGENTS.md", agents_bytes), ("CLAUDE.md", claude_bytes)):
+                self.assertEqual(
+                    len((root / output).read_bytes()), expected,
+                    f"FIXTURE ERROR: {output} does not have the requested byte size",
+                )
+            result = self.run_renderer(root, check=True)
+            evidence = self.command_evidence(result)
+            if accepted:
+                self.assertEqual(result.returncode, 0, "UNEXPECTED REJECTION:\n" + evidence)
+            else:
+                self.assertEqual(result.returncode, 1, "NON-BUDGET OR MISSING REJECTION:\n" + evidence)
+                for detail in ("AGENTS.md", f"{agents_bytes} bytes", str(limit), "agents_md_max_bytes"):
+                    self.assertIn(detail, result.stderr, "UNCLASSIFIED REJECTION:\n" + evidence)
+
+    def test_bytes_at_configured_limit_are_accepted(self) -> None:
+        self.assert_byte_budget(limit=29000, agents_bytes=29000, claude_bytes=29000, accepted=True)
+
+    def test_one_byte_above_configured_limit_is_rejected(self) -> None:
+        self.assert_byte_budget(limit=29000, agents_bytes=29001, claude_bytes=29000, accepted=False)
+
+    def test_claude_only_byte_excess_is_accepted(self) -> None:
+        self.assert_byte_budget(limit=29000, agents_bytes=29000, claude_bytes=29001, accepted=True)
+
+    def test_configured_byte_limit_is_not_hardcoded(self) -> None:
+        for size, accepted in ((2000, True), (2001, False)):
+            with self.subTest(agents_bytes=size, configured_limit=2000):
+                self.assert_byte_budget(limit=2000, agents_bytes=size, claude_bytes=29001, accepted=accepted)
+
     def empty_fixture(self) -> Path:
         directory = tempfile.TemporaryDirectory(prefix="instruction-budget-config-")
         self.addCleanup(directory.cleanup)
@@ -141,22 +193,24 @@ class RenderLineBudgetTests(unittest.TestCase):
         sources.mkdir(parents=True)
         for name in ("shared.md", "codex.md", "claude.md"):
             (sources / name).write_bytes(b"")
-        (root / "constraints.yaml").write_text(
-            "thresholds:\n  agents_md_max_lines: 320\n", encoding="utf-8",
-        )
+        (root / "constraints.yaml").write_text(budget_config(), encoding="utf-8")
         return root
 
     def test_invalid_configuration_is_rejected_without_fallback(self) -> None:
         configs = {
             "missing file": None,
             "empty file": "",
-            "missing threshold": "thresholds:\n  max_file_lines: 1000\n",
-            "wrong section": "other:\n  agents_md_max_lines: 320\n",
-            "duplicate threshold": "thresholds:\n  agents_md_max_lines: 320\n  agents_md_max_lines: 400\n",
-            "duplicate section": "thresholds:\n  agents_md_max_lines: 320\nthresholds:\n  agents_md_max_lines: 400\n",
+            "missing thresholds": "thresholds:\n  max_file_lines: 1000\n",
+            "missing line threshold": "thresholds:\n  agents_md_max_bytes: 29000\n",
+            "missing byte threshold": "thresholds:\n  agents_md_max_lines: 320\n",
+            "wrong section": "other:\n" + budget_config().split("\n", 1)[1],
+            "duplicate line threshold": budget_config() + "  agents_md_max_lines: 400\n",
+            "duplicate byte threshold": budget_config() + "  agents_md_max_bytes: 400\n",
+            "duplicate section": budget_config() + budget_config(),
         }
         for value in ("", "0", "-1", "1.5", "true", "320oops", '"320"', "[]", "320#comment"):
-            configs[f"malformed {value!r}"] = f"thresholds:\n  agents_md_max_lines: {value}\n"
+            configs[f"malformed lines {value!r}"] = budget_config(lines=value)
+            configs[f"malformed bytes {value!r}"] = budget_config(max_bytes=value)
         for name, config in configs.items():
             with self.subTest(config=name):
                 root = self.empty_fixture()
@@ -179,6 +233,7 @@ class RenderLineBudgetTests(unittest.TestCase):
             "other:\n  agents_md_max_lines: 1\n"
             "thresholds: # owned block\n  max_file_lines: 1000\n"
             "  agents_md_max_lines: 320 # AGENTS only\n"
+            "  agents_md_max_bytes: 29000 # AGENTS only\n"
             "next:\n  agents_md_max_lines: 1\n", encoding="utf-8",
         )
         self.require_render(root)
