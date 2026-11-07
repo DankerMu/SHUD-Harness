@@ -169,7 +169,7 @@
 
 ### Requirement: Epic-close PI acceptance for sensitivity
 
-M5 的 PI 功能验收 SHALL 在 Epic 收口时由 PI 在 `dsh --profile shud` 的 Web 内亲自完成一次 sensitivity 任务，并亲自对其报告审批卡作出放行决定；证据（session id、`task_id`、`analysis_plan_id`、各 `run_id`、`report_id`、审批 `callId` 与 `approval/asked|decided` 摘录）SHALL 记入 `docs/Migration_Plan_dsh.md`。验收安排 SHALL 由 `docs/adr/proposed/` 中的新决策记录（沿 ADR-0010/ADR-0014 模式）登记，PI 通过后转 implemented；#422 SHALL 在同一收口时由 PI 关闭。`shud:sensitivity` 的自动 Allow once、子 PR 合并与工程审查 SHALL NOT 被表述为 PI 验收。验收记录与报告 SHALL 把结果限定为单流域（ccw）、单窗口（90 天）、相对 baseline 的变化，SHALL NOT 含模型改进、校准结论、敏感性指数或排名、机制解释的措辞；参数范围 SHALL 标注为 agent 建议值。
+M5 的 PI 功能验收 SHALL 在 Epic 收口时由 PI 在 `dsh --profile shud` 的 Web 内亲自完成一次 sensitivity 任务，并亲自对其报告审批卡作出放行决定；证据（session id、`task_id`、`analysis_plan_id`、各 `run_id`、`report_id`、审批 `callId` 与 `approval/asked|decided` 摘录）SHALL 记入 `docs/Migration_Plan_dsh.md`。按 PI 2026-11-07 的明确决定，验收安排 SHALL 先登记并接受为 [ADR-0015](../../../../../docs/adr/implemented/0015-m5-epic-acceptance.md)，仅授权 M5 #639 子 PR 经完整工程门与审查后合并；流程 accepted SHALL NOT 被表述为功能验收通过。PI 明确功能通过后 SHALL 给该 ADR 追加功能证据链接，#422 SHALL 在同一收口时由 PI 关闭。`shud:sensitivity` 的自动 Allow once、子 PR 合并与工程审查 SHALL NOT 被表述为 PI 验收。验收记录与报告 SHALL 把结果限定为单流域（ccw）、单窗口（90 天）、相对 baseline 的变化，SHALL NOT 含模型改进、校准结论、敏感性指数或排名、机制解释的措辞；参数范围 SHALL 标注为 agent 建议值。
 
 #### Scenario: acceptance recorded separately from engineering evidence
 
@@ -179,7 +179,12 @@ M5 的 PI 功能验收 SHALL 在 Epic 收口时由 PI 在 `dsh --profile shud` �
 #### Scenario: engineering green is not acceptance
 
 - **WHEN** 全部子 PR 已合入且 `shud:sensitivity` exit 0，但 PI 尚未完成 Web 验收
-- **THEN** M5 Epic 不关闭，验收决策记录不转 implemented，OpenSpec change 不归档
+- **THEN** M5 Epic、#422 与 #675 不关闭，OpenSpec change 不归档；已 accepted 的流程 ADR 不被当作功能验收通过记录
+
+#### Scenario: process acceptance precedes engineering delivery
+
+- **WHEN** PI 已明确接受仅限 M5 的工程合并流程，子 PR 已完成规定工程验证、Critical Path 审查与 CI
+- **THEN** 子 PR 可合并、工程 issue 可关闭；仍须等待 #675 的 PI Web 功能验收才收口 Epic/change，工程判据、运行时审批与科学判断边界不变
 
 #### Scenario: no scientific overclaim in acceptance
 
