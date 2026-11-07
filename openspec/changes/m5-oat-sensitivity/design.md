@@ -314,3 +314,19 @@
 
 - O1（事实核查，在 run-metrics 实现切片之前）：`eleysnow` 与 `eleyic` 的单位（m 水当量？）、以及 `.cfg.ic` 的 Canopy/Snow 列是否与输出同一口径。已知线索：`MD_ET.cpp:158` 中 `yEleIS = icStg * vgFrac`，即 `eleyic` 输出已按植被覆盖率折算到元素面积。结论只影响 D7 两个扩展项的系数，不改变公式结构、spec 或任务切分。
 - O2（实测）：90 天 ccw 单 run 的耗时，以及 plan `threads: 1`（D4）下重复运行是否逐字节相同。绑定 plan 的副本 `NUM_OPENMP` 已改写为 plan 的 `threads`（DC-1），串行与 OpenMP 构建都以该线程数运行。由验收闸给出答案；不相同即 FAIL 并升级给 PI。
+
+## Issue #646 implementation fixture
+
+Scope: task 2.5 only; no AnalysisPlan schema, product check, metrics writer, report consumer or STORAGE_DEPTH_CONVERSIONS.
+Governing invariant: one immutable, source-audited registration and one deterministic decision/text implementation serve every future consumer; no profile or caller can silently change governance facts.
+Must preserve: CODE_CHANGE_SECTION5_WORDING, FORBIDDEN_REPORT_PHRASES, GOVERNANCE_INVARIANTS, scanner behavior, semantic-level-floor exports/projection, all existing core records and consumers.
+Sibling surfaces: calib registration → schema renderer/self-test → generated Markdown → schema:check; health constants → pure classifier → future #649; wording templates → coverage instantiator → future #657/#658.
+Public boundary: core package root exports the constants and pure functions; only minimal export additions outside governance, no private-module consumer imports.
+Data design: freeze registration, entries, nested ranges/source arrays; table is the single key-to-file mapping. Transform encoding must remain serializable/projectable and specify real divisors, including RIV_ROUGH /60.
+Classification: domain is the three named health metrics and number/null; max_solver_dt is outside the API and fails closed on an untyped call. No new threshold or scientific policy.
+Wording: templates1–3 literal per spec; templates4–6 finalized as fact-only strings naming required fields. Coverage instantiation accepts structural psets without depending on the future AnalysisPlan schema and uses JS shortest round-trip number text.
+Version: use an existing metrics method-version convention if present; otherwise select stable initial string "1", opaque provenance only, and document choice in PR. No new versioned implementation filenames.
+Projection: extend the existing semantic-floor generation path; generated files are never hand-edited. No threshold/wording projections or new generator abstraction.
+Evidence: boundary table in tasks.md, immutable registration mutation attempts, exact coverage/wording checks, forbidden-phrase negative controls, built-core smoke and actual schema:check stale-multiplier rejection in an isolated copy.
+Review focus: source transforms/ranges, nested immutability, boundary/null/type behavior, pset order/number formatting, existing wording preservation, single-source projection and no downstream scope creep.
+Execution: one implementer writes code/tests; parent owns fixture, final gates/smoke, PR and adjudication. Shared M5 change remains unarchived until #675.

@@ -38,7 +38,7 @@
 - [ ] 2.2 RunJob/RunRecord 增加 `analysis_plan_id`、`parameter_set_id`（缺键按 null，iff refine）；RunRecord 启用 `artifacts.metrics_summary`（`plots` 仍拒绝）。满足 run-records「RunJob record」「RunRecord record」「Generated projection」；附 M2–M4 旧记录解析回归（依赖 2.1）。
 - [ ] 2.3 TaskCard `type: sensitivity` 与 `linked_analyses`（缺键按 `[]`，refine：非 sensitivity 卡为空）。满足 task-cards「TaskCard record」「TaskCard generated projection」（依赖 2.1）。
 - [ ] 2.4 EvidenceReport 增加 `analysis_ids` 与 `sensitivity_summary`（缺键默认值与 iff refine）。满足 evidence-reports「EvidenceReport record」「EvidenceReport generated projection」（依赖 2.1）。
-- [ ] 2.5 governance 常量：
+- [x] 2.5 governance 常量：
   - calib 白名单：4 键；`read_transform`（KSATH/KSATV `/1440`，LC_ROUGH `/60`）、`check_range`、倍率区间，以及键 → 类别文件映射，逐条附 SHUD 源码 file:line（analysis-plans「Calib whitelist and category product check」的常量部分）。
   - `NUMERICAL_HEALTH_THRESHOLDS`（residual 0.01/0.05；cvode 0；negative 按 §13：0/≤10/>10）与 metrics `method_version`（run-metrics「Numerical health verdicts」的常量部分）。
   - 确定性 limitation 模板常量（evidence-reports「Deterministic report limitations」的常量部分）。
@@ -47,6 +47,25 @@
   - 本刀是第 2 组首刀，排在 2.1 之前。
 - Suggested fixture level: expanded - 共享 schema 单源、生成投影与治理常量（Critical Path #1/#7）
 - Minimal mergeable slice: 2.5 首刀（治理常量没有消费者，可独立保绿）；2.1 依赖 2.5（plan schema 的 refine 与投影要用白名单键集、倍率区间与键 → 类别文件映射）；2.2、2.3、2.4 都依赖 2.1，彼此独立
+
+### Issue #646 risk packs and executable evidence
+
+| Pack | Selection and evidence |
+|---|---|
+| Public API / CLI / script entry | Selected: built core import calls classifier and coverage instantiator with the issue's exact expected results; no new CLI |
+| Config / project setup | Not selected: no profile, dependency or toolchain changes |
+| File IO / path safety / overwrite | Not selected for runtime: no new runtime IO; generator reuses existing guarded publication, unchanged path-safety self-tests |
+| Schema / columns / units / field names | Selected: four keys/table/column/transform/range tied to pinned SHUD source; KSAT divisor1440, both roughness divisors60; nested mutation rejected |
+| Auth / permissions / secrets | Selected: whitelist remains closed/frozen, no runtime override or additional scan exemption; no credential access |
+| Concurrency / shared state / ordering | Not selected for concurrency: pure functions only; coverage test preserves non-baseline pset order without mutating input |
+| Resource limits / large input / discovery | Not selected: no discovery/unbounded external inputs; plan consumer's 3–5 pset validation belongs to #642 |
+| Legacy compatibility / examples | Selected: existing wording and semantic-floor tests retained; CODE_CHANGE_SECTION5_WORDING and existing generated files unchanged |
+| Error handling / rollback / partial outputs | Selected: null maps to not_available; max_solver_dt excluded from classifier type and unsupported runtime key rejected rather than silently classified |
+| Release / packaging / dependency compatibility | Selected: minimal public core exports and built-package smoke, no deep-import convention or new dependency |
+| Documentation / migration notes | Selected: generated whitelist reflects source; isolated copied repo changes multiplier without regeneration and actual schema:check rejects; restore fixture and check passes |
+
+Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn/warn/fail; negative 0/1/10/11/null → pass/warn/warn/fail/not_available; cvode 0/1/null → pass/fail/not_available. Exact ccw/90 four-pset coverage sentence and fixed templates2/3 match the requirement; six templates pass the existing forbidden-phrase scanner without becoming exemptions. Verify all cases through public functions, not copied constant snapshots. Preserve semantic red-before/green-after evidence for new behavior, then run full default gate and generator negative control once integration is complete.
+
 
 ## 3. records：输入读取、metrics、plan 文件层、closure 与报告（Critical Path #6/#7）
 

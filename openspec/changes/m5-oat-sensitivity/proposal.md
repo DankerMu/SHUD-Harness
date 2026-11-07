@@ -95,3 +95,13 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
   - M3/M4 报告的 §5 与 limitations 文本改变，黄金文件随之更新。
   - 新增模型工具 1 个（`analysis_create`）；`data/raw` 不变；根 submodule 不变。
 - 科学边界不变：OAT 汇总只陈述单流域、单窗口、相对 baseline 的变化，不做敏感性指数或排名，不写机制解释；参数范围始终标注为 agent 建议值；`water_balance_residual` 是数值守恒诊断，不代表水文真实性；单流域结果不构成模型改进，也不是校准结论。
+
+## Issue #646 execution fixture
+
+- Issue type: feature; fixture level: expanded; upstream expanded agreed (shared governance API, wording and generated projection).
+- Blast radius: all later plan, metrics and report consumers share these constants; incorrect units, boundary judgments or mutable registration corrupt downstream evidence.
+- Selected risk packs: Public API; Schema/units; Auth/governance; Compatibility; Error handling; Release/exports; Documentation/generated projection.
+- Evidence floor: issue #646 boundary cases, frozen nested registration, literal wording/scan checks, generator drift negative control, built-core smoke, full `pnpm run check`, Critical Path #1/#6/#7 white-box review.
+- Must preserve: existing wording and phrase-scan bytes/behavior, semantic-level floors and projection, nine current core record schemas; no profile overrides, solver/input writes or downstream consumers.
+- Source authority: requirements unchanged; pinned SHUD read semantics prevail over derived prose. `RIV_ROUGH` reads `x / 60` (`River.cpp:29`) before calib (`:40`), documented by #680 / PR #681.
+- Workflow-only scope: this fixture metadata and task completion accompany #646; product changes remain core governance, minimal core root exports, schema generator/self-test and generated whitelist documentation.

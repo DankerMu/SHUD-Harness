@@ -8,7 +8,12 @@ import {
   writeGeneratedFile,
 } from "./generated-paths.ts";
 import { assertSchemaRegistryComplete, schemaDefinitions } from "./registry.ts";
-import { buildJsonSchema, buildMarkdown, buildSemanticLevelFloorMarkdown } from "./render.ts";
+import {
+  buildCalibWhitelistMarkdown,
+  buildJsonSchema,
+  buildMarkdown,
+  buildSemanticLevelFloorMarkdown,
+} from "./render.ts";
 import { runSelfTest } from "./self-test.ts";
 
 async function main(): Promise<void> {
@@ -39,6 +44,11 @@ async function main(): Promise<void> {
   await writeGeneratedFile(
     join(markdownDir, "semantic-level-floor.md"),
     buildSemanticLevelFloorMarkdown(),
+    generatedPathContext,
+  );
+  await writeGeneratedFile(
+    join(markdownDir, "calib-whitelist.md"),
+    buildCalibWhitelistMarkdown(),
     generatedPathContext,
   );
 }
