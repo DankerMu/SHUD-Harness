@@ -89,9 +89,11 @@ floors:
 | GEOL_KSATH | `.para.geol` / `KsatH(m_d)` | x / 1440 | [0, 1e3] |
 | GEOL_KSATV | `.para.geol` / `KsatV(m_d)` | x / 1440 | [0, 1e3] |
 | LC_ROUGH | `.para.lc` / `ROUGH` | x / 60 | [0, 1] |
-| RIV_ROUGH | `.sp.riv` 河道类型表 / `Manning` | x | null（SHUD 无范围检查；harness 要求乘积有限且 >0） |
+| RIV_ROUGH | `.sp.riv` 河道类型表 / `Manning` | x / 60 | null（SHUD 无范围检查；harness 要求乘积有限且 >0） |
 
 每个条目同时记录 SHUD 源码出处；统一倍率 m ∈ [0.5, 2.0]，非 baseline 不得为 1。`analysis_create` 在任何写入前只读取得 cfg.calib 中恰一行有效 baseline 值 b，对每个类别行 x 按 SHUD 顺序计算 `read_transform(x) × b × m`，越界即拒绝并点名键、行、乘积与范围。缺键、重复有效行、缺列、不可解析值或不安全文件均拒绝；参与校验的字节在同次读取中计算 input_digests。
+
+河道粗糙度的 `/60` 来自钉版 SHUD `3aec65755926c478e13ca7d4fea80715e4e90345` 的 `SHUD/src/classes/River.cpp:29`（秒制转分钟制），同文件第 40 行随后乘 calib 因子。`check_range: null` 仅表示没有 SHUD 范围检查，不表示省略读入单位换算；不得把 read_transform 写成恒等变换。
 
 **D15(6)：M5 范围裁剪、非放宽 baseline。** 不创建 semantic_level_floor.yaml 的 parameters 段，不开放 38 键全集或 controlled search。只有上述四键在运行副本上的倍率扰动无需新增 ask；未登记键（包括数值容差、加数键、GEOL_THETAS/THETAR、SOIL_BETA）fail-closed，不以泛化 floor 推断放行。默认参数、物理方程与 benchmark baseline 的 PI gate 不变；报告仍须既有报告审批。扩大白名单须 PI 决定并逐键核实 SHUD 语义，后续 search 规则不构成 M5 旁路。
 
