@@ -9,6 +9,8 @@ canonical_for: [domain-cli]
 **事实基线**：SHUD@3aec657（无 tag，logo 串 "v2.0 2022"；上游加速线 tag cpu-accel-v1.0.2 指向其后 125 commits 的 db4ccdb）· rSHUD v2.5.0（228 导出函数）· AutoSHUD ≈v2.5.0-rc（f421445）
 **目标**：把高频科学操作固化为确定性命令，成为 **T2 证据的唯一生产通道**；并为"三仓库持续演化 + 研究成果回流上游"的双向变更提供版本治理。
 
+本页通用 CLI 是历史设计，不表示当前 dsh 插件提供同名命令。M5 指标生产者按 §2.2 的 TS/collect 契约落地；下文 CLI 唯一生产通道、Rscript 与 result YAML 的规划不覆盖该 M5 边界。
+
 ---
 
 ## 1. 定位与原则
@@ -85,38 +87,17 @@ stderr 模式（进失败签名）：`SUNDIALS_ERROR:`（cvode_config.cpp:11-22�
 **诚实声明**：负状态被静默钳制为 0（MD_update.cpp:7-8，无日志）——负状态检测**不能**靠日志，
 必须靠 `wb`/输出分析，RunRecord.numerical_health 的该项来源标注为 output-derived。
 
-### 2.2 指标与水量平衡组（经 rSHUD v2.5.0 现代 API）
+### 2.2 指标与水量平衡组（M5：TS 原生确定性实现）
 
-```text
-shud-harness metrics <run-dir> --project <prj> [--vars v1,v2,...] [--daily] [--out <yaml>]
-shud-harness wb      <run-dir> --project <prj> [--scope all|riv|ele] [--out <yaml>]
-shud-harness compare <base-run> <cand-run> [--obs <csv>] [--out <yaml>]
-```
+**D15(1)：M5 范围裁剪、非放宽 baseline。** 不采用 Rscript CLI 作为指标生产者，不新增 `shud-harness metrics/wb/compare` 命令。records 的 TS 原生读取器解析保留的 SHUD `.dat` 与运行副本输入，在 collect 内计算并发布 `runs/<run_id>/metrics.json`；RunRecord 以 `{path: "metrics.json", sha256}` 引用。公式、输出间隔、null 原因与阈值统一见 [SHUD_Output_Variables §11–§13](SHUD_Output_Variables.md#11-numerical-health)，机器契约见 [run-metrics](../../openspec/changes/m5-oat-sensitivity/specs/run-metrics/spec.md)。
 
-**实现契约**：每次调用是无状态 Rscript——先 `shud.env(prjname, inpath, outpath)`（SHUD_Env.R:14-40，
-重建 `.shud` 环境），再调**现代 API**：
+`numerical_health` 的来源不受模型选变量影响：残差来自规定公式，cvode_failures 来自 stderr 的 `SUNDIALS_ERROR:` 行，negative_state_count 来自四个指定状态输出的严格负值计数；钳零使该数只是下界，不做长零段启发式。max_solver_dt 恒 null，不用估计填值。原因与判定写 metrics，RunRecord 只存四值。
 
-- metrics：`load_output_data(variables=...)`（io_output.R:205-264）→ 逐变量 xts →（可选 `ts_to_daily`）→
-  标准 metrics YAML；默认变量集 = `get_default_variables()` 的 16 个（io_output.R:277-285）；
-- wb：`wb.all(xl=..., ic=readic(), fun=xts::apply.daily, plot=FALSE)`（WaterBalance.R:9-45，
-  需要 elevprcp/eleveta/elevetp/rivqdown/eleysurf/eleyunsat/eleygw；xl 必须显式传入）→ 残差统计 + 阈值判定；
-  `--scope riv|ele` 对应 `wb.riv`/`wb.ele`；
-- **numerical_health（对抗审查 A07-2）**：wb 固定加载 5 个状态变量
-  eleysurf/eleyunsat/eleygw/rivystage/lakystage（无湖流域跳过 lakystage 并在 result 记录），
-  该集合**不受 --vars 影响**——负状态在 SHUD 内被静默钳零（无日志），只能输出侧检测：
-  钳零特征（长零段 + 收支残差联合判定，启发式阈值实现期校准）计入 negative_state_count，
-  连同 water_balance_residual / cvode_failures（stderr 解析）组成 **RunRecord.numerical_health
-  的唯一生产通道**（[Execution_Jobs_Runs §8](Execution_Jobs_Runs.md)）。--vars 只作用于 metrics 载荷；
-- compare：产出 Controlled_Search 的 `BaselineComparisonRef`（same_stack_lock/same_data_id 校验 + metric_delta）；
-  给 `--obs` 时经 hydroGOF 计算 NSE/KGE 等 GOF 指标。
+所有任务类型的 ok run 在同一个 collect 尝试中计算；单项不可用与整份 unavailable 区分，指标读取/计算失败不改 run 退出类别、不触发 collect-error；metrics 文件写入失败时引用与四值为 null，继续发布 RunRecord 并在回执给出错误类别。历史已提交记录不回填，重复 collect 不重算。完整契约见 [Metrics computed at collect](../../openspec/changes/m5-oat-sensitivity/specs/run-metrics/spec.md#requirement-metrics-computed-at-collect)。
 
-**版本门**：CLI 要求 `packageVersion("rSHUD") >= 2.5.0`（现代 API `read_output`/`load_output_data` 自 v2.3.0 导出，
-v2.5.0 为当前稳定 tag）；低版本直接拒绝（exit 4），不做静默 legacy 回退。
-注意：旧名 `readout`/`loaddata` 在 v2.5.0 仍是**无 deprecated 标记**的正式导出，且 `wb.*` 系列默认参数内部走
-`loaddata()`（WaterBalance.R:9,66,124,199,228）——CLI 调 `wb.*` 必须显式传 `xl=`（由 `load_output_data` 构造），
-禁止依赖其默认取数路径（见 01_CODEBASE/rSHUD 报告 §6 偏差 1）。
-rSHUD 错误映射：`stop()`（文件缺失/不可读，io_output.R:59,63）→ exit 3；
-`warning`（文件不完整，io_output.R:93）→ result 中 `warnings[]` + exit 0 但 `complete: false`（不可作 accepted 证据）。
+rSHUD 2.5.0 只用于本机开发对照，生成入库的共有项期望值；CI 消费该期望文件，不调用 R。日间隔夹具比较 P、Qd、AET、ΔS_surf/us/gw/riv；积雪与截留另用手算夹具。对照范围见 [rSHUD cross-check fixture](../../openspec/changes/m5-oat-sensitivity/specs/run-metrics/spec.md#requirement-rshud-cross-check-fixture)。这不是 rSHUD 运行时依赖或科学结论。
+
+NSE/KGE、观测数据读取、controlled search 的 BaselineComparisonRef 与通用 compare CLI 不在 M5；复活条件见 [M5 Non-Goals](../../openspec/changes/m5-oat-sensitivity/design.md#goals--non-goals)。
 
 ### 2.3 AutoSHUD 流水线组
 

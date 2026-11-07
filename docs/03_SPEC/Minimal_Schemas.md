@@ -19,11 +19,11 @@ canonical_for: [core-object-schemas, runjob-backend-enum, stacklock-llm]
 
 ## 1. TaskCard
 
-M3 品牌标识符修订（#424）的实现源为 `packages/dsh-shud-core/src/schemas/task.ts` 与 `run-identifiers.ts`，依据 [M3 TaskCard 契约](../../openspec/specs/task-cards/spec.md)。本刀仅对齐 TaskCard，不改变其余对象的当前契约。
+M3 品牌标识符的实现源为 `packages/dsh-shud-core/src/schemas/task.ts` 与 `run-identifiers.ts`，依据 [TaskCard 契约](../../openspec/specs/task-cards/spec.md)。下文 M5 字段是 [M5 TaskCard record](../../openspec/changes/m5-oat-sensitivity/specs/task-cards/spec.md#requirement-taskcard-record) 的实现基线，由后续 schema 切片交付，不表示本次文档对齐已实现运行时行为。
 
 ```yaml
 task_id: TASK-20261027T080005-3f9c    # TaskId；UTC 秒 + 4 位小写 hex
-type: engineering | science_assist | ops | code_change
+type: engineering | science_assist | ops | code_change | sensitivity
 status: created | planned | running | parked | reporting | awaiting_pi | done | cancelled | blocked
 runtime_phase: null               # 运行时辅助字段，见下方说明
 title: "给 SHUD 添加 event flux 诊断输出"
@@ -42,6 +42,7 @@ linked_jobs: []                     # JobRecordId[]，如 JOB-20261027T081000-01
 linked_reports: []                  # ReportId[]，如 REPORT-20261027T090000-5b10
 linked_changes: []                  # ChangeId[]，排序唯一；缺键按 []
 linked_verifications: []            # VerificationId[]，排序唯一；缺键按 []
+linked_analyses: []                 # AnalysisPlanId[]，排序唯一；缺键按 []
 source_base_commit: null            # code_change 必须为 40 位小写 hex，其它类型必须为 null
 created_at: 2026-10-27T08:00:05Z
 updated_at: 2026-10-27T08:00:05Z
@@ -56,6 +57,8 @@ updated_at: 2026-10-27T08:00:05Z
 - 新建卡的 `stack_id`、`data_id` 显式为 `null`；后续提交回填品牌引用。StackLock、DataProvenance、EvidenceReport 的对象对齐与回填流程不在本刀交付。
 
 **M4 扩展：** `linked_changes`、`linked_verifications` 分别为品牌 `CHG-`、`VC-` 数组，码点升序且唯一；M3 文件缺键按 `[]` 解析，不改写原文件。`source_base_commit` 缺键按 `null` 解析；`code_change` 必须为完整的 40 位小写十六进制 commit，其它类型必须为 `null`。建卡时从会话工作区 `repos/SHUD` 的 HEAD 钉定，后续变更、构建与验证均复核，不由模型指定。状态/链接语义见 [M4 task-cards](../../openspec/specs/task-cards/spec.md)。
+
+**M5 扩展：** `type` 增加 `sensitivity`；`linked_analyses` 为品牌 `AnalysisPlanId` 数组，按码点升序且唯一，缺键按 `[]` 解析，不改写旧文件。非 sensitivity 卡必须为空；sensitivity 卡的 `source_base_commit` 必须为 `null`。一卡一 plan 的创建约束由 `analysis_create` 执行，不由数组 schema 代替。
 
 **废弃字段**: 单个 `owner`（歧义）、嵌套 `linked_objects`（过深）。
 
@@ -147,7 +150,7 @@ uncertainty_notes: null
 
 ## 4. RunJob
 
-实现源为 `packages/dsh-shud-core/src/schemas/run-job.ts`；以下示例保留 M2 `submitted` 记录形态并列出 M4 扩展字段。除下述三个 M4 字段缺键按 `null` 解析外，所有字段都必填，可空字段必须显式传 `null`。根对象与 `llm`、`notify` 均拒绝未知字段。
+实现源为 `packages/dsh-shud-core/src/schemas/run-job.ts`；以下示例保留 M2 `submitted` 记录形态，并列出 M4 与 M5 扩展字段。三个 M4 字段及两个 M5 plan 字段缺键按 `null` 解析，其余字段必填，可空字段必须显式传 `null`。根对象与 `llm`、`notify` 均拒绝未知字段；M5 实现基线见 [RunJob record](../../openspec/changes/m5-oat-sensitivity/specs/run-records/spec.md#requirement-runjob-record)。
 
 ```yaml
 job_id: JOB-20261022T031500-a1b2
@@ -166,6 +169,8 @@ end_days: 30                        # END 覆写正整数，或 null
 build_id: null                      # BuildId | null；M2/M3 缺键按 null
 threads: null                       # 正整数 | null；缺键按 null，不强制转换
 binary_sha256: null                 # 64 位小写 hex | null；非 null iff build_id 非 null
+analysis_plan_id: null              # AnalysisPlanId | null；M5 之前缺键按 null
+parameter_set_id: null              # PSET-1..PSET-5 | null；与 analysis_plan_id 成对
 owner_session: null                 # 发起会话 id，仅用于唤醒投递
 dsh_job_id: null                    # 当前宿主登记 id：shud- + 16 位小写十六进制，或 null
 dsh_job_ids: []                     # 历次宿主登记 id
@@ -193,6 +198,8 @@ notify:
 
 **M4 运行绑定：** `build_id`、`threads`、`binary_sha256` 缺键各按 `null` 解析，默认值之后校验 `binary_sha256` 非 null 当且仅当 `build_id` 非 null。`threads` 接受正整数或 null，拒绝 0、负数、小数与字符串；它不是仅允许 1 的 schema，N=1 是回放验证门。有 build 的提交校验 BuildRecord 与二进制摘要，复制二进制到本次运行目录 `bin/shud` 并执行副本；首次 `created` 即记录三字段，collect 原样继承。提供 threads 时设置 `OMP_NUM_THREADS` 与 `SHUD_RHS_THREADS`；缺省不设置，继承宿主环境。旧 M2/M3 文件读取不改写。
 
+**M5 plan 绑定：** `analysis_plan_id` 为品牌 `AnalysisPlanId | null`，`parameter_set_id` 为 `PSET-1` 至 `PSET-5` 或 `null`；缺键各按 `null` 解析后，校验二者同时为 null 或同时非 null。绑定 plan 的首次 `created` 写入即包含两个 id，后续状态转换不变；无 plan 提交写两个 null。旧文件不补写。绑定提交采用 plan 的 `threads`，collect 原样继承。
+
 采集来源由注册表必填配置 `stackRepos.{SHUD,rSHUD,AutoSHUD}`（绝对路径）、`hostVersion`、`llm.{base_url,request_alias}` 指定；可选 `sundialsRoot` 为绝对路径。apply 验证这些键与父类配置的严格并集，不采集 Git 或写工作区证据。安装器从自身所在仓库根派生三仓库路径，从 bundle peer 读取 hostVersion，从 bundle 模型行读取 llm；`SUNDIALS_ROOT` 未设置则省略，设置时须为已存在绝对目录。新 lock 的 response_model 与请求相同；指纹匹配时复用原 lock，保留其字节/mtime，不因响应模型变化改写。
 
 提交失败沿既有事务回滚：先证明执行已不能继续 I/O、完成登记清理，再移除自有索引/运行目录及本次返回的 provenance。删除前复核 provenance 普通文件及父目录身份，拒绝链接和外来替换；不扫描认领其它 provenance，从不删除任何 StackLock（包括本次新建或复用的 lock）。清理失败保留既有聚合错误、D7/预留 fail-closed 语义，不宣称全部删除；采集及回滚均纳入关闭前 drain。
@@ -217,7 +224,7 @@ created → submitted → running → succeeded | failed | cancelled → collect
 
 ## 5. RunRecord
 
-实现源为 `packages/dsh-shud-core/src/schemas/run-record.ts`。RunRecord 是 collect 后的不可变结果记录；以下示例保留 M2 成功记录形态并列出 M4 扩展字段。除三个 M4 字段缺键按 `null` 解析外，所有字段必填，未测量或未绑定的可空字段显式传 `null`；`numerical_health` 本身必须是对象。
+实现源为 `packages/dsh-shud-core/src/schemas/run-record.ts`。RunRecord 是 collect 后的不可变结果记录；以下示例保留 M2 成功记录形态并列出 M4 与 M5 扩展字段。三个 M4 字段、两个 M5 plan 字段与 `artifacts.metrics_summary` 缺键按 `null` 解析，其余字段必填；`numerical_health` 本身必须是对象。M5 实现基线见 [RunRecord record](../../openspec/changes/m5-oat-sensitivity/specs/run-records/spec.md#requirement-runrecord-record)。
 
 ```yaml
 run_id: RUN-20261022T031500-a1b2
@@ -228,6 +235,8 @@ data_id: null                       # M2 null 仍有效；M3 新提交的 proven
 build_id: null                      # BuildId | null；collect 原样继承
 threads: null                       # 正整数 | null；collect 原样继承
 binary_sha256: null                 # 64 位小写 hex | null；非 null iff build_id 非 null
+analysis_plan_id: null              # collect 原样继承 RunJob
+parameter_set_id: null              # 与 analysis_plan_id 同时 null 或同时非 null
 status: succeeded                  # succeeded | failed；仅 exit_class: ok 成功
 command: ["/usr/local/bin/shud", "-o", "output/ccw.out", "ccw"] # argv
 exit_code: 0                       # 整数或 null
@@ -236,10 +245,11 @@ artifacts:
   stdout: /workspace/runs/RUN-20261022T031500-a1b2/stdout.log
   stderr: /workspace/runs/RUN-20261022T031500-a1b2/stderr.log
   shud_output: /workspace/runs/RUN-20261022T031500-a1b2/output/ccw.out
+  metrics_summary: null             # M5：{path: "metrics.json", sha256} | null
   files:
     - path: flow.dat               # 相对于 shud_output
       size_bytes: 1024             # 必填非负整数字节数
-numerical_health:                   # M2 不计算这些指标，四个字段均可为 null
+numerical_health:                   # M5 collect 生产；不可用项仍为 null
   water_balance_residual: null
   cvode_failures: null
   negative_state_count: null
@@ -257,6 +267,10 @@ collected_at: "2026-10-22T03:16:00Z" # ISO 8601 UTC
 
 **M4 兼容：** `build_id`、`threads`、`binary_sha256` 的类型、缺键默认值与默认值后的 iff 校验同 §4；collect 不重新推断三字段，不改写已有 M2/M3 RunRecord 字节或 mtime。
 
+**M5 兼容：** plan/pset 类型、缺键默认与成对校验同 §4，collect 原样继承，不猜测关联。`artifacts.metrics_summary` 启用为严格对象 `{path, sha256} | null`；`path` 恰为 `metrics.json`，相对运行目录而非 `shud_output`，`sha256` 为文件字节的 64 位小写十六进制摘要。旧记录缺键按 null 解析，不回填、不改写历史产物。
+
+**M5 numerical_health 生产者：** 所有任务类型的 `exit_class: ok` run 在 collect 内计算并原子写 `runs/<run_id>/metrics.json`；前三项来源、公式与 null 原因见 [输出变量 §11–§13](SHUD_Output_Variables.md#11-numerical-health)，`max_solver_dt` 恒 null。单项不可用只使该项 null；整份计算不可用仍写带原因的 `status: unavailable` metrics，四项均 null。非 ok run 不写 metrics；写 metrics 本身失败时引用与四项均 null，collect 继续并在回执给出错误类别。指标失败不改变 run 退出类别、不产生 collect-error，也不计入 collect 失败次数。原因保存在 metrics，不扩充 RunRecord 的四值对象；已有 RunRecord 不重算。
+
 **退出类别：** `classifyRunExit(exitCode, missingOutcome?)` 为唯一映射：`0 → ok`、`10 → nan`、`12 → file_io`、`13 → input`、`19 → cvode`、`20 → consistency`，其它非零整数为 `other`（退出码事实见 [SHUD_IO_Facts](../01_CODEBASE/SHUD_IO_Facts.md#退出码)）。`exit_code: null` 必须明确提供 `cancelled`（取消且无退出码）或 `lost`（进程丢失/从未启动且无退出码），不猜测默认结果。数值退出证据优先于取消意图。schema 拒绝退出码与类别矛盾的记录，并要求 `ok` 对应 `succeeded`，其余八类对应 `failed`。
 
 **时长语义：** 新生成的数值 `resources.wall_seconds` 必须有原始提交实例的匹配启动身份与其成功发布的终态观测，值为 `(Date.parse(finished_at) - Date.parse(started_at)) / 1000`。有效数值退出或本地受控取消达到既有静止条件时可形成观测；丢失执行、非法/不可读退出证据、缺失或不匹配的观测不能授权数值。重启、接管及终态发布后但结果提交前的实例丢失，新结果均为 `null`，即使两端时间都有值；未知端点也为 `null`。两端已知但负区间仍拒绝，不能用 `null` 隐藏错误。该窗口可能包含 lstart 起点偏差、检测延迟及在线取消宽限，不是求解器运行时长、求解器时长上界或固定精度测量。同实例完成/生成重试保留原始端点，包括自动预算耗尽后的手动收集；有效已提交 RunRecord 优先原样返回，历史数值不改写，也不追认证实。
@@ -267,33 +281,55 @@ collected_at: "2026-10-22T03:16:00Z" # ISO 8601 UTC
 
 **密钥边界：** 根对象、产物对象、每个文件条目、数值健康、资源与模型来源对象均拒绝未知键，不接受 credentials、环境变量、headers 或自由 metadata 袋。规定的 argv、路径、模型字符串仍是领域数据，不是任意密钥内容扫描器；生产者不得把密钥放入这些字段。
 
-**相对原文的处置：** 采用 §4 的品牌 ID 格式替换 `RUN-NNNN` / `JOB-NNNN`；`command` 为 argv 数组；新增 `exit_code`、`exit_class`、`artifacts.files`、`llm.response_model_source` 与 `collected_at`，M2 允许三项引用为空。`artifacts.metrics_summary` / `artifacts.plots` 标为 **M3**，M2 不接受这两个字段。旧 `status: success` 与 `metrics: {}` 仍废弃。
+**相对原文的处置：** 采用 §4 的品牌 ID 格式替换 `RUN-NNNN` / `JOB-NNNN`；`command` 为 argv 数组；新增 `exit_code`、`exit_class`、`artifacts.files`、`llm.response_model_source` 与 `collected_at`，M2 允许三项引用为空。原先未启用的 `artifacts.metrics_summary` 在 M5 按上述契约启用；`artifacts.plots` 仍拒绝。旧 `status: success` 与 `metrics: {}` 仍废弃。
 
 ---
 
 ## 6. AnalysisPlan
 
+M5 严格对象契约见 [AnalysisPlan record](../../openspec/changes/m5-oat-sensitivity/specs/analysis-plans/spec.md#requirement-analysisplan-record)。所有字段必填、未知键拒绝；以下为四 pset 的字段示例，摘要用说明文本表示，不是可直接解析的持久化记录。
+
 ```yaml
-analysis_id: PLAN-0001                # 格式: PLAN-NNNN
-task_id: TASK-0001
-mode: sensitivity | calibration | benchmark | comparison
-baseline_run: RUN-0001                # 可选，comparison/benchmark 时必填
-parameters:
-  ksat_multiplier: [0.5, 1.0, 2.0]
-  mannings_n_multiplier: [0.7, 1.0, 1.3]
-metrics:
-  - peak_flow_error
-  - peak_timing_error
-  - water_balance_residual
-holdout:
-  enabled: false
-  basins: []
-  events: []
-rules:
-  - "Do not present calibration improvement as structural validation."
+analysis_plan_id: PLAN-20261107T093000-5c1e # AnalysisPlanId，UTC 秒 + 4 位小写 hex
+task_id: TASK-20261107T090000-2a1b
+mode: sensitivity
+strategy: one_at_a_time
+input_dir: /workspace/input/ccw           # analysis_create 解析后的 realpath
+project: ccw
+end_days: 90                             # 正整数
+threads: 1                               # 正整数；工具省略时写入 1，持久 schema 必填
+parameter_sets:
+  - {parameter_set_id: PSET-1, label: baseline, baseline: true, changes: {}}
+  - {parameter_set_id: PSET-2, label: null, baseline: false, changes: {GEOL_KSATH: 0.5}}
+  - {parameter_set_id: PSET-3, label: null, baseline: false, changes: {GEOL_KSATH: 2}}
+  - {parameter_set_id: PSET-4, label: null, baseline: false, changes: {LC_ROUGH: 2}}
+parameter_space_rationale:
+  proposed_by: agent
+  basis: "单键 OAT，单流域单窗口"
+  confirmed_by: null
+input_digests:
+  ccw.cfg.calib: "<该文件的 64 位小写十六进制 sha256>"
+  ccw.para.geol: "<该文件的 64 位小写十六进制 sha256>"
+  ccw.para.lc: "<该文件的 64 位小写十六进制 sha256>"
+created_by: coordinator                  # 非空字符串
+created_at: "2026-11-07T09:30:00Z"         # ISO 8601 UTC
 ```
 
-> **实现扩展：** AnalysisPlan 实现 schema 应支持 `parameter_sets` 和 `batch_policy`，详细定义见 [Parameter_Set_And_Analysis_Run_Mapping.md](Parameter_Set_And_Analysis_Run_Mapping.md)。本文件保留最小字段，避免核心对象膨胀。
+`project` 遵循 shud_run 的项目名规则；`parameter_sets` 为 3–5 项，每项严格包含 `parameter_set_id`、`label`（非空字符串或 null）、`baseline`（布尔）与 `changes`（白名单键到倍率）。`parameter_space_rationale` 为严格对象，`proposed_by` 固定 agent、`basis` 非空、`confirmed_by` 固定 null。`input_digests` 键是相对 input_dir 的 POSIX 路径，拒绝绝对路径及 `..`、`.`、空段，值为 64 位小写 hex sha256，与乘积校验来自同一次安全读取。
+
+七条 refine（前六条失败指出 `parameter_sets`，第七条指出 `input_digests`）：
+
+1. 恰好一个 baseline，且其 changes 为 `{}`。
+2. 非 baseline 的 changes 恰好一个键。
+3. pset id 按数组顺序依次为 `PSET-1..PSET-n`。
+4. 不存在 changes 完全相同的两个 pset。
+5. 倍率为有限数，位于 [0.5, 2.0] 且不等于 1.0。
+6. 键只允许 `GEOL_KSATH`、`GEOL_KSATV`、`LC_ROUGH`、`RIV_ROUGH`；加数键与其它键拒绝。
+7. 摘要文件集合恰为 `<project>.cfg.calib` 与所用键的类别文件并集：GEOL 两键 → `.para.geol`，LC_ROUGH → `.para.lc`，RIV_ROUGH → `.sp.riv`；不多不少、每个文件一次。
+
+**M5 字段处置：** `analysis_id` 改为 `analysis_plan_id`；旧顺序号 `PLAN-NNNN` 废弃，改用品牌格式，拒绝大写 hex、错误前缀与旧 id。删除 `parameters`、`metrics`、`holdout`、`rules`、`baseline_run`，不接受它们作为别名；M5 仅有 sensitivity/OAT。plan 排他、原子创建于 `analyses/<analysis_plan_id>.json` 后不可变，pset/run 关联只在 RunJob/RunRecord 上，详见 [Mapping](Parameter_Set_And_Analysis_Run_Mapping.md)。
+
+**D15(4)：M5 范围裁剪、非放宽 baseline。** 不持久化 ParameterSet 状态，不建 `batch_policy`、progress artifact 或批进度卡；状态从 RunJob/RunRecord 派生。**D15(5)：M5 范围裁剪、非放宽 baseline。** 没有 plan 确认路径，confirmed_by 恒 null，报告强制标注“参数范围为 agent 建议值”，不表示 PI 已确认。
 
 ---
 
@@ -316,12 +352,14 @@ data_ids: [DATA-20261027T081500-8e3f, DATA-20261027T081000-7d2e]
 llm_response_models: [deepseek-flash-guan]
 change_ids: []                      # ChangeId[]，去重；M3 缺键按 []
 verification_ids: []                # VerificationId[]，去重；M3 缺键按 []
+analysis_ids: []                    # AnalysisPlanId[]，去重；缺键按 []
+sensitivity_summary: null           # {path: "reports/<report_id>.sensitivity.json", sha256} | null
 decision_history: []
 created_at: "2026-10-27T09:00:00Z"
 updated_at: "2026-10-27T09:00:00Z"
 ```
 
-M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [报告契约](../../openspec/specs/evidence-reports/spec.md)，其中已同步 M4 扩展。根对象与嵌套 PiGateDecision 均严格拒绝未知字段；除 `change_ids`、`verification_ids` 缺键按 `[]` 解析外，以上字段全部必填。
+M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据 [报告契约](../../openspec/specs/evidence-reports/spec.md)，其中已同步 M4 扩展；M5 实现基线见 [EvidenceReport record](../../openspec/changes/m5-oat-sensitivity/specs/evidence-reports/spec.md#requirement-evidencereport-record)。根对象与嵌套 PiGateDecision 均严格拒绝未知字段；`change_ids`、`verification_ids`、`analysis_ids` 缺键按 `[]`、`sensitivity_summary` 缺键按 null 解析，其余字段必填。
 
 - `report_id` 从 `REPORT-NNNN` 改为品牌 `ReportId`；`task_id` 为品牌 `TaskId`。品牌格式为 `<PREFIX>-YYYYMMDDTHHMMSS-xxxx`，UTC 秒与 4 位小写 hex。
 - `linked_runs` 改为非空品牌 `RunId[]`，允许重复；新增 `stack_ids: StackId[]`、`data_ids: DataId[]`、`llm_response_models: string[]`，三者均非空且拒绝重复。schema 保留调用方顺序，不排序、不静默去重。后续生成器从关联 RunRecord 取引用并去重，不由 schema 读取运行记录。
@@ -329,6 +367,7 @@ M3 实现源为 `packages/dsh-shud-core/src/schemas/evidence-report.ts`，依据
 - 新增必填 `decision_history: PiGateDecision[]`，允许空数组；新增必填 `updated_at`。`created_at`/`updated_at` 沿用 TaskCard 非空字符串约定，不做时间格式或先后关系校验。仅 PiGateDecision 的 `decided_at` 要求 ISO 8601 UTC。
 - `status` 恰为 `draft | reviewed | awaiting_pi | accepted | revision_requested | rejected | archived`。schema 不强制 history 与状态一致，不校验 history 中 report_id 与外层一致，不检查决策时间顺序或审批权限。
 - M4 `change_ids`、`verification_ids` 为品牌 id 的去重数组，允许空数组；生成时按新鲜 TaskCard 的 `linked_changes`、`linked_verifications` 顺序取值，不接受模型指定。M3 报告缺键按 `[]` 解析，文件不改写。字段名固定为 `verification_ids`，不接受 Theory-to-Code 规划中的 `verification_case_ids`。
+- M5 `analysis_ids` 是去重品牌 `AnalysisPlanId[]`，从 closure 所用新鲜 TaskCard 的 `linked_analyses` 读取，不接受模型指定；非 sensitivity 报告为 `[]`。`sensitivity_summary` 为 `{path, sha256} | null`，非 null 当且仅当 analysis_ids 非空；路径恰为 `reports/<report_id>.sensitivity.json`，路径中的 id 必须等于本报告 id，摘要为该文件字节的 sha256。缺键默认在 refine 之前求值，旧文件不补写。
 
 **状态流转边界**：后续记录/工具层负责 `draft` → `reviewed` → `accepted | revision_requested | rejected`；`awaiting_pi` 在 M3 仅表示审批卡挂起瞬时态，不写入持久报告；`archived` 保留但无 M3 入口。解析成功不等同 PI 审批通过。
 
