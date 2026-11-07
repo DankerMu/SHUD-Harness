@@ -82,23 +82,18 @@ floors:
 
 ## 1.2 参数语义下限（无 ChangeRequest 的 search 任务）
 
-纯 sensitivity/calibration 任务不改代码，files_changed 为空集，§1.1 的 floor 完全不参与——对抗审查 A05-1
-指出的旁路。补充机制：semantic_level_floor.yaml 增设 `parameters` 段，对校准参数键分级：
+纯 sensitivity/calibration 不改代码时，files_changed floor 不能替代参数校验。M5 以 core 的仓库内白名单常量实现确定性下限，不经 profile 覆写；契约见 [Calib whitelist and category product check](../../openspec/changes/m5-oat-sensitivity/specs/analysis-plans/spec.md#requirement-calib-whitelist-and-category-product-check)。
 
-```yaml
-parameters:
-  registered_calib_keys:                     # SHUD .cfg.calib 的 38 因子（GEOL/SOIL/LC/TS/ET/RIV/IC/AQ）
-    floor: none                              # 常规校准面：无需 bundle，越界由 search_scope 校验拦（Controlled_Search §2.1）
-  solver_numeric_keys:                       # 求解器容差/步长类（MAX_SOLVER_STEP、CVODE 容差映射键等）
-    floor: numerical_implementation          # 触及数值实现语义 → 需 bundle accepted_for_search + PI gate
-  unregistered:                              # 未登记参数键
-    action: block                            # 不得进入 search；先登记分级再跑（隐藏旋钮即注入面）
-```
+| 键 | 类别文件 / 列 | read_transform | check_range |
+|---|---|---|---|
+| GEOL_KSATH | `.para.geol` / `KsatH(m_d)` | x / 1440 | [0, 1e3] |
+| GEOL_KSATV | `.para.geol` / `KsatV(m_d)` | x / 1440 | [0, 1e3] |
+| LC_ROUGH | `.para.lc` / `ROUGH` | x / 60 | [0, 1] |
+| RIV_ROUGH | `.sp.riv` 河道类型表 / `Manning` | x | null（SHUD 无范围检查；harness 要求乘积有限且 >0） |
 
-规则：AnalysisPlan preflight 对 `parameters` / `parameter_sets` 的全部键求
-`parameter_effective_level = max(floor(p))`，高风险时按 §2 与 [Controlled_Search §2](Controlled_Search_Boundary_Spec.md) 要求 bundle；
-该求值与 files_changed floor 相互独立、取并集生效。"hidden numerical tolerance 需 PI gate"
-（[Preflight §1](Preflight_And_Mutation_Boundary_Spec.md) mutation boundary）由此获得确定性执行点。
+每个条目同时记录 SHUD 源码出处；统一倍率 m ∈ [0.5, 2.0]，非 baseline 不得为 1。`analysis_create` 在任何写入前只读取得 cfg.calib 中恰一行有效 baseline 值 b，对每个类别行 x 按 SHUD 顺序计算 `read_transform(x) × b × m`，越界即拒绝并点名键、行、乘积与范围。缺键、重复有效行、缺列、不可解析值或不安全文件均拒绝；参与校验的字节在同次读取中计算 input_digests。
+
+**D15(6)：M5 范围裁剪、非放宽 baseline。** 不创建 semantic_level_floor.yaml 的 parameters 段，不开放 38 键全集或 controlled search。只有上述四键在运行副本上的倍率扰动无需新增 ask；未登记键（包括数值容差、加数键、GEOL_THETAS/THETAR、SOIL_BETA）fail-closed，不以泛化 floor 推断放行。默认参数、物理方程与 benchmark baseline 的 PI gate 不变；报告仍须既有报告审批。扩大白名单须 PI 决定并逐键核实 SHUD 语义，后续 search 规则不构成 M5 旁路。
 
 ## 2. Gate matrix
 

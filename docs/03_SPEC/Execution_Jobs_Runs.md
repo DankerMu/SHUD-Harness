@@ -140,9 +140,9 @@ Collect 必须幂等。重复 collect 同一 job 不得生成多个 RunRecord。
 
 没有 RunRecord 的结果，不进入 report 的”已验证结果”部分。
 
-`numerical_health` 的生产者是 Domain CLI 的 `wb --health`（[Domain_CLI_Spec](Domain_CLI_Spec.md) §2.2）：
-固定加载 5 个状态变量求负状态/钳零特征，不受调用方变量选择（--vars）影响——
-"必需字段无生产者"缺口的封堵（对抗审查 A07-2）。
+**D15(1)：M5 范围裁剪、非放宽 baseline。** `numerical_health` 的生产者改为 collect 内的 TS 确定性计算，不是 Domain CLI `wb --health`。所有任务类型的 ok run 在发布 RunRecord 前计算 `runs/<run_id>/metrics.json`，RunRecord 用 `artifacts.metrics_summary: {path: "metrics.json", sha256}` 引用；非 ok run 不计算，历史记录不回填。
+
+四项来源、公式与不可用语义见 [SHUD_Output_Variables §11–§13](SHUD_Output_Variables.md#11-numerical-health)，集成边界见 [Domain_CLI_Spec §2.2](Domain_CLI_Spec.md#22-指标与水量平衡组m5ts-原生确定性实现)。negative_state_count 只计规定四个状态输出的严格负值，为钳零后的下界，不使用启发式；max_solver_dt 恒 null。指标不可用或读取失败不改变退出类别、不产生 collect-error；metrics 写入失败时引用与四值为 null，collect 继续并在回执给出错误类别。原因留在 metrics，RunRecord 仅承载四值。
 
 ## 9. Sandbox 执行器
 

@@ -6,56 +6,24 @@ status: frozen
 
 ## 1. 参数敏感性分析是一等能力
 
-在水文建模中，参数敏感性分析不是 ExperimentSpec 的附属字段，而是高频核心能力。
+M5 只交付单流域、单窗口的 one-at-a-time（OAT）比较：一个不可变 AnalysisPlan，3–5 个 pset，恰一个 baseline；非 baseline 每项仅扰动一个 calib 白名单键。四键为 GEOL_KSATH、GEOL_KSATV、LC_ROUGH、RIV_ROUGH，倍率范围 [0.5, 2.0] 且不得为 1。字段、品牌 id 与完整示例统一见 [Minimal_Schemas §6](Minimal_Schemas.md#6-analysisplan)，不再保留旧 parameters/metrics/outputs 示例作为第二套 schema。
 
-v0.6 使用 `AnalysisPlan.mode = sensitivity` 表达。
+M5 规范与后续实现的边界见 [Goals / Non-Goals](../../openspec/changes/m5-oat-sensitivity/design.md#goals--non-goals)：不做 calibration、controlled search、holdout、多流域、观测类指标（NSE/KGE/peak_flow_error）、heatmap/tornado、批进度卡、plan 确认卡、敏感性指数、排名或机制解释。校准课题由 PI 启动；观测指标先核实数据质量；UI 能力须 K7 解除或 M6 立项；参数扩面须 PI 授权并核对施加语义。其余复活条件以该 Non-Goals 为准。下文 calibration、search 与通用 benchmark 内容是后续规划，不是 M5 已支持的入口。
 
-示例：
-
-```yaml
-analysis_id: PLAN-SENS-0001
-mode: sensitivity
-task_id: TASK-0002
-baseline_run: RUN-BASE-0001
-parameters:
-  ksat_multiplier: [0.5, 1.0, 2.0]
-  mannings_n_multiplier: [0.7, 1.0, 1.3]
-strategy:
-  type: one_at_a_time
-metrics:
-  - peak_flow_error
-  - peak_timing_error
-  - event_runoff_coefficient
-  - water_balance_residual
-outputs:
-  - sensitivity_table
-  - tornado_plot
-  - PI_summary
-```
+**D15(7)：M5 范围裁剪、非放宽 baseline。** 汇总表由 `report_generate` 从有效 run 的 metrics 确定性派生到 `reports/<report_id>.sensitivity.json`，由 EvidenceReport 引用，不设独立 sensitivity_table artifact 或工具；只列相对 baseline 的变化。逐 run 指标公式统一见 [SHUD_Output_Variables §12](SHUD_Output_Variables.md#12-水量平衡最小变量集)。
 
 ### 1.1 参数空间来源记录（AGA-P2）
 
-`parameters` 的取值网格常由 LLM 起草，而参数空间本身就是科学选择。AnalysisPlan 必须记录来源与理由：
+参数空间本身是科学选择。M5 的 `parameter_space_rationale` 严格含 `proposed_by: agent`、非空 `basis`、`confirmed_by: null`；由模型提出的范围不自动成为 PI 确认。
 
-```yaml
-parameter_space_rationale:
-  proposed_by: agent | pi | engineer
-  basis: "ksat 倍率按常见物理范围取对数均匀 3 点；mannings_n 参考文献区间"
-  confirmed_by: null        # PI/工程师确认后填写
-```
-
-规则：
-
-- agent 起草的参数空间是 T3 内容：未经确认时，报告必须标注“参数范围为 agent 建议值”；
-- 报告 limitations 必须包含未覆盖的参数区域（如“仅测试 ksat×[0.5,2]，未覆盖极端值”）——
-  sensitivity/calibration 模式下，limitations 至少含 1 条 coverage 声明，由 Reviewer validator 强制。
+**D15(5)：M5 范围裁剪、非放宽 baseline。** confirmed_by 恒 null，没有运行前 plan 确认路径。报告强制标注“参数范围为 agent 建议值”，并由确定性生成器追加覆盖声明：逐键列出已测倍率，明确未测区域不在结论范围。失败参数集保持可见，不由模型删去。
 
 ## 2. Sensitivity 不等于 calibration
 
-敏感性分析回答：
+M5 敏感性报告只陈述：
 
 ```text
-哪些参数对目标指标敏感？
+在指定流域与窗口内，各参数集相对 baseline 的指标变化是多少？
 ```
 
 校准回答：
@@ -166,8 +134,9 @@ Agent 报告中禁止：
 允许：
 
 ```text
-- “在该 basin/event 上，指标 X 改善”；
-- “该参数对洪峰误差更敏感”；
-- “该观察需要 PI 判断是否支持假设 H1”；
-- “holdout 尚未运行，因此不能推广”。
+- “在该流域与窗口内，PSET-2 的峰值相对 baseline 变化为表中 Δ%”；
+- “参数范围为 agent 建议值”；
+- “仅覆盖计划列出的单键倍率，未覆盖其它区域”。
 ```
+
+M5 不以这些变化给出敏感性指数、参数排名、机制解释或校准结论，不推广到单流域单窗口以外。
