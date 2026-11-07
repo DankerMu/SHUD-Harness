@@ -29,9 +29,11 @@ EvidenceReport 是给 PI 阅读和决策的证据包，不是论文结论，也�
 
 M3 生成报告前必须通过 TaskCard closure 谓词，并解析其链接的 RunRecord、StackLock、DataProvenance。模型提供 summary、observations、limitations、pi_questions，事实表由记录确定性生成。
 
-M3 没有 metrics/图表/AnalysisPlan 生产者，不把这些作为生成前提；§5“指标与图表”固定说明本里程碑无指标 artifact，缺失写入 limitations。没有 RunRecord 的信息不能冒充已复盘结果。失败运行在渲染器/validator fixture 中保持可见；正常 report_generate 的 closure 已拒绝失败/取消运行。
+M5 的实现基线改为 collect 内生产 `runs/<run_id>/metrics.json` 与 numerical_health；各类型报告读取关联 RunRecord 的 metrics_summary 引用并复核文件 sha256，历史无指标记录仍可按既有任务 closure 渲染为 not_available，不回填。sensitivity 报告只按卡片链接读取唯一 AnalysisPlan，并引用由 report_generate 派生的 `reports/<report_id>.sensitivity.json`；重渲染安全读取引用文件并核对 sha256，不从模型文本重算。图表仍无生产者。没有 RunRecord 的信息不能冒充已复盘结果；sensitivity 的失败有效 run 与被取代失败运行按其专用 closure 保持可见，不套用 science_assist 的全部成功条件。权威见 [M5 report workspace files](../../openspec/changes/m5-oat-sensitivity/specs/evidence-reports/spec.md#requirement-report-workspace-files)。
 
 M4 的 code_change closure 只按卡片链接读取 ChangeRequest、patch、VerificationCase，并复用既有运行与收集次数子句，按 [code_change closure](../02_ARCHITECTURE/Agent_Architecture.md#7-closure-判据) 六子句检查；VC 的 base/candidate BuildRecord 属于后续确定性事实表读取，不新增 build/pin/thread closure 条件。失败 VC 不阻止报告生成，但必须可见；缺失或不安全证据仍拒绝。`change_ids`、`verification_ids` 按首次出现顺序来自 closure 所用同一新鲜 TaskCard，保留 proposed CR 与 failed VC，不由模型提供；science_assist 报告两者为空。
+
+本页 M5 输入与模板描述是实现前的书面契约；§3 整节记录当前 M4 实现（两类生成谓词、九类品牌引用、15 项 validator），不是 M5 的最终工具面。PLAN 引用、安全读取与 sensitivity 生成接线分别随 #656/#667 交付，新增 validator 检查随 #658 同步；本次文档切片不提前改写既有 15 项计数或宣称这些代码已实现。
 
 ## 3. 生成流程
 
@@ -100,11 +102,23 @@ comment 先表示为 JSON literal，再与其余五列一起经过既有结构�
 
 M4 在 §3 增加三个确定性事实表段：ChangeRequest（含 floor_categories、patch 路径/摘要、状态与 approval_ref）、VerificationCase（两 run/build 引用、两个 SHA256、判定与 reviewer 字段）、BuildRecord（先 base 后 candidate，含 source_commit、rhs_openmp、make_argv、compiler、patch_sha256、binary_sha256）；StackLock 仅在 build_id 非 null 时展示该行。不内联 patch、编译日志或求解器输出；字段清单遵循 [Deterministic facts table](../../openspec/specs/evidence-reports/spec.md#requirement-deterministic-facts-table)。
 
-code_change 报告 §5 逐字渲染 core 措辞常量（模板文本，不进入禁止短语集）：
+M5 的 code_change 报告 §5 第一段逐字渲染更新后的 core 措辞常量（模板文本，不进入禁止短语集；删除旧“无指标”前缀，其余逐字不变）：
 
-> 本里程碑无指标 artifact；验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。
+> 验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。
 
-§7 除失败运行外还列出每个 failed VC 的 vc_id 与 failure_reason；无变更引用、无 build 的 M3 报告不新增这些段或 build_id 行，渲染字节不变。
+所有报告类型的 §5 均追加逐 run 指标表，按 linked_runs 顺序列出 metrics status、三项流量指标、numerical_health 四项与前三项判定，附 `runs/<run_id>/metrics.json` 路径和 sha256。数值原样采用源 JSON 的 JS 最短往返串，不舍入、补零或重新计算；null 单元格固定显示 `null` 并附源文件原因，缺 metrics 引用的 status 为 `not_available`。max_solver_dt 只展示值，不展示判定。sensitivity 另追加 `.sensitivity.json` 的 Δ 汇总表及路径/sha256；code_change 的固定句在逐 run 表之前，science_assist/sensitivity 不显示该固定句。详见 [Deterministic facts table](../../openspec/changes/m5-oat-sensitivity/specs/evidence-reports/spec.md#requirement-deterministic-facts-table)。
+
+汇总只从唯一 plan 与有效 run 的 metrics 派生，按 pset 顺序每项一行。失败 cell 保留退出码/类别，指标与 Δ 为 null；被取代运行另列。Δ 只陈述单流域单窗口相对 baseline 的变化，不计算敏感性指数或排名。派生、null 原因和不可变文件边界见 [Sensitivity summary derivation](../../openspec/changes/m5-oat-sensitivity/specs/evidence-reports/spec.md#requirement-sensitivity-summary-derivation)。
+
+确定性 limitations 在模型条目之后依次追加（[权威模板](../../openspec/changes/m5-oat-sensitivity/specs/evidence-reports/spec.md#requirement-deterministic-report-limitations)）：
+
+1. sensitivity 恰一条覆盖声明，由 plan 的 project/end_days 与按 pset 顺序列出的非 baseline 键×倍率组成，明确未覆盖其它参数、取值与窗口。
+2. sensitivity 恰一条“参数范围为 agent 建议值，未经 PI 确认”。
+3. 所有类型每报告恰一条 max_solver_dt 在钉版 SHUD 不可观测的固定说明，不逐 run 追加。
+4. 按 linked_runs 顺序，对 status: ok 的 metrics 按 residual、cvode、negative 顺序列出 warn/fail/not_available 的值或原因；成功但无 metrics 或 unavailable 的运行各一条原因。
+5. sensitivity 按汇总 rows 顺序为每个失败有效 run 追加 pset/run/exit_code/exit_class 及不参与比较的说明。
+
+非 sensitivity 不含第 1、2、5 类；追加条目写入报告 JSON 并在 §6 原样渲染，不凑 closure 的模型 limitation 计数。§7 保留失败运行与 failed VC 的 vc_id/failure_reason；sensitivity 另列被取代运行。M3 无变更引用/无 build 报告仍不增加 CR/VC/Build 段，但 M5 的逐 run 指标与确定性 limitation 会更新其渲染，不再声称全文字节不变。
 
 ## 4.1 Theory-to-Code Evidence 章节
 
@@ -215,13 +229,13 @@ calibration 的 `analysis_mode` 与 assertion_type 结构化约束见 [后续 li
 
 ## 7. Artifact 引用
 
-下面的 metrics/figure 引用示例是后续分析产物规划；M3 仅列 RunRecord 中的真实产物元数据与日志路径，不创建这些示例文件。后续报告引用 artifact 时使用相对路径或 artifact id：
+M5 的逐 run 指标引用使用实际运行目录文件，读取时以 RunRecord.metrics_summary 的 sha256 核验，不构造旧 metrics YAML：
 
 ```markdown
-见 `artifacts/metrics/RUN-001.yaml#numerical_health.water_balance_residual`。
+见 `runs/<run_id>/metrics.json` 的 numerical_health.water_balance_residual。
 ```
 
-图表可引用：
+图表仍是后续规划，不由 M5 创建。后续可引用：
 
 ```markdown
 ![Hydrograph](../artifacts/figures/RUN-001_rivqdown.png)

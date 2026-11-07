@@ -20,7 +20,7 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 | M2 | 运行主链：`shud_run` + durable JobRegistry + RunRecord | 一句话跑 ccw，中途重启 dsh，完成后被唤醒并拿到 RunRecord | ccw 全程 4m45s 内 dsh 重启一次，仍产出 RunRecord 且含退出码与产物清单 |
 | M3 | **MVP-1**：TaskCard + EvidenceReport + StackLock + 审批接线 | 从任务卡到 Markdown 证据报告，含 PI 审批 | 首任务"ccw 运行 → RunRecord → EvidenceReport"端到端；报告含 StackLock 三字段与响应 model |
 | M4 | **MVP-2**：已知答案回放 | 提交 openMP RHS 切片 ChangeRequest，经 VerificationCase 判定 | 正确性门按 serial baseline 一致性判定（ADR-0002 D4） |
-| M5 | 最小 OAT 敏感性（3–5 run，AnalysisPlan 对象） | 一次批量运行与汇总表 | 批次内 StackLock 一致；汇总表可复算 |
+| M5 | 最小 OAT 敏感性（3–5 pset，AnalysisPlan 对象） | 一次批量运行与汇总表 | [Sensitivity acceptance criteria](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-sensitivity-acceptance-criteria)，见 §4.1 |
 | M6 | 收口：记忆评估、UI 插件评估、dsh 升级评估、通知评估 | — | 每项一份一页评估，PI 决定是否立项 |
 
 ## 1. M1 骨架
@@ -72,6 +72,16 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 前置为本机 SHUD 工具链、SHUD_BIN、SUNDIALS_ROOT、DMXAPI_KEY 与 keliya 来源；缺项明确失败。VC failed 或任何判据不成立均 exit 1，不降为 INCONCLUSIVE。bitwise 一致只证明 N=1 与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论；不做性能复现。
 
 **PI 功能验收已通过**：PI 在 Web 亲自操作两次 CR 审批卡（含线程接线修复）与一次报告审批卡，报告 accepted、TaskCard done，随后明确通过并授权 M4 收尾；完整证据、原失败候选与限制见 [M4 PI acceptance](../Migration_Plan_dsh.md#m4-pi-acceptance)，安排登记于 [ADR-0014](../adr/implemented/0014-m4-epic-acceptance.md)。该人工修复流程与上述恰两次自动审批的工程脚本分别记账，不把旧候选重写为通过，也不放宽脚本判据。结论仅限固定 keliya 输入/时间窗的 rivqdown 一致；不是并行正确性、性能或科学有效性证明。#517 的 ADR-0011 确认独立于本次 PI 功能验收。
+
+## 4.1 M5 最小 OAT 敏感性
+
+**交付计划，尚未验收**（[Epic #639](https://github.com/DankerMu/SHUD-Harness/issues/639)、[m5-oat-sensitivity](../../openspec/changes/m5-oat-sensitivity/proposal.md)）：不可变 AnalysisPlan 与 sensitivity TaskCard；coordinator 创建 plan，worker 逐 pset 绑定提交并显式等待/收集；collect 内生成逐 run metrics 与 numerical_health；报告确定性派生 Δ 汇总表、校验引用并经报告审批。只改运行副本，不改根 submodule、原始输入或默认参数；dsh 保持钉版。
+
+**工程验收门**：默认 `pnpm run check` 与适用的既有本机闸保持；新增本机命令 `pnpm run shud:sensitivity <scratch-workspace>`，需可执行绝对路径 SHUD_BIN、环境变量 DMXAPI_KEY 与显式 scratch 工作区，CI 不运行。唯一通过判据为 [Sensitivity acceptance criteria](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-sensitivity-acceptance-criteria)，本节不复制清单；脚本、真实运行和控制面登记分别由 #669–#673 交付。
+
+**PI 验收计划**：按 [Epic-close PI acceptance for sensitivity](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-epic-close-pi-acceptance-for-sensitivity)，由 #674 起草 proposed ADR，#675 在 Epic 收口时由 PI 亲自在 Web 完成 sensitivity 任务并决定报告审批。工程脚本自动 Allow once 与子 PR 合并不是 PI 验收；人工会话证据与自动工程会话在 Migration_Plan 分别记账。PI 明确通过前 Epic 保持 open、ADR 不转 implemented、change 不归档，#422 由 PI 在收口时关闭；归档时将本节 change spec 链接改指 canonical spec。
+
+**措辞边界**：只陈述单流域、单窗口、相对 baseline 的变化，参数范围标为 agent 建议值，不推广到其它流域、参数或窗口，不作科学结论。
 
 ## 5. 全程不变式
 

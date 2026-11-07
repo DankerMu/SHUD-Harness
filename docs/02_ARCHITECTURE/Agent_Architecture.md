@@ -235,7 +235,7 @@ TaskCard 不能仅因为 LLM 认为“完成了”而关闭。closure 由两层�
 | science_assist | ∃ EvidenceReport(draft)：observations ≥ 1 ∧ limitations ≥ 1 ∧ pi_questions ≥ 1；每个 metric_fact 有 evidence_refs |
 | ops | ∃ CommandTrace（exit_code 记录完整）∨ ∃ MemoryNote(draft) |
 | debugging | 复现命令、根因候选、下一步排查三者均落盘为 artifact 或 note |
-| sensitivity | AnalysisPlan.parameter_sets 全部处于终态；failed cell 均有 failure_reason；sensitivity_table artifact 存在 |
+| sensitivity | 下列 M5 六子句全部成立；每个成功的有效 run 有 metrics（status: ok 且 sha256 匹配），不依赖独立汇总 artifact |
 | calibration | 参数空间、目标函数、calibration/holdout 窗口已落盘；holdout 结果存在或明确标记 not_run；报告含 calibration ≠ validation 限制 |
 | benchmark | baseline 与 candidate 的 RunRecord 均存在且 stack_id/data_id 可比；差异摘要 artifact 存在 |
 | code_change | 下列 M4 六子句全部成立；review note 由 VerificationCase 字段承载，不另造对象 |
@@ -250,6 +250,18 @@ TaskCard 不能仅因为 LLM 认为“完成了”而关闭。closure 由两层�
 5. 所有 linked_jobs 满足既有 science_assist 运行子句：均已 collected、RunRecord succeeded 且 stack_id/data_id 非 null；不存在 failed/cancelled 或收集重试耗尽的作业。
 
 所有对象按链接只读解析，不扫描目录认领；缺失、损坏、不安全或身份不符使谓词不成立。异步读取后以新鲜卡片求值，不丢弃新增链接。failed VC 允许进入 reporting、必须展示失败，但不能通过回放验收；closure 成立也不等于 PI 接受报告。其它表行中的未激活类型仍是规划，M4 不借此实现 engineering/ops/search 生产者。
+
+**M5 sensitivity closure 实现基线**（[权威谓词](../../openspec/changes/m5-oat-sensitivity/specs/task-cards/spec.md#requirement-sensitivity-closure-predicate)）：在 report_generate 的新鲜卡片 reconcile 后、写任何报告文件前，确定性检查以下六条；本节为后续实现的契约，不表示 M5 已验收。
+
+0. linked_analyses 恰一项；只按链接品牌 id 读取 plan，文件安全可读、schema 合法、内含 plan id 与 task_id 分别匹配链接和本卡。linked_jobs 非空；模型传入 observations、limitations、pi_questions 各至少一条，确定性追加条目不凑 closure 计数。
+1. 所有链接作业都绑定该 plan 与其已有 pset，且终态：collected、failed/cancelled，或 collect-error 的 attempts 已达 MAX_COLLECT_ATTEMPTS。终态本身不保证第 3 条成立。
+2. 每个 pset 至少有一个作业。有效 run：恰一个 succeeded RunRecord 时取它；多于一个 succeeded 则拒绝；没有 succeeded 时取 job_id 码点最大者。
+3. baseline 的有效 run 必须为 succeeded RunRecord；非 baseline 可为 succeeded，或已 collected、RunRecord failed 且 exit_class 不是 cancelled/lost。取消、lost、收集耗尽、无 RunRecord 的 failed 均不能作为可接受的有效 run。
+4. 所有 succeeded 有效 run 的 stack_id 相同且非 null，data_id 非 null；非有效 run 与失败有效 run 不参加此条。
+5. 每个 succeeded 有效 run 的 metrics_summary 非 null；其 metrics.json 安全可读（O_NOFOLLOW、普通文件、不逃逸运行目录）、sha256 匹配且 status 为 ok。
+
+被取代的失败运行仍留在 linked_jobs 并在报告列出，不进入 Δ 汇总。阈值 warn/fail/not_available 不阻断 closure；不得据此隐藏诊断。只读 collect 不隐式生成记录，不扫描目录认领 plan，不以 LLM 判断替代上述子句。失败返回未满足子句及相关 id，不写报告或改变 TaskCard（先前成功 reconcile 除外）；closure 成立仍不等于 PI 接受。
+
 
 ## 8. 并发规则
 

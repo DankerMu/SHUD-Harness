@@ -17,7 +17,10 @@ status: living
 | 数据溯源 | `DataProvenance` | 输入数据来源、许可与预处理链记录 | 同上 |
 | 运行作业 | `RunJob` | 一次 SHUD 执行的提交单元（`backend` 枚举在此定义） | 同上 |
 | 运行记录 | `RunRecord` | 作业 collect 后的不可变结果记录（T2 证据载体） | 同上 |
-| 分析计划 | `AnalysisPlan` | 敏感性/校准/基准分析的批量执行计划（`mode=sensitivity` 一等公民） | 同上 |
+| 分析计划 | `AnalysisPlan` | M5 实现基线：品牌 `AnalysisPlanId`（PLAN-YYYYMMDDTHHMMSS-xxxx），仅 `mode: sensitivity` / `strategy: one_at_a_time`；不可变单文件 `analyses/<analysis_plan_id>.json`，含参数组、线程数与校验输入摘要 | [M5 AnalysisPlan record](changes/m5-oat-sensitivity/specs/analysis-plans/spec.md#requirement-analysisplan-record) |
+| 参数组 / 参数集 | parameter set / `ParameterSet` | AnalysisPlan 内 3–5 项之一，按序 PSET-1..PSET-n；baseline 无 changes，其余恰一白名单键倍率；运行状态不持久化在 plan 中 | [M5 AnalysisPlan record](changes/m5-oat-sensitivity/specs/analysis-plans/spec.md#requirement-analysisplan-record) |
+| 有效 run / 有效运行 | effective run | 每个 pset 恰一 succeeded RunRecord 时选它；多于一项成功则 closure 拒绝；无成功时选 job_id 码点最大者。非有效失败运行留在报告、不进汇总 rows | [M5 sensitivity closure](changes/m5-oat-sensitivity/specs/task-cards/spec.md#requirement-sensitivity-closure-predicate) |
+| 覆盖声明 | coverage statement | sensitivity 报告恰一条确定性 limitation，由 plan 的流域、天数与按 pset 顺序的键×倍率构造，声明未覆盖其它参数、取值与窗口；不是模型判断或 PI 确认 | [M5 Deterministic report limitations](changes/m5-oat-sensitivity/specs/evidence-reports/spec.md#requirement-deterministic-report-limitations) |
 | 证据报告 | `EvidenceReport` | 供 PI 决策的规范 JSON 对象 `reports/<report_id>.json`（品牌 REPORT id，含 decision_history）；同名 `.md` 为确定性渲染投影 | [M3 evidence-reports](specs/evidence-reports/spec.md) |
 | 变更请求 | `ChangeRequest` | 代码/参数变更的 patch 载体，走科学分级门 | [Minimal_Schemas](../docs/03_SPEC/Minimal_Schemas.md) |
 | 构建记录 | `BuildRecord` | M4 一次成功 SHUD 构建的身份：钉定 source_commit、可空已批 change_id/patch_sha256、构建命令、编译器、二进制摘要；不是工作树快照 | [Minimal_Schemas §11](../docs/03_SPEC/Minimal_Schemas.md#11-buildrecord) |
