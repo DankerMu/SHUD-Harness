@@ -11,7 +11,7 @@ SHUD-Harness 是 **PI 主导的科研工程助手**：用 DeepSeek Harness（dsh
 | Context | 职责 | 代码/文档位置 | 对外契约 |
 |---|---|---|---|
 | Governance（策略门） | `tools/pre-execute` 瀑布决策 allow/deny/cancel/ask；角色—工具映射；保留规则 id | `packages/dsh-shud-core/src/governance/` | 决策表为测试常量；`ask` 走 `ctx.approval` |
-| Core objects（8 对象） | TaskCard · StackLock · DataProvenance · RunJob · RunRecord · AnalysisPlan · EvidenceReport · ChangeRequest 的 Zod 权威源与生成投影 | `packages/dsh-shud-core/src/schemas/`，`docs/generated/`，`docs/03_SPEC/Minimal_Schemas.md` | 字段真相 = Zod；Markdown/JSON Schema 只生成不手编 |
+| Core objects（10 对象） | TaskCard · StackLock · DataProvenance · RunJob · RunRecord · EvidenceReport · ChangeRequest · VerificationCase · BuildRecord · AnalysisPlan 的 Zod 权威源与生成投影 | `packages/dsh-shud-core/src/schemas/`，`docs/generated/`，`docs/03_SPEC/Minimal_Schemas.md` | 字段真相 = Zod；Markdown/JSON Schema 只生成不手编 |
 | Jobs / Park-Resume（M2） | 长作业经 `ctx.jobs` 提交、agent 空闲、完成唤醒；durable JobRegistry 跨重启对账 | `packages/dsh-shud-jobs/`，`docs/03_SPEC/Park_Resume_Design.md` | shud 无 owner 登记，以运行目录、索引与 `shud-jobs` 消息满足下列五条可恢复性断言；非 shud 作业保持宿主行为 |
 | Host profile（dsh seam） | 模型路由、出站通道、插件挂载；dsh 只读宿主 | `profile/shud/`，`../deepseek-harness`（钉 `dsh-v0.2.1-rc.2`） | 只用文档化 seam；`--dump-config` 可枚举 |
 | Scientific runtime | SHUD 编译/运行、rSHUD 读输出与水量平衡、ccw fixture | `scripts/runtime/`，`SHUD/ rSHUD/ AutoSHUD/`，`docs/01_CODEBASE/SHUD_IO_Facts.md` | submodule 只读；运行在 scratch workspace |

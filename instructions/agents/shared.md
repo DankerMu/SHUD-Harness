@@ -47,7 +47,7 @@ SHUD-Harness is a **PI-led scientific research engineering assistant** for the S
 
 ```
 SHUD-Harness/
-├── packages/dsh-shud-core/      ← 领域层：9 个当前导出的核心记录 Zod schema（不计支持 schema）、policy-gate-core、role-tool-map（M1 起新增 raw-guard/jobs/tools/records/presets）
+├── packages/dsh-shud-core/      ← 领域层：10 个当前导出的核心记录 Zod schema（不计支持 schema）、policy-gate-core、role-tool-map（M1 起新增 raw-guard/jobs/tools/records/presets）
 ├── profile/shud/                ← dsh bundle + cordis.patch.yml（模型路由、出站关闭、插件挂载）
 ├── scripts/                     ← 确定性脚本：schema/ docs/ adr/ guardrails/ instructions/ runtime/
 ├── docs/                        ← adr/（四区）· 03_SPEC · 04_IMPLEMENTATION · generated/（勿手编）· 99_ARCHIVE（冻结）

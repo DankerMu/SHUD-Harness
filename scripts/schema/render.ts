@@ -19,12 +19,16 @@ export type JsonSchema = {
   description?: string;
   type?: string | string[];
   enum?: unknown[];
+  const?: unknown;
   properties?: Record<string, JsonSchema>;
   required?: string[];
   additionalProperties?: boolean | JsonSchema;
+  propertyNames?: JsonSchema;
   default?: unknown;
   pattern?: string;
   items?: JsonSchema;
+  minItems?: number;
+  maxItems?: number;
   anyOf?: JsonSchema[];
   oneOf?: JsonSchema[];
   allOf?: JsonSchema[];

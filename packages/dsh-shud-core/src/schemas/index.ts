@@ -1,3 +1,4 @@
+export * from "./analysis-plan.ts";
 export * from "./artifact.ts";
 export * from "./artifact-manifest.ts";
 export * from "./build-record.ts";

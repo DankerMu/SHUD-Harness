@@ -26,7 +26,7 @@
 
 ## 2. core：schema、品牌 id 与常量（Critical Path #1/#7）
 
-- [ ] 2.1 AnalysisPlan schema（含 `threads`、`input_digests`）与品牌 id `AnalysisPlanId`（复用 run-identifiers 生成器）。满足 analysis-plans「Analysis plan identifier」「AnalysisPlan record」「AnalysisPlan generated projection」与 engineering-gates「New core objects participate in schema drift gate」；`schema:generate` 刷新 `docs/generated/`（依赖 2.5）。同一刀把核心对象计数统一为 10 个当前导出的 schema（TaskCard、StackLock、DataProvenance、RunJob、RunRecord、EvidenceReport、ChangeRequest、VerificationCase、BuildRecord、AnalysisPlan）：
+- [x] 2.1 AnalysisPlan schema（含 `threads`、`input_digests`）与品牌 id `AnalysisPlanId`（复用 run-identifiers 生成器）。满足 analysis-plans「Analysis plan identifier」「AnalysisPlan record」「AnalysisPlan generated projection」与 engineering-gates「New core objects participate in schema drift gate」；`schema:generate` 刷新 `docs/generated/`（依赖 2.5）。同一刀把核心对象计数统一为 10 个当前导出的 schema（TaskCard、StackLock、DataProvenance、RunJob、RunRecord、EvidenceReport、ChangeRequest、VerificationCase、BuildRecord、AnalysisPlan）：
   - `CONTEXT.md:14` 的「Core objects（8 对象）」行改为「10 对象」，并按上述 10 个名字重列（现行行漏了 VerificationCase/BuildRecord，且在导出之前就列入了 AnalysisPlan）；
   - `packages/dsh-shud-core/package.json:4` 的 `description`（"9 exported core-record Zod schemas"）；
   - `docs/04_IMPLEMENTATION/Repository_Layout.md` 中 `src/schemas/` 行的"8 对象 Zod schema"注释；
@@ -174,3 +174,24 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 - [ ] 8.1 PI 在 Web 亲自完成一次 sensitivity 任务并审批报告；证据（session log、plan、RunRecord、汇总表路径）记入 `docs/Migration_Plan_dsh.md`；给 1.2 已 accepted 的流程 ADR 追加功能验收证据链接；#422 由 PI 关闭。结论只限单流域、单窗口、相对 baseline 的变化，不构成模型改进或校准结论。满足 oat-sensitivity「Epic-close PI acceptance for sensitivity」（依赖 1.2、7.2）。
 - Suggested fixture level: none - 手工验收记录
 - Minimal mergeable slice: atomic - 一次完整验收及其证据记录
+
+## Issue #642 risk packs and executable evidence
+
+| Pack | Selection and evidence |
+|---|---|
+| Public API / CLI / script entry | Selected: root-exported AnalysisPlanSchema/AnalysisPlanId/ParameterSet id schema; UTC PLAN generation, branded type checks and built-core smoke; no CLI |
+| Config / project setup | Not selected: no dependency/profile/config change; package description only |
+| File IO / path safety / overwrite | Not selected for runtime IO; pure digest-path validation is covered under schema; existing guarded generator publication preserved |
+| Schema / columns / units / field names | Selected: exact thirteen required fields, strict nested objects, all seven refinements, issue-path assertions and generated literal/cardinality/pattern/null constraints |
+| Auth / permissions / secrets | Selected: rationale agent/unconfirmed only; closed imported whitelist; reject unauthorized confirmation/keys; no approval or credential changes |
+| Concurrency / shared state / ordering | No concurrency selected; ordered PSET ids, baseline uniqueness and perturbation dedup explicitly tested as schema invariants |
+| Resource limits / large input / discovery | No external IO/discovery; array bounds 3 and 5 pass, 2 and 6 fail |
+| Legacy compatibility / examples | Selected: prior prefix generators/brands and nine record schemas remain valid; CHG/VC/BUILD/PLAN projections reject sequence ids; historical and v0.8 counts unchanged |
+| Error handling / rollback / partial outputs | Selected: malformed ids, unknown nested/root keys, invalid multipliers/rationale/threads/digests rejected with named field/key; no parse side effects |
+| Release / packaging / dependency compatibility | Selected: root/type exports and built-package parse/generate smoke; no dependency |
+| Documentation / migration notes | Selected: schema generation plus real isolated stale-field schema:check rejection; five count sources/rendered instructions at 10 within budget; complete search classified per task2.1 TE-10 rule |
+
+Required tests: fixed ccw four-pset plan passes; PLAN UTC timestamp/lowercase hex and bad prefix/legacy/uppercase failures; every rejection listed in #642 Acceptance; positive multiplier bounds and same-table KSATH/KSATV digest dedup; all four whitelist mappings; project names accepted by existing component rules preserved literally; non-first baseline allowed; strict unknown fields identified.
+Required commands: focused schema/branded tests, `pnpm run schema:generate`, `pnpm run instructions:render`, actual isolated `pnpm run schema:check` clean/rejected/restored control, `pnpm run check`, built-core smoke, and the complete task2.1 count-search classification posted to PR. No strengthening of old record path or identifier semantics merely to simplify this slice.
+Count-audit supplement: `openspec/project-profile.md` has both the entry-surface count and a Contracts count/export-status sentence (`9 currently exported ... AnalysisPlan is not currently exported`), the latter missed by the original acceptance regex. Update both within that same allowed source file. Supplement—not replace—the original search with `git grep -nE "currently exported|AnalysisPlan is not currently exported" -- . ':!docs/generated' ':!docs/99_ARCHIVE' ':!openspec/changes'`; post its complete output and per-hit classification, with no residual `9 currently exported` or negative AnalysisPlan export-status assertion. This closes a verification blind spot without expanding the five-file boundary or changing historical classifications.
+Completion is task2.1 only; keep tasks2.2–2.4 and downstream implementation unchecked. One implementer owns code/tests/count-source edits; parent owns fixture, execution evidence, review adjudication and merge.

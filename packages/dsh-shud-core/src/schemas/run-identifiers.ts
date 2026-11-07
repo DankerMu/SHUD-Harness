@@ -1,46 +1,27 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 
-export const JobRecordIdSchema = z
-  .string()
-  .regex(/^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"JobRecordId">();
-export const RunIdSchema = z
-  .string()
-  .regex(/^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"RunId">();
-export const TaskIdSchema = z
-  .string()
-  .regex(/^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"TaskId">();
-export const StackIdSchema = z
-  .string()
-  .regex(/^STACK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"StackId">();
-export const DataIdSchema = z
-  .string()
-  .regex(/^DATA-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"DataId">();
-export const ReportIdSchema = z
-  .string()
-  .regex(/^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"ReportId">();
-export const DecisionIdSchema = z
-  .string()
-  .regex(/^DEC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"DecisionId">();
-export const ChangeIdSchema = z
-  .string()
-  .regex(/^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"ChangeId">();
+function identifierPattern(prefix: string): RegExp {
+  return new RegExp(`^${prefix}-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$`, "u");
+}
+
+export const JobRecordIdSchema = z.string().regex(identifierPattern("JOB")).brand<"JobRecordId">();
+export const RunIdSchema = z.string().regex(identifierPattern("RUN")).brand<"RunId">();
+export const TaskIdSchema = z.string().regex(identifierPattern("TASK")).brand<"TaskId">();
+export const StackIdSchema = z.string().regex(identifierPattern("STACK")).brand<"StackId">();
+export const DataIdSchema = z.string().regex(identifierPattern("DATA")).brand<"DataId">();
+export const ReportIdSchema = z.string().regex(identifierPattern("REPORT")).brand<"ReportId">();
+export const DecisionIdSchema = z.string().regex(identifierPattern("DEC")).brand<"DecisionId">();
+export const ChangeIdSchema = z.string().regex(identifierPattern("CHG")).brand<"ChangeId">();
 export const VerificationIdSchema = z
   .string()
-  .regex(/^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
+  .regex(identifierPattern("VC"))
   .brand<"VerificationId">();
-export const BuildIdSchema = z
+export const BuildIdSchema = z.string().regex(identifierPattern("BUILD")).brand<"BuildId">();
+export const AnalysisPlanIdSchema = z
   .string()
-  .regex(/^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$/u)
-  .brand<"BuildId">();
+  .regex(identifierPattern("PLAN"))
+  .brand<"AnalysisPlanId">();
 
 export type JobRecordId = z.infer<typeof JobRecordIdSchema>;
 export type RunId = z.infer<typeof RunIdSchema>;
@@ -52,6 +33,7 @@ export type DecisionId = z.infer<typeof DecisionIdSchema>;
 export type ChangeId = z.infer<typeof ChangeIdSchema>;
 export type VerificationId = z.infer<typeof VerificationIdSchema>;
 export type BuildId = z.infer<typeof BuildIdSchema>;
+export type AnalysisPlanId = z.infer<typeof AnalysisPlanIdSchema>;
 
 const identifierSchemas = {
   JOB: JobRecordIdSchema,
@@ -64,6 +46,7 @@ const identifierSchemas = {
   CHG: ChangeIdSchema,
   VC: VerificationIdSchema,
   BUILD: BuildIdSchema,
+  PLAN: AnalysisPlanIdSchema,
 };
 
 export function createBrandedId<Prefix extends keyof typeof identifierSchemas>(
