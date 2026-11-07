@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+  AnalysisPlanIdSchema,
   BuildIdSchema,
   ChangeIdSchema,
   createBrandedId,
@@ -22,6 +23,7 @@ const newIdentifiers = [
   ["CHG", ChangeIdSchema, "CHG-20261102T093000-4a1f", "CHG-0001"],
   ["VC", VerificationIdSchema, "VC-20261102T101500-0c3e", "VC-001"],
   ["BUILD", BuildIdSchema, "BUILD-20261102T100000-7b2d", "BUILD-1"],
+  ["PLAN", AnalysisPlanIdSchema, "PLAN-20261108T093000-5c1e", "PLAN-0001"],
 ] as const;
 
 afterEach(() => vi.useRealTimers());
@@ -65,4 +67,23 @@ test.each([
   expect(id.startsWith(`${prefix}-20261027T080005-`)).toBe(true);
   expect(id.slice(prefix.length + 17)).toMatch(/^[0-9a-f]{4}$/u);
   expect(schema.parse(id)).toBe(id);
+});
+
+test("generates PLAN identifiers at the acceptance instant using UTC seconds", () => {
+  const id = createBrandedId("PLAN", new Date("2026-11-08T11:30:00.987+02:00"));
+  expect(id).toMatch(/^PLAN-20261108T093000-[0-9a-f]{4}$/u);
+  expect(AnalysisPlanIdSchema.parse(id)).toBe(id);
+});
+
+test.each([
+  "TASK-20261108T093000-5c1e",
+  "plan-20261108T093000-5c1e",
+  "PLAN-20261108T0930-5c1e",
+  "PLAN-20261108T093000Z-5c1e",
+  "PLAN-2026-11-08T09:30:00-5c1e",
+  "PLAN-20261108T093000-5c1",
+  "PLAN-20261108T093000-5c1e0",
+  "PLAN-20261108T093000-5g1e",
+])("PLAN identifiers reject malformed format %j", (id) => {
+  expect(AnalysisPlanIdSchema.safeParse(id).success).toBe(false);
 });

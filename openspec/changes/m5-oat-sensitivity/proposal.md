@@ -105,3 +105,12 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Must preserve: existing wording and phrase-scan bytes/behavior, semantic-level floors and projection, nine current core record schemas; no profile overrides, solver/input writes or downstream consumers.
 - Source authority: requirements unchanged; pinned SHUD read semantics prevail over derived prose. `RIV_ROUGH` reads `x / 60` (`River.cpp:29`) before calib (`:40`), documented by #680 / PR #681.
 - Workflow-only scope: this fixture metadata and task completion accompany #646; product changes remain core governance, minimal core root exports, schema generator/self-test and generated whitelist documentation.
+
+## Issue #642 execution fixture
+
+- Feature; expanded fixture, matching upstream classification: new authoritative core record, branded identifier and generated projections (Critical Path #7).
+- Scope: AnalysisPlan's thirteen fields, nested strict objects and seven refinements; PLAN branding through the existing identifier module; shared ParameterSet id schema; generator registration; current-core-count statements in exactly five source files and rendered instructions. Both project-profile entry and Contracts counts must become 10; its negative AnalysisPlan export-status assertion must be updated.
+- Selected packs: Public API, Schema/units/field names, Auth/governance, Compatibility, Error handling, Release/exports, Documentation/generated projection. Pure schema parsing introduces no runtime IO, concurrency, process or credential surface.
+- Must preserve: existing identifier formats and brands, nine existing record schemas/projections, calib constants and mapping as the sole source, existing project-component acceptance domain, historical/v0.8 eight-object terminology, runtime consumers and PI gates.
+- Required evidence: every issue acceptance rejection with the named issue path/key; valid ccw plan and PLAN UTC generation; built-core parsing smoke; generated CHG/VC/BUILD/PLAN patterns and field constraints; actual isolated stale-schema drift rejection; complete count-search output with per-hit classification; instructions budget and full default gate.
+- Workflow-only scope: issue-specific fixture metadata accompanies the bounded implementation. Shared M5 change remains unarchived; no filesystem plan writer, tool, job/report fields, or consumer integration is claimed.

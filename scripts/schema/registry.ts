@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { z, type ZodType } from "zod";
 
+import { AnalysisPlanSchema } from "../../packages/dsh-shud-core/src/schemas/analysis-plan.ts";
 import { ArtifactSchema } from "../../packages/dsh-shud-core/src/schemas/artifact.ts";
 import { ArtifactManifestSchema } from "../../packages/dsh-shud-core/src/schemas/artifact-manifest.ts";
 import { BuildRecordSchema } from "../../packages/dsh-shud-core/src/schemas/build-record.ts";
@@ -393,6 +394,57 @@ export const schemaDefinitions: SchemaDefinition[] = [
       stdout_path: "builds/BUILD-20261102T100000-7b2d/make.stdout.log",
       stderr_path: "builds/BUILD-20261102T100000-7b2d/make.stderr.log",
       created_at: "2026-11-02T10:00:00Z",
+    },
+  },
+  {
+    name: "AnalysisPlan",
+    slug: "analysis-plan",
+    sourcePath: "packages/dsh-shud-core/src/schemas/analysis-plan.ts",
+    exportName: "AnalysisPlanSchema",
+    schema: AnalysisPlanSchema,
+    strictInput: true,
+    exampleOverrides: {
+      analysis_plan_id: "PLAN-20261108T093000-5c1e",
+      task_id: "TASK-20261108T090000-3f9c",
+      mode: "sensitivity",
+      strategy: "one_at_a_time",
+      input_dir: "/workspace/input/ccw",
+      project: "ccw",
+      end_days: 90,
+      threads: 1,
+      parameter_sets: [
+        { parameter_set_id: "PSET-1", label: null, baseline: true, changes: {} },
+        {
+          parameter_set_id: "PSET-2",
+          label: null,
+          baseline: false,
+          changes: { GEOL_KSATH: 0.5 },
+        },
+        {
+          parameter_set_id: "PSET-3",
+          label: null,
+          baseline: false,
+          changes: { GEOL_KSATH: 2 },
+        },
+        {
+          parameter_set_id: "PSET-4",
+          label: null,
+          baseline: false,
+          changes: { LC_ROUGH: 2 },
+        },
+      ],
+      parameter_space_rationale: {
+        proposed_by: "agent",
+        basis: "单键 OAT",
+        confirmed_by: null,
+      },
+      input_digests: {
+        "ccw.cfg.calib": "a".repeat(64),
+        "ccw.para.geol": "b".repeat(64),
+        "ccw.para.lc": "c".repeat(64),
+      },
+      created_by: "coordinator",
+      created_at: "2026-11-08T09:30:00Z",
     },
   },
 ];

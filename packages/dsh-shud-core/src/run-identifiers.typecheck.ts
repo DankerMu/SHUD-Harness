@@ -1,6 +1,8 @@
 // Checked by the normal core typecheck; excluded from emitting builds.
 // Keep outside schemas/, whose modules are imported during schema generation.
 import {
+  AnalysisPlanIdSchema,
+  AnalysisPlanSchema,
   createBrandedId,
   DataProvenanceSchema,
   EvidenceReportSchema,
@@ -11,6 +13,8 @@ import {
   RunJobSchema,
   StackLockSchema,
   TaskCardSchema,
+  type AnalysisPlan,
+  type AnalysisPlanId,
   type DataId,
   type DataProvenance,
   type DecisionId,
@@ -112,6 +116,31 @@ const plainDecisionId: PiGateDecision["decision_id"] = "DEC-20261027T093012-c4e7
 // @ts-expect-error Plain strings cannot be assigned to the public PiGateDecision report_id field.
 const plainDecisionReport: PiGateDecision["report_id"] = "REPORT-20261027T090000-5b10";
 
+const generatedPlan: AnalysisPlanId = createBrandedId("PLAN");
+const parsedPlanId: AnalysisPlanId = AnalysisPlanIdSchema.parse(stored);
+const plan: AnalysisPlan = AnalysisPlanSchema.parse(stored);
+const planId: AnalysisPlanId = plan.analysis_plan_id;
+const planTask: TaskId = plan.task_id;
+const planMode: "sensitivity" = plan.mode;
+const planStrategy: "one_at_a_time" = plan.strategy;
+const planThreads: number = plan.threads;
+const planLabel: string | null = plan.parameter_sets[0].label;
+const planProposer: "agent" = plan.parameter_space_rationale.proposed_by;
+const planConfirmation: null = plan.parameter_space_rationale.confirmed_by;
+// @ts-expect-error Plain strings are not analysis plan ids.
+const plainPlan: AnalysisPlanId = "PLAN-20261108T093000-5c1e";
+// @ts-expect-error Task ids cannot be assigned to analysis plan ids.
+const crossedPlan: AnalysisPlanId = createBrandedId("TASK");
+// @ts-expect-error Analysis plan ids cannot be assigned to task ids.
+const planAsTask: TaskId = createBrandedId("PLAN");
+// @ts-expect-error Plain strings cannot be assigned to the public AnalysisPlan id field.
+const plainPlanId: AnalysisPlan["analysis_plan_id"] = "PLAN-20261108T093000-5c1e";
+// @ts-expect-error Plain strings cannot be assigned to the public AnalysisPlan task_id field.
+const plainPlanTask: AnalysisPlan["task_id"] = "TASK-20261108T090000-3f9c";
+declare const planWithoutThreads: Omit<AnalysisPlan, "threads">;
+// @ts-expect-error Stored plans must carry an explicit thread count.
+const missingPlanThreads: AnalysisPlan = planWithoutThreads;
+
 void [
   generatedJob,
   generatedRun,
@@ -163,4 +192,20 @@ void [
   decisionReport,
   plainDecisionId,
   plainDecisionReport,
+  generatedPlan,
+  parsedPlanId,
+  planId,
+  planTask,
+  planMode,
+  planStrategy,
+  planThreads,
+  planLabel,
+  planProposer,
+  planConfirmation,
+  plainPlan,
+  crossedPlan,
+  planAsTask,
+  plainPlanId,
+  plainPlanTask,
+  missingPlanThreads,
 ];

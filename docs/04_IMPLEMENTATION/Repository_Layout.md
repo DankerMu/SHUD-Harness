@@ -17,7 +17,7 @@ SHUD-Harness/
   tsconfig.scripts.json             # 根 scripts/**/*.ts 的独立 noEmit 类型程序（排除测试/夹具）
   packages/
     dsh-shud-core/                  # 领域层（运行时无关）
-      src/schemas/                  # 8 对象 Zod schema（移植）
+      src/schemas/                  # 10 个当前导出的核心记录 Zod schema（不计支持 schema）
       src/governance/               # 治理常量、policy-gate-core 纯函数（移植）、措辞规则
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）

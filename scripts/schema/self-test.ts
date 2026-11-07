@@ -299,6 +299,7 @@ export async function runSelfTest(): Promise<void> {
   assertGeneratorSemanticContracts();
   assertSemanticLevelFloorProjection();
   assertCalibWhitelistProjection();
+  assertAnalysisPlanProjection();
   for (const definition of schemaDefinitions) {
     const jsonSchema = buildJsonSchema(definition);
     if (definition.strictInput) {
@@ -545,6 +546,175 @@ function assertGeneratorSemanticContracts(): void {
   }
 }
 
+function assertAnalysisPlanProjection(): void {
+  for (const [name, field, prefix] of [
+    ["ChangeRequest", "change_id", "CHG"],
+    ["VerificationCase", "vc_id", "VC"],
+    ["BuildRecord", "build_id", "BUILD"],
+    ["AnalysisPlan", "analysis_plan_id", "PLAN"],
+  ]) {
+    const definition = schemaDefinitions.find((entry) => entry.name === name)!;
+    const pattern = buildJsonSchema(definition).properties?.[field]?.pattern;
+    if (
+      pattern === undefined ||
+      !new RegExp(pattern).test(`${prefix}-20261108T093000-5c1e`) ||
+      [`${prefix}-0001`, `${prefix}-20261108T093000-5C1E`, "TASK-20261108T093000-5c1e"].some(
+        (invalid) => new RegExp(pattern).test(invalid),
+      )
+    ) {
+      throw new Error(`${name} projection must preserve its branded identifier pattern`);
+    }
+  }
+
+  const definition = schemaDefinitions.find((entry) => entry.name === "AnalysisPlan")!;
+  const schema = buildJsonSchema(definition);
+  const fields = [
+    "analysis_plan_id",
+    "task_id",
+    "mode",
+    "strategy",
+    "input_dir",
+    "project",
+    "end_days",
+    "threads",
+    "parameter_sets",
+    "parameter_space_rationale",
+    "input_digests",
+    "created_by",
+    "created_at",
+  ].sort();
+  if (
+    JSON.stringify(Object.keys(schema.properties ?? {}).sort()) !== JSON.stringify(fields) ||
+    JSON.stringify([...(schema.required ?? [])].sort()) !== JSON.stringify(fields)
+  ) {
+    throw new Error("AnalysisPlan projection must have exactly thirteen required fields");
+  }
+  const properties = schema.properties!;
+  const sets = properties.parameter_sets;
+  const rationale = properties.parameter_space_rationale;
+  if (
+    properties.mode.const !== "sensitivity" ||
+    properties.strategy.const !== "one_at_a_time" ||
+    sets.type !== "array" ||
+    sets.minItems !== 3 ||
+    sets.maxItems !== 5 ||
+    rationale.properties?.proposed_by?.const !== "agent" ||
+    rationale.properties?.confirmed_by?.type !== "null"
+  ) {
+    throw new Error(
+      "AnalysisPlan projection lost literals, set cardinality or null-only confirmation",
+    );
+  }
+  for (const [object, required] of [
+    [sets.items!, ["parameter_set_id", "label", "baseline", "changes"]],
+    [rationale, ["proposed_by", "basis", "confirmed_by"]],
+  ] as const) {
+    if (
+      JSON.stringify(Object.keys(object.properties ?? {}).sort()) !==
+        JSON.stringify([...required].sort()) ||
+      JSON.stringify([...(object.required ?? [])].sort()) !== JSON.stringify([...required].sort())
+    ) {
+      throw new Error("AnalysisPlan nested objects must preserve their exact required fields");
+    }
+  }
+  const markdown = buildMarkdown(definition, schema);
+  for (const meaning of [
+    "Only the literal sensitivity",
+    "Only the literal one_at_a_time",
+    "3–5 parameter sets",
+    "Only the literal agent",
+    "Only null is allowed",
+  ]) {
+    if (!markdown.includes(meaning)) throw new Error(`AnalysisPlan Markdown omits ${meaning}`);
+  }
+  assertStrictInputClosed(schema, definition);
+
+  // The new typed maps must not become a blanket exemption from strict input checks.
+  for (const [map, path] of [
+    [sets.items!.properties!.changes, "AnalysisPlan.parameter_sets[].changes"],
+    [properties.input_digests, "AnalysisPlan.input_digests"],
+  ] as const) {
+    for (const additionalProperties of [true, {}, { type: "number" }, { type: "string" }]) {
+      assertThrows(
+        () => assertStrictInputClosed({ ...map, additionalProperties }, definition, path),
+        "must retain constrained map keys and values",
+      );
+    }
+    for (const propertyNames of [{}, { type: "string" }, { type: "string", pattern: ".*" }]) {
+      assertThrows(
+        () => assertStrictInputClosed({ ...map, propertyNames }, definition, path),
+        "must retain constrained map keys and values",
+      );
+    }
+  }
+  for (const [object, path] of [
+    [schema, "AnalysisPlan"],
+    [sets.items!, "AnalysisPlan.parameter_sets[]"],
+    [rationale, "AnalysisPlan.parameter_space_rationale"],
+  ] as const) {
+    assertThrows(
+      () => assertStrictInputClosed({ ...object, additionalProperties: true }, definition, path),
+      "additionalProperties must be false",
+    );
+  }
+}
+
+function assertAnalysisPlanMap(schema: JsonSchema, path: string): void {
+  const keys = schema.propertyNames;
+  const value = schema.additionalProperties;
+  const fail = () => {
+    throw new Error(`${path} must retain constrained map keys and values`);
+  };
+  if (
+    schema.type !== "object" ||
+    schema.properties !== undefined ||
+    keys?.type !== "string" ||
+    typeof value !== "object" ||
+    value === null
+  ) {
+    fail();
+    return;
+  }
+  if (path === "AnalysisPlan.parameter_sets[].changes") {
+    if (
+      JSON.stringify([...(keys.enum ?? [])].sort()) !==
+        JSON.stringify(["GEOL_KSATH", "GEOL_KSATV", "LC_ROUGH", "RIV_ROUGH"]) ||
+      value.type !== "number" ||
+      value.minimum !== 0.5 ||
+      value.maximum !== 2 ||
+      (schema.required?.length ?? 0) !== 0
+    )
+      fail();
+    return;
+  }
+  if (
+    keys.minLength !== 1 ||
+    keys.pattern === undefined ||
+    value.type !== "string" ||
+    value.minLength !== 64 ||
+    value.maxLength !== 64 ||
+    value.pattern === undefined
+  ) {
+    fail();
+    return;
+  }
+  const pathPattern = new RegExp(keys.pattern);
+  const digestPattern = new RegExp(value.pattern);
+  if (
+    ["ccw.cfg.calib", "$&.para.geol", "<end_days>.para.lc", "nested/ccw.sp.riv"].some(
+      (key) => !pathPattern.test(key),
+    ) ||
+    ["", "/abs/file", "../file", "./file", "a/../b", "a/./b", "a//b", "a/", "a\0b"].some((key) =>
+      pathPattern.test(key),
+    ) ||
+    !digestPattern.test("a".repeat(64)) ||
+    ["A".repeat(64), "g".repeat(64), "a".repeat(63), "a".repeat(65)].some((digest) =>
+      digestPattern.test(digest),
+    )
+  )
+    fail();
+}
+
 function extractExampleYamlLines(markdown: string): string[] {
   const lines = markdown.split("\n");
   const start = lines.indexOf("```yaml");
@@ -642,6 +812,13 @@ function assertStrictInputClosed(
   definition: SchemaDefinition,
   path = definition.name,
 ): void {
+  if (
+    definition.name === "AnalysisPlan" &&
+    (path === "AnalysisPlan.parameter_sets[].changes" || path === "AnalysisPlan.input_digests")
+  ) {
+    assertAnalysisPlanMap(schema, path);
+    return;
+  }
   const schemaWithoutNull = nonNullSchema(schema);
 
   if (schemaWithoutNull.type === "object") {
