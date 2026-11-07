@@ -51,10 +51,14 @@ export function instantiateSensitivityCoverage(plan: {
       }
     }
   }
-  return REPORT_LIMITATION_TEMPLATES.coverage
-    .replace("<project>", () => plan.project)
-    .replace("<end_days>", () => String(plan.end_days))
-    .replace("<KEY×m, …>", () => perturbations.join(", "));
+  return REPORT_LIMITATION_TEMPLATES.coverage.replace(
+    /<project>|<end_days>|<KEY×m, …>/g,
+    (placeholder) => {
+      if (placeholder === "<project>") return plan.project;
+      if (placeholder === "<end_days>") return String(plan.end_days);
+      return perturbations.join(", ");
+    },
+  );
 }
 
 export const REPORT_SECRET_PATTERN = /\bsk-[A-Za-z0-9_-]{8,}/;

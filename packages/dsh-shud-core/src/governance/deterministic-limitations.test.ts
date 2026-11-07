@@ -85,6 +85,37 @@ describe("instantiateSensitivityCoverage", () => {
     );
   });
 
+  test.each([
+    [
+      "<end_days>",
+      "仅在 <end_days> 单流域、90 天窗口、相对 baseline 测试了 GEOL_KSATH×0.5000000000000001, LC_ROUGH×2, RIV_ROUGH×1.2345678901234567；未覆盖其它参数、取值与窗口",
+    ],
+    [
+      "<KEY×m, …>",
+      "仅在 <KEY×m, …> 单流域、90 天窗口、相对 baseline 测试了 GEOL_KSATH×0.5000000000000001, LC_ROUGH×2, RIV_ROUGH×1.2345678901234567；未覆盖其它参数、取值与窗口",
+    ],
+    [
+      "$&",
+      "仅在 $& 单流域、90 天窗口、相对 baseline 测试了 GEOL_KSATH×0.5000000000000001, LC_ROUGH×2, RIV_ROUGH×1.2345678901234567；未覆盖其它参数、取值与窗口",
+    ],
+  ] as const)(
+    "preserves project %s literally while instantiating the window and ordered perturbations",
+    (project, expected) => {
+      expect(
+        instantiateSensitivityCoverage({
+          project,
+          end_days: 90,
+          parameter_sets: [
+            { baseline: true, changes: {} },
+            { baseline: false, changes: { GEOL_KSATH: 0.5000000000000001 } },
+            { baseline: false, changes: { LC_ROUGH: 2 } },
+            { baseline: false, changes: { RIV_ROUGH: 1.2345678901234567 } },
+          ],
+        }),
+      ).toBe(expected);
+    },
+  );
+
   test("preserves caller pset order and round-trip numbers without mutating frozen input", () => {
     const plan = Object.freeze({
       project: "keliya",
