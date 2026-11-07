@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { z, type ZodType } from "zod";
 
 import {
+  CALIB_MULTIPLIER_RANGE,
+  CALIB_WHITELIST,
+} from "../../packages/dsh-shud-core/src/governance/calib-whitelist.ts";
+import {
   SEMANTIC_LEVEL_FLOORS,
   SEMANTIC_LEVEL_ORDER,
   riskForLevel,
@@ -18,6 +22,7 @@ import {
   type SchemaDefinition,
 } from "./registry.ts";
 import {
+  buildCalibWhitelistMarkdown,
   buildExample,
   buildJsonSchema,
   buildMarkdown,
@@ -293,6 +298,7 @@ export async function runSelfTest(): Promise<void> {
   assertTaskCardUnknownKeyParity();
   assertGeneratorSemanticContracts();
   assertSemanticLevelFloorProjection();
+  assertCalibWhitelistProjection();
   for (const definition of schemaDefinitions) {
     const jsonSchema = buildJsonSchema(definition);
     if (definition.strictInput) {
@@ -333,6 +339,38 @@ function assertSemanticLevelFloorProjection(): void {
     throw new Error(
       "semantic level floor projection must preserve all ordered level/risk and path/floor rows",
     );
+  }
+}
+
+function assertCalibWhitelistProjection(): void {
+  const markdown = buildCalibWhitelistMarkdown();
+  const rows = markdown
+    .split("\n")
+    .filter((line) => line.startsWith("|"))
+    .slice(2)
+    .map((line) =>
+      line
+        .slice(1, -1)
+        .split("|")
+        .map((value) => value.trim().replace(/^`|`$/g, "")),
+    );
+  const expectedRows = Object.values(CALIB_WHITELIST).map((entry) => [
+    entry.key,
+    entry.table,
+    entry.column,
+    JSON.stringify(entry.read_transform),
+    entry.check_range === null ? "null" : `[${entry.check_range.join(", ")}]`,
+    entry.source.join(", "),
+  ]);
+  if (JSON.stringify(rows) !== JSON.stringify(expectedRows)) {
+    throw new Error("calib whitelist projection must preserve every registered field and source");
+  }
+  const interval = `Inclusive multiplier interval: [${CALIB_MULTIPLIER_RANGE.join(", ")}].`;
+  if (!markdown.includes(interval)) {
+    throw new Error("calib whitelist projection must include the registered multiplier bounds");
+  }
+  if (!markdown.includes("second `.sp.riv` table (river types), at zero-based column 5")) {
+    throw new Error("calib whitelist projection must identify the river type table and column");
   }
 }
 

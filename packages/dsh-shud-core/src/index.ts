@@ -35,6 +35,8 @@ export {
 export * from "./governance/role-tool-map.ts";
 export * from "./governance/wording.ts";
 export * from "./governance/semantic-level-floor.ts";
+export * from "./governance/numerical-health.ts";
+export * from "./governance/calib-whitelist.ts";
 export * from "./stack-lock/fingerprint.ts";
 export * from "./stack-lock/repository-revision.ts";
 export { containsPath } from "./path-containment.ts";
