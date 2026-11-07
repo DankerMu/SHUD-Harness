@@ -244,6 +244,7 @@
   11. `SHUD/input/ccw` 的 md5 清单、根 submodule 修订与 `data/raw` md5 都不变。
 - 模型偏离 → exit 2，需重跑，不计回归；判据不成立 → exit 1。登记进 Verification Matrix、constraints 镜像与 instructions 源（经 `instructions:render`），沿用 M3/M4 的登记方式。
 - 既有 oracle：在改变 collect / 报告行为的同一切片中，`shud:first-task` 与 `shud:replay` 的 oracle 改为断言新行为。first-task 断言 ccw run 的 numerical_health 三项非 null、§5 渲染指标表、不再有"无指标 artifact"；replay 断言 keliya run 的 residual 为 null 且原因为 `missing_variable`，rivqdown bitwise 判据不变。两者都附本机重跑证据。已消费的证据字节不重写（ADR-0009）。
+- 2026-11-07 PI 明确选择提前接受 M5 流程 ADR（[决定记录](https://github.com/DankerMu/SHUD-Harness/issues/674#issuecomment-6707660269)），由 #674 登记为 [ADR-0015](../../../docs/adr/implemented/0015-m5-epic-acceptance.md)：子 PR 经完整工程门与审查可合并，功能仍待 #675 PI Web 亲验。流程 accepted 不等于功能通过；Epic/#422/#675 不提前关闭，change 不提前归档。本决定仅调整验收安排时序，不改本节工程 oracle。
 
 ### D15 规范对齐与偏离登记
 
@@ -297,12 +298,12 @@
 
 ## Migration Plan
 
-1. 规范对齐文档切片（D15）先合并。
+1. 规范对齐文档切片（D15）先合并；随后按 PI 明确授权提前完成任务 1.2（#674）的流程 ADR 接受，不再依赖控制面任务 7.2。
 2. core schema 与常量（AnalysisPlan、RunJob/RunRecord/TaskCard/EvidenceReport 字段、白名单、阈值、wording），执行 `schema:generate`。旧记录缺键按默认值解析，不改写已有文件。
 3. records：dat 读取器、metrics、对照夹具；随后 closure 与报告。
 4. jobs：提交重写，以及 collect 内 metrics（同一切片中更新 first-task/replay oracle 并附本机重跑证据）。
 5. tools：`analysis_create`、`shud_run` 绑定；guard 与 policy 回归；presets/prompt。
-6. `shud:sensitivity` 脚本与控制面登记；Epic 验收 ADR；PI Web 验收。
+6. `shud:sensitivity` 脚本与控制面登记；PI Web 功能验收，明确通过后才收口 Epic/change，并给已 accepted 的流程 ADR 追加功能证据链接。
 - 回滚：每个切片都可以单独 `git revert`。collect 内 metrics 回滚后，新 run 回到 null，已写出的 `metrics.json` 与 RunRecord 字段仍可解析（字段 nullable）。不引入数据迁移。
 
 ## Not yet specified

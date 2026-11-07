@@ -1,10 +1,10 @@
 # Tasks
 
-合入顺序按依赖，不按组号；与 design.md「Migration Plan」一致：1.1a → 1.1b → 2.5 → 2.1 → 2.2 → 2.3 → 2.4 → 3.0 → 3.1 → 3.2a → 3.2b → 3.2c → 3.2d → 3.3 → 3.4 → 3.5 → 3.6a → 3.6b → 3.6c → 4.1a → 4.1b → 4.1c → 4.2 → 5.1 → 5.2a → 5.2b → 5.3 → 5.4 → 6.1 → 7.1a → 7.1b → 7.1c → 7.1d → 7.2 → 1.2 → 8.1。各任务写明的"依赖"是硬前置；没写依赖的切片只受上述顺序约束。fixture level 的词表以 `subagent-workflow` 的 `issue-risk-contract.md` 为准。需求名一律引用 `specs/*/spec.md` 中 `### Requirement:` 的原文。每个切片都要求 `pnpm run check` 本机绿；触及 Zod 的切片执行 `pnpm run schema:generate`；触及 `instructions/agents/*` 的切片执行 `pnpm run instructions:render`；触及 Critical Paths 的切片附 reviewer 子代理白盒审查记录。`shud:replay` 的 oracle 会在 3.6b、4.1a、4.2 各改一次，每次都附本机重跑证据。
+合入顺序按依赖，不按组号；与 design.md「Migration Plan」一致：1.1a → 1.1b → 1.2 → 2.5 → 2.1 → 2.2 → 2.3 → 2.4 → 3.0 → 3.1 → 3.2a → 3.2b → 3.2c → 3.2d → 3.3 → 3.4 → 3.5 → 3.6a → 3.6b → 3.6c → 4.1a → 4.1b → 4.1c → 4.2 → 5.1 → 5.2a → 5.2b → 5.3 → 5.4 → 6.1 → 7.1a → 7.1b → 7.1c → 7.1d → 7.2 → 8.1。1.2 按 PI 2026-11-07 明确决定提前（ADR-0015），不再依赖 7.2。各任务写明的"依赖"是硬前置；没写依赖的切片只受上述顺序约束。fixture level 的词表以 `subagent-workflow` 的 `issue-risk-contract.md` 为准。需求名一律引用 `specs/*/spec.md` 中 `### Requirement:` 的原文。每个切片都要求 `pnpm run check` 本机绿；触及 Zod 的切片执行 `pnpm run schema:generate`；触及 `instructions/agents/*` 的切片执行 `pnpm run instructions:render`；触及 Critical Paths 的切片附 reviewer 子代理白盒审查记录。`shud:replay` 的 oracle 会在 3.6b、4.1a、4.2 各改一次，每次都附本机重跑证据。
 
 ## 1. 规范文档对齐与决策记录（design D15）
 
-- [ ] 1.1a 数据与规格文档对齐：
+- [x] 1.1a 数据与规格文档对齐（#640 / PR #678；RIV_ROUGH 事实纠错 #680 / PR #681）：
   - `docs/03_SPEC/Minimal_Schemas.md`：§6 AnalysisPlan 改为品牌 id `PLAN-<UTC>-xxxx` 与 D1 字段（含 `threads`、`input_digests`）；§5 RunRecord 写入 `artifacts.metrics_summary`；RunJob/RunRecord 加入 `analysis_plan_id`/`parameter_set_id`；TaskCard 加入 `linked_analyses`；EvidenceReport 加入 `analysis_ids`/`sensitivity_summary`。
   - `SHUD_Output_Variables.md`：§11–§13 写入 D7 公式（含区间平均近似与 null 原因词表）、D8 四项来源与 `max_solver_dt` 不可观测声明；§12 的 `metrics.yaml` 改为 `metrics.json`；§11 负状态列表与 §12 储量/输出行去掉 `lakystage`/湖泊项（D15(10)）。
   - `Parameter_Set_And_Analysis_Run_Mapping.md`：ParameterSet 状态不持久化；不建 batch_policy；pset id `PSET-1..5`；plan 单文件 `analyses/<id>.json`；`changes` 键为 calib 白名单键。
@@ -13,16 +13,16 @@
   - `Domain_CLI_Spec.md` §2.2：M5 不采用 Rscript CLI。
   - `Execution_Jobs_Runs.md`：numerical_health 的生产者由 Domain CLI `wb --health` 改为 collect 内计算（与 Domain_CLI §2.2 同类偏离）。
   - 每处偏离按 design D15(1)–(10) 登记。
-- [ ] 1.1b 架构、计划与术语文档对齐（依赖 1.1a）：
+- [x] 1.1b 架构、计划与术语文档对齐（依赖 1.1a；#641 / PR #679）：
   - `docs/02_ARCHITECTURE/Agent_Architecture.md` §7 sensitivity 谓词措辞（"每个成功的有效 run 有 metrics"取代"sensitivity_table artifact 存在"）。
   - `docs/03_SPEC/Report_Generation_Spec.md` §2/§5（含"M3 没有 metrics/图表/AnalysisPlan 生产者"一段与 §5 固定说明的刷新）。
   - `docs/04_IMPLEMENTATION/Phased_Plan.md` 新增 M5 节（验收门引用 oat-sensitivity「Sensitivity acceptance criteria」，不复制判据）。
   - `openspec/glossary.md`：AnalysisPlan / 分析计划、parameter set、有效 run、覆盖声明。
   - 用 `gh issue edit` 把 #422 正文改写为"由 M5 change `m5-oat-sensitivity` 交付"，并链接本 change（不关闭）。
   - 核心对象计数**不在本刀改**（导出发生在 2.1，在那之前改会写错事实）。
-- [ ] 1.2 在 `docs/adr/proposed/` 起草 M5 Epic 收口验收 ADR（仿 ADR-0010/0014）：仅限 M5 Epic；子 PR 按工程门合并；收口时由 PI 在 Web 亲自验收。状态为 Proposed，接受由 PI 确认。满足 oat-sensitivity「Epic-close PI acceptance for sensitivity」中的登记部分（依赖 7.2）。
+- [x] 1.2 按 PI 2026-11-07 明确选择提前起草并接受 M5 流程 ADR-0015：仅限 M5 Epic；子 PR 经完整工程门与审查后可合并；功能仍在 Epic 收口时由 PI 在 Web 亲自验收。流程 accepted 不等于功能通过，不提前关闭 #639/#422/#675 或归档 change。满足 oat-sensitivity「Epic-close PI acceptance for sensitivity」登记部分；本次 PI 决定取消原 7.2 前置，并同步控制面与 #674/#675 时序。
 - Suggested fixture level: none - 只有规范、计划与决策记录文档，没有产品代码
-- Minimal mergeable slice: 1.1a 首刀（规格文档自洽即可合并，没有代码依赖）；1.1b 依赖 1.1a；1.2 单独一刀，放在 7.2 之后，与 design Migration Plan 第 6 步一致
+- Minimal mergeable slice: 1.1a 首刀；1.1b 依赖 1.1a；1.2 按 PI 显式决定提前为独立流程登记切片，须先于代码子 PR 的工程合并，功能验收仍归 8.1
 
 ## 2. core：schema、品牌 id 与常量（Critical Path #1/#7）
 
@@ -152,6 +152,6 @@
 
 ## 8. Epic 收口：PI 功能验收
 
-- [ ] 8.1 PI 在 Web 亲自完成一次 sensitivity 任务并审批报告；证据（session log、plan、RunRecord、汇总表路径）记入 `docs/Migration_Plan_dsh.md`；1.2 的 ADR 由 PI 确认后转入 implemented；#422 由 PI 关闭。结论只限单流域、单窗口、相对 baseline 的变化，不构成模型改进或校准结论。满足 oat-sensitivity「Epic-close PI acceptance for sensitivity」（依赖 1.2、7.2）。
+- [ ] 8.1 PI 在 Web 亲自完成一次 sensitivity 任务并审批报告；证据（session log、plan、RunRecord、汇总表路径）记入 `docs/Migration_Plan_dsh.md`；给 1.2 已 accepted 的流程 ADR 追加功能验收证据链接；#422 由 PI 关闭。结论只限单流域、单窗口、相对 baseline 的变化，不构成模型改进或校准结论。满足 oat-sensitivity「Epic-close PI acceptance for sensitivity」（依赖 1.2、7.2）。
 - Suggested fixture level: none - 手工验收记录
 - Minimal mergeable slice: atomic - 一次完整验收及其证据记录

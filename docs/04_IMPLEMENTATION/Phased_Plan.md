@@ -79,7 +79,7 @@ supersedes: Zero 时代 M1–M9 计划（见 tag archive/zero-v0.8.3）
 
 **工程验收门**：默认 `pnpm run check` 与适用的既有本机闸保持；新增本机命令 `pnpm run shud:sensitivity <scratch-workspace>`，需可执行绝对路径 SHUD_BIN、环境变量 DMXAPI_KEY 与显式 scratch 工作区，CI 不运行。唯一通过判据为 [Sensitivity acceptance criteria](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-sensitivity-acceptance-criteria)，本节不复制清单；脚本、真实运行和控制面登记分别由 #669–#673 交付。
 
-**PI 验收计划**：按 [Epic-close PI acceptance for sensitivity](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-epic-close-pi-acceptance-for-sensitivity)，由 #674 起草 proposed ADR，#675 在 Epic 收口时由 PI 亲自在 Web 完成 sensitivity 任务并决定报告审批。工程脚本自动 Allow once 与子 PR 合并不是 PI 验收；人工会话证据与自动工程会话在 Migration_Plan 分别记账。PI 明确通过前 Epic 保持 open、ADR 不转 implemented、change 不归档，#422 由 PI 在收口时关闭；归档时将本节 change spec 链接改指 canonical spec。
+**PI 验收计划**：按 [Epic-close PI acceptance for sensitivity](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-epic-close-pi-acceptance-for-sensitivity) 与 PI 提前接受的 [ADR-0015](../adr/implemented/0015-m5-epic-acceptance.md)，#674 先登记仅限 #639 的完整工程门合并安排，#675 仍在 Epic 收口时由 PI 亲自在 Web 完成 sensitivity 任务并决定报告审批。流程 accepted、工程脚本自动 Allow once 与子 PR 合并都不是 PI 功能验收；人工会话证据与自动工程会话在 Migration_Plan 分别记账。PI 明确功能通过前 Epic/#422/#675 保持 open、change 不归档；通过后给已接受流程 ADR 追加功能证据，由 PI 关闭 #422。归档时将本节 change spec 链接改指 canonical spec。
 
 **措辞边界**：只陈述单流域、单窗口、相对 baseline 的变化，参数范围标为 agent 建议值，不推广到其它流域、参数或窗口，不作科学结论。
 
