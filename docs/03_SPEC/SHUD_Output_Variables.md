@@ -205,7 +205,7 @@ M5 的确定性生产者在 collect 内执行，契约见 [Numerical health prod
 - `θs_i = ThetaS[geol(i)] × GEOL_THETAS`；geol 来自副本 `.sp.att`、ThetaS 来自 `.para.geol`、GEOL_THETAS 来自 `.cfg.calib`，缺键不默认为 1。
 - `ΔS_riv = Σ_r (rivystage_r(T) − ic.Stage_r) · Width[type(r)] · Length_r / A`；类型、宽度与长度来自副本 `.sp.riv`。
 - `ΔS_snow = Σ_i w_i (snow_i(T) − snow0_i)`；`ΔS_ic = Σ_i w_i (ic_i(T) − ic0_i)`。四个原值分别为 eleysnow、eleyic 末行与 `.cfg.ic` 的 Snow、Canopy 列；作差前均换算为以元素面积计的水深。
-- 折算由 core 常量 `STORAGE_DEPTH_CONVERSIONS` 提供四条 `snow.output`、`snow.ic`、`ic.output`、`ic.ic`，每条深度为 `value × scale × (veg_frac_weighted ? VegFrac_i : 1)`。系数及是否乘植被覆盖率待 O1 核实，本节不填猜测值；常量形状与来源要求见 [Storage depth conversion constants](../../openspec/changes/m5-oat-sensitivity/specs/run-metrics/spec.md#requirement-storage-depth-conversion-constants)。
+- 折算由 core 常量 `STORAGE_DEPTH_CONVERSIONS` 提供四条 `snow.output`、`snow.ic`、`ic.output`、`ic.ic`，每条深度为 `value × scale × (veg_frac_weighted ? VegFrac_i : 1)`。O1 源码核查结论见下表；常量形状与来源要求见 [Storage depth conversion constants](../../openspec/changes/m5-oat-sensitivity/specs/run-metrics/spec.md#requirement-storage-depth-conversion-constants)。
 - `ΔS = ΔS_surf + ΔS_us + ΔS_gw + ΔS_riv + ΔS_snow + ΔS_ic`。
 - `water_balance_residual = |P − Qd − AET − ΔS| / P`。
 
@@ -233,6 +233,25 @@ records 的公开 `serializeRunMetrics` 以共享严格形状校验拒绝非有�
 `water_balance.residual` 与 `numerical_health.water_balance_residual` 是同一个数值，两个字段的值与各自原因必须一致（均为 null 时原因也必须相同）；共享 wire 校验拒绝矛盾，不复制或修复任一侧。无论 `status` 为 `ok` 还是 `unavailable`，`max_solver_dt` 均为 `null`，原因固定为 `not_observable_in_pinned_shud`，不被其它输入失败原因覆盖；顶层失败原因及恰好三项的 `verdicts` 保持各自语义。
 
 当前 #649 的 `computeRunMetrics` 仅是 records 内部入口，不从包 index 导出、不接入 collect，也不写文件。它始终以 run 根目录作为嵌套输入/输出的安全基目录，只读本刀五种 `.dat`；储量文件逐个处理，先遇缺失或非有限值也不掩盖后续已存在文件的结构/安全错误。水量平衡数值暂为 `null/pending_water_balance`，此中间态不由生产调用方发布；后续水量平衡生产者完整接入前，公开 serializer 的完整预算契约由构造值测试固定。
+
+### O1：积雪与冠层截留储量折算事实
+
+以下事实对应 SHUD pin `3aec65755926c478e13ca7d4fea80715e4e90345`。`veg_frac_weighted` 表示**消费者是否还需要再乘一次**元素植被覆盖率，而不是模型内部是否曾乘过植被覆盖率。四条均为 `scale = 1`、`veg_frac_weighted = false`，因此登记中不含 `veg_frac_source`。
+
+| 登记 | 原量与单位/面积口径 | scale | 额外 veg_frac_weighted | 决定口径的源码 |
+|---|---|---|---|---|
+| `snow.output` | `eleysnow` 绑定 `yEleSnow`；以元素面积计的降水水深 m，不是冠层/裸地子面积上的雪深 | 1 | false | `SHUD/src/ModelData/MD_ET.cpp:44`、`SHUD/src/ModelData/MD_ET.cpp:110`、`SHUD/src/ModelData/MD_ET.cpp:137`、`SHUD/src/ModelData/MD_ET.cpp:141`、`SHUD/src/ModelData/MD_ET.cpp:159`、`SHUD/src/ModelData/MD_initialize.cpp:248` |
+| `snow.ic` | `.cfg.ic` 元素表 `Snow`；按 `yEleSnow` 的 m 口径直接读入/写出，无额外植被乘数 | 1 | false | `SHUD/src/ModelData/MD_initialize.cpp:75`、`SHUD/src/ModelData/MD_update.cpp:237`、`SHUD/src/ModelData/MD_update.cpp:239` |
+| `ic.output` | `eleyic` 绑定 `yEleIS`；存储水深 m，内部赋值已含植被覆盖率，消费者不再乘 | 1 | false | `SHUD/src/ModelData/MD_ET.cpp:44`、`SHUD/src/ModelData/MD_ET.cpp:145`、`SHUD/src/ModelData/MD_ET.cpp:146`、`SHUD/src/ModelData/MD_ET.cpp:155`、`SHUD/src/ModelData/MD_ET.cpp:158`、`SHUD/src/ModelData/MD_initialize.cpp:246` |
+| `ic.ic` | `.cfg.ic` 元素表 `Canopy`；按 `yEleIS` 的 m 口径直接读入/写出，无额外植被乘数 | 1 | false | `SHUD/src/ModelData/MD_initialize.cpp:74`、`SHUD/src/ModelData/MD_update.cpp:237`、`SHUD/src/ModelData/MD_update.cpp:239` |
+
+单位链来自算术而非字段名称：`SHUD/src/ModelData/MD_ET.cpp:44` 将降水 mm/day 换成 m/min，`SHUD/src/ModelData/MD_ET.cpp:110` 使用分钟步长；积雪在 `SHUD/src/ModelData/MD_ET.cpp:137`、`SHUD/src/ModelData/MD_ET.cpp:141` 积分，截留在 `SHUD/src/ModelData/MD_ET.cpp:155` 积分，再写入相应状态数组。
+
+输出绑定使用实际的七参数 `Print_Ctrl::Init` 重载：`SHUD/src/classes/Model_Control.cpp:354` 绑定数组指针，`SHUD/src/classes/Model_Control.cpp:363` 对储量设置 `tau = 1`。`SHUD/src/classes/Model_Control.cpp:440` 与 `SHUD/src/classes/Model_Control.cpp:445` 对状态采样求平均，`SHUD/src/classes/Model_Control.cpp:410` 写二进制缓冲区。因此表中单位一致不代表输出是瞬时末态；仍适用本节的区间平均近似。
+
+IC 的列读入只对应 default/file 初始化分支（`SHUD/src/ModelData/MD_initialize.cpp:74`、`SHUD/src/ModelData/MD_initialize.cpp:75`）；模式 0/1/2 分别在 `SHUD/src/ModelData/MD_initialize.cpp:17`、`SHUD/src/ModelData/MD_initialize.cpp:18`、`SHUD/src/ModelData/MD_initialize.cpp:33`、`SHUD/src/ModelData/MD_initialize.cpp:34`、`SHUD/src/ModelData/MD_initialize.cpp:49`、`SHUD/src/ModelData/MD_initialize.cpp:50` 将两项置零。`SHUD/src/ModelData/MD_initialize.cpp:108`、`SHUD/src/ModelData/MD_initialize.cpp:109` 的初始冠层/地面积雪拆分不对绑定的 `yEleSnow` 再加因子。`SHUD/src/ModelData/MD_update.cpp:237` 的表头与 `SHUD/src/ModelData/MD_update.cpp:239` 的 `%lf` 文本写出确定 Canopy/Snow 列对应关系，但文本精度与二进制区间均值不同，不能声称 IC 输入、IC 写出与 `.dat` 字节相同，也不能据此断言某次运行选择了文件初始化。
+
+core 根导出 `STORAGE_DEPTH_CONVERSIONS` 与 `StorageDepthConversionsSchema`；常量及其组、条目、出处数组均冻结，不接受 profile/runtime 覆写。严格支持 schema 校验四条齐全、有限正系数、布尔标记和完整规范化源码引用；仅当至少一个标记为 true 时要求有效的 `veg_frac_source`，全 false 时连显式 `undefined` 属性也拒绝。反事实 true 标记测试只验证 schema 形状，不提供实际 VegFrac 读取配方。本登记不验证或修复 ET 反馈方程；相关语义问题独立跟踪于 [#693](https://github.com/DankerMu/SHUD-Harness/issues/693)，不据此改变系数或水量平衡公式。
 
 ## 13. 阈值
 
