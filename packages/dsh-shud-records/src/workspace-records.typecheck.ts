@@ -1,5 +1,7 @@
 // Checked by the normal package typecheck; excluded from emitting builds.
 import type {
+  AnalysisPlan,
+  AnalysisPlanId,
   TaskCard,
   TaskStatus,
   StackLock,
@@ -17,6 +19,8 @@ import type {
   TaskId,
 } from "@shud-harness/dsh-shud-core";
 import {
+  createAnalysisPlan,
+  checkCalibProducts,
   readWorkspaceRecord,
   writeWorkspaceRecord,
   createChangeRequest,
@@ -69,6 +73,11 @@ const report: EvidenceReport = readWorkspaceRecord(cwd, "report", id);
 const change: ChangeRequest = readWorkspaceRecord(cwd, "change", id);
 const verification: VerificationCase = readWorkspaceRecord(cwd, "verification", id);
 const build: BuildRecord = readWorkspaceRecord(cwd, "build", id);
+const analysis: AnalysisPlan = readWorkspaceRecord(cwd, "analysis", id);
+const readonlyAnalysis: AnalysisPlan = readWorkspaceRecord(cwd, "analysis", id, {
+  readonly: true,
+});
+const analysisId: AnalysisPlanId = analysis.analysis_plan_id;
 const readonlyChange: ChangeRequest = readWorkspaceRecord(cwd, "change", id, { readonly: true });
 const readonlyVerification: VerificationCase = readWorkspaceRecord(cwd, "verification", id, {
   readonly: true,
@@ -85,9 +94,11 @@ writeWorkspaceRecord(cwd, "change", value);
 writeWorkspaceRecord(cwd, "verification", value);
 // @ts-expect-error BuildRecords are published as whole directories, not generic overwrites.
 writeWorkspaceRecord(cwd, "build", value);
+// @ts-expect-error AnalysisPlans have no overwrite API after exclusive publication.
+writeWorkspaceRecord(cwd, "analysis", value);
 declare const mutableKind: MutableWorkspaceRecordKind;
 const legacyMutableKind: "task" | "data" | "report" = mutableKind;
-// @ts-expect-error The file layer has seven fixed record kinds, not arbitrary path plugins.
+// @ts-expect-error The file layer has eight fixed record kinds, not arbitrary path plugins.
 readWorkspaceRecord(cwd, "custom", id);
 // @ts-expect-error Kind-specific reads must not erase their domain result type.
 const crossed: TaskCard = readWorkspaceRecord(cwd, "report", id);
@@ -98,6 +109,8 @@ const crossedChange: VerificationCase = readWorkspaceRecord(cwd, "change", id);
 const crossedVerification: BuildRecord = readWorkspaceRecord(cwd, "verification", id);
 // @ts-expect-error A build read must retain its BuildRecord result.
 const crossedBuild: ChangeRequest = readWorkspaceRecord(cwd, "build", id);
+// @ts-expect-error An analysis read must retain its AnalysisPlan result.
+const crossedAnalysis: VerificationCase = readWorkspaceRecord(cwd, "analysis", id);
 void [
   change,
   verification,
@@ -109,6 +122,10 @@ void [
   crossedChange,
   crossedVerification,
   crossedBuild,
+  analysis,
+  readonlyAnalysis,
+  analysisId,
+  crossedAnalysis,
 ];
 
 const observation: Promise<{ files_changed: string[]; patch: Buffer }> = observeSourceChanges(cwd);
@@ -155,6 +172,23 @@ void [observation, derivedRecord, adjustment, synchronousObservation, asynchrono
 
 declare const changeFields: Omit<ChangeRequest, "change_id" | "patch_path">;
 declare const verificationFields: Omit<VerificationCase, "vc_id">;
+declare const analysisFields: Omit<AnalysisPlan, "analysis_plan_id">;
+const createdAnalysis: AnalysisPlan = createAnalysisPlan(cwd, analysisFields);
+const createdAnalysisId: AnalysisPlanId = createdAnalysis.analysis_plan_id;
+const inputDigests: AnalysisPlan["input_digests"] = checkCalibProducts(
+  analysis.input_dir,
+  analysis.project,
+  analysis.parameter_sets,
+);
+// @ts-expect-error Product checking consumes structured parameter sets, not arbitrary JSON.
+checkCalibProducts(cwd, "ccw", value);
+// @ts-expect-error Product checking is synchronous.
+const asynchronousProducts: Promise<unknown> = checkCalibProducts(
+  analysis.input_dir,
+  analysis.project,
+  analysis.parameter_sets,
+);
+void [inputDigests, asynchronousProducts];
 const createdChange: ChangeRequest = createChangeRequest(cwd, change);
 const createdVerification: VerificationCase = createVerificationCase(cwd, verificationFields);
 const patchWritten: void = writeChangePatch(cwd, change.change_id, Buffer.from("abc"));
@@ -167,6 +201,12 @@ const rewrittenChange: void = rewriteChangeRequest(cwd, change);
 createChangeRequest(cwd, value);
 // @ts-expect-error Verification creation takes complete domain fields.
 createVerificationCase(cwd, value);
+// @ts-expect-error Analysis creation takes complete domain fields.
+createAnalysisPlan(cwd, value);
+// @ts-expect-error The allocator owns analysis_plan_id.
+createAnalysisPlan(cwd, { ...analysisFields, analysis_plan_id: analysis.analysis_plan_id });
+// @ts-expect-error Analysis creation is synchronous.
+const asynchronousAnalysis: Promise<AnalysisPlan> = createAnalysisPlan(cwd, analysisFields);
 // @ts-expect-error The candidate must supply both its id and bound patch path.
 createChangeRequest(cwd, changeFields);
 // @ts-expect-error The candidate must supply its bound patch path.
@@ -192,6 +232,9 @@ const decodedPatch: string = readChangePatch(cwd, change.change_id);
 void [
   createdChange,
   createdVerification,
+  createdAnalysis,
+  createdAnalysisId,
+  asynchronousAnalysis,
   patchWritten,
   patchRead,
   readonlyPatch,

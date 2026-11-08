@@ -12,7 +12,7 @@ import {
   type WorkspaceRecordStage,
 } from "./index.ts";
 import { installUnsafe, unsafeKinds } from "./test-harness.ts";
-import { buildCase, workspaceFileCases } from "./workspace-files-test-harness.ts";
+import { analysisCase, buildCase, workspaceFileCases } from "./workspace-files-test-harness.ts";
 
 vi.mock("node:fs", async (original) => {
   const actual = await original<typeof fs>();
@@ -168,6 +168,22 @@ function expectUnchanged(target: string, text: string, before: FileIdentity): vo
   expect(native.readdirSync(nativePath.dirname(target))).toEqual([nativePath.basename(target)]);
 }
 
+test("reads an analysis plan by its bound id without changing bytes or mtime", () => {
+  expect(analysisCase.schema.safeParse(analysisCase.value).success).toBe(true);
+  const text = `  ${JSON.stringify(analysisCase.value, null, 2)}\n\n`;
+  const target = seed(analysisCase.relative, text);
+  const before = identity(target);
+  vi.clearAllMocks();
+
+  const plan = readWorkspaceRecord(cwd, "analysis", analysisCase.id, { readonly: true });
+
+  expect(plan).toEqual(analysisCase.value);
+  expect(plan).toMatchObject({ analysis_plan_id: analysisCase.id });
+  expectUnchanged(target, text, before);
+  expectNoWrites();
+  expect(native.readdirSync(cwd)).toEqual(["analyses"]);
+});
+
 describe.each(workspaceFileCases)("$kind workspace file", (fixture) => {
   describe.each(modes)("$name reads", ({ options }) => {
     test("returns the complete schema-valid object from its published layout without rewriting", () => {
@@ -222,6 +238,7 @@ describe.each(workspaceFileCases)("$kind workspace file", (fixture) => {
       "CHG-0001",
       "VC-0001",
       "BUILD-0001",
+      "PLAN-0001",
       fixture.id.toUpperCase(),
       "TASK-20261102T090000-a1b2",
       `${fixture.id}/child`,

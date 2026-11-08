@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
+  AnalysisPlanSchema,
   BuildRecordSchema,
   ChangeRequestSchema,
   DataProvenanceSchema,
@@ -10,6 +11,7 @@ import {
   VerificationCaseSchema,
 } from "@shud-harness/dsh-shud-core";
 import {
+  createAnalysisPlan,
   createTaskCard,
   createDataProvenance,
   createEvidenceReport,
@@ -27,6 +29,7 @@ import {
 } from "./index.ts";
 import { installUnsafe, mutableCases, recordCases, reportCase, taskCase } from "./test-harness.ts";
 import {
+  analysisCase,
   buildCase,
   changeCase,
   verificationCase,
@@ -109,6 +112,8 @@ function decoy(fixture: (typeof cases)[number]) {
       return { ...fixture.value, description: "LEXICAL_SENTINEL" };
     case "build":
       return { ...fixture.value, compiler: "LEXICAL_SENTINEL" };
+    case "analysis":
+      return { ...fixture.value, created_by: "LEXICAL_SENTINEL" };
   }
 }
 
@@ -204,6 +209,10 @@ describe.each(modes)("%s workspace routing", (mode) => {
     expect(
       readWorkspaceRecord(physical, "verification", verification.vc_id, { readonly: true }),
     ).toEqual(verification);
+    const analysis = createAnalysisPlan(cwd, AnalysisPlanSchema.parse(analysisCase.value));
+    expect(
+      readWorkspaceRecord(physical, "analysis", analysis.analysis_plan_id, { readonly: true }),
+    ).toEqual(analysis);
     const build = await publishBuildDirectory(cwd, async (directory, id) => {
       expect(dirname(directory)).toBe(join(physical, "builds"));
       fs.writeFileSync(join(directory, "shud"), "abc", { mode: 0o755 });
@@ -338,6 +347,11 @@ test("flat and exclusive creators and the build producer create missing cwd recu
   const vcCwd = join(root, "absent-verification", "workspace");
   const vc = createVerificationCase(vcCwd, VerificationCaseSchema.parse(verificationCase.value));
   expect(readWorkspaceRecord(vcCwd, "verification", vc.vc_id, { readonly: true })).toEqual(vc);
+  const analysisCwd = join(root, "absent-analysis", "workspace");
+  const analysis = createAnalysisPlan(analysisCwd, AnalysisPlanSchema.parse(analysisCase.value));
+  expect(
+    readWorkspaceRecord(analysisCwd, "analysis", analysis.analysis_plan_id, { readonly: true }),
+  ).toEqual(analysis);
   const buildCwd = join(root, "absent-build", "workspace");
   const physicalBuilds = join(fs.realpathSync.native(root), "absent-build", "workspace", "builds");
   const build = await publishBuildDirectory(buildCwd, async (directory, id) => {
@@ -364,6 +378,7 @@ for (const operation of [
   "report",
   "change",
   "verification",
+  "analysis",
   "patch",
   "markdown",
   "build",
@@ -379,6 +394,7 @@ for (const operation of [
         report: "reports",
         change: "changes",
         verification: "verifications",
+        analysis: "analyses",
         patch: "patches",
         markdown: "reports",
         build: "builds",
@@ -413,6 +429,8 @@ for (const operation of [
               cwd,
               VerificationCaseSchema.parse(verificationCase.value),
             );
+          case "analysis":
+            return createAnalysisPlan(cwd, AnalysisPlanSchema.parse(analysisCase.value));
           case "patch":
             return writeChangePatch(cwd, change.change_id, "abc");
           case "markdown":

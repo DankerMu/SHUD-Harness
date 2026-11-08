@@ -1,4 +1,5 @@
 import {
+  AnalysisPlanSchema,
   BuildRecordSchema,
   ChangeRequestSchema,
   VerificationCaseSchema,
@@ -102,6 +103,51 @@ export const buildCase = {
   },
 } as const;
 
+export const analysisCase = {
+  kind: "analysis",
+  id: "PLAN-20261108T093000-5c1e",
+  directory: "analyses",
+  relative: "analyses/PLAN-20261108T093000-5c1e.json",
+  schema: AnalysisPlanSchema,
+  value: {
+    analysis_plan_id: "PLAN-20261108T093000-5c1e",
+    task_id: "TASK-20261102T090000-c3d4",
+    mode: "sensitivity",
+    strategy: "one_at_a_time",
+    input_dir: "/workspace/input/ccw",
+    project: "ccw",
+    end_days: 90,
+    threads: 1,
+    parameter_sets: [
+      { parameter_set_id: "PSET-1", label: null, baseline: true, changes: {} },
+      {
+        parameter_set_id: "PSET-2",
+        label: null,
+        baseline: false,
+        changes: { GEOL_KSATH: 2 },
+      },
+      {
+        parameter_set_id: "PSET-3",
+        label: null,
+        baseline: false,
+        changes: { LC_ROUGH: 2 },
+      },
+    ],
+    parameter_space_rationale: {
+      proposed_by: "agent",
+      basis: "Single-key perturbations relative to the baseline.",
+      confirmed_by: null,
+    },
+    input_digests: {
+      "ccw.cfg.calib": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "ccw.para.geol": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ccw.para.lc": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    },
+    created_by: "coordinator",
+    created_at: "2026-11-08T09:30:00Z",
+  },
+} as const;
+
 export const workspaceFileCases = [
   {
     ...changeCase,
@@ -123,6 +169,13 @@ export const workspaceFileCases = [
       binary_path: "builds/BUILD-20261102T090000-ffff/shud",
       stdout_path: "builds/BUILD-20261102T090000-ffff/make.stdout.log",
       stderr_path: "builds/BUILD-20261102T090000-ffff/make.stderr.log",
+    },
+  },
+  {
+    ...analysisCase,
+    foreignValue: {
+      ...analysisCase.value,
+      analysis_plan_id: "PLAN-20261108T093000-ffff",
     },
   },
 ] as const;
