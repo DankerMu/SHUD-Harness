@@ -5,7 +5,15 @@ import {
 } from "@shud-harness/dsh-shud-core";
 import { readShudDat, type ShudDat } from "./shud-dat.ts";
 import { readShudInputFile, ShudInputError } from "./shud-input-file.ts";
-import { readShudTextInput } from "./shud-text-input.ts";
+import { readShudTextInput, type ShudInputDataMap, type ShudInputKind } from "./shud-text-input.ts";
+import {
+  catchmentGeometry,
+  elementPorosity,
+  elementStorage,
+  fluxDepth,
+  riverStorage,
+  storageDeltas,
+} from "./run-metrics-water-balance.ts";
 import {
   compareMetricPaths,
   FLOW_FIELDS,
@@ -149,8 +157,8 @@ function countSolverFailures(bytes: Buffer): number {
 }
 
 /**
- * Internal pending-water-balance producer. Never exported from the package root or
- * called by collect in this slice; persistence belongs to the later complete producer.
+ * Internal shared-water-balance producer. Never exported from the package root or
+ * called by collect in this slice; residual and persistence remain deferred.
  * The run root remains the safety base even for nested input/output observations.
  */
 export function computeRunMetrics(
@@ -209,6 +217,29 @@ export function computeRunMetrics(
     metrics.nonfinite_count += dat.nonfinite_count;
     return dat;
   };
+  const readText = <K extends ShudInputKind>(kind: K): ShudInputDataMap[K] => {
+    currentPath = `input/${project}/${project}.${kind}`;
+    const input = readShudTextInput(runDir, currentPath, kind);
+    observe(input);
+    return input.data;
+  };
+  const readOptional = <T>(read: () => T): T | null => {
+    try {
+      return read();
+    } catch (error) {
+      if (error instanceof ShudInputError && error.stage === "missing") return null;
+      throw error;
+    }
+  };
+  const setWater = (
+    field: "P" | "Qd" | "AET" | "delta_s_surf" | "delta_s_us" | "delta_s_gw" | "delta_s_riv",
+    value: number | null,
+  ) => {
+    if (value !== null && Number.isFinite(value)) {
+      metrics.water_balance[field] = value;
+      metrics.water_balance.reasons[field] = null;
+    }
+  };
   try {
     if (typeof project !== "string" || !isProjectComponent(project)) {
       return unavailable("invalid_project");
@@ -216,10 +247,10 @@ export function computeRunMetrics(
     currentPath = `input/${project}/${project}.sp.riv`;
     const river = readShudTextInput(runDir, currentPath, "sp.riv");
     observe(river);
-    for (const kind of ["sp.mesh", "cfg.ic", "cfg.para"] as const) {
-      currentPath = `input/${project}/${project}.${kind}`;
-      observe(readShudTextInput(runDir, currentPath, kind));
-    }
+    const mesh = readText("sp.mesh");
+    const ic = readText("cfg.ic");
+    readText("cfg.para");
+    const geometry = catchmentGeometry(mesh);
     const indexColumn = river.data.reaches.columns.indexOf("Index");
     const downColumn = river.data.reaches.columns.indexOf("Down");
     const outlets = new Set<number>();
@@ -232,10 +263,25 @@ export function computeRunMetrics(
     }
     metrics.outlets = [...outlets].sort((left, right) => left - right);
     if (outlets.size === 0) return unavailable(`empty_outlets:${river.path}`);
-    // The data buffer is not retained while the independent state files are processed.
-    const flow = flowMetrics(readDat("rivqdown"), metrics.outlets);
-    if (flow === null) return unavailable(`invalid_outlet_columns:${currentPath}`);
-    metrics.flow = flow;
+    // Release the runoff buffer before processing independent state files.
+    {
+      const dat = readDat("rivqdown");
+      const flow = flowMetrics(dat, metrics.outlets);
+      if (flow === null) return unavailable(`invalid_outlet_columns:${currentPath}`);
+      metrics.flow = flow;
+    }
+    const deltas: Record<(typeof STATE_VARIABLES)[number], number[] | null> = {
+      eleygw: null,
+      eleysurf: null,
+      eleyunsat: null,
+      rivystage: null,
+    };
+    const initialColumns = {
+      eleygw: "GW",
+      eleysurf: "Surface",
+      eleyunsat: "Unsat",
+      rivystage: "Stage",
+    } as const;
 
     let negativeCount = 0;
     let missing: string | null = null;
@@ -243,6 +289,12 @@ export function computeRunMetrics(
     for (const variable of STATE_VARIABLES) {
       try {
         const dat = readDat(variable);
+        const initial = variable === "rivystage" ? ic.rivers : ic.elements;
+        const count =
+          variable === "rivystage" ? river.data.reaches.rows.length : mesh.elements.rows.length;
+        if (initial.rows.length === count) {
+          deltas[variable] = storageDeltas(dat, initial, initialColumns[variable]);
+        }
         if (dat.nonfinite_count > 0) {
           nonfinite ??= variable;
         } else {
@@ -276,6 +328,35 @@ export function computeRunMetrics(
       metrics.numerical_health.cvode_failures = null;
       metrics.numerical_health.reasons.cvode_failures =
         error instanceof ShudInputError ? `${error.stage}:stderr.log` : "read:stderr.log";
+    }
+    // Absence leaves only dependent terms pending; later present inputs must still
+    // pass the same safe readers. Existing core/state failure precedence is unchanged.
+    const att = readOptional(() => readText("sp.att"));
+    const geol = readOptional(() => readText("para.geol"));
+    const calib = readOptional(() => readText("cfg.calib"));
+    if (geometry !== null) {
+      const { area, weights } = geometry;
+      if (metrics.flow.total_runoff_m3 !== null) {
+        setWater("Qd", metrics.flow.total_runoff_m3 / area);
+      }
+      setWater("delta_s_surf", elementStorage(deltas.eleysurf, weights));
+      setWater("delta_s_riv", riverStorage(deltas.rivystage, river.data, area));
+      if (att !== null && geol !== null && calib !== null) {
+        const porosity = elementPorosity(att, geol, calib, weights.length);
+        if (porosity !== null) {
+          setWater("delta_s_us", elementStorage(deltas.eleyunsat, weights, porosity));
+          setWater("delta_s_gw", elementStorage(deltas.eleygw, weights, porosity));
+        }
+      }
+    }
+    for (const [variable, field] of [
+      ["elevprcp", "P"],
+      ["eleveta", "AET"],
+    ] as const) {
+      const dat = readOptional(() => readDat(variable));
+      if (dat !== null && geometry !== null) {
+        setWater(field, fluxDepth(dat, geometry.weights, intervalDays(dat)));
+      }
     }
     return finish();
   } catch (error) {

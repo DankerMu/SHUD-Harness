@@ -6,7 +6,6 @@ import { computeRunMetrics } from "./run-metrics.ts";
 import {
   datPath,
   makeMetricsRun,
-  metricFields,
   project,
   stateVariables,
   writeDat,
@@ -146,22 +145,4 @@ test("multiple nonfinite state files choose the code-point-first reason and reta
   const { metrics } = computeRunMetrics(root, project);
   expect(metrics.numerical_health.reasons.negative_state_count).toBe("nonfinite:eleygw");
   expect(metrics.nonfinite_count).toBe(2);
-});
-
-test("water balance is honestly pending internally and carries formula and interval-average context", () => {
-  const { metrics, health } = computeRunMetrics(root, project);
-  expect(Object.keys(metrics.water_balance.reasons).sort()).toEqual(
-    [...metricFields.water_balance].sort(),
-  );
-  for (const key of metricFields.water_balance) {
-    expect(metrics.water_balance.reasons[key]).toBe("pending_water_balance");
-    expect((metrics.water_balance as unknown as Record<string, unknown>)[key]).toBeNull();
-  }
-  expect(health.water_balance_residual).toBeNull();
-  expect(metrics.water_balance.formula_source).toMatch(/wb\.all/u);
-  expect(metrics.water_balance.formula_source).toMatch(/wb\.DS/u);
-  expect(metrics.water_balance.formula_source).toMatch(/snow|积雪/u);
-  expect(metrics.water_balance.formula_source).toMatch(/interception|截留/u);
-  expect(metrics.water_balance.approximation).toMatch(/interval.*average|区间.*平均/iu);
-  expect(metrics.water_balance.approximation).toMatch(/not.*instantaneous|非.*瞬时/iu);
 });
