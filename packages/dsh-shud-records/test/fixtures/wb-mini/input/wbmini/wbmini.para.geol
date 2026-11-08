@@ -1,0 +1,4 @@
+2	8
+INDEX	KsatH(m_d)	KsatV(m_d)	ThetaS(m3_m3)	ThetaR(m3_m3)	vAreaF(m2_m2)	macKsatH(m_d)	Dmac(m)
+1	1.5	0.25	0.25	0.01	0.01	150	1
+2	2.5	0.35	0.45	0.02	0.02	250	2

@@ -167,3 +167,10 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Selected packs: units/source evidence, schema/conditional fields, public exports, immutable governance/config boundary, compatibility/generated projection, documentation/scientific wording. No new IO, processes, concurrency, credentials or profile configuration.
 - Source pin is SHUD 3aec65755926c478e13ca7d4fea80715e4e90345. Register scale1 and no additional vegetation weighting for snow.output, snow.ic, ic.output and ic.ic; omit veg_frac_source. This describes stored units, not validation or repair of SHUD's physical equations.
 - Scope is task3.2b only: governance registration/schema/tests, core root exports, SHUD_Output_Variables O1 facts and this workflow fixture. Preserve all existing constants, core-record count10, schemas/projections, run-metrics spec wording and water-balance formula. No records/jobs/tools/submodule edit or runtime consumption.
+
+## Issue #651 execution fixture
+
+- Expanded, Critical Paths #2/#6/#7 and scientific provenance: populate the seven rSHUD-shared water-balance terms through the existing records-internal producer. Preserve the upstream classification and PI-defined D7 formulas.
+- Selected packs: numeric units/joins, safe single-read file evidence, deterministic serialization/compatibility, independent oracle integrity, local-only R tooling, documentation/scientific boundaries. No auth, concurrency, release configuration or new runtime dependency.
+- Scope is task3.2c: records calculation/tests/wb-mini fixture and the local R cross-check script, plus minimum behavior documentation. No core/jobs/tools/CI/root-script/submodule changes. Snow/interception, aggregate/residual and final null reasons remain #652; collect remains #662.
+- Verification includes a semantic RED against the current null-valued producer, committed R-generated expectations, a rejected missing-GEOL_THETAS mutant, unchanged-reader regressions, built-module and real ccw comparison, no-R test execution, and unchanged citation-checker rejection. Only task3.2c may close; no shared-change archive or scientific/PI acceptance.

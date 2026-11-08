@@ -232,7 +232,7 @@ records 的公开 `serializeRunMetrics` 以共享严格形状校验拒绝非有�
 
 `water_balance.residual` 与 `numerical_health.water_balance_residual` 是同一个数值，两个字段的值与各自原因必须一致（均为 null 时原因也必须相同）；共享 wire 校验拒绝矛盾，不复制或修复任一侧。无论 `status` 为 `ok` 还是 `unavailable`，`max_solver_dt` 均为 `null`，原因固定为 `not_observable_in_pinned_shud`，不被其它输入失败原因覆盖；顶层失败原因及恰好三项的 `verdicts` 保持各自语义。
 
-当前 #649 的 `computeRunMetrics` 仅是 records 内部入口，不从包 index 导出、不接入 collect，也不写文件。它始终以 run 根目录作为嵌套输入/输出的安全基目录，只读本刀五种 `.dat`；储量文件逐个处理，先遇缺失或非有限值也不掩盖后续已存在文件的结构/安全错误。水量平衡数值暂为 `null/pending_water_balance`，此中间态不由生产调用方发布；后续水量平衡生产者完整接入前，公开 serializer 的完整预算契约由构造值测试固定。
+当前 #651 的 `computeRunMetrics` 仍仅是 records 内部入口，不从包 index 导出、不接入 collect，也不写文件。它始终以 run 根目录作为嵌套输入/输出的安全基目录，只读七种规定 `.dat`（`rivqdown`、`elevprcp`、`eleveta` 与四种储量）；各文件只观察一次，储量处理后只保留末行减初值的紧凑分量，不保留整份输出缓冲区。七个 rSHUD 共有项 `P`、`Qd`、`AET`、`delta_s_surf/us/gw/riv` 在各自依赖完整可用时计算；缺失、非有限或覆盖不完整的依赖不产生部分总量，也不以默认孔隙率补齐。先遇缺失不掩盖后续已存在文件的结构/安全错误。积雪、截留、总储量变化与残差仍为 `null/pending_water_balance`；不可计算的共有项也暂用该原因，最终逐项原因由 #652 接入。此中间态不由生产调用方发布，公开 serializer 的完整预算契约仍由构造值测试固定；共有项对照不构成水文真实性或模型改进证据。
 
 ### O1：积雪与冠层截留储量折算事实
 
