@@ -62,7 +62,13 @@ function allocate(fixture: MutableFixture, fields?: Record<string, unknown>) {
 describe.each(mutableCases)("$kind allocation", (fixture) => {
   const expectedOutput =
     fixture.kind === "task"
-      ? { ...fixture.value, linked_changes: [], linked_verifications: [], source_base_commit: null }
+      ? {
+          ...fixture.value,
+          linked_changes: [],
+          linked_verifications: [],
+          linked_analyses: [],
+          source_base_commit: null,
+        }
       : fixture.kind === "data"
         ? { ...fixture.value, sources: { ...fixture.value.sources, external_files: [] } }
         : { ...fixture.value, change_ids: [], verification_ids: [] };
@@ -153,6 +159,7 @@ test("an empty pre-existing task id directory is still a collision", () => {
     task_id: "TASK-20261027T080005-abcd",
     linked_changes: [],
     linked_verifications: [],
+    linked_analyses: [],
     source_base_commit: null,
   });
   expect(realFs.readdirSync(original)).toEqual([]);

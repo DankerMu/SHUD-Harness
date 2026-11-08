@@ -294,6 +294,7 @@ for (const fixture of recordCases) {
             ...fixture.value,
             linked_changes: [],
             linked_verifications: [],
+            linked_analyses: [],
             source_base_commit: null,
           }
         : fixture.kind === "stack"

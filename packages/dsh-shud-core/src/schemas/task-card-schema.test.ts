@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { TaskCardSchema } from "../index.ts";
+import { AnalysisPlanIdSchema, TaskCardSchema } from "../index.ts";
 
 const card = {
   task_id: "TASK-20261027T080005-3f9c",
@@ -21,10 +21,17 @@ const card = {
 };
 
 const sourceBaseCommit = "9a422e5eb708df7d2f8b4066a3083a031d679a82";
+const analysisPlanId = "PLAN-20261107T080000-3f9c";
+
+function expectAnalysisDefault(input: unknown) {
+  const { linked_analyses, ...oldFields } = TaskCardSchema.parse(input);
+  expect(linked_analyses).toEqual([]);
+  return oldFields;
+}
 
 function expectLegacyDefaults(input: unknown, expectedOldFields: unknown = input) {
   const { linked_changes, linked_verifications, source_base_commit, ...oldFields } =
-    TaskCardSchema.parse(input);
+    expectAnalysisDefault(input);
   expect(oldFields).toEqual(expectedOldFields);
   expect(linked_changes).toEqual([]);
   expect(linked_verifications).toEqual([]);
@@ -43,7 +50,7 @@ describe("TaskCard branded references", () => {
       linked_verifications: [],
       source_base_commit: null,
     };
-    expect(TaskCardSchema.parse(input)).toEqual(input);
+    expect(expectAnalysisDefault(input)).toEqual(input);
   });
 
   test.each(["stack_id", "data_id"] as const)("requires an explicit %s", (field) => {
@@ -102,16 +109,20 @@ describe("TaskCard code-change references and legacy defaults", () => {
       linked_verifications: ["VC-20261102T090000-a1b2"],
       source_base_commit: sourceBaseCommit,
     };
-    expect(TaskCardSchema.parse(input)).toEqual(input);
+    const before = JSON.stringify(input);
+    expect(expectAnalysisDefault(input)).toEqual(input);
+    expect(JSON.stringify(input)).toBe(before);
+    expect(input).not.toHaveProperty("linked_analyses");
   });
 
-  test("supplies three defaults without changing legacy input or its existing fields", () => {
+  test("supplies four defaults without changing legacy input or its existing fields", () => {
     const before = JSON.stringify(card);
     expectLegacyDefaults(card);
     expect(JSON.stringify(card)).toBe(before);
     expect(card).not.toHaveProperty("linked_changes");
     expect(card).not.toHaveProperty("linked_verifications");
     expect(card).not.toHaveProperty("source_base_commit");
+    expect(card).not.toHaveProperty("linked_analyses");
   });
 
   test("supplies independent empty link arrays for each legacy parse", () => {
@@ -121,9 +132,19 @@ describe("TaskCard code-change references and legacy defaults", () => {
     expect(first.linked_verifications).toEqual([]);
     expect(second.linked_changes).toEqual([]);
     expect(second.linked_verifications).toEqual([]);
+    expect(first.linked_analyses).toEqual([]);
+    expect(second.linked_analyses).toEqual([]);
     expect(first.linked_changes).not.toBe(second.linked_changes);
     expect(first.linked_verifications).not.toBe(second.linked_verifications);
     expect(first.linked_changes).not.toBe(first.linked_verifications);
+    expect(first.linked_analyses).not.toBe(second.linked_analyses);
+    expect(first.linked_analyses).not.toBe(first.linked_changes);
+    expect(first.linked_analyses).not.toBe(first.linked_verifications);
+    first.linked_analyses.push(AnalysisPlanIdSchema.parse(analysisPlanId));
+    expect(first.linked_analyses).toEqual([analysisPlanId]);
+    expect(second.linked_analyses).toEqual([]);
+    expect(first.linked_changes).toEqual([]);
+    expect(first.linked_verifications).toEqual([]);
   });
 
   test("keeps runtime_phase and theory_bundle_ids optional", () => {
@@ -221,6 +242,103 @@ describe("TaskCard code-change references and legacy defaults", () => {
       ],
       source_base_commit: null,
     };
-    expect(TaskCardSchema.parse(input)).toEqual(input);
+    expect(expectAnalysisDefault(input)).toEqual(input);
+  });
+});
+
+describe("TaskCard sensitivity analysis references", () => {
+  test("accepts sensitivity with one branded plan and a null source base commit", () => {
+    const input = {
+      ...card,
+      type: "sensitivity",
+      source_base_commit: null,
+      linked_analyses: [analysisPlanId],
+    };
+    expect(TaskCardSchema.parse(input)).toEqual({
+      ...input,
+      linked_changes: [],
+      linked_verifications: [],
+    });
+  });
+
+  test.each(["engineering", "science_assist", "ops", "code_change", "sensitivity"])(
+    "accepts omitted and explicit empty analysis links for %s",
+    (type) => {
+      const input = {
+        ...card,
+        type,
+        source_base_commit: type === "code_change" ? sourceBaseCommit : null,
+      };
+      const expected = { ...input, linked_changes: [], linked_verifications: [] };
+      expect(expectAnalysisDefault(input)).toEqual(expected);
+      expect(expectAnalysisDefault({ ...input, linked_analyses: [] })).toEqual(expected);
+    },
+  );
+
+  test.each(["engineering", "science_assist", "ops", "code_change"])(
+    "rejects nonempty analysis links on %s at linked_analyses",
+    (type) => {
+      const result = TaskCardSchema.safeParse({
+        ...card,
+        type,
+        source_base_commit: type === "code_change" ? sourceBaseCommit : null,
+        linked_analyses: [analysisPlanId],
+      });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((issue) => issue.path)).toContainEqual(["linked_analyses"]);
+    },
+  );
+
+  test("rejects a sensitivity source base commit even when it is valid 40-hex", () => {
+    const result = TaskCardSchema.safeParse({
+      ...card,
+      type: "sensitivity",
+      source_base_commit: sourceBaseCommit,
+      linked_analyses: [analysisPlanId],
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.path)).toContainEqual(["source_base_commit"]);
+  });
+
+  test.each(["PLAN-0001", "PLAN-20261107T080000-3F9C"])(
+    "rejects malformed analysis plan %s at the array item",
+    (plan) => {
+      const result = TaskCardSchema.safeParse({
+        ...card,
+        type: "sensitivity",
+        source_base_commit: null,
+        linked_analyses: [plan],
+      });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((issue) => issue.path)).toContainEqual([
+        "linked_analyses",
+        0,
+      ]);
+    },
+  );
+
+  test.each([null, analysisPlanId])(
+    "rejects non-array analysis links %j rather than defaulting or coercing them",
+    (linked_analyses) => {
+      const result = TaskCardSchema.safeParse({ ...card, linked_analyses });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.map((issue) => issue.path)).toContainEqual(["linked_analyses"]);
+    },
+  );
+
+  test("preserves unsorted duplicate analysis links without enforcing one-plan cardinality", () => {
+    const input = {
+      ...card,
+      type: "sensitivity",
+      source_base_commit: null,
+      linked_analyses: ["PLAN-20261107T090000-a1b2", analysisPlanId, "PLAN-20261107T090000-a1b2"],
+    };
+    const before = JSON.stringify(input);
+    expect(TaskCardSchema.parse(input)).toEqual({
+      ...input,
+      linked_changes: [],
+      linked_verifications: [],
+    });
+    expect(JSON.stringify(input)).toBe(before);
   });
 });

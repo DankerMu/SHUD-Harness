@@ -14,7 +14,8 @@
         "engineering",
         "science_assist",
         "ops",
-        "code_change"
+        "code_change",
+        "sensitivity"
       ]
     },
     "status": {
@@ -145,6 +146,14 @@
       "items": {
         "type": "string",
         "pattern": "^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
+    "linked_analyses": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
       }
     },
     "source_base_commit": {

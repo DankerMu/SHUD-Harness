@@ -102,7 +102,8 @@ test("task_create with disjoint data/raw publishes a planned card without changi
       JSON.parse(fs.readFileSync(join(directory, "task.json"), "utf8")),
     );
     expect(result.value).toEqual({ task_id: taskId, status: "planned" });
-    const { created_at, updated_at, ...fields } = card;
+    const { created_at, updated_at, linked_analyses, ...fields } = card;
+    expect(linked_analyses).toEqual([]);
     expect(fields).toEqual({
       ...args,
       task_id: taskId,

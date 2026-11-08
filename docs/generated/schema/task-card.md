@@ -11,7 +11,7 @@ Required is evaluated within the immediate parent object.
 | Field | Required | Nullable | Type | Constraints / values |
 |---|---|---|---|---|
 | task_id | yes | no | string | pattern=^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
-| type | yes | no | enum<string> | values: `engineering`, `science_assist`, `ops`, `code_change` |
+| type | yes | no | enum<string> | values: `engineering`, `science_assist`, `ops`, `code_change`, `sensitivity` |
 | status | yes | no | enum<string> | values: `created`, `planned`, `running`, `parked`, `reporting`, `awaiting_pi`, `done`, `cancelled`, `blocked` |
 | runtime_phase | no | yes | enum<string> \| null | values: `running_local`, `submitted_job`, `waiting_for_job`, `collecting` |
 | title | yes | no | string | minLength=1 |
@@ -30,6 +30,7 @@ Required is evaluated within the immediate parent object.
 | linked_reports | yes | no | array<string> | items: pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | linked_changes | no | no | array<string> | default=[]; items: pattern=^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | linked_verifications | no | no | array<string> | default=[]; items: pattern=^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| linked_analyses | no | no | array<string> | default=[]; items: pattern=^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | source_base_commit | no | yes | string \| null | pattern=^[0-9a-f]{40}$ |
 | created_at | yes | no | string | minLength=1 |
 | updated_at | yes | no | string | minLength=1 |
@@ -39,7 +40,7 @@ Required is evaluated within the immediate parent object.
 
 | Field | Values |
 |---|---|
-| type | `engineering`, `science_assist`, `ops`, `code_change` |
+| type | `engineering`, `science_assist`, `ops`, `code_change`, `sensitivity` |
 | status | `created`, `planned`, `running`, `parked`, `reporting`, `awaiting_pi`, `done`, `cancelled`, `blocked` |
 | runtime_phase | `running_local`, `submitted_job`, `waiting_for_job`, `collecting` |
 | inference_budget.mode | `cheap`, `normal`, `deep` |
@@ -69,6 +70,7 @@ linked_reports:
   - "REPORT-20261027T090000-5b10"
 linked_changes: []
 linked_verifications: []
+linked_analyses: []
 source_base_commit: null
 created_at: "example"
 updated_at: "example"
@@ -79,9 +81,9 @@ theory_bundle_ids:
 ## Changelog Diff
 
 ```diff
-+ schema TaskCard sha256:1b8d5c5510633a570371ce5e95fea28545d3de204de9a5fdc13f2ae4a4cd704d
++ schema TaskCard sha256:8603f7cd916555a7b34e6124224f9460cc1c06c13ab3dcdcb08d5711aed9d221
 + field task_id required=yes nullable=no type=string constraints=pattern=^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
-+ field type required=yes nullable=no type=enum<string> constraints=values: `engineering`, `science_assist`, `ops`, `code_change`
++ field type required=yes nullable=no type=enum<string> constraints=values: `engineering`, `science_assist`, `ops`, `code_change`, `sensitivity`
 + field status required=yes nullable=no type=enum<string> constraints=values: `created`, `planned`, `running`, `parked`, `reporting`, `awaiting_pi`, `done`, `cancelled`, `blocked`
 + field runtime_phase required=no nullable=yes type=enum<string> | null constraints=values: `running_local`, `submitted_job`, `waiting_for_job`, `collecting`
 + field title required=yes nullable=no type=string constraints=minLength=1
@@ -100,6 +102,7 @@ theory_bundle_ids:
 + field linked_reports required=yes nullable=no type=array<string> constraints=items: pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field linked_changes required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field linked_verifications required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field linked_analyses required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field source_base_commit required=no nullable=yes type=string | null constraints=pattern=^[0-9a-f]{40}$
 + field created_at required=yes nullable=no type=string constraints=minLength=1
 + field updated_at required=yes nullable=no type=string constraints=minLength=1

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  AnalysisPlanIdSchema,
   ChangeIdSchema,
   DataIdSchema,
   JobRecordIdSchema,
@@ -28,7 +29,13 @@ export const TaskRuntimePhaseSchema = z.enum([
   "collecting",
 ]);
 
-export const TaskTypeSchema = z.enum(["engineering", "science_assist", "ops", "code_change"]);
+export const TaskTypeSchema = z.enum([
+  "engineering",
+  "science_assist",
+  "ops",
+  "code_change",
+  "sensitivity",
+]);
 
 export const InferenceBudgetSchema = z.object({
   mode: z.enum(["cheap", "normal", "deep"]),
@@ -55,6 +62,7 @@ export const TaskCardSchema = z
     linked_reports: z.array(ReportIdSchema),
     linked_changes: z.array(ChangeIdSchema).default([]),
     linked_verifications: z.array(VerificationIdSchema).default([]),
+    linked_analyses: z.array(AnalysisPlanIdSchema).default([]),
     source_base_commit: z
       .string()
       .regex(/^[0-9a-f]{40}$/u)
@@ -67,6 +75,10 @@ export const TaskCardSchema = z
   .refine((card) => (card.type === "code_change") === (card.source_base_commit !== null), {
     path: ["source_base_commit"],
     message: "Source base commit must be non-null exactly when the task type is code_change",
+  })
+  .refine((card) => card.type === "sensitivity" || card.linked_analyses.length === 0, {
+    path: ["linked_analyses"],
+    message: "Analysis links must be empty unless the task type is sensitivity",
   });
 
 export type TaskStatus = z.infer<typeof TaskStatusSchema>;
@@ -74,3 +86,4 @@ export type TaskRuntimePhase = z.infer<typeof TaskRuntimePhaseSchema>;
 export type TaskType = z.infer<typeof TaskTypeSchema>;
 export type InferenceBudget = z.infer<typeof InferenceBudgetSchema>;
 export type TaskCard = z.infer<typeof TaskCardSchema>;
+export type TaskCardInput = z.input<typeof TaskCardSchema>;

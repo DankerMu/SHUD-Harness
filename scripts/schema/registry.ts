@@ -59,6 +59,7 @@ export const schemaDefinitions: SchemaDefinition[] = [
       linked_reports: ["REPORT-20261027T090000-5b10"],
       linked_changes: [],
       linked_verifications: [],
+      linked_analyses: [],
       source_base_commit: null,
     },
   },

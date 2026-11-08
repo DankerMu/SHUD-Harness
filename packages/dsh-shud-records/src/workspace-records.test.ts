@@ -146,7 +146,13 @@ function identity(target: string) {
 describe.each(recordCases)("$kind workspace reads", (fixture) => {
   const expectedOutput =
     fixture.kind === "task"
-      ? { ...fixture.value, linked_changes: [], linked_verifications: [], source_base_commit: null }
+      ? {
+          ...fixture.value,
+          linked_changes: [],
+          linked_verifications: [],
+          linked_analyses: [],
+          source_base_commit: null,
+        }
       : fixture.kind === "stack"
         ? { ...fixture.value, build_id: null }
         : fixture.kind === "data"
@@ -285,7 +291,13 @@ test.each(unsafeKinds)("task nested directory rejects %s for reads and writes", 
 describe.each(mutableCases)("$kind workspace writes", (fixture) => {
   const expectedOutput =
     fixture.kind === "task"
-      ? { ...fixture.value, linked_changes: [], linked_verifications: [], source_base_commit: null }
+      ? {
+          ...fixture.value,
+          linked_changes: [],
+          linked_verifications: [],
+          linked_analyses: [],
+          source_base_commit: null,
+        }
       : fixture.kind === "data"
         ? {
             ...fixture.value,

@@ -1,10 +1,15 @@
 import { ensureDirectory, regularTarget, resolveManagedRoot } from "./workspace-paths.ts";
 import { join } from "node:path";
-import { createBrandedId, TaskCardSchema, type TaskCard } from "@shud-harness/dsh-shud-core";
+import {
+  createBrandedId,
+  TaskCardSchema,
+  type TaskCard,
+  type TaskCardInput,
+} from "@shud-harness/dsh-shud-core";
 import { writeJsonSync } from "./state-files.ts";
 
 /** Allocation, validation and publication stay synchronous to exclude in-process interleaving. */
-export function createTaskCard(cwd: string, fields: Omit<TaskCard, "task_id">): TaskCard {
+export function createTaskCard(cwd: string, fields: Omit<TaskCardInput, "task_id">): TaskCard {
   let card = TaskCardSchema.parse({ ...fields, task_id: createBrandedId("TASK") });
   const tasks = resolveManagedRoot(cwd, "tasks", "TaskCard");
   for (;;) {
