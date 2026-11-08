@@ -35,7 +35,7 @@
     - v0.8 概念集合的术语（指 v0.8 规格定义的 8 个核心对象，不是导出计数）：`Minimal_Schemas.md` 支撑对象节、`Support_Schema_Contracts.md`、`Context_Trust_And_Injection_Spec.md`、`docs/00_INDEX/Theory_To_Code_Rationale.md`、`docs/00_INDEX/Doc_Disposition_*`；
     - 记录当时状态的历史描述：`Port_List.md` 的移植行、`Phased_Plan.md` 的 M1 交付行、`UI_Implementation_Spec.md` 的命名定案、`Migration_Plan_dsh.md`、`docs/adr/implemented/`、`docs/05_PROPOSAL/`。
     - 实现时以 `git grep -nE "8 ?(个)?(核心)?对象|9 个当前导出|9 exported"`（排除 `docs/generated`、`docs/99_ARCHIVE`、`openspec/changes`）复核：命中只能落在上述两类或已改的五处。
-- [ ] 2.2 RunJob/RunRecord 增加 `analysis_plan_id`、`parameter_set_id`（缺键按 null，iff refine）；RunRecord 启用 `artifacts.metrics_summary`（`plots` 仍拒绝）。满足 run-records「RunJob record」「RunRecord record」「Generated projection」；附 M2–M4 旧记录解析回归（依赖 2.1）。
+- [x] 2.2 RunJob/RunRecord 增加 `analysis_plan_id`、`parameter_set_id`（缺键按 null，iff refine）；RunRecord 启用 `artifacts.metrics_summary`（`plots` 仍拒绝）。满足 run-records「RunJob record」「RunRecord record」「Generated projection」；附 M2–M4 旧记录解析回归（依赖 2.1）。
 - [ ] 2.3 TaskCard `type: sensitivity` 与 `linked_analyses`（缺键按 `[]`，refine：非 sensitivity 卡为空）。满足 task-cards「TaskCard record」「TaskCard generated projection」（依赖 2.1）。
 - [ ] 2.4 EvidenceReport 增加 `analysis_ids` 与 `sensitivity_summary`（缺键默认值与 iff refine）。满足 evidence-reports「EvidenceReport record」「EvidenceReport generated projection」（依赖 2.1）。
 - [x] 2.5 governance 常量：
@@ -195,3 +195,25 @@ Required tests: fixed ccw four-pset plan passes; PLAN UTC timestamp/lowercase he
 Required commands: focused schema/branded tests, `pnpm run schema:generate`, `pnpm run instructions:render`, actual isolated `pnpm run schema:check` clean/rejected/restored control, `pnpm run check`, built-core smoke, and the complete task2.1 count-search classification posted to PR. No strengthening of old record path or identifier semantics merely to simplify this slice.
 Count-audit supplement: `openspec/project-profile.md` has both the entry-surface count and a Contracts count/export-status sentence (`9 currently exported ... AnalysisPlan is not currently exported`), the latter missed by the original acceptance regex. Update both within that same allowed source file. Supplement—not replace—the original search with `git grep -nE "currently exported|AnalysisPlan is not currently exported" -- . ':!docs/generated' ':!docs/99_ARCHIVE' ':!openspec/changes'`; post its complete output and per-hit classification, with no residual `9 currently exported` or negative AnalysisPlan export-status assertion. This closes a verification blind spot without expanding the five-file boundary or changing historical classifications.
 Completion is task2.1 only; keep tasks2.2–2.4 and downstream implementation unchecked. One implementer owns code/tests/count-source edits; parent owns fixture, execution evidence, review adjudication and merge.
+
+## Issue #643 risk packs and executable evidence
+
+| Pack | Selection and evidence |
+|---|---|
+| Public API / script entry | Selected: both exported run schemas, built-core legacy/bound/metrics parsing smoke; no CLI |
+| Config / setup | Not selected: no dependency or configuration change |
+| File IO / safety | No runtime IO implementation; scratch read-parse smoke preserves bytes/mtime, existing generator guards reused |
+| Schema / fields | Selected: default-null pair, after-default iff refinement and diagnostics; strict metrics.json/lowercase64hex object; import shared PLAN/PSET definitions |
+| Auth / secrets | No new authority or credentials; preserve old secret/llm and closed-artifact behavior |
+| Concurrency / state / ordering | No concurrency implementation; preserve all existing state predicates and run identity, exercise pairing across valid states |
+| Resource / discovery | Not selected: no new processes, traversal or external input discovery |
+| Compatibility | Selected: unchanged M2–M4 raw input fixtures parse with null defaults; exact old fields/state checks retained under PI-authorized assertion migration; no on-disk backfill |
+| Error handling | Selected: each partial/malformed pair points to prescribed field; bad metrics path/digest/extra keys and plots rejected at artifacts path/key |
+| Release / types | Selected: core typecheck/root exports; jobs null literals only if required, no caller semantics change |
+| Documentation / projection | Selected: schema:generate updates RunJob/RunRecord Markdown+JSON; patterns/defaults/strict shapes checked; actual isolated schema:check stale-field rejection |
+
+Required tests: both-null/both-valid and all omitted/null/non-null pair combinations on both schemas; PLAN-0001/PSET-6/pset-1 rejected at owning field; succeeded metrics summary with health0.003/0/0/null passes; wrong paths, uppercase/missing/short/long/newline sha256 and extra keys rejected; plots still rejected; failed-state metrics reference not additionally forbidden by schema. Legacy omissions tested for M2/M3/M4 with exact unchanged old fields and nonmutated inputs.
+Nullable input positive: explicit `artifacts.metrics_summary: null` must parse successfully and produce null independently of the omitted-key legacy default case. Both literal-null acceptance and missing-key defaulting are required; a default without nullable input does not satisfy the contract.
+Required commands: focused core schema tests and prior run-build regression tests, schema generation/self-test, full default check, built-core smoke and actual isolated drift clean/rejected/restored control. If jobs code receives permitted null literals, also run profile:smoke; no runtime behavior evidence may be claimed from pure schema tests.
+Completion is task2.2 only. One implementer edits source/tests, parent owns fixtures/verification/PR. PI clarification on #643 is part of the immutable review oracle; no other assertion weakening is authorized.
+PI-authorized type-only exception: correct makeRunRecord override input typing in records task-lifecycle-test-harness.ts, preserving all fixture values and reports; full typecheck and report regression tests must pass. Authorization: issue #643 comment6715523002. No other records edits are in scope.

@@ -300,6 +300,7 @@ export async function runSelfTest(): Promise<void> {
   assertSemanticLevelFloorProjection();
   assertCalibWhitelistProjection();
   assertAnalysisPlanProjection();
+  assertRunPlanProjection();
   for (const definition of schemaDefinitions) {
     const jsonSchema = buildJsonSchema(definition);
     if (definition.strictInput) {
@@ -543,6 +544,70 @@ function assertGeneratorSemanticContracts(): void {
 
   if (failures.length > 0) {
     throw new Error(`Generator semantic contract failed:\n${failures.join("\n")}`);
+  }
+}
+
+function assertRunPlanProjection(): void {
+  for (const name of ["RunJob", "RunRecord"]) {
+    const definition = schemaDefinitions.find((entry) => entry.name === name)!;
+    const schema = buildJsonSchema(definition);
+    const rows = flattenFields(schema);
+    const markdown = buildMarkdown(definition, schema);
+    for (const [field, valid, invalid] of [
+      [
+        "analysis_plan_id",
+        ["PLAN-20261108T093000-5c1e"],
+        ["PLAN-0001", "PLAN-20261108T093000-5C1E"],
+      ],
+      [
+        "parameter_set_id",
+        ["PSET-1", "PSET-2", "PSET-3", "PSET-4", "PSET-5"],
+        ["PSET-0", "PSET-6", "pset-1"],
+      ],
+    ] as const) {
+      const property = schema.properties?.[field];
+      const row = rows.find((entry) => entry.field === field);
+      const pattern = property === undefined ? undefined : nonNullSchema(property).pattern;
+      if (
+        property?.default !== null ||
+        row?.required !== "no" ||
+        row.nullable !== "yes" ||
+        pattern === undefined ||
+        valid.some((value) => !new RegExp(pattern).test(value)) ||
+        invalid.some((value) => new RegExp(pattern).test(value)) ||
+        !markdown.includes(`| ${field} | no | yes |`)
+      ) {
+        throw new Error(`${name}.${field} projection lost its nullable default or shared pattern`);
+      }
+    }
+    assertStrictInputClosed(schema, definition);
+    if (name !== "RunRecord") continue;
+    const artifacts = schema.properties?.artifacts;
+    const summary = artifacts?.properties?.metrics_summary;
+    const summaryRow = rows.find((entry) => entry.field === "artifacts.metrics_summary");
+    const object = summary === undefined ? undefined : nonNullSchema(summary);
+    const digest = object?.properties?.sha256;
+    if (
+      summary?.default !== null ||
+      summaryRow?.required !== "no" ||
+      summaryRow.nullable !== "yes" ||
+      object?.type !== "object" ||
+      object.additionalProperties !== false ||
+      JSON.stringify(Object.keys(object.properties ?? {}).sort()) !== '["path","sha256"]' ||
+      JSON.stringify([...(object.required ?? [])].sort()) !== '["path","sha256"]' ||
+      object.properties?.path?.const !== "metrics.json" ||
+      digest?.type !== "string" ||
+      digest.minLength !== 64 ||
+      digest.maxLength !== 64 ||
+      digest.pattern !== "^[0-9a-f]{64}$" ||
+      artifacts?.additionalProperties !== false ||
+      Object.hasOwn(artifacts.properties ?? {}, "plots") ||
+      !markdown.includes("| artifacts.metrics_summary | no | yes |") ||
+      !markdown.includes("| artifacts.metrics_summary.path | yes | no |") ||
+      !markdown.includes("| artifacts.metrics_summary.sha256 | yes | no |")
+    ) {
+      throw new Error("RunRecord metrics projection lost its closed nullable literal/digest shape");
+    }
   }
 }
 

@@ -1,7 +1,13 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 
-import { BuildIdSchema, JobRecordIdSchema, RunIdSchema } from "./run-identifiers.ts";
+import { ParameterSetIdSchema } from "./analysis-plan.ts";
+import {
+  AnalysisPlanIdSchema,
+  BuildIdSchema,
+  JobRecordIdSchema,
+  RunIdSchema,
+} from "./run-identifiers.ts";
 
 export const RunJobSchema = z
   .strictObject({
@@ -10,6 +16,13 @@ export const RunJobSchema = z
     task_id: z.string().min(1).nullable(),
     stack_id: z.string().min(1).nullable(),
     data_id: z.string().min(1).nullable(),
+    analysis_plan_id: AnalysisPlanIdSchema.nullable().default(null),
+    parameter_set_id: ParameterSetIdSchema.nullable()
+      .default(null)
+      .describe(
+        "Runtime validation requires analysis_plan_id and parameter_set_id to be both null or both non-null. " +
+          "Missing identifiers default to null without rewriting stored records.",
+      ),
     build_id: BuildIdSchema.nullable().default(null),
     threads: z.number().int().positive().nullable().default(null),
     binary_sha256: z
@@ -76,6 +89,13 @@ export const RunJobSchema = z
     }),
   })
   .superRefine((job, context) => {
+    if ((job.analysis_plan_id !== null) !== (job.parameter_set_id !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["parameter_set_id"],
+        message: "Parameter set id must be non-null exactly when the run has an analysis plan id",
+      });
+    }
     if ((job.build_id !== null) !== (job.binary_sha256 !== null)) {
       context.addIssue({
         code: "custom",

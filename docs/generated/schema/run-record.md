@@ -15,6 +15,8 @@ Required is evaluated within the immediate parent object.
 | task_id | yes | yes | string \| null | minLength=1 |
 | stack_id | yes | yes | string \| null | minLength=1 |
 | data_id | yes | yes | string \| null | minLength=1 |
+| analysis_plan_id | no | yes | string \| null | pattern=^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| parameter_set_id | no | yes | string \| null | pattern=^PSET-[1-5]$ |
 | build_id | no | yes | string \| null | pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | threads | no | yes | integer \| null | maximum=9007199254740991 |
 | binary_sha256 | no | yes | string \| null | pattern=^[0-9a-f]{64}$ |
@@ -29,6 +31,9 @@ Required is evaluated within the immediate parent object.
 | artifacts.files | yes | no | array<object> | items: additionalProperties=false |
 | artifacts.files[].path | yes | no | string | minLength=1 |
 | artifacts.files[].size_bytes | yes | no | integer | minimum=0; maximum=9007199254740991 |
+| artifacts.metrics_summary | no | yes | object \| null | additionalProperties=false |
+| artifacts.metrics_summary.path | yes | no | string | - |
+| artifacts.metrics_summary.sha256 | yes | no | string | minLength=64; maxLength=64; pattern=^[0-9a-f]{64}$ |
 | numerical_health | yes | no | object | additionalProperties=false |
 | numerical_health.water_balance_residual | yes | yes | number \| null | - |
 | numerical_health.cvode_failures | yes | yes | integer \| null | minimum=0; maximum=9007199254740991 |
@@ -44,6 +49,8 @@ Required is evaluated within the immediate parent object.
 
 ## Field semantics
 
+- parameter_set_id: Runtime validation requires analysis_plan_id and parameter_set_id to be both null or both non-null. Missing identifiers default to null without rewriting stored records.
+- artifacts.metrics_summary.path: Relative to the run directory, not to shud_output.
 - resources.wall_seconds: Original-instance observation window in seconds: (finished_at - started_at) / 1000. New records require matching original start and successfully published terminal observations; missing, recovered or mismatched observations produce null. finished_at is settlement observation, not solver exit time. The window may include start-clock bias, detection delay and local cancellation grace; it is not solver runtime, a solver-runtime upper bound or a fixed-precision measurement. Negative known intervals are rejected even without observations. Valid committed records remain immutable and historical numeric values are not retroactively certified.
 
 ## Enums
@@ -62,6 +69,8 @@ job_id: "JOB-20261022T031500-a1b2"
 task_id: null
 stack_id: null
 data_id: null
+analysis_plan_id: null
+parameter_set_id: null
 build_id: null
 threads: null
 binary_sha256: null
@@ -81,6 +90,7 @@ artifacts:
     -
       path: "flow.dat"
       size_bytes: 1024
+  metrics_summary: null
 numerical_health:
   water_balance_residual: null
   cvode_failures: null
@@ -98,12 +108,14 @@ collected_at: "2026-10-22T03:16:00Z"
 ## Changelog Diff
 
 ```diff
-+ schema RunRecord sha256:6be4f0e369e46afa7389b842f10b5d5e897d25f52ced860abbb1fd3949c8a53f
++ schema RunRecord sha256:6eaf5271c4f2f0b3285a19b237af30f305f1cfb2a789450cf8f719bc9a574595
 + field run_id required=yes nullable=no type=string constraints=pattern=^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field job_id required=yes nullable=no type=string constraints=pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field task_id required=yes nullable=yes type=string | null constraints=minLength=1
 + field stack_id required=yes nullable=yes type=string | null constraints=minLength=1
 + field data_id required=yes nullable=yes type=string | null constraints=minLength=1
++ field analysis_plan_id required=no nullable=yes type=string | null constraints=pattern=^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field parameter_set_id required=no nullable=yes type=string | null constraints=pattern=^PSET-[1-5]$
 + field build_id required=no nullable=yes type=string | null constraints=pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field threads required=no nullable=yes type=integer | null constraints=maximum=9007199254740991
 + field binary_sha256 required=no nullable=yes type=string | null constraints=pattern=^[0-9a-f]{64}$
@@ -118,6 +130,9 @@ collected_at: "2026-10-22T03:16:00Z"
 + field artifacts.files required=yes nullable=no type=array<object> constraints=items: additionalProperties=false
 + field artifacts.files[].path required=yes nullable=no type=string constraints=minLength=1
 + field artifacts.files[].size_bytes required=yes nullable=no type=integer constraints=minimum=0; maximum=9007199254740991
++ field artifacts.metrics_summary required=no nullable=yes type=object | null constraints=additionalProperties=false
++ field artifacts.metrics_summary.path required=yes nullable=no type=string constraints=-
++ field artifacts.metrics_summary.sha256 required=yes nullable=no type=string constraints=minLength=64; maxLength=64; pattern=^[0-9a-f]{64}$
 + field numerical_health required=yes nullable=no type=object constraints=additionalProperties=false
 + field numerical_health.water_balance_residual required=yes nullable=yes type=number | null constraints=-
 + field numerical_health.cvode_failures required=yes nullable=yes type=integer | null constraints=minimum=0; maximum=9007199254740991
