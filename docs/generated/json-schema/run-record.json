@@ -45,6 +45,31 @@
         }
       ]
     },
+    "analysis_plan_id": {
+      "default": null,
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "parameter_set_id": {
+      "default": null,
+      "description": "Runtime validation requires analysis_plan_id and parameter_set_id to be both null or both non-null. Missing identifiers default to null without rewriting stored records.",
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^PSET-[1-5]$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "build_id": {
       "default": null,
       "anyOf": [
@@ -158,6 +183,35 @@
             ],
             "additionalProperties": false
           }
+        },
+        "metrics_summary": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "const": "metrics.json",
+                  "description": "Relative to the run directory, not to shud_output."
+                },
+                "sha256": {
+                  "type": "string",
+                  "minLength": 64,
+                  "maxLength": 64,
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "path",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [

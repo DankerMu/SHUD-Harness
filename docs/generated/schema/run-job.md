@@ -15,6 +15,8 @@ Required is evaluated within the immediate parent object.
 | task_id | yes | yes | string \| null | minLength=1 |
 | stack_id | yes | yes | string \| null | minLength=1 |
 | data_id | yes | yes | string \| null | minLength=1 |
+| analysis_plan_id | no | yes | string \| null | pattern=^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| parameter_set_id | no | yes | string \| null | pattern=^PSET-[1-5]$ |
 | build_id | no | yes | string \| null | pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | threads | no | yes | integer \| null | maximum=9007199254740991 |
 | binary_sha256 | no | yes | string \| null | pattern=^[0-9a-f]{64}$ |
@@ -48,6 +50,7 @@ Required is evaluated within the immediate parent object.
 
 ## Field semantics
 
+- parameter_set_id: Runtime validation requires analysis_plan_id and parameter_set_id to be both null or both non-null. Missing identifiers default to null without rewriting stored records.
 - started_at: Accepted wrapper start identity time from lstart, not a precise solver start measurement; null when unknown. A persisted timestamp, including one retained or adopted during recovery, does not by itself authorize numeric wall_seconds.
 - finished_at: Settlement-observation timestamp, not solver exit time; null before settlement or when unknown. Completion and collection retries preserve this endpoint. Numeric wall_seconds additionally requires matching start and terminal observations from the original submitting instance.
 
@@ -67,6 +70,8 @@ run_id: "RUN-20261022T031500-a1b2"
 task_id: null
 stack_id: null
 data_id: null
+analysis_plan_id: null
+parameter_set_id: null
 build_id: null
 threads: null
 binary_sha256: null
@@ -106,12 +111,14 @@ notify:
 ## Changelog Diff
 
 ```diff
-+ schema RunJob sha256:b2d5d591f6e9e8663505860250112da5e7649a217f6a342ac94b6dd0749ff0a7
++ schema RunJob sha256:ccac56ce807f3bb33f0e2b025bab298d7d81855457033d12eccb57d6bdf28a91
 + field job_id required=yes nullable=no type=string constraints=pattern=^JOB-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field run_id required=yes nullable=no type=string constraints=pattern=^RUN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field task_id required=yes nullable=yes type=string | null constraints=minLength=1
 + field stack_id required=yes nullable=yes type=string | null constraints=minLength=1
 + field data_id required=yes nullable=yes type=string | null constraints=minLength=1
++ field analysis_plan_id required=no nullable=yes type=string | null constraints=pattern=^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field parameter_set_id required=no nullable=yes type=string | null constraints=pattern=^PSET-[1-5]$
 + field build_id required=no nullable=yes type=string | null constraints=pattern=^BUILD-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field threads required=no nullable=yes type=integer | null constraints=maximum=9007199254740991
 + field binary_sha256 required=no nullable=yes type=string | null constraints=pattern=^[0-9a-f]{64}$

@@ -1,7 +1,13 @@
 import { z } from "zod";
 
+import { ParameterSetIdSchema } from "./analysis-plan.ts";
 import { ArtifactSchema } from "./artifact.ts";
-import { BuildIdSchema, JobRecordIdSchema, RunIdSchema } from "./run-identifiers.ts";
+import {
+  AnalysisPlanIdSchema,
+  BuildIdSchema,
+  JobRecordIdSchema,
+  RunIdSchema,
+} from "./run-identifiers.ts";
 
 export const RunExitClassSchema = z.enum([
   "ok",
@@ -67,6 +73,13 @@ export const RunRecordSchema = z
     task_id: z.string().min(1).nullable(),
     stack_id: z.string().min(1).nullable(),
     data_id: z.string().min(1).nullable(),
+    analysis_plan_id: AnalysisPlanIdSchema.nullable().default(null),
+    parameter_set_id: ParameterSetIdSchema.nullable()
+      .default(null)
+      .describe(
+        "Runtime validation requires analysis_plan_id and parameter_set_id to be both null or both non-null. " +
+          "Missing identifiers default to null without rewriting stored records.",
+      ),
     build_id: BuildIdSchema.nullable().default(null),
     threads: z.number().int().positive().nullable().default(null),
     binary_sha256: z
@@ -90,6 +103,18 @@ export const RunRecordSchema = z
           size_bytes: ArtifactSchema.shape.size_bytes.unwrap(),
         }),
       ),
+      metrics_summary: z
+        .strictObject({
+          path: z
+            .literal("metrics.json")
+            .describe("Relative to the run directory, not to shud_output."),
+          sha256: z
+            .string()
+            .length(64)
+            .regex(/^[0-9a-f]{64}$/u),
+        })
+        .nullable()
+        .default(null),
     }),
     numerical_health: z.strictObject({
       water_balance_residual: z.number().nullable(),
@@ -120,6 +145,13 @@ export const RunRecordSchema = z
     collected_at: z.iso.datetime(),
   })
   .superRefine((record, context) => {
+    if ((record.analysis_plan_id !== null) !== (record.parameter_set_id !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["parameter_set_id"],
+        message: "Parameter set id must be non-null exactly when the run has an analysis plan id",
+      });
+    }
     if ((record.build_id !== null) !== (record.binary_sha256 !== null)) {
       context.addIssue({
         code: "custom",
@@ -148,4 +180,5 @@ export const RunRecordSchema = z
     }
   });
 
+export type RunRecordInput = z.input<typeof RunRecordSchema>;
 export type RunRecord = z.infer<typeof RunRecordSchema>;

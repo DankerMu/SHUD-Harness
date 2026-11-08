@@ -5,6 +5,7 @@ import {
   type TaskCard,
   type RunJob,
   type RunRecord,
+  type RunRecordInput,
 } from "@shud-harness/dsh-shud-core";
 import { taskCase } from "./test-harness.ts";
 
@@ -82,7 +83,7 @@ export function freezeRunJob(job: RunJob): RunJob {
   return Object.freeze(job);
 }
 
-export function makeRunRecord(job: RunJob, overrides: Partial<RunRecord> = {}): RunRecord {
+export function makeRunRecord(job: RunJob, overrides: Partial<RunRecordInput> = {}): RunRecord {
   return RunRecordSchema.parse({
     run_id: job.run_id,
     job_id: job.job_id,

@@ -126,7 +126,13 @@ describe("RunRecord contract", () => {
       ...generateRunIdentifiers(),
       llm: { response_model: "deepseek-flash-guan", response_model_source: "configured" },
     };
-    expect(RunRecordSchema.parse(record)).toEqual({
+    const { analysis_plan_id, parameter_set_id, artifacts, ...parsed } =
+      RunRecordSchema.parse(record);
+    const { metrics_summary, ...legacyArtifacts } = artifacts;
+    expect(analysis_plan_id).toBeNull();
+    expect(parameter_set_id).toBeNull();
+    expect(metrics_summary).toBeNull();
+    expect({ ...parsed, artifacts: legacyArtifacts }).toEqual({
       ...record,
       build_id: null,
       threads: null,
@@ -159,7 +165,13 @@ describe("RunRecord contract", () => {
     };
     const resources = { wall_seconds: value, peak_memory_mb: value };
     const candidate = { ...validRunRecord(), numerical_health, resources };
-    expect(RunRecordSchema.parse(candidate)).toEqual({
+    const { analysis_plan_id, parameter_set_id, artifacts, ...parsed } =
+      RunRecordSchema.parse(candidate);
+    const { metrics_summary, ...legacyArtifacts } = artifacts;
+    expect(analysis_plan_id).toBeNull();
+    expect(parameter_set_id).toBeNull();
+    expect(metrics_summary).toBeNull();
+    expect({ ...parsed, artifacts: legacyArtifacts }).toEqual({
       ...candidate,
       build_id: null,
       threads: null,
@@ -228,7 +240,10 @@ describe("RunJob contract", () => {
   });
 
   test("submitted records preserve nullable references and process identity", () => {
-    expect(RunJobSchema.parse(validRunJob())).toEqual({
+    const { analysis_plan_id, parameter_set_id, ...parsed } = RunJobSchema.parse(validRunJob());
+    expect(analysis_plan_id).toBeNull();
+    expect(parameter_set_id).toBeNull();
+    expect(parsed).toEqual({
       ...validRunJob(),
       build_id: null,
       threads: null,
