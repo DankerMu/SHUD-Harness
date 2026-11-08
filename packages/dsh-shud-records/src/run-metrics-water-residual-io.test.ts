@@ -242,3 +242,52 @@ test("complete budget binds sixteen single-read inputs with deterministic read-o
     setTreeWritable(relocated, true);
   }
 });
+
+test("combined precedence: duplicate calib beats read-unavailable attributes by code point", () => {
+  const attPath = waterBalanceInputPath("sp.att");
+  const calibPath = waterBalanceInputPath("cfg.calib");
+  const calibFile = join(root, calibPath);
+  const calib = native.readFileSync(calibFile, "utf8");
+  expect(calib).toContain("GEOL_THETAS\t1.6\n");
+  native.writeFileSync(
+    calibFile,
+    calib.replace("GEOL_THETAS\t1.6\n", "GEOL_THETAS\t1.6\nGEOL_THETAS\t1.6\n"),
+  );
+  const before = snapshotTree(parent);
+  let denied = false;
+  vi.mocked(fs.openSync).mockImplementation((...args) => {
+    if (String(args[0]) === join(root, attPath)) {
+      denied = true;
+      throw Object.assign(new Error("private attribute IO payload"), { code: "EACCES" });
+    }
+    return native.openSync(...args);
+  });
+  const result = computeRunMetrics(root, waterBalanceProject);
+  const { metrics } = result;
+  expect(denied).toBe(true);
+  expect(metrics.status).toBe("ok");
+  expect(metrics.reason).toBeNull();
+  for (const field of ["delta_s_us", "delta_s_gw", "delta_s", "residual"] as const) {
+    expect.soft(metrics.water_balance[field], `${field}: no partial value`).toBeNull();
+    expect
+      .soft(metrics.water_balance.reasons[field], `${field}: selected cause`)
+      .toBe(`unreadable_input:${calibPath}`);
+  }
+  expect
+    .soft(metrics.numerical_health.reasons.water_balance_residual)
+    .toBe(`unreadable_input:${calibPath}`);
+  expectResidualIdentity(result);
+  expect(metrics.verdicts.water_balance_residual).toBe("not_available");
+  expect(metrics.nonfinite_count).toBe(0);
+  expect(metrics.flow).toMatchObject({ peak_flow_m3d: 16.5, peak_day: 0, total_runoff_m3: 33 });
+  expect(Number.isFinite(metrics.water_balance.delta_s_snow)).toBe(true);
+  expect(metrics.water_balance.delta_s_snow).toBeCloseTo(0.004, 12);
+  expect(metrics.inputs.map(({ path }) => path)).not.toContain(attPath);
+  const bytes = native.readFileSync(calibFile);
+  expect(metrics.inputs).toContainEqual({
+    path: calibPath,
+    sha256: digest(bytes),
+    size_bytes: bytes.length,
+  });
+  expect(snapshotTree(parent)).toEqual(before);
+});

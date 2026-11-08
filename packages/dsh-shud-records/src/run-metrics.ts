@@ -349,6 +349,10 @@ export function computeRunMetrics(
               inputPath("cfg.ic"),
               conversion,
             );
+      if (variable === "rivystage") {
+        setWater(field, riverStorage(deltas, river.data, geometry, river.path));
+        continue;
+      }
       const needsPorosity = variable === "eleygw" || variable === "eleyunsat";
       const reason = firstWaterReason(
         deltas.reason,
@@ -357,8 +361,6 @@ export function computeRunMetrics(
       );
       if (reason !== null) {
         setWater(field, waterFailure(reason));
-      } else if (variable === "rivystage") {
-        setWater(field, riverStorage(deltas.value!, river.data, geometry.value!.area, river.path));
       } else {
         setWater(
           field,
@@ -399,7 +401,13 @@ export function computeRunMetrics(
         field,
         observed.value === null
           ? waterFailure(observed.reason)
-          : fluxDepth(observed.value, geometry, intervalDays(observed.value), variable),
+          : fluxDepth(
+              observed.value,
+              geometry,
+              mesh.elements.rows.length,
+              intervalDays(observed.value),
+              variable,
+            ),
       );
     }
     totalWaterBalance(metrics.water_balance);

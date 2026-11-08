@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { computeRunMetrics } from "./index.ts";
+import { computeRunMetrics, type RunMetrics } from "./index.ts";
 import {
   makeClosedBudgetRun,
   waterBalanceInputPath,
@@ -56,6 +56,26 @@ function replaceInput(kind: string, before: string, after: string): void {
 function expectFinite(actual: number | null, expected: number, field: string): void {
   expect.soft(Number.isFinite(actual), `${field}: finite hand budget term`).toBe(true);
   expect.soft(actual, `${field}: hand budget ${expected}`).toBeCloseTo(expected, 12);
+}
+
+function expectPrecedenceFailure(
+  components: readonly (keyof RunMetrics["water_balance"]["reasons"])[],
+  reason: string,
+  nonfiniteCount = 0,
+  storageReason = reason,
+) {
+  const metrics = computeBudget();
+  for (const field of [...components, "residual"] as const) {
+    expect.soft(metrics.water_balance[field], `${field}: no partial value`).toBeNull();
+    expect.soft(metrics.water_balance.reasons[field], `${field}: selected cause`).toBe(reason);
+  }
+  expect.soft(metrics.water_balance.delta_s, "delta_s: no partial sum").toBeNull();
+  expect.soft(metrics.water_balance.reasons.delta_s, "delta_s: selected cause").toBe(storageReason);
+  expect.soft(metrics.numerical_health.reasons.water_balance_residual).toBe(reason);
+  expect(metrics.verdicts.water_balance_residual).toBe("not_available");
+  expect(metrics.nonfinite_count).toBe(nonfiniteCount);
+  expect(metrics.flow).toMatchObject({ peak_flow_m3d: 16.5, peak_day: 0, total_runoff_m3: 33 });
+  return metrics;
 }
 
 test("closed budget includes snow and canopy changes from nonzero initial storage", () => {
@@ -268,4 +288,117 @@ test("empty canopy output is not treated as zero storage", () => {
   const metrics = expectResidualFailure("empty_variable:eleyic");
   expect(metrics.water_balance.delta_s_ic).toBeNull();
   expectFinite(metrics.water_balance.delta_s_snow, 0.004, "delta_s_snow");
+});
+
+test("combined precedence: incomplete Stage columns outrank river IC shape mismatch", () => {
+  replaceInput("cfg.ic", "2\t2\nIndex\tStage\n", "1\t2\nIndex\tStage\n");
+  replaceInput("cfg.ic", "2\t0.4\n", "");
+  writeClosedBudgetDat(root, "rivystage", {
+    columns: [1],
+    rows: [
+      { t_min: 0, values: [0.2] },
+      { t_min: 1440, values: [0.2] },
+    ],
+  });
+  const metrics = expectPrecedenceFailure(
+    ["delta_s_riv"],
+    `unreadable_input:${waterBalanceOutputPath("rivystage")}`,
+  );
+  expectFinite(metrics.water_balance.delta_s_snow, 0.004, "delta_s_snow");
+  expectFinite(metrics.water_balance.P, 0.1, "P");
+});
+
+test("combined precedence: incomplete precipitation columns outrank nonfinite geometry", () => {
+  replaceInput("sp.mesh", "1\t0\t0\t10\t100", "1\tNaN\t0\t10\t100");
+  writeClosedBudgetDat(root, "elevprcp", {
+    columns: [1, 2],
+    rows: [
+      { t_min: 0, values: [0.05, 0.05] },
+      { t_min: 1440, values: [0.05, 0.05] },
+    ],
+  });
+  const geometryReason = `nonfinite:${waterBalanceInputPath("sp.mesh")}`;
+  const metrics = expectPrecedenceFailure(
+    ["P"],
+    `unreadable_input:${waterBalanceOutputPath("elevprcp")}`,
+    0,
+    geometryReason,
+  );
+  for (const field of ["Qd", "AET", "delta_s_snow"] as const) {
+    expect(metrics.water_balance[field]).toBeNull();
+    expect(metrics.water_balance.reasons[field]).toBe(geometryReason);
+  }
+});
+
+test.each(["empty", "nonfinite"])(
+  "combined precedence: invalid river Type outranks %s Stage",
+  (state) => {
+    replaceInput("sp.riv", "2\t1\t2\t0.02\t50\t0", "2\t1\t9\t0.02\t50\t0");
+    writeClosedBudgetDat(root, "rivystage", {
+      rows: state === "empty" ? [] : [{ t_min: 0, values: [NaN, 0.4] }],
+    });
+    const metrics = expectPrecedenceFailure(
+      ["delta_s_riv"],
+      `unreadable_input:${waterBalanceInputPath("sp.riv")}`,
+      state === "empty" ? 0 : 1,
+    );
+    expect(metrics.numerical_health.negative_state_count).toBe(state === "empty" ? 0 : null);
+    expect(metrics.numerical_health.reasons.negative_state_count).toBe(
+      state === "empty" ? null : "nonfinite:rivystage",
+    );
+    expectFinite(metrics.water_balance.delta_s_snow, 0.004, "delta_s_snow");
+    expectFinite(metrics.water_balance.P, 0.1, "P");
+  },
+);
+
+test("combined precedence: later invalid node reference outranks earlier nonfinite geometry", () => {
+  replaceInput("sp.mesh", "1\t0\t0\t10\t100", "1\tNaN\t0\t10\t100");
+  replaceInput("sp.mesh", "2\t2\t4\t3\t3\t1\t0\t101", "2\t99\t4\t3\t3\t1\t0\t101");
+  expectPrecedenceFailure(
+    [
+      "P",
+      "Qd",
+      "AET",
+      "delta_s_surf",
+      "delta_s_us",
+      "delta_s_gw",
+      "delta_s_riv",
+      "delta_s_snow",
+      "delta_s_ic",
+    ],
+    `unreadable_input:${waterBalanceInputPath("sp.mesh")}`,
+  );
+});
+
+test("combined precedence: later invalid GEOL reference outranks earlier nonfinite reference", () => {
+  replaceInput("sp.att", "1\t1\t1\t1\t1\t1\t0\t0\t0", "1\t1\tNaN\t1\t1\t1\t0\t0\t0");
+  replaceInput("sp.att", "2\t1\t2\t1\t1\t1\t0\t0\t0", "2\t1\t9\t1\t1\t1\t0\t0\t0");
+  const metrics = expectPrecedenceFailure(
+    ["delta_s_us", "delta_s_gw"],
+    `unreadable_input:${waterBalanceInputPath("sp.att")}`,
+  );
+  expectFinite(metrics.water_balance.delta_s_snow, 0.004, "delta_s_snow");
+  expectFinite(metrics.water_balance.delta_s_riv, 0, "delta_s_riv");
+});
+
+test("combined precedence: later invalid river Type outranks earlier nonfinite Length", () => {
+  replaceInput("sp.riv", "1\t-3\t1\t0.01\t30\t0", "1\t-3\t1\t0.01\tNaN\t0");
+  replaceInput("sp.riv", "2\t1\t2\t0.02\t50\t0", "2\t1\t9\t0.02\t50\t0");
+  const metrics = expectPrecedenceFailure(
+    ["delta_s_riv"],
+    `unreadable_input:${waterBalanceInputPath("sp.riv")}`,
+  );
+  expectFinite(metrics.water_balance.delta_s_snow, 0.004, "delta_s_snow");
+  expectFinite(metrics.water_balance.Qd, 0.03, "Qd");
+});
+
+test("combined precedence: invalid GEOL reference outranks missing calibration key", () => {
+  replaceInput("cfg.calib", "GEOL_THETAS\t1.6\n", "");
+  replaceInput("sp.att", "2\t1\t2\t1\t1\t1\t0\t0\t0", "2\t1\t9\t1\t1\t1\t0\t0\t0");
+  const metrics = expectPrecedenceFailure(
+    ["delta_s_us", "delta_s_gw"],
+    `unreadable_input:${waterBalanceInputPath("sp.att")}`,
+  );
+  expectFinite(metrics.water_balance.delta_s_snow, 0.004, "delta_s_snow");
+  expectFinite(metrics.water_balance.delta_s_surf, 0, "delta_s_surf");
 });
