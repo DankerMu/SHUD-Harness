@@ -71,7 +71,13 @@ describe.each(mutableCases)("$kind allocation", (fixture) => {
         }
       : fixture.kind === "data"
         ? { ...fixture.value, sources: { ...fixture.value.sources, external_files: [] } }
-        : { ...fixture.value, change_ids: [], verification_ids: [] };
+        : {
+            ...fixture.value,
+            change_ids: [],
+            verification_ids: [],
+            analysis_ids: [],
+            sensitivity_summary: null,
+          };
 
   test("synchronously publishes exactly the supplied fields with one independently generated id", () => {
     const result = allocate(fixture);

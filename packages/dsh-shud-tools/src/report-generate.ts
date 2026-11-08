@@ -102,6 +102,8 @@ async function generateReport(
     llm_response_models: [...new Set(ordered.map((record) => record.llm.response_model))],
     change_ids: card.type === "code_change" ? [...new Set(card.linked_changes)] : [],
     verification_ids: card.type === "code_change" ? [...new Set(card.linked_verifications)] : [],
+    analysis_ids: [],
+    sensitivity_summary: null,
     decision_history: [],
     created_at: now,
     updated_at: now,

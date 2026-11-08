@@ -97,6 +97,44 @@
         "pattern": "^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
       }
     },
+    "analysis_ids": {
+      "default": [],
+      "description": "Unique analysis plan references in caller order; omitted legacy references default to []. Runtime validation requires a nonempty array exactly when sensitivity_summary is non-null.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$"
+      }
+    },
+    "sensitivity_summary": {
+      "default": null,
+      "description": "Strict summary file reference, or null when analysis_ids is empty; omitted legacy references default to null. Schema validates reference shape, not file bytes or existence.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Runtime validation requires exactly reports/<this report_id>.sensitivity.json."
+            },
+            "sha256": {
+              "type": "string",
+              "minLength": 64,
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "decision_history": {
       "type": "array",
       "items": {
