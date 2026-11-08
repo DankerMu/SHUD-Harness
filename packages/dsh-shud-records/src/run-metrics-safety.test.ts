@@ -218,7 +218,7 @@ test("late malformed state after an optional miss preserves the fixed solver-ste
 test("computations and relocated copies have identical bytes, exact manifests, and no persisted output", () => {
   // These deliberately unreadable, unrelated targets must not be scanned by this slice.
   mkdirSync(`${root}/output/mini.out/mini.eleprcp.dat`);
-  symlinkSync(`${parent}/absent`, `${root}/output/mini.out/mini.eleysnow.dat`);
+  symlinkSync(`${parent}/absent`, `${root}/output/mini.out/mini.elevetp.dat`);
   const before = snapshotTree(root);
   const first = computeRunMetrics(root, project);
   const second = computeRunMetrics(root, project);

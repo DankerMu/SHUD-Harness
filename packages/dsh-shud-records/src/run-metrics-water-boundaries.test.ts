@@ -1,9 +1,7 @@
 import {
-  chmodSync,
   cpSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -19,6 +17,7 @@ import { digest, snapshotTree } from "./run-metrics-test-harness.ts";
 import type { RunMetrics } from "./run-metrics-wire.ts";
 import { buildShudDat } from "./shud-dat-test-harness.ts";
 import {
+  setTreeWritable,
   sharedWaterFields,
   waterBalanceDatInputs,
   waterBalanceFixture,
@@ -64,15 +63,15 @@ function replaceText(kind: string, before: string, after: string): void {
 
 function expectShared(
   metrics: RunMetrics,
-  pending: readonly SharedField[] = [],
+  failures: Partial<Record<SharedField, string>> = {},
   scales: Partial<Record<SharedField, number>> = {},
 ): void {
   expect(metrics.status, metrics.reason ?? "item-level failures preserve the run").toBe("ok");
   for (const field of sharedWaterFields) {
     const actual = metrics.water_balance[field];
-    if (pending.includes(field)) {
+    if (failures[field] !== undefined) {
       expect(actual, field).toBeNull();
-      expect(metrics.water_balance.reasons[field], field).toBe("pending_water_balance");
+      expect(metrics.water_balance.reasons[field], field).toBe(failures[field]);
     } else {
       const reference = expected[field] * (scales[field] ?? 1);
       expect(typeof actual, `${field}: numeric shared term`).toBe("number");
@@ -90,15 +89,6 @@ function expectShared(
 function expectFlowHealth(metrics: RunMetrics): void {
   expect(metrics.flow).toEqual(baseline.flow);
   expect(metrics.numerical_health).toEqual(baseline.numerical_health);
-}
-
-function setTreeWritable(directory: string, writable: boolean): void {
-  chmodSync(directory, writable ? 0o700 : 0o500);
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) setTreeWritable(path, writable);
-    else chmodSync(path, writable ? 0o600 : 0o400);
-  }
 }
 
 test("reordered complete flux and storage columns preserve entity-weighted terms", () => {
@@ -123,7 +113,7 @@ test.each([
     field: "delta_s_us",
   },
   { name: "out-of-range AET entity", variable: "eleveta", columns: [1, 2, 4], field: "AET" },
-] as const)("$name leaves only its dependent term pending", ({ variable, columns, field }) => {
+] as const)("$name leaves only its dependent term unavailable", ({ variable, columns, field }) => {
   rewriteDat(variable, (input) => ({
     ...input,
     columns,
@@ -133,7 +123,7 @@ test.each([
     })),
   }));
   const { metrics } = computeRunMetrics(root, waterBalanceProject);
-  expectShared(metrics, [field]);
+  expectShared(metrics, { [field]: `unreadable_input:${datPath(variable)}` });
   expectFlowHealth(metrics);
 });
 
@@ -149,7 +139,7 @@ test("each flux uses its own interval instead of unchanged cfg DT values", () =>
     }));
   }
   const { metrics } = computeRunMetrics(root, waterBalanceProject);
-  expectShared(metrics, [], { P: 0.5, AET: 2, Qd: 3 });
+  expectShared(metrics, {}, { P: 0.5, AET: 2, Qd: 3 });
   const originalRunoff = baseline.flow.total_runoff_m3;
   if (originalRunoff === null) throw new Error("Canonical fixture must have finite runoff");
   expect(metrics.flow.total_runoff_m3).toBe(originalRunoff * 3);
@@ -159,7 +149,7 @@ test("each flux uses its own interval instead of unchanged cfg DT values", () =>
 test.each([
   { variable: "elevprcp", field: "P", name: "irregular precipitation intervals" },
   { variable: "eleveta", field: "AET", name: "single AET observation" },
-] as const)("$name leaves only that flux pending", ({ variable, field }) => {
+] as const)("$name leaves only that flux unavailable", ({ variable, field }) => {
   rewriteDat(variable, (input) => ({
     ...input,
     rows:
@@ -168,7 +158,7 @@ test.each([
         : input.rows.map((row, index) => ({ ...row, t_min: row.t_min + (index === 1 ? 1 : 0) })),
   }));
   const { metrics } = computeRunMetrics(root, waterBalanceProject);
-  expectShared(metrics, [field]);
+  expectShared(metrics, { [field]: `interval_undetermined:${variable}` });
   expectFlowHealth(metrics);
 });
 
@@ -183,7 +173,11 @@ test.each(["file missing", "key missing", "key duplicated"])(
         condition === "key missing" ? "" : "GEOL_THETAS\t1.6\nGEOL_THETAS\t1.6\n",
       );
     const { metrics } = computeRunMetrics(root, waterBalanceProject);
-    expectShared(metrics, ["delta_s_us", "delta_s_gw"]);
+    const reason =
+      condition === "key missing"
+        ? "missing_calib:GEOL_THETAS"
+        : `unreadable_input:${inputPath("cfg.calib")}`;
+    expectShared(metrics, { delta_s_us: reason, delta_s_gw: reason });
     expectFlowHealth(metrics);
   },
 );
@@ -194,21 +188,24 @@ test.each([
     kind: "sp.att",
     before: "2\t1\t2\t1\t1\t1\t0\t0\t0",
     after: "2\t1\t9\t1\t1\t1\t0\t0\t0",
-    pending: ["delta_s_us", "delta_s_gw"],
+    fields: ["delta_s_us", "delta_s_gw"],
   },
   {
     name: "river type reference",
     kind: "sp.riv",
     before: "2\t1\t2\t0.02\t50\t0",
     after: "2\t1\t9\t0.02\t50\t0",
-    pending: ["delta_s_riv"],
+    fields: ["delta_s_riv"],
   },
 ] as const)(
-  "invalid $name leaves only dependent storage pending",
-  ({ kind, before, after, pending }) => {
+  "invalid $name leaves only dependent storage unavailable",
+  ({ kind, before, after, fields }) => {
     replaceText(kind, before, after);
     const { metrics } = computeRunMetrics(root, waterBalanceProject);
-    expectShared(metrics, pending);
+    expectShared(
+      metrics,
+      Object.fromEntries(fields.map((field) => [field, `unreadable_input:${inputPath(kind)}`])),
+    );
     expectFlowHealth(metrics);
   },
 );
@@ -217,12 +214,16 @@ test("a parsed but incomplete element IC table cannot create partial storage tot
   replaceText("cfg.ic", "3\t6\t0\n", "2\t6\t0\n");
   replaceText("cfg.ic", "3\t0.003\t0.004\t0.03\t0.9\t1.5\n", "");
   const { metrics } = computeRunMetrics(root, waterBalanceProject);
-  expectShared(metrics, ["delta_s_surf", "delta_s_us", "delta_s_gw"]);
+  expectShared(metrics, {
+    delta_s_surf: "ic_shape_mismatch",
+    delta_s_us: "ic_shape_mismatch",
+    delta_s_gw: "ic_shape_mismatch",
+  });
   expectFlowHealth(metrics);
 });
 
 test.each(["invalid node reference", "zero catchment area"])(
-  "%s leaves shared depths pending without changing flow or health",
+  "%s leaves shared depths unavailable without changing flow or health",
   (condition) => {
     if (condition === "invalid node reference") {
       replaceText("sp.mesh", "1\t1\t2\t3\t2\t0\t0\t100", "1\t99\t2\t3\t2\t0\t0\t100");
@@ -239,7 +240,12 @@ test.each(["invalid node reference", "zero catchment area"])(
       writeFileSync(path, lines.join("\n"));
     }
     const { metrics } = computeRunMetrics(root, waterBalanceProject);
-    expectShared(metrics, sharedWaterFields);
+    expectShared(
+      metrics,
+      Object.fromEntries(
+        sharedWaterFields.map((field) => [field, `unreadable_input:${inputPath("sp.mesh")}`]),
+      ),
+    );
     expectFlowHealth(metrics);
   },
 );
@@ -252,14 +258,14 @@ test("a nonfinite state value is counted once across health and storage consumer
     ),
   }));
   const { metrics } = computeRunMetrics(root, waterBalanceProject);
-  expectShared(metrics, ["delta_s_us"]);
+  expectShared(metrics, { delta_s_us: "nonfinite:eleyunsat" });
   expect(metrics.nonfinite_count).toBe(1);
   expect(metrics.flow).toEqual(baseline.flow);
   expect(metrics.numerical_health.negative_state_count).toBeNull();
   expect(metrics.numerical_health.reasons.negative_state_count).toBe("nonfinite:eleyunsat");
 });
 
-test("finite precipitation aggregation overflow is pending without inventing raw nonfinites", () => {
+test("finite precipitation aggregation overflow is unavailable without inventing raw nonfinites", () => {
   rewriteDat("elevprcp", (input) => ({
     ...input,
     rows: input.rows.map((row) => ({
@@ -268,7 +274,7 @@ test("finite precipitation aggregation overflow is pending without inventing raw
     })),
   }));
   const { metrics } = computeRunMetrics(root, waterBalanceProject);
-  expectShared(metrics, ["P"]);
+  expectShared(metrics, { P: "nonfinite:elevprcp" });
   expect(metrics.nonfinite_count).toBe(0);
   expectFlowHealth(metrics);
 });
@@ -287,7 +293,7 @@ test("an unrelated nonoutlet NaN is counted but does not poison outlet Qd", () =
 });
 
 test.each(["unsafe", "malformed"])(
-  "missing early attributes cannot hide later present %s geology",
+  "missing attributes and present %s geology remain item-level failures without receipts",
   (condition) => {
     unlinkSync(join(root, inputPath("sp.att")));
     const relative = inputPath("para.geol");
@@ -300,24 +306,33 @@ test.each(["unsafe", "malformed"])(
     } else writeFileSync(path, "invalid geology table\n");
     const before = snapshotTree(parent);
     const { metrics } = computeRunMetrics(root, waterBalanceProject);
-    expect(metrics.status).toBe("unavailable");
-    expect(metrics.reason).toBe(`${condition === "unsafe" ? "unsafe" : "parse"}:${relative}`);
+    expect(metrics.status).toBe("ok");
+    expect(metrics.reason).toBeNull();
+    const reason = `unreadable_input:${inputPath("para.geol")}`;
+    expectShared(metrics, { delta_s_us: reason, delta_s_gw: reason });
     expect(metrics.inputs.map(({ path: observed }) => observed)).not.toContain(relative);
     expect(metrics.inputs.map(({ path: observed }) => observed)).not.toContain(inputPath("sp.att"));
     expect(snapshotTree(parent)).toEqual(before);
   },
 );
 
-test("missing precipitation leaves only P pending and still observes AET", () => {
+test("missing precipitation leaves P unavailable and still observes AET", () => {
   unlinkSync(join(root, datPath("elevprcp")));
   const { metrics } = computeRunMetrics(root, waterBalanceProject);
-  expectShared(metrics, ["P"]);
-  expectFlowHealth(metrics);
+  expectShared(metrics, { P: "missing_variable:elevprcp" });
+  expect(metrics.flow).toEqual(baseline.flow);
+  expect(metrics.numerical_health).toEqual({
+    ...baseline.numerical_health,
+    reasons: {
+      ...baseline.numerical_health.reasons,
+      water_balance_residual: "missing_variable:elevprcp",
+    },
+  });
   expect(metrics.inputs.map(({ path }) => path)).not.toContain(datPath("elevprcp"));
   expect(metrics.inputs.map(({ path }) => path)).toContain(datPath("eleveta"));
 });
 
-test("complete water metrics bind fourteen inputs and remain deterministic and read-only after relocation", () => {
+test("shared water metrics bind fourteen inputs and remain deterministic and read-only after relocation", () => {
   const relocated = join(parent, "relocated");
   cpSync(root, relocated, { recursive: true });
   try {
@@ -348,13 +363,18 @@ test("complete water metrics bind fourteen inputs and remain deterministic and r
       }),
     );
     expect(first.metrics.nonfinite_count).toBe(0);
-    for (const field of ["delta_s_snow", "delta_s_ic", "delta_s", "residual"] as const) {
+    for (const [field, reason] of [
+      ["delta_s_snow", "missing_variable:eleysnow"],
+      ["delta_s_ic", "missing_variable:eleyic"],
+      ["delta_s", "missing_variable:eleyic"],
+      ["residual", "missing_variable:eleyic"],
+    ] as const) {
       expect(first.metrics.water_balance[field], field).toBeNull();
-      expect(first.metrics.water_balance.reasons[field], field).toBe("pending_water_balance");
+      expect(first.metrics.water_balance.reasons[field], field).toBe(reason);
     }
     expect(first.health.water_balance_residual).toBeNull();
     expect(first.metrics.numerical_health.reasons.water_balance_residual).toBe(
-      "pending_water_balance",
+      "missing_variable:eleyic",
     );
     expect(first.metrics.numerical_health.reasons.cvode_failures).toBe("missing:stderr.log");
     expect(snapshotTree(parent)).toEqual(before);
