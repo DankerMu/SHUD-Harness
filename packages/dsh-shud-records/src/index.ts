@@ -20,10 +20,13 @@
  * metadata reads neither execute nor implicitly verify binaries.
  * Rivqdown comparison preflights both final files, then compares descriptor-bound raw-byte
  * SHA256 without writes or numerical tolerance; missing/unsafe evidence is an error, not unequal.
- * SHUD text inputs share that descriptor lifecycle: one read binds parser bytes, SHA256
- * and observed size. Relative ancestors/targets are rechecked observationally, not as an
- * atomic sandbox. Eight typed parsers preserve optional tables, cfg duplicates and C numeric
- * values; missing/unsafe/read/parse errors omit native causes and input payloads. Scientific
+ * SHUD text inputs and binary outputs share that descriptor lifecycle: one read binds
+ * parser bytes, SHA256 and observed size. Relative ancestors/targets are rechecked
+ * observationally, not as an atomic sandbox. Eight text parsers preserve optional tables,
+ * cfg duplicates and C numeric values. Little-endian .dat reads preserve date metadata,
+ * interval-start minutes and raw samples, counting retained nonfinites without interpreting
+ * them. Typed-array views use owned file storage, never unrelated Buffer-pool bytes.
+ * Missing/unsafe/read/parse errors omit native causes and input payloads. Scientific
  * finiteness, cross-file counts, factors and units remain consumer responsibilities.
  * Provenance inventories prepared input bytes before allocation. Task transition,
  * reconciliation and closure helpers are pure; callers own evidence reads, approval,
@@ -47,10 +50,13 @@ export { captureStackLock } from "./capture-stack-lock.ts";
 export type { StackCaptureConfig, StackCaptureLlm } from "./capture-stack-lock.ts";
 export { generateProvenance } from "./generate-provenance.ts";
 export { compareRivqdown } from "./compare-rivqdown.ts";
-export { readShudTextInput, parseShudTextInput, ShudInputError } from "./shud-text-input.ts";
+export { readShudDat } from "./shud-dat.ts";
+export type { ShudDat, ShudDatRow } from "./shud-dat.ts";
+export { ShudInputError } from "./shud-input-file.ts";
+export type { ShudInputStage } from "./shud-input-file.ts";
+export { readShudTextInput, parseShudTextInput } from "./shud-text-input.ts";
 export type {
   ShudInputKind,
-  ShudInputStage,
   ShudTable,
   ShudConfigEntry,
   ShudInputDataMap,

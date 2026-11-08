@@ -33,6 +33,14 @@
 - **WHEN** `.dat` 某行某列为 NaN
 - **THEN** 读取成功返回，`nonfinite_count` 计入该值，依赖该变量的指标为 `null` 且原因点名该变量
 
+#### Scenario: binary metadata and sample nonfinites retain their positions
+- **WHEN** 合法布局的 `.dat` 起始日期元数据或数据行的时间/变量值为 NaN 或 ±Inf
+- **THEN** 读取器保留这些值在 start_date、t_min 或对应列位置，并逐值累计 nonfinite_count；NumVar 或列索引的非有限值仍按布局错误拒绝，不作为数据计数
+
+#### Scenario: binary platform and structural bounds are explicit
+- **WHEN** 平台非小端，或 NumVar 声明的列索引超出实际文件长度
+- **THEN** 返回点名文件与受控原因的错误；非小端分支不打开文件，过大的声明不触发按声明大小的未验证分配
+
 #### Scenario: shared text reader preserves source bytes and table structure
 - **WHEN** records 的共享文本输入读取器读取钉版 ccw 的 `.sp.mesh`、`.sp.att`、`.sp.riv`、`.para.geol`、`.para.lc`、`.cfg.para`、`.cfg.calib`、`.cfg.ic`
 - **THEN** 八类文件解析成功，每个已声明表的行列数与实际一致；sha256 与 size_bytes 来自解析所用的同一次字节读取，源文件字节不变
