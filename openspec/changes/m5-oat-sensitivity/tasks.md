@@ -76,7 +76,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - status `ok|unavailable` 语义；两次计算逐字节相同。
   - `metrics.json` 的安全读与 sha256 绑定读取器（唯一实现；3.4 closure 与 3.6b 渲染都 import 它）。
   - 满足 run-metrics「Per-run flow metrics」「Numerical health producers」「Numerical health verdicts」「Metrics file shape and determinism」（依赖 3.0、3.1、2.5）。
-- [ ] 3.2b O1 事实核查与系数常量：对照 SHUD 源码核实 `eleysnow`/`eleyic` 的单位，以及 `.cfg.ic` Canopy/Snow 的口径；把两项系数登记为 core 常量（附 file:line），并写入 `SHUD_Output_Variables.md`。满足 run-metrics「Water balance residual」中的系数常量部分（依赖 2.5）。
+- [x] 3.2b O1 事实核查与系数常量：对照 SHUD 源码核实 `eleysnow`/`eleyic` 的单位，以及 `.cfg.ic` Canopy/Snow 的口径；把两项系数登记为 core 常量（附 file:line），并写入 `SHUD_Output_Variables.md`。满足 run-metrics「Water balance residual」中的系数常量部分（依赖 2.5）。
 - [ ] 3.2c 水量平衡 rSHUD 共有项：P、Qd、AET、ΔS_surf/us/gw/riv 的分项计算（面积、孔隙率、河道面积、IC 读取）；合成迷你项目夹具与小 `.dat` 写出器；本机一次性生成脚本 `scripts/metrics/rshud-crosscheck.R` 与入库的 `expected-rshud.json`。满足 run-metrics「rSHUD cross-check fixture」与 engineering-gates「rSHUD cross-check generator is local-only」（依赖 3.0、3.2a）。
 - [ ] 3.2d 积雪/截留扩展项与残差汇总：ΔS_snow/ΔS_ic（使用 3.2b 的常量）；`water_balance_residual`；`zero_precipitation`/`missing_variable`/`ic_shape_mismatch`/`missing_calib`/`interval_undetermined` 等 null 原因；积雪与截留用手算夹具覆盖。满足 run-metrics「Water balance residual」（依赖 3.2b、3.2c）。
 - [ ] 3.3 AnalysisPlan 工作区文件层（`analyses/<id>.json` 排他创建、只读解析、id 绑定）；calib 类别表乘积校验（键缺失或重复即拒绝，越界时点名行 index）；`input_digests` 与乘积校验取自同一次读取。满足 analysis-plans「AnalysisPlan workspace file」与「Calib whitelist and category product check」的校验部分（依赖 2.1、2.5、3.0）。
@@ -317,3 +317,19 @@ Boundary fixtures: no rows, missing/duplicate outlet column, nonfinite outlet ve
 Commands/evidence: focused new metrics suites plus shud-text-*/shud-dat*/compare-rivqdown regressions; pnpm run build; built internal compute + public serializer/reader smoke; openspec validate m5-oat-sensitivity --strict --no-interactive; full pnpm run check. Publish all commands and independent input recipes/results. Completion is task3.2a only.
 
 Peak-time explicit oracles (all Q finite): rows [4320,20],[1440,20] select peak_day1 regardless of order; [1440,20],[NaN,20] preserve peak_flow20 but peak_day null/nonfinite:rivqdown and total null/interval_undetermined:rivqdown; [1440,20],[NaN,10] preserve peak_flow20 and peak_day1, with only total null/interval_undetermined:rivqdown. Reverse each nonfinite row order to prove no first-row shortcut.
+
+## Issue #650 risk packs and executable evidence
+
+| Pack | Required evidence |
+|---|---|
+| Units / source lineage | Four-row O1 table with full pinned SHUD/src file:line refs; reviewer independently traces forcing units, ET assignment, actual output overload, IC read/write and initialization modes |
+| Schema / conditional fields | All four entries required; finite positive scale, boolean flag, nonempty valid source refs; missing entry/bad scale/empty or malformed ref names the exact entry; strict unknown keys rejected |
+| Conditional source | Each individual flag true requires veg_frac_source; valid source accepted; any false-only registration rejects a present source or explicit undefined; malformed source fields/refs rejected at their paths |
+| Immutability / config | Reflect mutation attempts cannot change coefficients, flags or provenance arrays; no profile/runtime setter or new configuration |
+| Public API / compatibility | Built core root imports constant/schema; independent raw values0.012/0.023/0.034/0.045 and VegFrac0.25 remain those same element-depth values under the registered formula; no existing export/schema/threshold behavior changes |
+| Generated projection / docs | Governance-local supporting schema leaves10core records and existing projections unchanged; schema:check and docs:check; no manual generated edit; source table distinguishes interval means from IC text precision |
+| Scientific boundary | No water-balance producer, coefficient inference from desired residual, physical equation change, or claim of model correctness; original run-metrics spec/D7 unchanged |
+
+Test oracle includes the actual all-false registration plus synthetic true-flag registrations to exercise all four conditional branches. Reject scale0/negative/NaN/Infinity, missing entries, string flags, empty refs, missing/zero line numbers and escaping/non-SHUD source refs. Test error paths rather than pinning incidental Zod wording or parsing C++ source text. No runtime filesystem access in the schema.
+
+Commands: focused storage-conversion tests and existing core governance regressions; pnpm run build; built-core API smoke; openspec validate m5-oat-sensitivity --strict --no-interactive; pnpm run check (which includes schema/docs). Publish actual source table, commands, complete smoke inputs/results and any observed gate failures without reinterpretation. Completion is task3.2b only; no shared-change archive or PI-gate closure.

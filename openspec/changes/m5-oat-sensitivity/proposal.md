@@ -160,3 +160,10 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Scope is task3.2a only. computeRunMetrics remains internal (not records index, no production caller). The explicitly planned water-balance intermediate has null values and cannot be published by a tool; #651/#652 supply its producers before #662 integrates collection. Serializer and safe reader are complete reusable boundaries now, not fake producers.
 - Reuse existing shared file/descriptor readers, .dat builder, project-component predicate, core method version and classifier. No filesystem discovery, duplicate safe reader, new dependency/core schema, jobs/tools integration, thresholds, default parameters, scientific formula or baseline change.
 - Preserve every existing text/binary/comparator consumer and all source bytes. Only successfully observed file bytes contribute digest/size evidence; missing files never receive fabricated inputs entries. Invalid present data fails closed without claiming a partial metric.
+
+## Issue #650 execution fixture
+
+- Expanded, Critical Path #7 and scientific provenance: four immutable storage-conversion registrations plus their supporting validator and O1 source-fact documentation. Upstream classification retained; no new core record or metric producer.
+- Selected packs: units/source evidence, schema/conditional fields, public exports, immutable governance/config boundary, compatibility/generated projection, documentation/scientific wording. No new IO, processes, concurrency, credentials or profile configuration.
+- Source pin is SHUD 3aec65755926c478e13ca7d4fea80715e4e90345. Register scale1 and no additional vegetation weighting for snow.output, snow.ic, ic.output and ic.ic; omit veg_frac_source. This describes stored units, not validation or repair of SHUD's physical equations.
+- Scope is task3.2b only: governance registration/schema/tests, core root exports, SHUD_Output_Variables O1 facts and this workflow fixture. Preserve all existing constants, core-record count10, schemas/projections, run-metrics spec wording and water-balance formula. No records/jobs/tools/submodule edit or runtime consumption.
