@@ -1,5 +1,10 @@
 import type { RunRecord, TaskCard } from "@shud-harness/dsh-shud-core";
 import { codeChangeClosure, type CodeChangeObjectLoaders } from "./code-change-closure.ts";
+import { deriveSensitivityClosure, hasSensitivityLoaders } from "./sensitivity-closure.ts";
+import type {
+  SensitivityClosureResult,
+  SensitivityObjectLoaders,
+} from "./sensitivity-closure-types.ts";
 import {
   closureResult,
   sharedClosureFailures,
@@ -10,7 +15,7 @@ import {
 } from "./task-closure-shared.ts";
 
 /**
- * Evaluate prevalidated domain evidence synchronously, without IO, logging or mutation.
+ * Evaluate prevalidated evidence synchronously, without implicit IO, logging or mutation.
  * The future caller owns ledger reads (absent ledger -> explicit 0), reconciliation,
  * report persistence and appending automatic_limitation. Invalid counts fail closed.
  * Current M3 policy retains attempts >= MAX_COLLECT_ATTEMPTS as a blocker even after
@@ -22,17 +27,57 @@ import {
  * A successful result establishes closure only, not approval or a TaskCard transition.
  * code_change requires explicit object loaders in the fifth argument and fails closed
  * without them. Its task-job snapshot, records and draft are the existing arguments;
- * this facade never queries a backend. Other task types retain their M3 diagnostics.
+ * this facade never queries a backend. Sensitivity requires its own explicit readers.
+ * Its loaded result carries selections, never legacy no-metrics claims. The old signature
+ * remains ClosureResult: a sensitivity card without those readers returns only a clause-0
+ * failure with legacy metadata. Generic cards with new/union readers return the result union;
+ * loader shape alone cannot promise sensitivity output for a science/code-change card.
  */
+export function evaluateClosure(
+  card: TaskCard & { type: "sensitivity" },
+  runJobs: readonly ClosureRunJob[],
+  runRecords: readonly RunRecord[],
+  draft: ClosureDraft,
+  objectLoaders: SensitivityObjectLoaders,
+): SensitivityClosureResult;
 export function evaluateClosure(
   card: TaskCard,
   runJobs: readonly ClosureRunJob[],
   runRecords: readonly RunRecord[],
   draft: ClosureDraft,
   objectLoaders?: CodeChangeObjectLoaders,
-): ClosureResult {
+): ClosureResult;
+export function evaluateClosure(
+  card: TaskCard,
+  runJobs: readonly ClosureRunJob[],
+  runRecords: readonly RunRecord[],
+  draft: ClosureDraft,
+  objectLoaders: CodeChangeObjectLoaders | SensitivityObjectLoaders | undefined,
+): ClosureResult | SensitivityClosureResult;
+export function evaluateClosure(
+  card: TaskCard,
+  runJobs: readonly ClosureRunJob[],
+  runRecords: readonly RunRecord[],
+  draft: ClosureDraft,
+  objectLoaders?: CodeChangeObjectLoaders | SensitivityObjectLoaders,
+): ClosureResult | SensitivityClosureResult {
+  if (card.type === "sensitivity") {
+    if (!hasSensitivityLoaders(objectLoaders)) {
+      return closureResult([{ clause: 0, reason: "missing_sensitivity_loaders" }]);
+    }
+    return deriveSensitivityClosure(card, runJobs, runRecords, draft, objectLoaders);
+  }
   if (card.type === "code_change") {
-    if (objectLoaders === undefined) {
+    if (
+      typeof objectLoaders !== "object" ||
+      objectLoaders === null ||
+      !("readChange" in objectLoaders) ||
+      typeof objectLoaders.readChange !== "function" ||
+      !("readPatch" in objectLoaders) ||
+      typeof objectLoaders.readPatch !== "function" ||
+      !("readVerification" in objectLoaders) ||
+      typeof objectLoaders.readVerification !== "function"
+    ) {
       return closureResult([{ reason: "missing_code_change_loaders" }]);
     }
     return codeChangeClosure(card, {

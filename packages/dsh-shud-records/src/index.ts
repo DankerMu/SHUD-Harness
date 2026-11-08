@@ -80,6 +80,15 @@ export { reconcileTaskCard, TaskReconcileError } from "./task-reconcile.ts";
 export { evaluateClosure } from "./task-closure.ts";
 export { codeChangeClosure } from "./code-change-closure.ts";
 export type { CodeChangeObjectLoaders, CodeChangeClosureLoaders } from "./code-change-closure.ts";
+export { deriveSensitivityClosure } from "./sensitivity-closure.ts";
+export { createSensitivityClosureLoaders } from "./sensitivity-closure-files.ts";
+export type {
+  SensitivityObjectLoaders,
+  SensitivityClosureFailure,
+  SensitivityClosureResult,
+  SensitivityRunIdentity,
+  SensitivitySelection,
+} from "./sensitivity-closure-types.ts";
 export type {
   ClosureRunJob,
   ClosureDraft,

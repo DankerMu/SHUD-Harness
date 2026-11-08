@@ -14,6 +14,7 @@ import type {
   PiGateDecision,
   RunJob,
   RunRecord,
+  RunId,
   JobRecordId,
   ChangeId,
   TaskId,
@@ -37,6 +38,8 @@ import {
   reconcileTaskCard,
   evaluateClosure,
   codeChangeClosure,
+  createSensitivityClosureLoaders,
+  deriveSensitivityClosure,
   isReportMarkdownStale,
   applyDecision,
   markReportReviewed,
@@ -59,6 +62,9 @@ import {
   type ClosureResult,
   type CodeChangeClosureLoaders,
   type CodeChangeObjectLoaders,
+  type RunMetrics,
+  type SensitivityClosureResult,
+  type SensitivityObjectLoaders,
   type TaskEvent,
   type MutableWorkspaceRecordKind,
 } from "./index.ts";
@@ -397,6 +403,122 @@ void [
   buildEvent,
   submitEvent,
   verifyEvent,
+];
+
+declare const sensitivityCard: TaskCard & { type: "sensitivity" };
+declare const sensitivityScienceCard: TaskCard & { type: "science_assist" };
+declare const sensitivityRunId: RunId;
+const sensitivityReaders: SensitivityObjectLoaders = createSensitivityClosureLoaders(cwd);
+const sensitivityLoadedPlan: unknown = sensitivityReaders.readAnalysisPlan(analysisId);
+const sensitivityMetrics: RunMetrics = sensitivityReaders.readRunMetrics(
+  sensitivityRunId,
+  "a".repeat(64),
+);
+const sensitivityOldGeneric: ClosureResult = evaluateClosure(task, closureJobs, records, draft);
+const sensitivityOldExplicit: ClosureResult = evaluateClosure(
+  task,
+  closureJobs,
+  records,
+  draft,
+  closureObjects,
+);
+const sensitivityMissing: ClosureResult = evaluateClosure(
+  sensitivityCard,
+  closureJobs,
+  records,
+  draft,
+);
+const sensitivityWrongReaders: ClosureResult = evaluateClosure(
+  sensitivityCard,
+  closureJobs,
+  records,
+  draft,
+  closureObjects,
+);
+const sensitivityNarrowed: SensitivityClosureResult = evaluateClosure(
+  sensitivityCard,
+  closureJobs,
+  records,
+  draft,
+  sensitivityReaders,
+);
+const sensitivityDirect: SensitivityClosureResult = deriveSensitivityClosure(
+  task,
+  closureJobs,
+  records,
+  draft,
+  sensitivityReaders,
+);
+const sensitivityGeneric: ClosureResult | SensitivityClosureResult = evaluateClosure(
+  task,
+  closureJobs,
+  records,
+  draft,
+  sensitivityReaders,
+);
+const sensitivityMismatched: ClosureResult | SensitivityClosureResult = evaluateClosure(
+  sensitivityScienceCard,
+  closureJobs,
+  records,
+  draft,
+  sensitivityReaders,
+);
+declare const sensitivityUnionReaders:
+  CodeChangeObjectLoaders | SensitivityObjectLoaders | undefined;
+const sensitivityUnion: ClosureResult | SensitivityClosureResult = evaluateClosure(
+  task,
+  closureJobs,
+  records,
+  draft,
+  sensitivityUnionReaders,
+);
+
+// @ts-expect-error A generic card and sensitivity readers can still produce a legacy result.
+const sensitivityOverpromised: SensitivityClosureResult = evaluateClosure(
+  task,
+  closureJobs,
+  records,
+  draft,
+  sensitivityReaders,
+);
+// @ts-expect-error New readers do not promise legacy metadata for a generic card.
+const sensitivityOldPromise: ClosureResult = evaluateClosure(
+  task,
+  closureJobs,
+  records,
+  draft,
+  sensitivityReaders,
+);
+// @ts-expect-error Plan path construction requires a validated branded identifier.
+sensitivityReaders.readAnalysisPlan("PLAN-20261108T093000-5c1e");
+// @ts-expect-error Run path construction requires a validated branded identifier.
+sensitivityReaders.readRunMetrics("RUN-20261108T093000-0001", "a".repeat(64));
+const sensitivityAsyncMetrics = () => Promise.resolve(sensitivityMetrics);
+// @ts-expect-error Metrics loaders must remain synchronous.
+const sensitivityAsyncReader: SensitivityObjectLoaders["readRunMetrics"] = sensitivityAsyncMetrics;
+// @ts-expect-error Sensitivity results do not contain the legacy no-metrics assertion.
+void sensitivityNarrowed.metric_fact;
+if (sensitivityNarrowed.ok) {
+  const sensitivitySelectedRun: RunId = sensitivityNarrowed.selected[0].run_id;
+  const sensitivitySelectedMetrics: RunMetrics | null = sensitivityNarrowed.selected[0].metrics;
+  // @ts-expect-error Selection order is owned by closure, not mutable by a consumer.
+  void sensitivityNarrowed.selected.reverse;
+  void [sensitivitySelectedRun, sensitivitySelectedMetrics];
+}
+void [
+  sensitivityLoadedPlan,
+  sensitivityOldGeneric,
+  sensitivityOldExplicit,
+  sensitivityMissing,
+  sensitivityWrongReaders,
+  sensitivityNarrowed,
+  sensitivityDirect,
+  sensitivityGeneric,
+  sensitivityMismatched,
+  sensitivityUnion,
+  sensitivityOverpromised,
+  sensitivityOldPromise,
+  sensitivityAsyncReader,
 ];
 
 const stale: boolean = isReportMarkdownStale(report, undefined);
