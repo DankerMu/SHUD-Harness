@@ -37,7 +37,7 @@
     - 实现时以 `git grep -nE "8 ?(个)?(核心)?对象|9 个当前导出|9 exported"`（排除 `docs/generated`、`docs/99_ARCHIVE`、`openspec/changes`）复核：命中只能落在上述两类或已改的五处。
 - [x] 2.2 RunJob/RunRecord 增加 `analysis_plan_id`、`parameter_set_id`（缺键按 null，iff refine）；RunRecord 启用 `artifacts.metrics_summary`（`plots` 仍拒绝）。满足 run-records「RunJob record」「RunRecord record」「Generated projection」；附 M2–M4 旧记录解析回归（依赖 2.1）。
 - [x] 2.3 TaskCard `type: sensitivity` 与 `linked_analyses`（缺键按 `[]`，refine：非 sensitivity 卡为空）。满足 task-cards「TaskCard record」「TaskCard generated projection」（依赖 2.1）。
-- [ ] 2.4 EvidenceReport 增加 `analysis_ids` 与 `sensitivity_summary`（缺键默认值与 iff refine）。满足 evidence-reports「EvidenceReport record」「EvidenceReport generated projection」（依赖 2.1）。
+- [x] 2.4 EvidenceReport 增加 `analysis_ids` 与 `sensitivity_summary`（缺键默认值与 iff refine）。满足 evidence-reports「EvidenceReport record」「EvidenceReport generated projection」（依赖 2.1）。
 - [x] 2.5 governance 常量：
   - calib 白名单：4 键；`read_transform`（KSATH/KSATV `/1440`，LC_ROUGH `/60`）、`check_range`、倍率区间，以及键 → 类别文件映射，逐条附 SHUD 源码 file:line（analysis-plans「Calib whitelist and category product check」的常量部分）。
   - `NUMERICAL_HEALTH_THRESHOLDS`（residual 0.01/0.05；cvode 0；negative 按 §13：0/≤10/>10）与 metrics `method_version`（run-metrics「Numerical health verdicts」的常量部分）。
@@ -238,3 +238,20 @@ Required positives: sensitivity with null base and one plan; sensitivity omitted
 Required commands: focused TaskCard and existing consumer regression tests, schema generation/self-test, full default check, strict OpenSpec validation, built core/tool/closure smoke and scratch byte/mtime proof, isolated actual stale-field schema drift control. Publish exact invocations and complete smoke inputs with results, not summary-only evidence.
 Completion is task2.3 only; keep sensitivity task_create/closure/link writers deferred to #667/#654/#664. No expansion of tool parameters or closure implementation is authorized.
 PI batch test authorization (issue #644 comment6716702659): migrate only additive-default expectations in the four existing compatibility suites identified by the full gate (record-allocation, workspace-records, workspace-readonly, task-create-raw-guard). Retain all raw fixture inputs, original exact-value/state/security/cleanup assertions, and explicitly assert linked_analyses:[]. Run those suites plus the original focused tests and full default gate. No production or golden-report semantics changes are authorized.
+
+## Issue #645 risk packs and executable evidence
+
+| Pack | Selection and evidence |
+|---|---|
+| Public API / release | Selected: exported EvidenceReport parser and existing writer typechecks; only allowed empty/null writer literals |
+| Schema / fields | Selected: unique branded array, strict nullable summary, after-default iff and exact current-report path binding |
+| Compatibility | Selected: unchanged M3/M4 raw fixtures and golden reports; exact old-field checks plus explicit defaults under PI batch authorization |
+| Error handling | Selected: malformed/duplicate PLAN, both mismatched pair directions, wrong report/path, digest boundaries and nested extras fail at owning field |
+| Documentation / projection | Selected: generated defaults, PLAN element pattern, strict nested object and digest constraints; actual isolated stale-field schema drift rejection |
+| File IO / safety | No new production IO; built-core scratch read/parse proves bytes/mtime unchanged |
+| Auth / state / ordering | No new authority/state machine; retain old statuses/decision guards, reference order and independent default arrays |
+| Config / resource / concurrency | Not selected: no configuration, discovery, process or concurrent behavior |
+
+Required positives: valid bound summary with multiple ordered plans; legacy M3 and M4 omissions; explicit empty/null; independent default arrays. Required negatives: PLAN-0001, uppercase/malformed brand, duplicate plans, null/nonarray analysis_ids, nonempty plans with omitted/null summary, omitted/empty plans with summary, missing or extra summary keys, wrong report id, absolute/traversal/prefix/suffix paths, uppercase/nonhex/short/long/newline digests.
+Required commands: focused schema and affected report consumer regression tests; schema:generate/self-test; strict OpenSpec validation; build and built-core parsing smoke; full pnpm run check; isolated real schema:check clean/rejected/restored with full reproducible evidence published. All unrelated projections and golden-report bytes remain unchanged.
+Completion is task2.4 only. No #655 summary writing, #656 citation support, #658 render/validate or #667 generation binding is claimed.

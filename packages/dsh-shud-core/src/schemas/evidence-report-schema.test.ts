@@ -37,6 +37,8 @@ test("EvidenceReport preserves multiple runs and every stack and data reference"
     ...report,
     change_ids: [],
     verification_ids: [],
+    analysis_ids: [],
+    sensitivity_summary: null,
   });
 });
 
@@ -50,9 +52,16 @@ test("M3 missing references default to independent empty arrays without changing
   expect(first.change_ids).not.toBe(second.change_ids);
   expect(first.verification_ids).not.toBe(second.verification_ids);
   expect(first.change_ids).not.toBe(first.verification_ids);
+  expect(first).toMatchObject({ analysis_ids: [], sensitivity_summary: null });
+  expect(second).toMatchObject({ analysis_ids: [], sensitivity_summary: null });
+  expect(first.analysis_ids).not.toBe(second.analysis_ids);
+  expect(first.analysis_ids).not.toBe(first.change_ids);
+  expect(first.analysis_ids).not.toBe(first.verification_ids);
   expect(JSON.stringify(input)).toBe(before);
   expect(input).not.toHaveProperty("change_ids");
   expect(input).not.toHaveProperty("verification_ids");
+  expect(input).not.toHaveProperty("analysis_ids");
+  expect(input).not.toHaveProperty("sensitivity_summary");
 });
 
 test("EvidenceReport retains declared change and verification order rather than sorting", () => {
@@ -61,7 +70,11 @@ test("EvidenceReport retains declared change and verification order rather than 
     change_ids: ["CHG-20261102T090000-b002", "CHG-20261102T090000-a001"],
     verification_ids: ["VC-20261102T090000-b002", "VC-20261102T090000-a001"],
   };
-  expect(EvidenceReportSchema.parse(input)).toEqual(input);
+  expect(EvidenceReportSchema.parse(input)).toEqual({
+    ...input,
+    analysis_ids: [],
+    sensitivity_summary: null,
+  });
   expect(
     EvidenceReportSchema.parse({ ...input, change_ids: [], verification_ids: [] }),
   ).toMatchObject({ change_ids: [], verification_ids: [] });
@@ -92,6 +105,209 @@ test.each([
     }
   },
 );
+
+function validSensitivitySummary() {
+  return {
+    path: "reports/REPORT-20261027T090000-5b10.sensitivity.json",
+    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  };
+}
+
+function rejectsEvidenceReportAt(input: unknown, path: readonly (string | number)[]) {
+  const result = EvidenceReportSchema.safeParse(input);
+  expect(result.success).toBe(false);
+  if (!result.success) {
+    expect(result.error.issues.map((issue) => issue.path)).toContainEqual(path);
+  }
+}
+
+test.each([
+  ["M3", {}],
+  [
+    "M4",
+    {
+      change_ids: ["CHG-20261102T090000-a001"],
+      verification_ids: ["VC-20261102T090000-a001"],
+    },
+  ],
+] as const)(
+  "EvidenceReport preserves %s inputs with omitted or explicit empty analysis fields",
+  (_milestone, references) => {
+    for (const analysisFields of [
+      {},
+      { analysis_ids: [] },
+      { sensitivity_summary: null },
+      { analysis_ids: [], sensitivity_summary: null },
+    ]) {
+      const input = { ...validEvidenceReport(), ...references, ...analysisFields };
+      const before = JSON.stringify(input);
+      expect(EvidenceReportSchema.parse(input)).toEqual({
+        ...input,
+        change_ids: [],
+        verification_ids: [],
+        ...references,
+        analysis_ids: [],
+        sensitivity_summary: null,
+      });
+      expect(JSON.stringify(input)).toBe(before);
+    }
+  },
+);
+
+test("EvidenceReport preserves unique analysis references in caller order and the summary", () => {
+  const input = {
+    ...validEvidenceReport(),
+    analysis_ids: ["PLAN-20261108T093000-5c1e", "PLAN-20261107T093000-7b2d"],
+    sensitivity_summary: validSensitivitySummary(),
+  };
+  const before = JSON.stringify(input);
+  expect(EvidenceReportSchema.parse(input)).toEqual({
+    ...input,
+    change_ids: [],
+    verification_ids: [],
+  });
+  expect(JSON.stringify(input)).toBe(before);
+});
+
+test("EvidenceReport rejects malformed brands and analysis array shapes at their own paths", () => {
+  const input = {
+    ...validEvidenceReport(),
+    sensitivity_summary: validSensitivitySummary(),
+  };
+  for (const id of ["PLAN-0001", "TASK-20261108T093000-5c1e", null]) {
+    rejectsEvidenceReportAt({ ...input, analysis_ids: [id] }, ["analysis_ids", 0]);
+  }
+  for (const analysis_ids of [null, "PLAN-20261108T093000-5c1e"]) {
+    rejectsEvidenceReportAt({ ...input, analysis_ids }, ["analysis_ids"]);
+  }
+});
+
+test("EvidenceReport rejects duplicate analysis ids without silently deduplicating input", () => {
+  const input = {
+    ...validEvidenceReport(),
+    analysis_ids: ["PLAN-20261108T093000-5c1e", "PLAN-20261108T093000-5c1e"],
+    sensitivity_summary: validSensitivitySummary(),
+  };
+  const before = JSON.stringify(input);
+  rejectsEvidenceReportAt(input, ["analysis_ids"]);
+  expect(JSON.stringify(input)).toBe(before);
+});
+
+test("EvidenceReport rejects both analysis-summary mismatches after applying missing defaults", () => {
+  for (const analysisFields of [
+    { analysis_ids: ["PLAN-20261108T093000-5c1e"], sensitivity_summary: null },
+    { analysis_ids: ["PLAN-20261108T093000-5c1e"] },
+    { analysis_ids: [], sensitivity_summary: validSensitivitySummary() },
+    { sensitivity_summary: validSensitivitySummary() },
+  ]) {
+    const result = EvidenceReportSchema.safeParse({ ...validEvidenceReport(), ...analysisFields });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(
+        result.error.issues.some(
+          (issue) =>
+            issue.code === "custom" &&
+            issue.path.length === 1 &&
+            (issue.path[0] === "analysis_ids" || issue.path[0] === "sensitivity_summary"),
+        ),
+      ).toBe(true);
+    }
+  }
+});
+
+test("EvidenceReport accepts the exact relative summary path for a different current report", () => {
+  const input = {
+    ...validEvidenceReport(),
+    report_id: "REPORT-20261107T100000-c3d4",
+    analysis_ids: ["PLAN-20261108T093000-5c1e"],
+    sensitivity_summary: {
+      ...validSensitivitySummary(),
+      path: "reports/REPORT-20261107T100000-c3d4.sensitivity.json",
+    },
+  };
+  expect(EvidenceReportSchema.parse(input)).toEqual({
+    ...input,
+    change_ids: [],
+    verification_ids: [],
+  });
+});
+
+test("EvidenceReport rejects summary paths other than its exact report-bound relative path", () => {
+  for (const path of [
+    "reports/REPORT-20261107T100000-c3d4.sensitivity.json",
+    "/reports/REPORT-20261027T090000-5b10.sensitivity.json",
+    "./reports/REPORT-20261027T090000-5b10.sensitivity.json",
+    "reports/../reports/REPORT-20261027T090000-5b10.sensitivity.json",
+    "reports\\REPORT-20261027T090000-5b10.sensitivity.json",
+    "reports/REPORT-20261027T090000-5b10.json",
+    "reports/REPORT-20261027T090000-5b10.sensitivity.json\n",
+  ]) {
+    rejectsEvidenceReportAt(
+      {
+        ...validEvidenceReport(),
+        analysis_ids: ["PLAN-20261108T093000-5c1e"],
+        sensitivity_summary: { ...validSensitivitySummary(), path },
+      },
+      ["sensitivity_summary", "path"],
+    );
+  }
+});
+
+test("EvidenceReport requires exactly 64 lowercase hexadecimal summary digest characters", () => {
+  const digest = validSensitivitySummary().sha256;
+  for (const sha256 of [
+    digest.toUpperCase(),
+    "g".repeat(64),
+    "a".repeat(63),
+    "a".repeat(65),
+    `${digest}\n`,
+    null,
+    42,
+  ]) {
+    rejectsEvidenceReportAt(
+      {
+        ...validEvidenceReport(),
+        analysis_ids: ["PLAN-20261108T093000-5c1e"],
+        sensitivity_summary: { ...validSensitivitySummary(), sha256 },
+      },
+      ["sensitivity_summary", "sha256"],
+    );
+  }
+});
+
+test("EvidenceReport requires both summary members and an object when analyses are present", () => {
+  const input = {
+    ...validEvidenceReport(),
+    analysis_ids: ["PLAN-20261108T093000-5c1e"],
+  };
+  for (const field of ["path", "sha256"]) {
+    const summary: Record<string, unknown> = validSensitivitySummary();
+    delete summary[field];
+    rejectsEvidenceReportAt({ ...input, sensitivity_summary: summary }, [
+      "sensitivity_summary",
+      field,
+    ]);
+  }
+  for (const sensitivity_summary of [[], "summary", 42]) {
+    rejectsEvidenceReportAt({ ...input, sensitivity_summary }, ["sensitivity_summary"]);
+  }
+});
+
+test("EvidenceReport rejects extra summary keys at the nested object rather than the root", () => {
+  const result = EvidenceReportSchema.safeParse({
+    ...validEvidenceReport(),
+    analysis_ids: ["PLAN-20261108T093000-5c1e"],
+    sensitivity_summary: { ...validSensitivitySummary(), extra: true },
+  });
+  expect(result.success).toBe(false);
+  if (!result.success) {
+    const issue = result.error.issues.find(
+      (candidate) => candidate.code === "unrecognized_keys" && candidate.keys.includes("extra"),
+    );
+    expect(issue).toBeDefined();
+    expect(issue?.path).toEqual(["sensitivity_summary"]);
+  }
+});
 
 test("PiGateDecision accepts an accepted outcome with an explicit null comment", () => {
   const decision = validPiGateDecision();
@@ -143,6 +359,8 @@ test.each([
     ...report,
     change_ids: [],
     verification_ids: [],
+    analysis_ids: [],
+    sensitivity_summary: null,
   });
 });
 
@@ -158,6 +376,8 @@ test("EvidenceReport accepts empty narrative arrays and decision history", () =>
     ...report,
     change_ids: [],
     verification_ids: [],
+    analysis_ids: [],
+    sensitivity_summary: null,
   });
 });
 
@@ -171,6 +391,8 @@ test("EvidenceReport preserves repeated run references and caller model order", 
     ...report,
     change_ids: [],
     verification_ids: [],
+    analysis_ids: [],
+    sensitivity_summary: null,
   });
 });
 
@@ -262,6 +484,8 @@ test("EvidenceReport preserves nonempty text without trimming or timestamp chron
     ...report,
     change_ids: [],
     verification_ids: [],
+    analysis_ids: [],
+    sensitivity_summary: null,
   });
 });
 
@@ -432,6 +656,8 @@ test("EvidenceReport preserves decision history without cross-record or chronolo
     ...report,
     change_ids: [],
     verification_ids: [],
+    analysis_ids: [],
+    sensitivity_summary: null,
   });
 });
 

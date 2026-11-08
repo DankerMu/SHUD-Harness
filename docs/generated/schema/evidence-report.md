@@ -23,6 +23,10 @@ Required is evaluated within the immediate parent object.
 | llm_response_models | yes | no | array<string> | items: minLength=1 |
 | change_ids | no | no | array<string> | default=[]; items: pattern=^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | verification_ids | no | no | array<string> | default=[]; items: pattern=^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| analysis_ids | no | no | array<string> | default=[]; items: pattern=^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
+| sensitivity_summary | no | yes | object \| null | additionalProperties=false |
+| sensitivity_summary.path | yes | no | string | - |
+| sensitivity_summary.sha256 | yes | no | string | minLength=64; maxLength=64; pattern=^[0-9a-f]{64}$ |
 | decision_history | yes | no | array<object> | items: additionalProperties=false |
 | decision_history[].decision_id | yes | no | string | pattern=^DEC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
 | decision_history[].report_id | yes | no | string | pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$ |
@@ -32,6 +36,12 @@ Required is evaluated within the immediate parent object.
 | decision_history[].decided_at | yes | no | string | format=date-time; pattern=^(?:(?:\d\d[2468][048]\|\d\d[13579][26]\|\d\d0[48]\|[02468][048]00\|[13579][26]00)-02-29\|\d{4}-(?:(?:0[13578]\|1[02])-(?:0[1-9]\|[12]\d\|3[01])\|(?:0[469]\|11)-(?:0[1-9]\|[12]\d\|30)\|(?:02)-(?:0[1-9]\|1\d\|2[0-8])))T(?:(?:[01]\d\|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z))$ |
 | created_at | yes | no | string | minLength=1 |
 | updated_at | yes | no | string | minLength=1 |
+
+## Field semantics
+
+- analysis_ids: Unique analysis plan references in caller order; omitted legacy references default to []. Runtime validation requires a nonempty array exactly when sensitivity_summary is non-null.
+- sensitivity_summary: Strict summary file reference, or null when analysis_ids is empty; omitted legacy references default to null. Schema validates reference shape, not file bytes or existence.
+- sensitivity_summary.path: Runtime validation requires exactly reports/<this report_id>.sensitivity.json.
 
 ## Enums
 
@@ -66,6 +76,8 @@ llm_response_models:
   - "deepseek-flash-guan"
 change_ids: []
 verification_ids: []
+analysis_ids: []
+sensitivity_summary: null
 decision_history: []
 created_at: "2026-10-27T09:00:00Z"
 updated_at: "2026-10-27T09:00:00Z"
@@ -74,7 +86,7 @@ updated_at: "2026-10-27T09:00:00Z"
 ## Changelog Diff
 
 ```diff
-+ schema EvidenceReport sha256:9689cac9de504188568bdb30f332bf397e345ffebf6db4ab2650a422ccadc7d3
++ schema EvidenceReport sha256:4ee1daa42746d32e3c3c8840bce43d9c7254272195ba1d6344db0d820d0b6460
 + field report_id required=yes nullable=no type=string constraints=pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field task_id required=yes nullable=no type=string constraints=pattern=^TASK-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field status required=yes nullable=no type=enum<string> constraints=values: `draft`, `reviewed`, `awaiting_pi`, `accepted`, `revision_requested`, `rejected`, `archived`
@@ -88,6 +100,10 @@ updated_at: "2026-10-27T09:00:00Z"
 + field llm_response_models required=yes nullable=no type=array<string> constraints=items: minLength=1
 + field change_ids required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^CHG-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field verification_ids required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^VC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field analysis_ids required=no nullable=no type=array<string> constraints=default=[]; items: pattern=^PLAN-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
++ field sensitivity_summary required=no nullable=yes type=object | null constraints=additionalProperties=false
++ field sensitivity_summary.path required=yes nullable=no type=string constraints=-
++ field sensitivity_summary.sha256 required=yes nullable=no type=string constraints=minLength=64; maxLength=64; pattern=^[0-9a-f]{64}$
 + field decision_history required=yes nullable=no type=array<object> constraints=items: additionalProperties=false
 + field decision_history[].decision_id required=yes nullable=no type=string constraints=pattern=^DEC-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$
 + field decision_history[].report_id required=yes nullable=no type=string constraints=pattern=^REPORT-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}$

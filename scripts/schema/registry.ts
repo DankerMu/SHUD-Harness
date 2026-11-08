@@ -146,6 +146,8 @@ export const schemaDefinitions: SchemaDefinition[] = [
       llm_response_models: ["deepseek-flash-guan"],
       change_ids: [],
       verification_ids: [],
+      analysis_ids: [],
+      sensitivity_summary: null,
       decision_history: [],
       created_at: "2026-10-27T09:00:00Z",
       updated_at: "2026-10-27T09:00:00Z",
