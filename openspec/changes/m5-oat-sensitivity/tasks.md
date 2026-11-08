@@ -69,7 +69,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 
 ## 3. records：输入读取、metrics、plan 文件层、closure 与报告（Critical Path #6/#7）
 
-- [ ] 3.0 共享 SHUD 文本输入安全读模块：`.sp.mesh/.sp.att/.sp.riv/.para.geol/.para.lc/.cfg.para/.cfg.calib/.cfg.ic` 的解析，加上普通文件/不逃逸/`O_NOFOLLOW` 读取，并在同一次读取内算 sha256。这是唯一实现，3.2/3.3/7.1 一律 import 它，不另写。满足 run-metrics「SHUD binary output read contract」中的文本输入部分（依赖无；用 ccw 真实文件做夹具）。
+- [x] 3.0 共享 SHUD 文本输入安全读模块：`.sp.mesh/.sp.att/.sp.riv/.para.geol/.para.lc/.cfg.para/.cfg.calib/.cfg.ic` 的解析，加上普通文件/不逃逸/`O_NOFOLLOW` 读取，并在同一次读取内算 sha256。这是唯一实现，3.2/3.3/7.1 一律 import 它，不另写。满足 run-metrics「SHUD binary output read contract」中的文本输入部分（依赖无；用 ccw 真实文件做夹具）。
 - [ ] 3.1 SHUD 二进制 `.dat` 读取器：布局校验、截断与 NaN、安全读、同一次读取内算 sha256、只接受小端。满足 run-metrics「SHUD binary output read contract」的 `.dat` 部分。
 - [ ] 3.2a 逐 run 流量指标、numerical_health 中非水量平衡的三项、判定与 `metrics.json` 确定性序列化：
   - 出口集合；`peak_flow_m3d`/`peak_day`/`total_runoff_m3`；Δ 由时间列推导；`cvode_failures`；`negative_state_count`（任一文件缺失则整项 null）；`max_solver_dt` 恒为 null 且不进 verdicts。
@@ -255,3 +255,24 @@ PI batch test authorization (issue #644 comment6716702659): migrate only additiv
 Required positives: valid bound summary with multiple ordered plans; legacy M3 and M4 omissions; explicit empty/null; independent default arrays. Required negatives: PLAN-0001, uppercase/malformed brand, duplicate plans, null/nonarray analysis_ids, nonempty plans with omitted/null summary, omitted/empty plans with summary, missing or extra summary keys, wrong report id, absolute/traversal/prefix/suffix paths, uppercase/nonhex/short/long/newline digests.
 Required commands: focused schema and affected report consumer regression tests; schema:generate/self-test; strict OpenSpec validation; build and built-core parsing smoke; full pnpm run check; isolated real schema:check clean/rejected/restored with full reproducible evidence published. All unrelated projections and golden-report bytes remain unchanged.
 Completion is task2.4 only. No #655 summary writing, #656 citation support, #658 render/validate or #667 generation binding is claimed.
+
+## Issue #647 risk packs and executable evidence
+
+| Pack | Evidence |
+|---|---|
+| Public API / release | Built records root exports readShudTextInput/parseShudTextInput and typed results; no deep-import consumer convention or new dependency |
+| File IO / path safety | Absolute-base and relative-path validation, normalized escape rejection, nested linked ancestors/final symlink/dangling link/directory/FIFO refusal; real nonblocking FIFO test and unchanged outside bytes |
+| Schema / columns | Eight ccw kinds, exact declared rows/columns, required named columns, malformed values, optional river geometry/IC time/lake tables, LC zero index and negative slope preservation |
+| Auth / diagnostics | No writes/renames/truncation; controlled missing versus unsafe/read errors, sanitized native faults and parser errors without input payload |
+| Resource / ordering | Single descriptor open/read-pass for digest+parse+size, partial read handling, zero-length/multi-chunk input, one close attempt and cleanup fault coverage; comparator remains bounded and sequential |
+| Compatibility | Existing comparator, binary verification and artifact validation tests remain valid; direct pinned submodule fixtures unchanged before/after |
+| Error handling | Missing file distinct from unsafe and IO; missing column/bad number/row or column mismatch yields file+controlled column/section diagnostic, never partial data |
+| Documentation | Public source contract and shared fixture record real format extras and observational race limits; no atomic-sandbox or scientific-validation claim |
+| Config / concurrency | No new config, job state, processes or parallel algorithm; observed final/ancestor replacements tested, no atomic snapshot claimed |
+
+Required real-data proof: mesh1147 elements/629nodes; att1147rows; river103reaches/4types and optional103geometryrows; geol67rows; LC17rows startingINDEX0; IC1147elements/103rivers; para29/calib38effective lines. Down<0 yields exactly river1. Digest equals independent full-file sha256 and size equals bytes read; all eight source files retain bytes.
+Required synthetic proof: key comments/space/NUL skip before trimming, tab-leading keys parse, GEOL_KSATV/geol_ksatv duplicates retained; absent values/malformed numerics/missing registered columns/short and extra rows/column mismatches rejected. Optional sections may be absent, but malformed present sections fail. Cross-file count policy and unit conversions remain unimplemented.
+Numeric proof for both table cells and cfg values: decimal/scientific, signed zero, 0x1.8p+2→6, hex without exponent, case-insensitive inf/infinity/nan and nan payload remain parseable; 93abc/bad/missing and malformed exponents fail at file+column/line without partial result. Verify hex double rounding near ties, normal/subnormal limits, overflow/underflow and a long significand against independent expected doubles. Parsed nonfinite values are not converted to null or classified here.
+Dimension regression: reject 1.0/1e0/0x1 count spellings for row/column declarations; preserve signed decimal integer counts, leading zeros and the separate general numeric grammar for optional IC time. Evidence compares pinned %d source and actual host libc against built-parser behavior.
+Safety proof: successful nested path and normalized in-base request; lexical escape rejected before target IO; final/ancestor links and special files rejected; preflight-to-open replacement and dev/ino mismatch rejected before content; failures at open/fstat/read/close and cleanup remain controlled with descriptors accounted for. No schema/golden/threshold changes.
+Commands: focused new parser/safety tests plus compare-rivqdown, workspace-build-binary and report-artifact-io regressions; build and actual built records API smoke; pnpm run check; strict OpenSpec. Parent owns execution and publishes full reproducible inputs/results. Completion is task3.0 only.
