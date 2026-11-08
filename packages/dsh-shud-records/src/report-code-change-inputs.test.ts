@@ -60,7 +60,10 @@ function expectReadonlyFailure(stage: string, path?: string) {
   expect(snapshotTree(workspace.root)).toEqual(before);
 }
 
-describe.each(workspaceFileCases)("cited $kind facts", (fixture) => {
+const codeChangeFiles = workspaceFileCases.filter(
+  ({ kind }) => kind === "change" || kind === "verification" || kind === "build",
+);
+describe.each(codeChangeFiles)("cited $kind facts", (fixture) => {
   test.each([
     ["missing", "missing"],
     ["malformed", "parse"],

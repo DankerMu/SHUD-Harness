@@ -79,7 +79,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 - [x] 3.2b O1 事实核查与系数常量：对照 SHUD 源码核实 `eleysnow`/`eleyic` 的单位，以及 `.cfg.ic` Canopy/Snow 的口径；把两项系数登记为 core 常量（附 file:line），并写入 `SHUD_Output_Variables.md`。满足 run-metrics「Water balance residual」中的系数常量部分（依赖 2.5）。
 - [x] 3.2c 水量平衡 rSHUD 共有项：P、Qd、AET、ΔS_surf/us/gw/riv 的分项计算（面积、孔隙率、河道面积、IC 读取）；合成迷你项目夹具与小 `.dat` 写出器；本机一次性生成脚本 `scripts/metrics/rshud-crosscheck.R` 与入库的 `expected-rshud.json`。满足 run-metrics「rSHUD cross-check fixture」与 engineering-gates「rSHUD cross-check generator is local-only」（依赖 3.0、3.2a）。
 - [x] 3.2d 积雪/截留扩展项与残差汇总：ΔS_snow/ΔS_ic（使用 3.2b 的常量）；`water_balance_residual`；`zero_precipitation`/`missing_variable`/`ic_shape_mismatch`/`missing_calib`/`interval_undetermined` 等 null 原因；积雪与截留用手算夹具覆盖。满足 run-metrics「Water balance residual」（依赖 3.2b、3.2c）。
-- [ ] 3.3 AnalysisPlan 工作区文件层（`analyses/<id>.json` 排他创建、只读解析、id 绑定）；calib 类别表乘积校验（键缺失或重复即拒绝，越界时点名行 index）；`input_digests` 与乘积校验取自同一次读取。满足 analysis-plans「AnalysisPlan workspace file」与「Calib whitelist and category product check」的校验部分（依赖 2.1、2.5、3.0）。
+- [x] 3.3 AnalysisPlan 工作区文件层（`analyses/<id>.json` 排他创建、只读解析、id 绑定）；calib 类别表乘积校验（键缺失或重复即拒绝，越界时点名行 index）；`input_digests` 与乘积校验取自同一次读取。满足 analysis-plans「AnalysisPlan workspace file」与「Calib whitelist and category product check」的校验部分（依赖 2.1、2.5、3.0）。
 - [ ] 3.4 sensitivity closure 谓词：恰好一个 plan；作业全部绑定该 plan 且全部终态；有效 run 规则；baseline 必须 succeeded；同一 `stack_id`；metrics `status: ok` 且 sha256 匹配。本刀只新增 sensitivity 谓词，不改 science_assist/code_change。满足 task-cards「sensitivity closure predicate」与「TaskCard workspace file」（依赖 2.2、2.3、3.2a、3.3）。
 - [ ] 3.5 汇总表派生与报告文件层：
   - `SensitivitySummary` 构造：`_pct` 以 baseline 为分母，分母为 0 时给 null；`delta_peak_day` 为差值。
@@ -364,3 +364,21 @@ Auth/concurrency/release/config packs are non-selected because this slice adds n
 | Scientific docs / evidence | Existing producer-status docs describe the complete numerical diagnostic but not hydrologic validity/model improvement; actual built ok/unavailable formula-source and interval-average semantics checked outside permanent wording tests |
 
 Release/exports is selected within the public API pack above. Auth/concurrency/configuration/packaging/dependency packs are non-selected because those surfaces are unchanged. Commands: focused new residual and existing metrics/reader suites, pnpm run build, root-export built smoke and retained-real-ccw missing-extension check, pnpm run check, openspec validate m5-oat-sensitivity --strict --no-interactive. Publish exact hand inputs, outputs, reason precedence, RED/GREEN and safety/determinism evidence. Complete only task3.2d; #662 persistence and PI gates remain open.
+
+## Issue #653 risk packs and executable evidence
+
+| Pack | Selection and evidence |
+|---|---|
+| Public API / entry | Selected: built root createAnalysisPlan/checkCalibProducts/readWorkspaceRecord round trip and type contract |
+| Config / setup | Not selected: no project/runtime configuration or defaults change |
+| File IO / path / overwrite | Selected: real unsafe roots/targets, malformed id before IO, readonly absence, physical-cwd decoy, same-byte input hashes and unchanged mtime |
+| Schema / columns / units | Selected: consume core schema/whitelist; all four transforms, per-row bounds, malformed/missing/duplicate calibration and tables; no core projection edits |
+| Auth / permissions / secrets | Not selected: no tool/auth surface; controlled diagnostics must not echo arbitrary input contents, raw approval remains #663/#664 |
+| Concurrency / shared state | Selected: exclusive publish collision, four allocations maximum, no overwrite and ownership/cleanup fault regressions; no new lock/transaction |
+| Resource limits / discovery | Selected: one read per distinct required file, exact digest set, no directory scans or unrelated reads; preserve shared reader limits |
+| Legacy compatibility / examples | Selected: existing workspace/readonly/physical/publication/text-reader suites and ccw copied inputs |
+| Errors / rollback / partial outputs | Selected: schema/path/product rejection before relevant writes, collision exhaustion unchanged files, no leaked owned temporary file; existing committed-cleanup error semantics preserved |
+| Release / packaging | Selected: exported runtime API plus package typecheck/built smoke; no dependency or package manifest change |
+| Documentation / migration | Selected: API comments and this fixture describe new immutable object, arithmetic/source/digest boundaries and non-goals; no migration of existing objects |
+
+Commands: focused AnalysisPlan/product tests plus workspace allocation/publication/physical/readonly and SHUD text suites; pnpm run build; parent built root-API ccw-copy smoke; pnpm run check; openspec validate m5-oat-sensitivity --strict --no-interactive. Publish reproducible inputs, positive/negative outputs, RED/GREEN, read counts, before/after fingerprints and review reports. Only task3.3 closes; shared change and PI gates remain open.

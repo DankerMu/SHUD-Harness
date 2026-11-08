@@ -181,3 +181,11 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Selected packs: public API/cutover (including Release/exports), numeric units/dependency errors, file IO/path safety/single-read resource ownership, deterministic evidence/compatibility, scientific wording and immutable oracle. No new auth/concurrency/configuration/packaging/dependency surface.
 - Scope is task3.2d, records source/tests plus existing behavior documentation. No core/jobs/tools/collect/persistence, R-generator/corpus changes, threshold changes, profile overrides or new scientific VegFrac recipe. Actual O1 registrations have no veg_frac_source, so the issue's explicit no-extra-read acceptance alternative applies.
 - Required evidence: semantic closed-budget RED/GREEN, positive/zero snow/interception contrast, all specified null reasons and unavailable boundaries, code-point missing-variable precedence, unchanged seven-term rSHUD oracle, public built API/digest round-trip/read-only relocation and three-seat source review. No shared-change archive or PI acceptance.
+
+## Issue #653 execution fixture
+
+- Issue type: feature. Fixture level: expanded; agree with upstream. Critical Paths #1/#2 apply to fail-closed product governance and read-only/path-safe persistence; schema consumption does not modify core.
+- Blast radius: unsafe plan publication could overwrite evidence; wrong transforms or byte digests could authorize invalid or different run inputs.
+- Selected packs: Public API, File IO/path safety/overwrite, Schema/columns/units, Concurrency/publication ownership, Resource/single-read limits, Legacy compatibility, Error/rollback, Release/exports, Documentation.
+- Scope: task3.3, records source/tests only plus this execution fixture. Extend canonical workspace publication and shared SHUD readers; no tools/jobs/core/policy/raw-guard changes, scan/repair, input rewrite, or scientific baseline change.
+- Evidence floor: semantic workspace RED/GREEN, ccw-copy and discriminating product boundaries, exact same-read digest set, exclusive collision/unsafe-path/read-only proofs, existing sibling publication regressions, built root-API smoke, full check and exact-head CI. Shared change stays open for #675 PI acceptance.

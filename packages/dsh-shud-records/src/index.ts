@@ -1,12 +1,12 @@
 /**
  * Core-and-Node workspace file layer. Atomic primitives retain their low-level diagnostics;
  * workspace reads/writes expose controlled errors and never repair invalid object evidence.
- * Seven-kind reads always bind change/verification/build identities; readonly also binds legacy
- * identities without mkdir. Build metadata reads never create a published build directory.
+ * Eight-kind reads always bind change/verification/build/analysis identities; readonly also
+ * binds legacy identities without mkdir. Build reads never create a published build directory.
  * Safe Markdown facades share managed-path guards and the canonical atomic byte writer;
  * report allocation protects both siblings. Stack capture exclusively creates or reuses locks.
  * Generic overwrite remains limited to task/data/report.
- * Change/verification first publication and companion patches use exclusive link commits;
+ * Change/verification/analysis first publication and companion patches use exclusive link commits;
  * only existing valid ChangeRequests can be rewritten through the atomic replacement writer.
  * CR publication preserves a complete candidate's id/path unless an actual collision reallocates it.
  * Source observation returns literal tracked modification paths and exact HEAD diff bytes through
@@ -28,6 +28,9 @@
  * them. Typed-array views use owned file storage, never unrelated Buffer-pool bytes.
  * Missing/unsafe/read/parse errors omit native causes and input payloads. Scientific
  * finiteness, cross-file counts, factors and units remain consumer responsibilities.
+ * Calibration products consume the core whitelist and shared parser, applying read conversion
+ * before baseline and multiplier. Returned input digests identify those same reads; product
+ * errors identify a zero-based category row and inclusive bounds or finite-positive river rule.
  * Run metrics computation exposes read-only flow, health and six-store water-budget
  * diagnostics. Serialization owns the strict canonical wire format; metrics.json reads
  * bind the caller's digest before parsing. These APIs never write an artifact.
@@ -61,6 +64,7 @@ export type { RunMetrics, RunMetricsHealth, MetricsInput } from "./run-metrics-w
 export { ShudInputError } from "./shud-input-file.ts";
 export type { ShudInputStage } from "./shud-input-file.ts";
 export { readShudTextInput, parseShudTextInput } from "./shud-text-input.ts";
+export { checkCalibProducts, CalibProductError } from "./calib-products.ts";
 export type {
   ShudInputKind,
   ShudTable,
@@ -110,6 +114,7 @@ export {
   createEvidenceReport,
   createChangeRequest,
   createVerificationCase,
+  createAnalysisPlan,
   writeChangePatch,
   readChangePatch,
   rewriteChangeRequest,

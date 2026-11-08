@@ -5,15 +5,18 @@ import { tmpdir } from "node:os";
 import { inspect } from "node:util";
 import type * as NodeCrypto from "node:crypto";
 import {
+  AnalysisPlanSchema,
   ChangeRequestSchema,
   createBrandedId,
   VerificationCaseSchema,
   type ChangeId,
   type ChangeRequest,
   type VerificationCase,
+  type AnalysisPlan,
 } from "@shud-harness/dsh-shud-core";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
+  createAnalysisPlan,
   createChangeRequest,
   createVerificationCase,
   readChangePatch,
@@ -25,6 +28,7 @@ import {
 } from "./index.ts";
 import { installUnsafe, unsafeKinds } from "./test-harness.ts";
 import {
+  analysisCase,
   changeCase,
   verificationCase,
   workspaceFileCases,
@@ -76,6 +80,7 @@ const native = await vi.importActual<typeof fs>("node:fs");
 const nativePath = await vi.importActual<typeof NodePath>("node:path");
 const change = ChangeRequestSchema.parse(changeCase.value);
 const verification = VerificationCaseSchema.parse(verificationCase.value);
+const analysis = AnalysisPlanSchema.parse(analysisCase.value);
 const secret = "private-publication-payload-527";
 // SHA256("abc") is the published standard vector in both frozen schema fixtures.
 const patchBytes = Buffer.from("abc");
@@ -187,6 +192,11 @@ function verificationFields(): Omit<VerificationCase, "vc_id"> {
   void vc_id;
   return fields;
 }
+function analysisFields(): Omit<AnalysisPlan, "analysis_plan_id"> {
+  const { analysis_plan_id, ...fields } = analysis;
+  void analysis_plan_id;
+  return fields;
+}
 const allocations = [
   {
     ...changeCase,
@@ -209,10 +219,18 @@ const allocations = [
       }),
     expected: (id: string) => ({ ...verificationCase.value, vc_id: id }),
   },
+  {
+    ...analysisCase,
+    create: (directory: string) => createAnalysisPlan(directory, analysisFields()),
+    invalid: (directory: string) =>
+      createAnalysisPlan(directory, { ...analysisFields(), input_digests: {} }),
+    expected: (id: string) => ({ ...analysisCase.value, analysis_plan_id: id }),
+  },
 ];
 
 describe.each(allocations)("$kind first publication", (fixture) => {
   beforeEach(() => {
+    if (fixture.kind === "analysis") vi.setSystemTime(new Date("2026-11-08T09:30:00Z"));
     entropy.suffixes = [fixture.id.slice(-4), "abcd", "1234", "5678", "9999"];
   });
 

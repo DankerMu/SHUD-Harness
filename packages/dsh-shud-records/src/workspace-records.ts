@@ -24,6 +24,7 @@ import {
   ChangeIdSchema,
   VerificationIdSchema,
   BuildIdSchema,
+  AnalysisPlanIdSchema,
   TaskCardSchema,
   StackLockSchema,
   DataProvenanceSchema,
@@ -31,6 +32,7 @@ import {
   ChangeRequestSchema,
   VerificationCaseSchema,
   BuildRecordSchema,
+  AnalysisPlanSchema,
   type TaskCard,
   type StackLock,
   type DataProvenance,
@@ -38,6 +40,7 @@ import {
   type ChangeRequest,
   type VerificationCase,
   type BuildRecord,
+  type AnalysisPlan,
   type ReportId,
   type ChangeId,
   type BuildId,
@@ -59,6 +62,7 @@ export interface WorkspaceRecordMap {
   change: ChangeRequest;
   verification: VerificationCase;
   build: BuildRecord;
+  analysis: AnalysisPlan;
 }
 export type WorkspaceRecordKind = keyof WorkspaceRecordMap;
 export type MutableWorkspaceRecordKind = "task" | "data" | "report";
@@ -148,11 +152,23 @@ const recordTypes = {
     binary: "shud",
     nested: { filename: "build-record.json", createDirectory: false },
   },
+  analysis: {
+    field: "analysis_plan_id",
+    directory: "analyses",
+    id: AnalysisPlanIdSchema,
+    schema: AnalysisPlanSchema,
+    bindIdentity: true,
+    prefix: "PLAN",
+  },
 } as const;
 
 function validatedId(kind: WorkspaceRecordKind, value: unknown): string {
   const result = recordTypes[kind].id.safeParse(value);
-  if (!result.success) throw new WorkspaceRecordError("id");
+  if (!result.success) {
+    const error = new WorkspaceRecordError("id");
+    if (kind === "analysis") error.message += `: ${recordTypes[kind].field}`;
+    throw error;
+  }
   return result.data;
 }
 
@@ -222,7 +238,7 @@ function publish(path: string, value: unknown): void {
 }
 
 /**
- * Read one of the seven fixed workspace layouts, synchronously and through its core schema.
+ * Read one of the eight fixed workspace layouts, synchronously and through its core schema.
  * Missing managed roots are created unless readonly, recursively including a missing cwd.
  * Reads never create a published build directory or repair missing/corrupt objects.
  * cwd is trusted but its symlink/.. traversal is physical: managed roots are lstat-checked
@@ -443,7 +459,7 @@ function changePatchPath(cwd: string, id: string, readonly: boolean): string {
   return join(root, `${id}.${extension}`);
 }
 
-function createExclusiveRecord<K extends "change" | "verification">(
+function createExclusiveRecord<K extends "change" | "verification" | "analysis">(
   cwd: string,
   kind: K,
   candidate: WorkspaceRecordMap[K],
@@ -451,7 +467,7 @@ function createExclusiveRecord<K extends "change" | "verification">(
   const definition = recordTypes[kind];
   let record = parseRecord(kind, candidate);
   for (let reallocations = 0; ; reallocations += 1) {
-    const id = "vc_id" in record ? record.vc_id : record.change_id;
+    const id = validatedId(kind, Reflect.get(record, definition.field));
     const path = workspacePath(cwd, kind, id);
     if (publishExclusive(path, id, `${JSON.stringify(record)}\n`)) return record;
     // The first candidate plus at most three reallocations; never draw a fifth id.
@@ -478,6 +494,21 @@ export function createVerificationCase(
   return createExclusiveRecord(cwd, "verification", {
     ...fields,
     vc_id: createBrandedId("VC"),
+  });
+}
+
+/**
+ * Allocate a PLAN id and exclusively publish schema-valid, immutable analysis metadata.
+ * Collisions permit at most three reallocations; existing bytes are never replaced.
+ * Input product/digest validation belongs to the caller; this does not read model inputs.
+ */
+export function createAnalysisPlan(
+  cwd: string,
+  fields: Omit<AnalysisPlan, "analysis_plan_id">,
+): AnalysisPlan {
+  return createExclusiveRecord(cwd, "analysis", {
+    ...fields,
+    analysis_plan_id: createBrandedId("PLAN"),
   });
 }
 
