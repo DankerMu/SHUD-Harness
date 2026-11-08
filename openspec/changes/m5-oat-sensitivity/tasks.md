@@ -296,3 +296,24 @@ Required negatives: <1040bytes, missing declared column bytes, truncated last8by
 Typed-array ownership regression: use a small valid pooled-size file; each returned values.buffer must be confined to owned verified-file/payload data rather than exposing the larger shared Buffer pool. Verify exact decoded values and unchanged source bytes, not a particular allocation API.
 Safety proof: missing vs unsafe/read errors, real FIFO with successful regular control, ancestor/final symlink and directory, normalized in-base path/escape rejection, inode replacement and cleanup/close faults, input/target bytes and mtime unchanged. Do not duplicate the entire #647 fault matrix; reuse the common primitive and prove the new public reader reaches its actual boundary.
 Commands: focused dat tests plus unchanged shud-text-formats/numeric/IO, compare-rivqdown, workspace-build-binary and report-artifact-io; build; actual built binary/text/comparator smoke; strict OpenSpec; full pnpm run check. Parent publishes independent byte construction and complete observed output. Completion is task3.1 only.
+
+## Issue #649 risk packs and executable evidence
+
+| Pack | Required evidence |
+|---|---|
+| Numeric correctness / units | Independent synthetic outlet sums and 0/1440/2880→10/20/30 total60; multi-outlet reordered IDs; tie at1440/4320 selects day1; single/unequal interval preserves peaks; no DT_* inference |
+| IO / path safety | Existing safe readers for all text/dat/log/metrics bytes; final and ancestor links, directory, writerless FIFO, escape/project invalidity, no outside writes; missing versus unsafe/parse/read |
+| Evidence identity | inputs actual full-byte SHA256/length with relative paths, sorted and unique; nonfinite tally includes retained dat fields; digest checked on metrics bytes before parse; mismatch/missing/malformed controlled |
+| Errors / status | Empty outlets/core input missing or unsafe and present malformed dat→unavailable/all numeric cells null; optional state absence/nonfinite→only dependent null; later bad present state cannot hide behind earlier missing state; stderr failure remains item-null |
+| Determinism / wire | Fixed complete nested order, finite numeric cells, exact null reasons, shortest-roundtrip JSON+LF, copied/sorted inputs/outlets without argument mutation; strict reader rejects malformed shape; repeated and relocated runs byte-identical |
+| API / compatibility | compute stays internal/no production consumer; root serializer/reader built smoke; existing text/dat/comparator suites unchanged; canonical dat builder reused |
+| Resource / concurrency | One safe pass per target; process state files serially; descriptor fault cleanup shared and exercised; no atomic snapshot or same-inode immutability claim |
+| Governance / docs | Core classifier/method constant reused; tolerance remains -1e-10; max_solver_dt not in verdicts; lower-bound and final-interval approximation explicit; no scientific verdict, thresholds or formula changes |
+
+Core fixtures: ccw-like sole outlet1 and multi-outlet unordered reach/column IDs; negative -1e-6×3 plus -1e-12→3, exact -1e-10 excluded; two exact line-start SUNDIALS_ERROR: lines→2 with prefixed nonmatches ignored; max_solver_dt always null. Missing rivystage with other negative values gives null, never partial count; keliya-like missing states keeps all flow values and status ok. Unavailable tests include missing cfg.ic, symlink mesh and malformed eleygw. Check method_version/verdict keys and core threshold boundary transitions without changing status.
+
+Boundary fixtures: no rows, missing/duplicate outlet column, nonfinite outlet versus unrelated column, nonfinite time/date, finite-sum overflow, equal zero/negative intervals under the literal formula, reordered tie rows; successful-read manifests remain deterministic on controlled failure. Reader checks wrong digest, same digest malformed JSON/shape, symlink/ancestor/FIFO and unchanged bytes. Reject invalid serializer input rather than NaN/Infinity implicit JSON null. Water-balance constructed-value round-trip fixes every field/order; its producers remain task3.2c/d, and this internal intermediate is never written by production.
+
+Commands/evidence: focused new metrics suites plus shud-text-*/shud-dat*/compare-rivqdown regressions; pnpm run build; built internal compute + public serializer/reader smoke; openspec validate m5-oat-sensitivity --strict --no-interactive; full pnpm run check. Publish all commands and independent input recipes/results. Completion is task3.2a only.
+
+Peak-time explicit oracles (all Q finite): rows [4320,20],[1440,20] select peak_day1 regardless of order; [1440,20],[NaN,20] preserve peak_flow20 but peak_day null/nonfinite:rivqdown and total null/interval_undetermined:rivqdown; [1440,20],[NaN,10] preserve peak_flow20 and peak_day1, with only total null/interval_undetermined:rivqdown. Reverse each nonfinite row order to prove no first-row shortcut.

@@ -28,6 +28,9 @@
  * them. Typed-array views use owned file storage, never unrelated Buffer-pool bytes.
  * Missing/unsafe/read/parse errors omit native causes and input payloads. Scientific
  * finiteness, cross-file counts, factors and units remain consumer responsibilities.
+ * Run metrics serialization owns the strict canonical wire format; metrics.json reads
+ * bind the caller's digest before parsing. Computation remains internal until the
+ * complete water-balance producers land; neither public API writes an artifact.
  * Provenance inventories prepared input bytes before allocation. Task transition,
  * reconciliation and closure helpers are pure; callers own evidence reads, approval,
  * report augmentation and persistence. Reconciliation identity signals no write.
@@ -52,6 +55,8 @@ export { generateProvenance } from "./generate-provenance.ts";
 export { compareRivqdown } from "./compare-rivqdown.ts";
 export { readShudDat } from "./shud-dat.ts";
 export type { ShudDat, ShudDatRow } from "./shud-dat.ts";
+export { serializeRunMetrics, readRunMetrics } from "./run-metrics-wire.ts";
+export type { RunMetrics, RunMetricsHealth, MetricsInput } from "./run-metrics-wire.ts";
 export { ShudInputError } from "./shud-input-file.ts";
 export type { ShudInputStage } from "./shud-input-file.ts";
 export { readShudTextInput, parseShudTextInput } from "./shud-text-input.ts";

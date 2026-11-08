@@ -228,6 +228,10 @@ null 原因词表：
 
 **D15(9)：M5 范围裁剪、非放宽 baseline。** 原 metrics YAML 规划改为确定性 `metrics.json`，basin aggregation 方法与区间平均近似写入其中；固定键序、JS 最短往返数值表示，inputs 按相对路径码点升序，不含时间戳、绝对路径或主机信息。同输入字节应产出相同文件字节。
 
+records 的公开 `serializeRunMetrics` 以共享严格形状校验拒绝非有限数、未知字段与不一致的 null 原因，复制后按 Unicode 码点排序 `inputs`、按数值排序 `outlets`，输出固定嵌套键序的 JSON 与一个末尾 LF。`readRunMetrics(runDir, expectedSha256)` 只读 `metrics.json`，经共享安全读取器在同一次字节观察中计算 sha256，先绑定调用方摘要再解析并返回文档；缺失、不安全、摘要不等和非法内容均为不带原始载荷或 native cause 的受控文件错误。
+
+当前 #649 的 `computeRunMetrics` 仅是 records 内部入口，不从包 index 导出、不接入 collect，也不写文件。它始终以 run 根目录作为嵌套输入/输出的安全基目录，只读本刀五种 `.dat`；储量文件逐个处理，先遇缺失或非有限值也不掩盖后续已存在文件的结构/安全错误。水量平衡数值暂为 `null/pending_water_balance`，此中间态不由生产调用方发布；后续水量平衡生产者完整接入前，公开 serializer 的完整预算契约由构造值测试固定。
+
 ## 13. 阈值
 
 M5 沿用阈值，core 的 `NUMERICAL_HEALTH_THRESHOLDS` 为仓库内常量，不允许 profile 覆写：
