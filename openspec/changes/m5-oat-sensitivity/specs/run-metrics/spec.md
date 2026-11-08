@@ -33,6 +33,26 @@
 - **WHEN** `.dat` 某行某列为 NaN
 - **THEN** 读取成功返回，`nonfinite_count` 计入该值，依赖该变量的指标为 `null` 且原因点名该变量
 
+#### Scenario: shared text reader preserves source bytes and table structure
+- **WHEN** records 的共享文本输入读取器读取钉版 ccw 的 `.sp.mesh`、`.sp.att`、`.sp.riv`、`.para.geol`、`.para.lc`、`.cfg.para`、`.cfg.calib`、`.cfg.ic`
+- **THEN** 八类文件解析成功，每个已声明表的行列数与实际一致；sha256 与 size_bytes 来自解析所用的同一次字节读取，源文件字节不变
+
+#### Scenario: optional writer-produced text sections are not truncated
+- **WHEN** `.sp.riv` 含第三段几何表，或 `.cfg.ic` 含可选时间头字段或湖泊表
+- **THEN** 读取器显式保留这些结构并校验已出现的表，不将其误当成必需表的额外数据；缺少可选结构不导致失败
+
+#### Scenario: config duplicates and byte-leading skip rules are preserved
+- **WHEN** `.cfg.calib` 含首字节为 #、空格或 NUL 的行，以及有效的 `GEOL_KSATV` 与 `geol_ksatv` 两行
+- **THEN** 前述行被跳过，两个有效键值行按文件顺序返回且按不区分大小写的键识别，读取器不合并重复键
+
+#### Scenario: malformed text and unsafe files fail without partial results
+- **WHEN** 文本输入缺登记列、数值不可解析、声明行列数不符，或目标不存在、是符号链接/目录/FIFO、请求路径逃逸基目录
+- **THEN** 返回点名文件与受控原因的错误，无部分解析结果、无写入、无 FIFO 阻塞；不存在与不安全或读取失败可区分
+
+#### Scenario: text numeric syntax is complete-token and consumer-neutral
+- **WHEN** 文本表格单元或 cfg 值含 `0x1.8p+2`、`nan`、`infinity`，或含 `93abc`、`bad`、缺失值
+- **THEN** 前三者分别解析为 6、NaN、Infinity，有限性与范围由消费者判定；后三者返回点名文件与列的受控解析错误，不接受数值前缀或复用上一行值
+
 ### Requirement: Per-run flow metrics
 出口集合 `O` SHALL 为运行副本 `<project>.sp.riv` 第一张表中 `Down < 0` 的全部河段 index（与 rSHUD `getOutlets` 一致）；`O` 为空 SHALL 视为指标不可用。出口流量序列 SHALL 为 `Q(t) = Σ_{o∈O} rivqdown[o](t)`，单位 m³/d。窗口 SHALL 为 `rivqdown.dat` 的全部输出行。指标 SHALL 为：
 - `peak_flow_m3d = max_t Q(t)`；并列时取 `t` 最小的一行。

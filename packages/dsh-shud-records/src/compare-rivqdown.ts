@@ -1,7 +1,8 @@
-import { closeSync, constants, fstatSync, openSync, type Stats } from "node:fs";
+import type { Stats } from "node:fs";
 import { isAbsolute } from "node:path";
 import { isProjectComponent } from "@shud-harness/dsh-shud-core";
 import { hashDescriptor } from "./hash-descriptor.ts";
+import { readVerifiedDescriptor } from "./descriptor-read.ts";
 import { regularTarget } from "./workspace-paths.ts";
 import { WorkspaceRecordError } from "./workspace-records.ts";
 
@@ -17,43 +18,12 @@ function inspectOutput(path: string): Stats {
 }
 
 function hashOutput(path: string, inspected: Stats): string {
-  let fd: number | undefined;
-  let closeAttempted = false;
-  let phase: "open" | "fstat" | "target" | "read" | "close" = "open";
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    phase = "fstat";
-    const descriptor = fstatSync(fd);
-    phase = "target";
-    if (
-      !descriptor.isFile() ||
-      descriptor.dev !== inspected.dev ||
-      descriptor.ino !== inspected.ino
-    ) {
-      throw new WorkspaceRecordError("target", path);
-    }
-    phase = "read";
-    const digest = hashDescriptor(fd);
-    phase = "close";
-    // A failed close leaves ownership unknown; it must not trigger a second close attempt.
-    closeAttempted = true;
-    closeSync(fd);
-    return digest;
-  } catch {
-    // Derive diagnostics from our phase, never from an arbitrary native error or its cause.
-    const primary = new WorkspaceRecordError(phase === "target" ? "target" : "read", path);
-    primary.message += `: ${phase} failed`;
-    if (fd !== undefined && !closeAttempted) {
-      try {
-        closeSync(fd);
-      } catch {
-        primary.message += ": descriptor cleanup failed; descriptor state unknown";
-      }
-    } else if (closeAttempted) {
-      primary.message += "; descriptor state unknown";
-    }
-    throw primary;
-  }
+  return readVerifiedDescriptor(
+    path,
+    inspected,
+    hashDescriptor,
+    (phase) => new WorkspaceRecordError(phase === "target" ? "target" : "read", path),
+  );
 }
 
 /**
