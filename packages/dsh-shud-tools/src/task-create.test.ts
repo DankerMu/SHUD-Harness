@@ -143,7 +143,9 @@ test("task_create publishes the exact planned card through the closed ToolRuntim
   ]);
   const result = await call();
   expect(result).toMatchObject({ isError: false, value: { task_id: firstId, status: "planned" } });
-  expect(await readCard()).toEqual({
+  const { linked_analyses, ...oldFields } = await readCard();
+  expect(linked_analyses).toEqual([]);
+  expect(oldFields).toEqual({
     ...args,
     task_id: firstId,
     status: "planned",
@@ -244,7 +246,10 @@ const invalid = [
       return { input, message: new RegExp(field, "iu") };
     }),
   ),
-  ...["engineering", "ops"].map((type) => ({ input: { ...args, type }, message: /type/iu })),
+  ...["engineering", "ops", "sensitivity"].map((type) => ({
+    input: { ...args, type },
+    message: /type/iu,
+  })),
   ...["status", "cwd", "toString"].map((key) => ({
     input: { ...args, [key]: "unexpected" },
     message: /unknown parameter/iu,

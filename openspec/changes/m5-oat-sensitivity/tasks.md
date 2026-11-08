@@ -36,7 +36,7 @@
     - 记录当时状态的历史描述：`Port_List.md` 的移植行、`Phased_Plan.md` 的 M1 交付行、`UI_Implementation_Spec.md` 的命名定案、`Migration_Plan_dsh.md`、`docs/adr/implemented/`、`docs/05_PROPOSAL/`。
     - 实现时以 `git grep -nE "8 ?(个)?(核心)?对象|9 个当前导出|9 exported"`（排除 `docs/generated`、`docs/99_ARCHIVE`、`openspec/changes`）复核：命中只能落在上述两类或已改的五处。
 - [x] 2.2 RunJob/RunRecord 增加 `analysis_plan_id`、`parameter_set_id`（缺键按 null，iff refine）；RunRecord 启用 `artifacts.metrics_summary`（`plots` 仍拒绝）。满足 run-records「RunJob record」「RunRecord record」「Generated projection」；附 M2–M4 旧记录解析回归（依赖 2.1）。
-- [ ] 2.3 TaskCard `type: sensitivity` 与 `linked_analyses`（缺键按 `[]`，refine：非 sensitivity 卡为空）。满足 task-cards「TaskCard record」「TaskCard generated projection」（依赖 2.1）。
+- [x] 2.3 TaskCard `type: sensitivity` 与 `linked_analyses`（缺键按 `[]`，refine：非 sensitivity 卡为空）。满足 task-cards「TaskCard record」「TaskCard generated projection」（依赖 2.1）。
 - [ ] 2.4 EvidenceReport 增加 `analysis_ids` 与 `sensitivity_summary`（缺键默认值与 iff refine）。满足 evidence-reports「EvidenceReport record」「EvidenceReport generated projection」（依赖 2.1）。
 - [x] 2.5 governance 常量：
   - calib 白名单：4 键；`read_transform`（KSATH/KSATV `/1440`，LC_ROUGH `/60`）、`check_range`、倍率区间，以及键 → 类别文件映射，逐条附 SHUD 源码 file:line（analysis-plans「Calib whitelist and category product check」的常量部分）。
@@ -217,3 +217,24 @@ Nullable input positive: explicit `artifacts.metrics_summary: null` must parse s
 Required commands: focused core schema tests and prior run-build regression tests, schema generation/self-test, full default check, built-core smoke and actual isolated drift clean/rejected/restored control. If jobs code receives permitted null literals, also run profile:smoke; no runtime behavior evidence may be claimed from pure schema tests.
 Completion is task2.2 only. One implementer edits source/tests, parent owns fixtures/verification/PR. PI clarification on #643 is part of the immutable review oracle; no other assertion weakening is authorized.
 PI-authorized type-only exception: correct makeRunRecord override input typing in records task-lifecycle-test-harness.ts, preserving all fixture values and reports; full typecheck and report regression tests must pass. Authorization: issue #643 comment6715523002. No other records edits are in scope.
+
+## Issue #644 risk packs and executable evidence
+
+| Pack | Selection and evidence |
+|---|---|
+| Public API / tool entry | Selected: core parse and existing task_create/closure smoke; sensitivity parses but tool creation and closure reject |
+| Config / setup | Not selected: no dependency/profile change |
+| File IO / safety | No new IO implementation; scratch parse preserves old task.json bytes/mtime, rejected tool creates no task file |
+| Schema / fields | Selected: sensitivity enum, branded array, default[], non-sensitivity empty predicate and inherited base-commit iff; malformed links at linked_analyses |
+| Auth / permissions | Selected: temporary admission remains fail-closed; no tool enum expansion or successful closure route |
+| Concurrency / ordering | No concurrency implementation; schema preserves link order/multiplicity and independent mutable default arrays; writer sorting remains out of scope |
+| Resource / discovery | Not selected: no new process, discovery or resource behavior |
+| Compatibility | Selected: unchanged M3/M4 raw inputs, exact prior fields plus new[], unchanged stripping/optional fields/status/base/reference rules |
+| Error handling | Selected: wrong type-link pairing and malformed brand/base commit have owning-field errors; tool invalid argument and closure unsupported-type remain explicit |
+| Release / types | Selected: root types and full typecheck, PI-authorized createTaskCard input-only annotation; no runtime body change |
+| Documentation / projection | Selected: TaskCard enum/PLAN element/default projected; actual schema:check clean/rejected/restored control, other generated files unchanged |
+
+Required positives: sensitivity with null base and one plan; sensitivity omitted/explicit empty links; unchanged M3 science_assist and M4 code_change raw inputs parse with[]; valid sensitivity link order/duplicates remain unmodified. Required negatives: science_assist/code_change nonempty analyses, sensitivity non-null40hex base, PLAN-0001 and uppercasehex links, null/nonarray links. Mutating one parse's default array must not change another.
+Required commands: focused TaskCard and existing consumer regression tests, schema generation/self-test, full default check, strict OpenSpec validation, built core/tool/closure smoke and scratch byte/mtime proof, isolated actual stale-field schema drift control. Publish exact invocations and complete smoke inputs with results, not summary-only evidence.
+Completion is task2.3 only; keep sensitivity task_create/closure/link writers deferred to #667/#654/#664. No expansion of tool parameters or closure implementation is authorized.
+PI batch test authorization (issue #644 comment6716702659): migrate only additive-default expectations in the four existing compatibility suites identified by the full gate (record-allocation, workspace-records, workspace-readonly, task-create-raw-guard). Retain all raw fixture inputs, original exact-value/state/security/cleanup assertions, and explicitly assert linked_analyses:[]. Run those suites plus the original focused tests and full default gate. No production or golden-report semantics changes are authorized.

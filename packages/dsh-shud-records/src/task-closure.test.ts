@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   MAX_COLLECT_ATTEMPTS,
   RunIdSchema,
+  TaskCardSchema,
   type RunRecord,
   type TaskCard,
 } from "@shud-harness/dsh-shud-core";
@@ -138,6 +139,17 @@ describe("card and model-authored closure clauses", () => {
   test.each(["engineering", "ops"] as const)("rejects unsupported task type %s", (type) => {
     const input = readyCase();
     input.card.type = type;
+    expectDenied(input, [{ reason: "unsupported_task_type" }]);
+  });
+
+  test("rejects a parsed sensitivity card despite otherwise ready closure evidence", () => {
+    const input = readyCase();
+    input.card = TaskCardSchema.parse({
+      ...input.card,
+      type: "sensitivity",
+      source_base_commit: null,
+      linked_analyses: ["PLAN-20261107T080000-3f9c"],
+    });
     expectDenied(input, [{ reason: "unsupported_task_type" }]);
   });
 
