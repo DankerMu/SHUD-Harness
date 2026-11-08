@@ -1,7 +1,4 @@
-import { lstatSync, realpathSync, type Stats } from "node:fs";
-import { isAbsolute } from "node:path";
-import { readVerifiedDescriptor } from "./descriptor-read.ts";
-import { readDescriptor } from "./hash-descriptor.ts";
+import { readShudInputFile, ShudInputError, shudInputPath } from "./shud-input-file.ts";
 import { shudTextNumber } from "./shud-text-number.ts";
 
 export type ShudInputKind =
@@ -43,28 +40,6 @@ export interface ShudInputReadResult<K extends ShudInputKind> {
   data: ShudInputDataMap[K];
 }
 
-export type ShudInputStage = "missing" | "unsafe" | "read" | "parse";
-type Location = { column?: string; line?: number };
-
-/** Controlled file/column diagnostics; never retain native errors or input payloads. */
-export class ShudInputError extends Error {
-  readonly stage: ShudInputStage;
-  readonly path: string;
-  readonly column?: string;
-  readonly line?: number;
-
-  constructor(stage: ShudInputStage, path: string, reason: string, location: Location = {}) {
-    super(
-      `SHUD input ${stage}: ${path}: ${reason}${location.column === undefined ? "" : `; column ${location.column}`}${location.line === undefined ? "" : `; line ${location.line}`}`,
-    );
-    this.name = "ShudInputError";
-    this.stage = stage;
-    this.path = path;
-    if (location.column !== undefined) this.column = location.column;
-    if (location.line !== undefined) this.line = location.line;
-  }
-}
-
 const INPUT_KINDS: readonly ShudInputKind[] = [
   "sp.mesh",
   "sp.att",
@@ -76,124 +51,22 @@ const INPUT_KINDS: readonly ShudInputKind[] = [
   "cfg.ic",
 ];
 
-/** Validate without IO and normalize only the relative request, never a caller's base. */
-function inputPath(relativePath: string, kind: ShudInputKind): string {
+/** Keep kind rejection ahead of path validation for both text entry points. */
+function checkInputKind(relativePath: string, kind: ShudInputKind): void {
   const diagnosticPath = typeof relativePath === "string" ? relativePath : "<invalid path>";
   if (!INPUT_KINDS.includes(kind)) {
     throw new ShudInputError("parse", diagnosticPath, "unsupported file kind");
   }
-  if (
-    typeof relativePath !== "string" ||
-    relativePath.length === 0 ||
-    relativePath.startsWith("/") ||
-    relativePath.includes("\0") ||
-    relativePath.includes("\\")
-  ) {
-    throw new ShudInputError("unsafe", diagnosticPath, "expected a relative POSIX file path");
-  }
-  const components: string[] = [];
-  for (const component of relativePath.split("/")) {
-    if (component === "" || component === ".") continue;
-    if (component === "..") {
-      if (components.length === 0)
-        throw new ShudInputError("unsafe", relativePath, "path escapes its base");
-      components.pop();
-    } else components.push(component);
-  }
-  if (components.length === 0)
-    throw new ShudInputError("unsafe", relativePath, "expected a file path");
-  return components.join("/");
 }
 
-function ioStage(error: unknown, absence: "missing" | "unsafe" | "read"): ShudInputStage {
-  const code =
-    typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-  if (code === "ENOENT") return absence;
-  if (code === "ELOOP" || code === "ENOTDIR") return "unsafe";
-  return "read";
-}
-
-function inspectInput(path: string, relative: string, recheck = false): Stats {
-  try {
-    return lstatSync(path);
-  } catch (error) {
-    throw new ShudInputError(
-      ioStage(error, recheck ? "unsafe" : "missing"),
-      relative,
-      "file inspection failed",
-    );
-  }
-}
-
-/**
- * Read a prepared input from a caller-owned absolute base. The physical base preserves
- * alias/.. traversal. Relative ancestors must be real directories and the final target
- * must be a regular file. Identity is observed before/around a single no-follow,
- * nonblocking descriptor read; digest, size and parser bytes share that complete pass.
- *
- * These checks detect observed replacements, not an atomic filesystem snapshot or a
- * kernel sandbox. An adversarial ancestor swap-and-restore between observations and
- * concurrent same-inode writes remain outside this contract. No input is written and
- * no raw-directory discovery, file-size cap, scientific formula or unit conversion is
- * performed. A failed close is reported once with descriptor ownership unknown.
- */
 export function readShudTextInput<K extends ShudInputKind>(
   baseDir: string,
   relativePath: string,
   kind: K,
 ): ShudInputReadResult<K> {
-  const path = inputPath(relativePath, kind);
-  if (typeof baseDir !== "string" || !isAbsolute(baseDir) || baseDir.includes("\0")) {
-    throw new ShudInputError("unsafe", path, "expected an absolute base directory");
-  }
-  let target: string;
-  try {
-    target = realpathSync.native(baseDir);
-  } catch (error) {
-    throw new ShudInputError(ioStage(error, "missing"), path, "base directory resolution failed");
-  }
-  const directories: Array<{ path: string; stat: Stats }> = [];
-  for (const component of path.split("/")) {
-    const stat = inspectInput(target, path);
-    if (!stat.isDirectory())
-      throw new ShudInputError("unsafe", path, "ancestor is not a real directory");
-    directories.push({ path: target, stat });
-    target += `/${component}`;
-  }
-  const inspected = inspectInput(target, path);
-  if (!inspected.isFile()) throw new ShudInputError("unsafe", path, "target is not a regular file");
-  const recheck = () => {
-    for (const directory of directories) {
-      const current = inspectInput(directory.path, path, true);
-      if (
-        !current.isDirectory() ||
-        current.dev !== directory.stat.dev ||
-        current.ino !== directory.stat.ino
-      ) {
-        throw new ShudInputError("unsafe", path, "ancestor identity changed");
-      }
-    }
-    const current = inspectInput(target, path, true);
-    if (!current.isFile() || current.dev !== inspected.dev || current.ino !== inspected.ino) {
-      throw new ShudInputError("unsafe", path, "target identity changed");
-    }
-  };
-  const observed = readVerifiedDescriptor(
-    target,
-    inspected,
-    (fd) => {
-      recheck();
-      const result = readDescriptor(fd);
-      recheck();
-      return result;
-    },
-    (phase, error) => {
-      if (error instanceof ShudInputError) return error;
-      const stage =
-        phase === "target" ? "unsafe" : phase === "open" ? ioStage(error, "missing") : "read";
-      return new ShudInputError(stage, path, "descriptor operation failed");
-    },
-  );
+  checkInputKind(relativePath, kind);
+  const observed = readShudInputFile(baseDir, relativePath);
+  const { path } = observed;
   // Parsing after successful closure cannot leak an owned descriptor on malformed input.
   const data = parseShudTextInput(observed.bytes, path, kind);
   return { path, sha256: observed.sha256, size_bytes: observed.size_bytes, data };
@@ -425,7 +298,8 @@ export function parseShudTextInput(
   relativePath: string,
   kind: ShudInputKind,
 ): ShudInputDataMap[ShudInputKind] {
-  const path = inputPath(relativePath, kind);
+  checkInputKind(relativePath, kind);
+  const path = shudInputPath(relativePath);
   if (!(bytes instanceof Uint8Array))
     throw new ShudInputError("parse", path, "expected input bytes");
   // Latin1 preserves byte-leading semantics and arbitrary comment bytes without UTF-8

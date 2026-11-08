@@ -70,7 +70,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 ## 3. records：输入读取、metrics、plan 文件层、closure 与报告（Critical Path #6/#7）
 
 - [x] 3.0 共享 SHUD 文本输入安全读模块：`.sp.mesh/.sp.att/.sp.riv/.para.geol/.para.lc/.cfg.para/.cfg.calib/.cfg.ic` 的解析，加上普通文件/不逃逸/`O_NOFOLLOW` 读取，并在同一次读取内算 sha256。这是唯一实现，3.2/3.3/7.1 一律 import 它，不另写。满足 run-metrics「SHUD binary output read contract」中的文本输入部分（依赖无；用 ccw 真实文件做夹具）。
-- [ ] 3.1 SHUD 二进制 `.dat` 读取器：布局校验、截断与 NaN、安全读、同一次读取内算 sha256、只接受小端。满足 run-metrics「SHUD binary output read contract」的 `.dat` 部分。
+- [x] 3.1 SHUD 二进制 `.dat` 读取器：布局校验、截断与 NaN、安全读、同一次读取内算 sha256、只接受小端。满足 run-metrics「SHUD binary output read contract」的 `.dat` 部分。
 - [ ] 3.2a 逐 run 流量指标、numerical_health 中非水量平衡的三项、判定与 `metrics.json` 确定性序列化：
   - 出口集合；`peak_flow_m3d`/`peak_day`/`total_runoff_m3`；Δ 由时间列推导；`cvode_failures`；`negative_state_count`（任一文件缺失则整项 null）；`max_solver_dt` 恒为 null 且不进 verdicts。
   - status `ok|unavailable` 语义；两次计算逐字节相同。
@@ -276,3 +276,23 @@ Numeric proof for both table cells and cfg values: decimal/scientific, signed ze
 Dimension regression: reject 1.0/1e0/0x1 count spellings for row/column declarations; preserve signed decimal integer counts, leading zeros and the separate general numeric grammar for optional IC time. Evidence compares pinned %d source and actual host libc against built-parser behavior.
 Safety proof: successful nested path and normalized in-base request; lexical escape rejected before target IO; final/ancestor links and special files rejected; preflight-to-open replacement and dev/ino mismatch rejected before content; failures at open/fstat/read/close and cleanup remain controlled with descriptors accounted for. No schema/golden/threshold changes.
 Commands: focused new parser/safety tests plus compare-rivqdown, workspace-build-binary and report-artifact-io regressions; build and actual built records API smoke; pnpm run check; strict OpenSpec. Parent owns execution and publishes full reproducible inputs/results. Completion is task3.0 only.
+
+## Issue #648 risk packs and executable evidence
+
+| Pack | Evidence |
+|---|---|
+| Public API / release | readShudDat and typed result via records root; built-package smoke; one canonical synthetic byte builder for later #651 |
+| File IO / safety | Reuse #647 normalized base/path/ancestor and descriptor primitives; final/ancestor links, directory, FIFO, escape, missing and observed replacement tests; no writes or SHUD/output reads |
+| Binary layout / units | Independent 1024-header/2column/3row vector; metadata/date and interval-start t preserved; length, column extent, row alignment and integer constraints checked before allocation |
+| Resource / ownership | One open/pass for bytes/hash/size, partial reads, multi-chunk input, descriptor cleanup and close errors; no subprocess reader, extra payload copies or arbitrary cap |
+| Compatibility | Existing text API/error/export and comparator/hash contracts survive shared extraction; old text/numeric/IO and comparator/binary/artifact suites unchanged |
+| Errors / diagnostics | Controlled missing versus unsafe/read/parse; malformed header/column/payload reports file+reason without raw data/native cause or partial rows |
+| Platform / config | Actual LE decoding, mocked BE refusal before file IO; no public endian override, dependency or profile changes |
+| Documentation | Public API and fixture state date-versus-minute, interval averaging, nonfinite count and observational filesystem limits; no scientific verdict |
+| Concurrency | No new concurrency mechanism; preserve observed identity checks, do not claim atomic snapshot or same-inode immutability |
+
+Required positives: exactly2columns[1,2]/3rows and independent sha256/length; opaque nonzero header; zero-variable/time-only rows, empty rows, zero/duplicate/out-of-order column ids; nonfinite start_date/t/value retained and counted individually; signed zero; caller order preserved.
+Required negatives: <1040bytes, missing declared column bytes, truncated last8bytes, unaligned extra bytes, NumVar fractional/negative/NaN/Infinity or huge count exceeding file, fractional/negative/nonfinite column ids; no partial values. BE platform branch refuses without IO. Error names only file/controlled reason.
+Typed-array ownership regression: use a small valid pooled-size file; each returned values.buffer must be confined to owned verified-file/payload data rather than exposing the larger shared Buffer pool. Verify exact decoded values and unchanged source bytes, not a particular allocation API.
+Safety proof: missing vs unsafe/read errors, real FIFO with successful regular control, ancestor/final symlink and directory, normalized in-base path/escape rejection, inode replacement and cleanup/close faults, input/target bytes and mtime unchanged. Do not duplicate the entire #647 fault matrix; reuse the common primitive and prove the new public reader reaches its actual boundary.
+Commands: focused dat tests plus unchanged shud-text-formats/numeric/IO, compare-rivqdown, workspace-build-binary and report-artifact-io; build; actual built binary/text/comparator smoke; strict OpenSpec; full pnpm run check. Parent publishes independent byte construction and complete observed output. Completion is task3.1 only.

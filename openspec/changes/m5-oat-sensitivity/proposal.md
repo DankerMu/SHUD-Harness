@@ -146,3 +146,10 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Product scope: records modules, exports and tests, including the minimum extraction from compareRivqdown/hashDescriptor needed to reuse the existing descriptor discipline. Preserve comparator semantics and every existing consumer; no consolidation of unrelated readers in jobs/tools or report validation.
 - Must preserve raw input bytes, existing physical-root routing, single-close error handling and bounded comparator hashing. Parse/hash/size share one byte read; missing is distinguishable from unsafe/read failure. No metrics, products, units conversion, file writing, configuration or dependency additions.
 - Primary-source compatibility: real ccw river input includes an optional third geometry table; IC accepts an optional time header and optional lake table. Parse present tables explicitly rather than rejecting legitimate writer output or silently truncating. Names required by the issue are checked against actual registered headers, including ThetaS(m3_m3); do not invent aliases for other watersheds.
+
+## Issue #648 execution fixture
+
+- Expanded, Critical Path #2: records-native little-endian SHUD .dat reader, same-read byte identity and controlled layout/safety failures. No new core schema, metrics computation or scientific interpretation.
+- Selected packs: Public API/release, File IO/path safety, Binary layout/units, Resource/descriptor ownership, Compatibility, Error handling, Platform configuration, Documentation. Reuse #647's descriptor lifecycle and path/ancestor checks; do not introduce a second safe-file implementation.
+- Scope: records .dat reader, one canonical synthetic test-byte builder, tests/exports, and minimum internal extraction of #647's generic safe byte-read/error/path logic. All old text parser APIs/errors/results and comparator behavior remain unchanged; no jobs/tools/core or SHUD/output access.
+- Must preserve opaque 1024-byte header, row/column order and original numeric values; nonfinite data remains located in returned fields rather than being discarded or classified scientifically. Shared M5 fixture remains unarchived.
