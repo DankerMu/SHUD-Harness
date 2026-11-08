@@ -32,6 +32,7 @@ const VERDICT_FIELDS = [
   "negative_state_count",
 ] as const;
 export const NEGATIVE_STATE_NOTE = "SHUD 静默钳零，该值为下界";
+export const MAX_SOLVER_DT_REASON = "not_observable_in_pinned_shud";
 
 type MetricBlock<K extends string> = Record<K, number | null> & {
   reasons: Record<K, string | null>;
@@ -183,12 +184,20 @@ function validateRunMetrics(value: unknown): asserts value is RunMetrics {
   validateBlock(flow, FLOW_FIELDS, unavailable);
   validateBlock(water, WATER_FIELDS, unavailable);
   validateBlock(health, HEALTH_FIELDS, unavailable);
+  const waterReasons = water.reasons as Record<string, unknown>;
+  const healthReasons = health.reasons as Record<string, unknown>;
+  if (
+    water.residual !== health.water_balance_residual ||
+    waterReasons.residual !== healthReasons.water_balance_residual
+  )
+    invalidShape();
   if (!nonempty(water.formula_source) || !nonempty(water.approximation)) invalidShape();
   if (health.negative_state_count_note !== NEGATIVE_STATE_NOTE) invalidShape();
   for (const field of ["cvode_failures", "negative_state_count"] as const) {
     if (health[field] !== null && !count(health[field])) invalidShape();
   }
-  if (health.max_solver_dt !== null) invalidShape();
+  if (health.max_solver_dt !== null || healthReasons.max_solver_dt !== MAX_SOLVER_DT_REASON)
+    invalidShape();
   const verdicts = strictObject(document.verdicts, VERDICT_FIELDS);
   for (const field of VERDICT_FIELDS) {
     if (verdicts[field] !== classifyNumericalHealth(field, health[field] as number | null))

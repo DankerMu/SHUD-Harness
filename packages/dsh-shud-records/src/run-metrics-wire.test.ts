@@ -156,10 +156,113 @@ test("accepts a genuinely unavailable all-null document with evidence metadata r
       change(value, `${block}.reasons.${key}`, "missing_variable:rivqdown");
     }
   }
+  change(value, "numerical_health.reasons.max_solver_dt", "not_observable_in_pinned_shud");
   for (const key of Object.keys(value.verdicts)) change(value, `verdicts.${key}`, "not_available");
   const bytes = serializeRunMetrics(value);
   writeFileSync(`${root}/metrics.json`, bytes);
   expect(readRunMetrics(root, digest(bytes))).toEqual(value);
+});
+
+describe.each(["serializer", "digest reader"] as const)("%s evidence coherence", (consumer) => {
+  test.each([
+    {
+      name: "null water residual versus finite health residual",
+      water: null,
+      waterReason: "pending_water_balance",
+      health: 0.01,
+      healthReason: null,
+      verdict: "pass",
+    },
+    {
+      name: "finite water residual versus null health residual",
+      water: 0.01,
+      waterReason: null,
+      health: null,
+      healthReason: "pending_water_balance",
+      verdict: "not_available",
+    },
+    {
+      name: "different finite residual values",
+      water: 0.02,
+      waterReason: null,
+      health: 0.01,
+      healthReason: null,
+      verdict: "pass",
+    },
+    {
+      name: "matching null residuals with different reasons",
+      water: null,
+      waterReason: "zero_precipitation",
+      health: null,
+      healthReason: "missing_variable:elevprcp",
+      verdict: "not_available",
+    },
+  ])(
+    "rejects $name without reconciling the evidence",
+    ({ water, waterReason, health, healthReason, verdict }) => {
+      const document = completeMetrics();
+      change(document, "water_balance.residual", water);
+      change(document, "water_balance.reasons.residual", waterReason);
+      change(document, "numerical_health.water_balance_residual", health);
+      change(document, "numerical_health.reasons.water_balance_residual", healthReason);
+      change(document, "verdicts.water_balance_residual", verdict);
+      const before = structuredClone(document);
+      if (consumer === "serializer") {
+        expectSerializeError(document);
+      } else {
+        const bytes = JSON.stringify(document);
+        writeFileSync(`${root}/metrics.json`, bytes);
+        expectReadError(digest(bytes), /shape|parse|invalid|validat/iu);
+      }
+      expect(document).toEqual(before);
+    },
+  );
+
+  test("accepts matching null residuals with the same availability reason", () => {
+    const document = completeMetrics();
+    change(document, "water_balance.residual", null);
+    change(document, "water_balance.reasons.residual", "zero_precipitation");
+    change(document, "numerical_health.water_balance_residual", null);
+    change(document, "numerical_health.reasons.water_balance_residual", "zero_precipitation");
+    change(document, "verdicts.water_balance_residual", "not_available");
+    if (consumer === "serializer") {
+      expect(JSON.parse(serializeRunMetrics(document))).toEqual(document);
+    } else {
+      const bytes = JSON.stringify(document);
+      writeFileSync(`${root}/metrics.json`, bytes);
+      expect(readRunMetrics(root, digest(bytes))).toEqual(document);
+    }
+  });
+
+  test.each(["ok", "unavailable"] as const)(
+    "rejects a file-failure solver-step reason in a %s document",
+    (status) => {
+      const document = completeMetrics();
+      if (status === "unavailable") {
+        change(document, "status", status);
+        change(document, "reason", "missing_variable:rivqdown");
+        for (const block of ["flow", "water_balance", "numerical_health"] as const) {
+          for (const key of Object.keys(document[block].reasons)) {
+            change(document, `${block}.${key}`, null);
+            change(document, `${block}.reasons.${key}`, "missing_variable:rivqdown");
+          }
+        }
+        for (const key of Object.keys(document.verdicts)) {
+          change(document, `verdicts.${key}`, "not_available");
+        }
+      }
+      change(document, "numerical_health.reasons.max_solver_dt", "missing_variable:rivqdown");
+      const before = structuredClone(document);
+      if (consumer === "serializer") {
+        expectSerializeError(document);
+      } else {
+        const bytes = JSON.stringify(document);
+        writeFileSync(`${root}/metrics.json`, bytes);
+        expectReadError(digest(bytes), /shape|parse|invalid|validat/iu);
+      }
+      expect(document).toEqual(before);
+    },
+  );
 });
 
 const malformed = [

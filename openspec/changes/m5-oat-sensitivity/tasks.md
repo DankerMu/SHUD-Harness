@@ -71,7 +71,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 
 - [x] 3.0 共享 SHUD 文本输入安全读模块：`.sp.mesh/.sp.att/.sp.riv/.para.geol/.para.lc/.cfg.para/.cfg.calib/.cfg.ic` 的解析，加上普通文件/不逃逸/`O_NOFOLLOW` 读取，并在同一次读取内算 sha256。这是唯一实现，3.2/3.3/7.1 一律 import 它，不另写。满足 run-metrics「SHUD binary output read contract」中的文本输入部分（依赖无；用 ccw 真实文件做夹具）。
 - [x] 3.1 SHUD 二进制 `.dat` 读取器：布局校验、截断与 NaN、安全读、同一次读取内算 sha256、只接受小端。满足 run-metrics「SHUD binary output read contract」的 `.dat` 部分。
-- [ ] 3.2a 逐 run 流量指标、numerical_health 中非水量平衡的三项、判定与 `metrics.json` 确定性序列化：
+- [x] 3.2a 逐 run 流量指标、numerical_health 中非水量平衡的三项、判定与 `metrics.json` 确定性序列化：
   - 出口集合；`peak_flow_m3d`/`peak_day`/`total_runoff_m3`；Δ 由时间列推导；`cvode_failures`；`negative_state_count`（任一文件缺失则整项 null）；`max_solver_dt` 恒为 null 且不进 verdicts。
   - status `ok|unavailable` 语义；两次计算逐字节相同。
   - `metrics.json` 的安全读与 sha256 绑定读取器（唯一实现；3.4 closure 与 3.6b 渲染都 import 它）。

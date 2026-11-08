@@ -10,6 +10,7 @@ import {
   compareMetricPaths,
   FLOW_FIELDS,
   HEALTH_FIELDS,
+  MAX_SOLVER_DT_REASON,
   NEGATIVE_STATE_NOTE,
   nullMetricBlock,
   WATER_FIELDS,
@@ -23,7 +24,6 @@ const NEGATIVE_STATE_TOLERANCE = -1e-10;
 const STATE_VARIABLES = ["eleygw", "eleysurf", "eleyunsat", "rivystage"] as const;
 const SOLVER_SIGNATURE = Buffer.from("SUNDIALS_ERROR:", "ascii");
 const PENDING_WATER = "pending_water_balance";
-const UNOBSERVABLE_STEP = "not_observable_in_pinned_shud";
 
 interface ComputedRunMetrics {
   metrics: RunMetrics;
@@ -163,6 +163,9 @@ export function computeRunMetrics(
     metrics.inputs.push({ path: input.path, sha256: input.sha256, size_bytes: input.size_bytes });
   };
   const finish = (): ComputedRunMetrics => {
+    // Structural unobservability survives both successful and unavailable finalization.
+    metrics.numerical_health.max_solver_dt = null;
+    metrics.numerical_health.reasons.max_solver_dt = MAX_SOLVER_DT_REASON;
     metrics.inputs.sort((left, right) => compareMetricPaths(left.path, right.path));
     const health: RunMetricsHealth = {
       water_balance_residual: metrics.numerical_health.water_balance_residual,
@@ -263,8 +266,6 @@ export function computeRunMetrics(
           : null;
     metrics.numerical_health.negative_state_count = negativeReason === null ? negativeCount : null;
     metrics.numerical_health.reasons.negative_state_count = negativeReason;
-    metrics.numerical_health.max_solver_dt = null;
-    metrics.numerical_health.reasons.max_solver_dt = UNOBSERVABLE_STEP;
     currentPath = "stderr.log";
     try {
       const log = readShudInputFile(runDir, currentPath);

@@ -38,9 +38,9 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(parent, { recursive: true, force: true }));
 
-function unavailable(path: string, reason?: RegExp) {
+function unavailable(path: string, reason?: RegExp, requestedProject = project) {
   const before = snapshotTree(parent);
-  const result = computeRunMetrics(root, project);
+  const result = computeRunMetrics(root, requestedProject);
   expect(snapshotTree(parent)).toEqual(before);
   expect(result.metrics.status).toBe("unavailable");
   expect(result.metrics.reason).toContain(path);
@@ -196,6 +196,24 @@ test.each(["", ".", "..", "../outside", "/absolute", "nested/name", "nested\\nam
     expect(snapshotTree(parent)).toEqual(before);
   },
 );
+
+test("early invalid-project unavailability preserves the fixed solver-step reason", () => {
+  const metrics = unavailable("project", /^invalid_project$/u, "../outside");
+  expect(metrics.reason).toBe("invalid_project");
+  expect(metrics.inputs).toEqual([]);
+  expect(metrics.numerical_health.reasons.max_solver_dt).toBe("not_observable_in_pinned_shud");
+});
+
+test("late malformed state after an optional miss preserves the fixed solver-step reason", () => {
+  unlinkSync(`${root}/${datPath("eleygw")}`);
+  const relative = datPath("rivystage");
+  const bytes = readFileSync(`${root}/${relative}`);
+  writeFileSync(`${root}/${relative}`, bytes.subarray(0, bytes.length - 8));
+  const metrics = unavailable(relative, /^parse:/u);
+  expect(metrics.reason).toBe("parse:output/mini.out/mini.rivystage.dat");
+  expect(metrics.inputs.map(({ path }) => path)).toContain(datPath("rivqdown"));
+  expect(metrics.numerical_health.reasons.max_solver_dt).toBe("not_observable_in_pinned_shud");
+});
 
 test("computations and relocated copies have identical bytes, exact manifests, and no persisted output", () => {
   // These deliberately unreadable, unrelated targets must not be scanned by this slice.

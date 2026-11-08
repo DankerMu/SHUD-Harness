@@ -230,6 +230,8 @@ null 原因词表：
 
 records 的公开 `serializeRunMetrics` 以共享严格形状校验拒绝非有限数、未知字段与不一致的 null 原因，复制后按 Unicode 码点排序 `inputs`、按数值排序 `outlets`，输出固定嵌套键序的 JSON 与一个末尾 LF。`readRunMetrics(runDir, expectedSha256)` 只读 `metrics.json`，经共享安全读取器在同一次字节观察中计算 sha256，先绑定调用方摘要再解析并返回文档；缺失、不安全、摘要不等和非法内容均为不带原始载荷或 native cause 的受控文件错误。
 
+`water_balance.residual` 与 `numerical_health.water_balance_residual` 是同一个数值，两个字段的值与各自原因必须一致（均为 null 时原因也必须相同）；共享 wire 校验拒绝矛盾，不复制或修复任一侧。无论 `status` 为 `ok` 还是 `unavailable`，`max_solver_dt` 均为 `null`，原因固定为 `not_observable_in_pinned_shud`，不被其它输入失败原因覆盖；顶层失败原因及恰好三项的 `verdicts` 保持各自语义。
+
 当前 #649 的 `computeRunMetrics` 仅是 records 内部入口，不从包 index 导出、不接入 collect，也不写文件。它始终以 run 根目录作为嵌套输入/输出的安全基目录，只读本刀五种 `.dat`；储量文件逐个处理，先遇缺失或非有限值也不掩盖后续已存在文件的结构/安全错误。水量平衡数值暂为 `null/pending_water_balance`，此中间态不由生产调用方发布；后续水量平衡生产者完整接入前，公开 serializer 的完整预算契约由构造值测试固定。
 
 ## 13. 阈值
