@@ -2,6 +2,7 @@ import {
   classifyNumericalHealth,
   isProjectComponent,
   METRICS_METHOD_VERSION,
+  STORAGE_DEPTH_CONVERSIONS,
 } from "@shud-harness/dsh-shud-core";
 import { readShudDat, type ShudDat } from "./shud-dat.ts";
 import { readShudInputFile, ShudInputError } from "./shud-input-file.ts";
@@ -10,9 +11,14 @@ import {
   catchmentGeometry,
   elementPorosity,
   elementStorage,
+  finiteWater,
+  firstWaterReason,
   fluxDepth,
   riverStorage,
   storageDeltas,
+  totalWaterBalance,
+  waterFailure,
+  type WaterValue,
 } from "./run-metrics-water-balance.ts";
 import {
   compareMetricPaths,
@@ -29,9 +35,15 @@ import {
 
 // Pinned producer tolerance, SHUD_Output_Variables.md §11; not a verdict threshold.
 const NEGATIVE_STATE_TOLERANCE = -1e-10;
-const STATE_VARIABLES = ["eleygw", "eleysurf", "eleyunsat", "rivystage"] as const;
+const STORAGE_VARIABLES = [
+  ["eleygw", "delta_s_gw", "GW"],
+  ["eleysurf", "delta_s_surf", "Surface"],
+  ["eleyunsat", "delta_s_us", "Unsat"],
+  ["rivystage", "delta_s_riv", "Stage"],
+  ["eleysnow", "delta_s_snow", "Snow"],
+  ["eleyic", "delta_s_ic", "Canopy"],
+] as const;
 const SOLVER_SIGNATURE = Buffer.from("SUNDIALS_ERROR:", "ascii");
-const PENDING_WATER = "pending_water_balance";
 
 interface ComputedRunMetrics {
   metrics: RunMetrics;
@@ -58,12 +70,13 @@ function initialMetrics(): RunMetrics {
     outlets: [],
     flow: nullMetricBlock(FLOW_FIELDS, "empty_variable:rivqdown"),
     water_balance: {
-      formula_source: "rSHUD wb.all / wb.DS; SHUD snow/interception extension",
-      ...nullMetricBlock(WATER_FIELDS, PENDING_WATER),
+      formula_source:
+        "rSHUD wb.all / wb.DS with registered SHUD snow/interception storage; numerical conservation diagnostic, not hydrologic validity or model improvement",
+      ...nullMetricBlock(WATER_FIELDS, "empty_variable:rivqdown"),
       approximation: "Final output interval average, not instantaneous final state",
     },
     numerical_health: {
-      ...nullMetricBlock(HEALTH_FIELDS, PENDING_WATER),
+      ...nullMetricBlock(HEALTH_FIELDS, "empty_variable:rivqdown"),
       negative_state_count_note: NEGATIVE_STATE_NOTE,
     },
     verdicts: {
@@ -157,8 +170,8 @@ function countSolverFailures(bytes: Buffer): number {
 }
 
 /**
- * Internal shared-water-balance producer. Never exported from the package root or
- * called by collect in this slice; residual and persistence remain deferred.
+ * Read-only numerical diagnostics, including the complete six-store water budget.
+ * No collection or artifact persistence occurs here.
  * The run root remains the safety base even for nested input/output observations.
  */
 export function computeRunMetrics(
@@ -171,6 +184,9 @@ export function computeRunMetrics(
     metrics.inputs.push({ path: input.path, sha256: input.sha256, size_bytes: input.size_bytes });
   };
   const finish = (): ComputedRunMetrics => {
+    metrics.numerical_health.water_balance_residual = metrics.water_balance.residual;
+    metrics.numerical_health.reasons.water_balance_residual =
+      metrics.water_balance.reasons.residual;
     // Structural unobservability survives both successful and unavailable finalization.
     metrics.numerical_health.max_solver_dt = null;
     metrics.numerical_health.reasons.max_solver_dt = MAX_SOLVER_DT_REASON;
@@ -223,22 +239,28 @@ export function computeRunMetrics(
     observe(input);
     return input.data;
   };
-  const readOptional = <T>(read: () => T): T | null => {
+  const inputPath = (kind: string) => `input/${project}/${project}.${kind}`;
+  const readMetadata = <K extends "sp.att" | "para.geol" | "cfg.calib">(
+    kind: K,
+  ): WaterValue<ShudInputDataMap[K]> => {
     try {
-      return read();
+      return { value: readText(kind), reason: null };
+    } catch {
+      return waterFailure(`unreadable_input:${inputPath(kind)}`);
+    }
+  };
+  const readOptionalDat = (variable: string): WaterValue<ShudDat> => {
+    try {
+      return { value: readDat(variable), reason: null };
     } catch (error) {
-      if (error instanceof ShudInputError && error.stage === "missing") return null;
+      if (error instanceof ShudInputError && error.stage === "missing")
+        return waterFailure(`missing_variable:${variable}`);
       throw error;
     }
   };
-  const setWater = (
-    field: "P" | "Qd" | "AET" | "delta_s_surf" | "delta_s_us" | "delta_s_gw" | "delta_s_riv",
-    value: number | null,
-  ) => {
-    if (value !== null && Number.isFinite(value)) {
-      metrics.water_balance[field] = value;
-      metrics.water_balance.reasons[field] = null;
-    }
+  const setWater = (field: (typeof WATER_FIELDS)[number], result: WaterValue<number>) => {
+    metrics.water_balance[field] = result.value;
+    metrics.water_balance.reasons[field] = result.reason;
   };
   try {
     if (typeof project !== "string" || !isProjectComponent(project)) {
@@ -250,7 +272,7 @@ export function computeRunMetrics(
     const mesh = readText("sp.mesh");
     const ic = readText("cfg.ic");
     readText("cfg.para");
-    const geometry = catchmentGeometry(mesh);
+    const geometry = catchmentGeometry(mesh, inputPath("sp.mesh"));
     const indexColumn = river.data.reaches.columns.indexOf("Index");
     const downColumn = river.data.reaches.columns.indexOf("Down");
     const outlets = new Set<number>();
@@ -270,44 +292,85 @@ export function computeRunMetrics(
       if (flow === null) return unavailable(`invalid_outlet_columns:${currentPath}`);
       metrics.flow = flow;
     }
-    const deltas: Record<(typeof STATE_VARIABLES)[number], number[] | null> = {
-      eleygw: null,
-      eleysurf: null,
-      eleyunsat: null,
-      rivystage: null,
-    };
-    const initialColumns = {
-      eleygw: "GW",
-      eleysurf: "Surface",
-      eleyunsat: "Unsat",
-      rivystage: "Stage",
-    } as const;
-
+    // Metadata failures affect only dependent water terms. Continue all selected
+    // observations so optional absence cannot hide a later present corrupt dat.
+    const porosity = elementPorosity(
+      readMetadata("sp.att"),
+      readMetadata("para.geol"),
+      readMetadata("cfg.calib"),
+      mesh.elements.rows.length,
+      inputPath,
+    );
+    const runoff = metrics.flow.total_runoff_m3;
+    const runoffReason = firstWaterReason(metrics.flow.reasons.total_runoff_m3, geometry.reason);
+    setWater(
+      "Qd",
+      runoffReason !== null
+        ? waterFailure(runoffReason)
+        : finiteWater(runoff! / geometry.value!.area, "rivqdown"),
+    );
     let negativeCount = 0;
     let missing: string | null = null;
     let nonfinite: string | null = null;
-    for (const variable of STATE_VARIABLES) {
-      try {
-        const dat = readDat(variable);
-        const initial = variable === "rivystage" ? ic.rivers : ic.elements;
-        const count =
-          variable === "rivystage" ? river.data.reaches.rows.length : mesh.elements.rows.length;
-        if (initial.rows.length === count) {
-          deltas[variable] = storageDeltas(dat, initial, initialColumns[variable]);
-        }
-        if (dat.nonfinite_count > 0) {
+    for (const [variable, field, initialColumn] of STORAGE_VARIABLES) {
+      const observed = readOptionalDat(variable);
+      const isNegativeState = variable !== "eleysnow" && variable !== "eleyic";
+      if (isNegativeState) {
+        if (observed.value === null) {
+          missing ??= variable;
+        } else if (observed.value.nonfinite_count > 0) {
           nonfinite ??= variable;
         } else {
-          for (const row of dat.rows) {
+          for (const row of observed.value.rows) {
             for (const value of row.values) {
               if (value < NEGATIVE_STATE_TOLERANCE) negativeCount += 1;
             }
           }
         }
-      } catch (error) {
-        if (error instanceof ShudInputError && error.stage === "missing") {
-          missing ??= variable;
-        } else throw error;
+      }
+      const initial = variable === "rivystage" ? ic.rivers : ic.elements;
+      const count =
+        variable === "rivystage" ? river.data.reaches.rows.length : mesh.elements.rows.length;
+      const conversion =
+        variable === "eleysnow"
+          ? STORAGE_DEPTH_CONVERSIONS.snow
+          : variable === "eleyic"
+            ? STORAGE_DEPTH_CONVERSIONS.ic
+            : undefined;
+      const deltas =
+        observed.value === null
+          ? waterFailure(observed.reason)
+          : storageDeltas(
+              observed.value,
+              initial,
+              initialColumn,
+              count,
+              variable,
+              inputPath("cfg.ic"),
+              conversion,
+            );
+      if (variable === "rivystage") {
+        setWater(field, riverStorage(deltas, river.data, geometry, river.path));
+        continue;
+      }
+      const needsPorosity = variable === "eleygw" || variable === "eleyunsat";
+      const reason = firstWaterReason(
+        deltas.reason,
+        geometry.reason,
+        needsPorosity ? porosity.reason : null,
+      );
+      if (reason !== null) {
+        setWater(field, waterFailure(reason));
+      } else {
+        setWater(
+          field,
+          elementStorage(
+            deltas.value!,
+            geometry.value!.weights,
+            variable,
+            needsPorosity ? porosity.value! : undefined,
+          ),
+        );
       }
     }
     const negativeReason =
@@ -329,35 +392,25 @@ export function computeRunMetrics(
       metrics.numerical_health.reasons.cvode_failures =
         error instanceof ShudInputError ? `${error.stage}:stderr.log` : "read:stderr.log";
     }
-    // Absence leaves only dependent terms pending; later present inputs must still
-    // pass the same safe readers. Existing core/state failure precedence is unchanged.
-    const att = readOptional(() => readText("sp.att"));
-    const geol = readOptional(() => readText("para.geol"));
-    const calib = readOptional(() => readText("cfg.calib"));
-    if (geometry !== null) {
-      const { area, weights } = geometry;
-      if (metrics.flow.total_runoff_m3 !== null) {
-        setWater("Qd", metrics.flow.total_runoff_m3 / area);
-      }
-      setWater("delta_s_surf", elementStorage(deltas.eleysurf, weights));
-      setWater("delta_s_riv", riverStorage(deltas.rivystage, river.data, area));
-      if (att !== null && geol !== null && calib !== null) {
-        const porosity = elementPorosity(att, geol, calib, weights.length);
-        if (porosity !== null) {
-          setWater("delta_s_us", elementStorage(deltas.eleyunsat, weights, porosity));
-          setWater("delta_s_gw", elementStorage(deltas.eleygw, weights, porosity));
-        }
-      }
-    }
     for (const [variable, field] of [
       ["elevprcp", "P"],
       ["eleveta", "AET"],
     ] as const) {
-      const dat = readOptional(() => readDat(variable));
-      if (dat !== null && geometry !== null) {
-        setWater(field, fluxDepth(dat, geometry.weights, intervalDays(dat)));
-      }
+      const observed = readOptionalDat(variable);
+      setWater(
+        field,
+        observed.value === null
+          ? waterFailure(observed.reason)
+          : fluxDepth(
+              observed.value,
+              geometry,
+              mesh.elements.rows.length,
+              intervalDays(observed.value),
+              variable,
+            ),
+      );
     }
+    totalWaterBalance(metrics.water_balance);
     return finish();
   } catch (error) {
     const reason =

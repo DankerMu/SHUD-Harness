@@ -35,7 +35,7 @@ test("counts exact line-start solver signatures without serializing source log p
   });
   expect(metrics.status).toBe("ok");
   expect(metrics.numerical_health.reasons).toEqual({
-    water_balance_residual: "pending_water_balance",
+    water_balance_residual: "missing_variable:eleveta",
     cvode_failures: null,
     negative_state_count: null,
     max_solver_dt: "not_observable_in_pinned_shud",
