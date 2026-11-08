@@ -71,7 +71,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 
 - [x] 3.0 共享 SHUD 文本输入安全读模块：`.sp.mesh/.sp.att/.sp.riv/.para.geol/.para.lc/.cfg.para/.cfg.calib/.cfg.ic` 的解析，加上普通文件/不逃逸/`O_NOFOLLOW` 读取，并在同一次读取内算 sha256。这是唯一实现，3.2/3.3/7.1 一律 import 它，不另写。满足 run-metrics「SHUD binary output read contract」中的文本输入部分（依赖无；用 ccw 真实文件做夹具）。
 - [x] 3.1 SHUD 二进制 `.dat` 读取器：布局校验、截断与 NaN、安全读、同一次读取内算 sha256、只接受小端。满足 run-metrics「SHUD binary output read contract」的 `.dat` 部分。
-- [ ] 3.2a 逐 run 流量指标、numerical_health 中非水量平衡的三项、判定与 `metrics.json` 确定性序列化：
+- [x] 3.2a 逐 run 流量指标、numerical_health 中非水量平衡的三项、判定与 `metrics.json` 确定性序列化：
   - 出口集合；`peak_flow_m3d`/`peak_day`/`total_runoff_m3`；Δ 由时间列推导；`cvode_failures`；`negative_state_count`（任一文件缺失则整项 null）；`max_solver_dt` 恒为 null 且不进 verdicts。
   - status `ok|unavailable` 语义；两次计算逐字节相同。
   - `metrics.json` 的安全读与 sha256 绑定读取器（唯一实现；3.4 closure 与 3.6b 渲染都 import 它）。
@@ -296,3 +296,24 @@ Required negatives: <1040bytes, missing declared column bytes, truncated last8by
 Typed-array ownership regression: use a small valid pooled-size file; each returned values.buffer must be confined to owned verified-file/payload data rather than exposing the larger shared Buffer pool. Verify exact decoded values and unchanged source bytes, not a particular allocation API.
 Safety proof: missing vs unsafe/read errors, real FIFO with successful regular control, ancestor/final symlink and directory, normalized in-base path/escape rejection, inode replacement and cleanup/close faults, input/target bytes and mtime unchanged. Do not duplicate the entire #647 fault matrix; reuse the common primitive and prove the new public reader reaches its actual boundary.
 Commands: focused dat tests plus unchanged shud-text-formats/numeric/IO, compare-rivqdown, workspace-build-binary and report-artifact-io; build; actual built binary/text/comparator smoke; strict OpenSpec; full pnpm run check. Parent publishes independent byte construction and complete observed output. Completion is task3.1 only.
+
+## Issue #649 risk packs and executable evidence
+
+| Pack | Required evidence |
+|---|---|
+| Numeric correctness / units | Independent synthetic outlet sums and 0/1440/2880→10/20/30 total60; multi-outlet reordered IDs; tie at1440/4320 selects day1; single/unequal interval preserves peaks; no DT_* inference |
+| IO / path safety | Existing safe readers for all text/dat/log/metrics bytes; final and ancestor links, directory, writerless FIFO, escape/project invalidity, no outside writes; missing versus unsafe/parse/read |
+| Evidence identity | inputs actual full-byte SHA256/length with relative paths, sorted and unique; nonfinite tally includes retained dat fields; digest checked on metrics bytes before parse; mismatch/missing/malformed controlled |
+| Errors / status | Empty outlets/core input missing or unsafe and present malformed dat→unavailable/all numeric cells null; optional state absence/nonfinite→only dependent null; later bad present state cannot hide behind earlier missing state; stderr failure remains item-null |
+| Determinism / wire | Fixed complete nested order, finite numeric cells, exact null reasons, shortest-roundtrip JSON+LF, copied/sorted inputs/outlets without argument mutation; strict reader rejects malformed shape; repeated and relocated runs byte-identical |
+| API / compatibility | compute stays internal/no production consumer; root serializer/reader built smoke; existing text/dat/comparator suites unchanged; canonical dat builder reused |
+| Resource / concurrency | One safe pass per target; process state files serially; descriptor fault cleanup shared and exercised; no atomic snapshot or same-inode immutability claim |
+| Governance / docs | Core classifier/method constant reused; tolerance remains -1e-10; max_solver_dt not in verdicts; lower-bound and final-interval approximation explicit; no scientific verdict, thresholds or formula changes |
+
+Core fixtures: ccw-like sole outlet1 and multi-outlet unordered reach/column IDs; negative -1e-6×3 plus -1e-12→3, exact -1e-10 excluded; two exact line-start SUNDIALS_ERROR: lines→2 with prefixed nonmatches ignored; max_solver_dt always null. Missing rivystage with other negative values gives null, never partial count; keliya-like missing states keeps all flow values and status ok. Unavailable tests include missing cfg.ic, symlink mesh and malformed eleygw. Check method_version/verdict keys and core threshold boundary transitions without changing status.
+
+Boundary fixtures: no rows, missing/duplicate outlet column, nonfinite outlet versus unrelated column, nonfinite time/date, finite-sum overflow, equal zero/negative intervals under the literal formula, reordered tie rows; successful-read manifests remain deterministic on controlled failure. Reader checks wrong digest, same digest malformed JSON/shape, symlink/ancestor/FIFO and unchanged bytes. Reject invalid serializer input rather than NaN/Infinity implicit JSON null. Water-balance constructed-value round-trip fixes every field/order; its producers remain task3.2c/d, and this internal intermediate is never written by production.
+
+Commands/evidence: focused new metrics suites plus shud-text-*/shud-dat*/compare-rivqdown regressions; pnpm run build; built internal compute + public serializer/reader smoke; openspec validate m5-oat-sensitivity --strict --no-interactive; full pnpm run check. Publish all commands and independent input recipes/results. Completion is task3.2a only.
+
+Peak-time explicit oracles (all Q finite): rows [4320,20],[1440,20] select peak_day1 regardless of order; [1440,20],[NaN,20] preserve peak_flow20 but peak_day null/nonfinite:rivqdown and total null/interval_undetermined:rivqdown; [1440,20],[NaN,10] preserve peak_flow20 and peak_day1, with only total null/interval_undetermined:rivqdown. Reverse each nonfinite row order to prove no first-row shortcut.

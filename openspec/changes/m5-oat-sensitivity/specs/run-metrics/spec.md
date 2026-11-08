@@ -209,6 +209,22 @@ core SHALL 导出阈值常量 `NUMERICAL_HEALTH_THRESHOLDS`（取自 `SHUD_Outpu
 - **WHEN** 同一运行目录被复制到另一绝对路径后重算
 - **THEN** `metrics.json` 与原文件逐字节相同，不含任何绝对路径
 
+#### Scenario: outlet identity uses column IDs rather than physical position
+- **WHEN** 合法河网包含多个出口且 rivqdown 的列索引顺序不同于出口升序
+- **THEN** Q 按每个出口的实际列索引求和；缺少或重复必需出口列时不猜测映射，返回点名 rivqdown 的受控 unavailable
+
+#### Scenario: optional absence cannot hide corrupt present evidence
+- **WHEN** 某个储量变量缺失，而另一个已存在的储量变量布局错误或不安全
+- **THEN** 整份指标为 unavailable，不能在第一个缺失文件处提前返回部分健康计数或 status ok
+
+#### Scenario: metrics artifact is bound before parsing
+- **WHEN** 调用方以记录中的 sha256 读取运行目录的 metrics.json
+- **THEN** 共享安全读对同一次字节观察计算 sha256，摘要相等后才解析完整指标形状；文件缺失、不安全、摘要不等、JSON 或字段形状非法均为点名 metrics.json 的受控错误
+
+#### Scenario: canonical serializer rejects implicit nonfinite null conversion
+- **WHEN** 序列化同一合法指标对象的不同字段插入顺序，或提供包含 NaN/Infinity 数值单元的非法对象
+- **THEN** 前者得到相同固定键序、最短往返数字与单个末尾换行；后者受控拒绝，不依赖 JSON.stringify 把非有限值隐式变为无原因的 null
+
 ### Requirement: Metrics computed at collect
 指标 SHALL 在 shud-run-jobs「Automatic collect」与 `shud_collect` 的同一 collect 尝试内、RunRecord 发布之前计算，调度、幂等与重试计数规则以该 requirement 为准；本 requirement 只定义指标侧的可观测结果，适用于所有任务类型的运行（含不带 `task_id` 的运行）：
 - `exit_class` 为 `ok` 的运行：SHALL 原子写 `runs/<run_id>/metrics.json`，RunRecord 的 `artifacts.metrics_summary` SHALL 为 `{path: "metrics.json", sha256}`（sha256 为所写字节的摘要），`numerical_health` 四项取自 `metrics.json`；`status: unavailable` 时四项 SHALL 为 `null`，`metrics_summary` 仍指向该文件。
