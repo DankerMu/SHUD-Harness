@@ -27,6 +27,9 @@ export interface CodeChangeObjectLoaders {
   readChange(id: ChangeId): unknown;
   readPatch(id: ChangeId): Uint8Array;
   readVerification(id: VerificationId): unknown;
+  /** Loader families are exclusive; erasing sensitivity capabilities must not promise legacy results. */
+  readAnalysisPlan?: never;
+  readRunMetrics?: never;
 }
 
 export interface CodeChangeClosureLoaders extends CodeChangeObjectLoaders {

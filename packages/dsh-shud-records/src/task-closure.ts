@@ -32,7 +32,18 @@ import {
  * remains ClosureResult: a sensitivity card without those readers returns only a clause-0
  * failure with legacy metadata. Generic cards with new/union readers return the result union;
  * loader shape alone cannot promise sensitivity output for a science/code-change card.
+ * Families exclude opposing capabilities statically and at runtime. "Missing" includes a
+ * conflicting family: dual sensitivity/code-change inputs fail before invoking readers.
+ * Ambient or asserted intersections conservatively return the union, never a legacy-only
+ * promise. This overload does not authorize constructing a dual-capability object.
  */
+export function evaluateClosure(
+  card: TaskCard,
+  runJobs: readonly ClosureRunJob[],
+  runRecords: readonly RunRecord[],
+  draft: ClosureDraft,
+  objectLoaders: CodeChangeObjectLoaders & SensitivityObjectLoaders,
+): ClosureResult | SensitivityClosureResult;
 export function evaluateClosure(
   card: TaskCard & { type: "sensitivity" },
   runJobs: readonly ClosureRunJob[],
@@ -76,7 +87,9 @@ export function evaluateClosure(
       !("readPatch" in objectLoaders) ||
       typeof objectLoaders.readPatch !== "function" ||
       !("readVerification" in objectLoaders) ||
-      typeof objectLoaders.readVerification !== "function"
+      typeof objectLoaders.readVerification !== "function" ||
+      objectLoaders.readAnalysisPlan !== undefined ||
+      objectLoaders.readRunMetrics !== undefined
     ) {
       return closureResult([{ reason: "missing_code_change_loaders" }]);
     }

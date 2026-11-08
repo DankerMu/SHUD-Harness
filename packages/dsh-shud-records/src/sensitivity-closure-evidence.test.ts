@@ -1,13 +1,20 @@
 import { inspect } from "node:util";
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import {
   AnalysisPlanIdSchema,
   JobRecordIdSchema,
   MAX_COLLECT_ATTEMPTS,
   RunIdSchema,
   TaskIdSchema,
+  type TaskCard,
 } from "@shud-harness/dsh-shud-core";
-import { deriveSensitivityClosure, evaluateClosure } from "./index.ts";
+import {
+  deriveSensitivityClosure,
+  evaluateClosure,
+  type ClosureResult,
+  type CodeChangeObjectLoaders,
+  type SensitivityObjectLoaders,
+} from "./index.ts";
 import {
   evaluateSensitivity,
   sensitivityEvidence,
@@ -54,6 +61,90 @@ test("missing and mismatched reader capabilities fail closed without changing le
   expect(
     deriveSensitivityClosure(science, input.runJobs, input.records, input.draft, loaders),
   ).toMatchObject({ ok: false, failures: [{ clause: 0, reason: "invalid_sensitivity_card" }] });
+});
+
+test.each(["narrowed", "generic"] as const)(
+  "dual-capability loaders erased to legacy reject a %s sensitivity card",
+  (kind) => {
+    const input = sensitivityEvidence();
+    const { loaders, reads } = sensitivityLoaders(input);
+    const legacy = {
+      readChange: vi.fn(() => undefined),
+      readPatch: vi.fn(() => new Uint8Array()),
+      readVerification: vi.fn(() => undefined),
+    };
+    const dual = { ...legacy, ...loaders };
+    // Deliberate untyped-boundary simulation; registered type tests reject safe erasure.
+    const erased = dual as unknown as CodeChangeObjectLoaders;
+    const genericCard: TaskCard = input.card;
+    const result: ClosureResult =
+      kind === "narrowed"
+        ? evaluateClosure(input.card, input.runJobs, input.records, input.draft, erased)
+        : evaluateClosure(genericCard, input.runJobs, input.records, input.draft, erased);
+    expect(result).toMatchObject({ ok: false, failures: [{ clause: 0 }] });
+    expect(result.metric_fact).toBe(true);
+    expect(typeof result.automatic_limitation).toBe("string");
+    expect(result).not.toHaveProperty("selected");
+    expect(reads).toEqual({ plans: [], metrics: [] });
+    expect(legacy.readChange).not.toHaveBeenCalled();
+    expect(legacy.readPatch).not.toHaveBeenCalled();
+    expect(legacy.readVerification).not.toHaveBeenCalled();
+  },
+);
+
+test("dual-capability loaders cannot enter the direct sensitivity predicate", () => {
+  const input = sensitivityEvidence();
+  const { loaders, reads } = sensitivityLoaders(input);
+  const dual = {
+    ...loaders,
+    readChange: vi.fn(() => undefined),
+    readPatch: vi.fn(() => new Uint8Array()),
+    readVerification: vi.fn(() => undefined),
+  };
+  // JavaScript callers can bypass mutually exclusive types; the guard must still reject.
+  const unsafe = dual as unknown as SensitivityObjectLoaders;
+  const result = deriveSensitivityClosure(
+    input.card,
+    input.runJobs,
+    input.records,
+    input.draft,
+    unsafe,
+  );
+  expect(result).toMatchObject({ ok: false, failures: [{ clause: 0 }] });
+  expect(result).not.toHaveProperty("metric_fact");
+  expect(result).not.toHaveProperty("automatic_limitation");
+  expect(result).not.toHaveProperty("selected");
+  expect(reads).toEqual({ plans: [], metrics: [] });
+  expect(dual.readChange).not.toHaveBeenCalled();
+  expect(dual.readPatch).not.toHaveBeenCalled();
+  expect(dual.readVerification).not.toHaveBeenCalled();
+});
+
+test("dual-capability loaders are rejected before code-change readers run", () => {
+  const input = sensitivityEvidence();
+  const { loaders, reads } = sensitivityLoaders(input);
+  const dual = {
+    ...loaders,
+    readChange: vi.fn(() => undefined),
+    readPatch: vi.fn(() => new Uint8Array()),
+    readVerification: vi.fn(() => undefined),
+  };
+  const unsafe = dual as unknown as CodeChangeObjectLoaders;
+  const result = evaluateClosure(
+    { ...input.card, type: "code_change" },
+    input.runJobs,
+    input.records,
+    input.draft,
+    unsafe,
+  );
+  expect(result).toMatchObject({
+    ok: false,
+    failures: [{ reason: "missing_code_change_loaders" }],
+  });
+  expect(reads).toEqual({ plans: [], metrics: [] });
+  expect(dual.readChange).not.toHaveBeenCalled();
+  expect(dual.readPatch).not.toHaveBeenCalled();
+  expect(dual.readVerification).not.toHaveBeenCalled();
 });
 
 test.each([
@@ -323,4 +414,59 @@ test("two linked jobs cannot claim the same run identity", () => {
     ok: false,
     failures: [{ clause: 1, reason: "ambiguous_job", job_id: "JOB-20261108T093000-0002" }],
   });
+});
+
+test("dual-capability intersection rejects a generic sensitivity card before loading evidence", () => {
+  const input = sensitivityEvidence();
+  const { loaders, reads } = sensitivityLoaders(input);
+  const dual = {
+    ...loaders,
+    readChange: vi.fn(() => undefined),
+    readPatch: vi.fn(() => new Uint8Array()),
+    readVerification: vi.fn(() => undefined),
+  };
+  const genericCard: TaskCard = input.card;
+  // An impossible intersection can still arrive from an untyped JavaScript boundary.
+  const unsafe = dual as unknown as CodeChangeObjectLoaders & SensitivityObjectLoaders;
+  const result = evaluateClosure(genericCard, input.runJobs, input.records, input.draft, unsafe);
+  expect(result).toMatchObject({ ok: false, failures: [{ clause: 0 }] });
+  expect(result).not.toHaveProperty("selected");
+  expect(reads).toEqual({ plans: [], metrics: [] });
+  expect(dual.readChange).not.toHaveBeenCalled();
+  expect(dual.readPatch).not.toHaveBeenCalled();
+  expect(dual.readVerification).not.toHaveBeenCalled();
+});
+
+test.each(["readChange", "readPatch", "readVerification"] as const)(
+  "a sensitivity loader with opposing %s capability is not an exclusive family",
+  (method) => {
+    const input = sensitivityEvidence();
+    const { loaders, reads } = sensitivityLoaders(input);
+    const opposing = vi.fn(() => undefined);
+    const unsafe = { ...loaders, [method]: opposing };
+    const facade = evaluateClosure(input.card, input.runJobs, input.records, input.draft, unsafe);
+    const direct = deriveSensitivityClosure(
+      input.card,
+      input.runJobs,
+      input.records,
+      input.draft,
+      unsafe,
+    );
+    expect(facade).toMatchObject({ ok: false, failures: [{ clause: 0 }] });
+    expect(direct).toMatchObject({ ok: false, failures: [{ clause: 0 }] });
+    expect(reads).toEqual({ plans: [], metrics: [] });
+    expect(opposing).not.toHaveBeenCalled();
+  },
+);
+
+test("undefined optional exclusions do not create conflicting loader capabilities", () => {
+  const input = sensitivityEvidence();
+  const { loaders } = sensitivityLoaders(input);
+  const exclusive: SensitivityObjectLoaders = {
+    ...loaders,
+    readChange: undefined,
+    readPatch: undefined,
+    readVerification: undefined,
+  };
+  expect(evaluateSensitivity(input, exclusive).ok).toBe(true);
 });

@@ -521,6 +521,31 @@ void [
   sensitivityAsyncReader,
 ];
 
+const sensitivityDualLoaders = { ...closureObjects, ...sensitivityReaders };
+const sensitivityGenericArgs = [task, closureJobs, records, draft] as const;
+const sensitivityNarrowedArgs = [sensitivityCard, closureJobs, records, draft] as const;
+// @ts-expect-error Dual capabilities must not be erased to the legacy loader family.
+const sensitivityErasedLegacy: CodeChangeObjectLoaders = sensitivityDualLoaders;
+// @ts-expect-error Dual capabilities must not be erased to the sensitivity loader family.
+const sensitivityErasedNew: SensitivityObjectLoaders = sensitivityDualLoaders;
+// @ts-expect-error No concrete dual-capability object inhabits the exclusive intersection.
+const sensitivityIntersection: CodeChangeObjectLoaders & SensitivityObjectLoaders =
+  sensitivityDualLoaders;
+// @ts-expect-error A generic card cannot route an inferred dual-capability loader.
+evaluateClosure(...sensitivityGenericArgs, sensitivityDualLoaders);
+// @ts-expect-error A narrowed sensitivity card cannot route a dual-capability loader.
+evaluateClosure(...sensitivityNarrowedArgs, sensitivityDualLoaders);
+// @ts-expect-error The direct predicate must enforce the same exclusive loader contract.
+deriveSensitivityClosure(...sensitivityNarrowedArgs, sensitivityDualLoaders);
+void [sensitivityErasedLegacy, sensitivityErasedNew, sensitivityIntersection];
+
+declare const sensitivityDeclaredDual: CodeChangeObjectLoaders & SensitivityObjectLoaders;
+const sensitivityDualResult = evaluateClosure(...sensitivityGenericArgs, sensitivityDeclaredDual);
+const sensitivityDualUnion: ClosureResult | SensitivityClosureResult = sensitivityDualResult;
+// @ts-expect-error An explicitly intersected loader cannot promise only legacy result fields.
+const sensitivityDualLegacy: ClosureResult = sensitivityDualResult;
+void [sensitivityDualUnion, sensitivityDualLegacy];
+
 const stale: boolean = isReportMarkdownStale(report, undefined);
 isReportMarkdownStale(report, "# EvidenceReport\nDRAFT — not accepted by PI\n");
 // @ts-expect-error The predicate takes a validated report, not raw unknown data.

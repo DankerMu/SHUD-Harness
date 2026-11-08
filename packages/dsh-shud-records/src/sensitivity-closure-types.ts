@@ -11,6 +11,10 @@ import type { RunMetrics } from "./run-metrics-wire.ts";
 export interface SensitivityObjectLoaders {
   readAnalysisPlan(id: AnalysisPlanId): unknown;
   readRunMetrics(runId: RunId, expectedSha256: string): RunMetrics;
+  /** Sensitivity success must not be reachable through the legacy loader/result overload. */
+  readChange?: never;
+  readPatch?: never;
+  readVerification?: never;
 }
 
 /** Only validated identifiers, never native exceptions or authored text, enter diagnostics. */

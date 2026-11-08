@@ -30,7 +30,7 @@ function denied(failure: SensitivityClosureFailure): SensitivityClosureResult {
   return { ok: false, failures: [failure] };
 }
 
-/** Structural capability check also keeps mismatched facade loaders fail-closed. */
+/** Require one exclusive family, including inherited capabilities; undefined exclusions are inert. */
 export function hasSensitivityLoaders(value: unknown): value is SensitivityObjectLoaders {
   return (
     value !== null &&
@@ -38,7 +38,10 @@ export function hasSensitivityLoaders(value: unknown): value is SensitivityObjec
     "readAnalysisPlan" in value &&
     typeof value.readAnalysisPlan === "function" &&
     "readRunMetrics" in value &&
-    typeof value.readRunMetrics === "function"
+    typeof value.readRunMetrics === "function" &&
+    (!("readChange" in value) || value.readChange === undefined) &&
+    (!("readPatch" in value) || value.readPatch === undefined) &&
+    (!("readVerification" in value) || value.readVerification === undefined)
   );
 }
 
