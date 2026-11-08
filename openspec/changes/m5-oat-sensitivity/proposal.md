@@ -189,3 +189,11 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Selected packs: Public API, File IO/path safety/overwrite, Schema/columns/units, Concurrency/publication ownership, Resource/single-read limits, Legacy compatibility, Error/rollback, Release/exports, Documentation.
 - Scope: task3.3, records source/tests only plus this execution fixture. Extend canonical workspace publication and shared SHUD readers; no tools/jobs/core/policy/raw-guard changes, scan/repair, input rewrite, or scientific baseline change.
 - Evidence floor: semantic workspace RED/GREEN, ccw-copy and discriminating product boundaries, exact same-read digest set, exclusive collision/unsafe-path/read-only proofs, existing sibling publication regressions, built root-API smoke, full check and exact-head CI. Shared change stays open for #675 PI acceptance.
+
+## Issue #654 execution fixture
+
+- Issue type: feature. Fixture level: expanded; agree with upstream for public closure dispatch, injected readers, evidence identity and deterministic selection.
+- Blast radius: selecting the wrong effective run or accepting mismatched plan/metrics evidence could permit an invalid sensitivity report.
+- Selected packs: Public API, File IO/path safety, Schema/identity/status, shared-state ordering, Resource/discovery, Legacy compatibility, Error handling, Release/exports, Documentation. No new auth/config/dependency surface.
+- Scope is task3.4 in records source/tests plus this fixture. Add the sensitivity predicate and readonly adapters, not report/tool wiring, summary derivation, core schema changes or job collection.
+- Evidence floor: semantic unsupported-to-success RED/GREEN at the existing facade, all clauses0–5, failed/retried/two-successful cells, deterministic selection, real safe plan/metrics files and digest failures, unchanged legacy closure behavior, built public smoke, full check and exact-head CI. Shared change remains open.

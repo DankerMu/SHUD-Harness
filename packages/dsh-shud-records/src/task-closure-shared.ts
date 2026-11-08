@@ -52,6 +52,7 @@ type SharedClosureFailure =
 export type ClosureFailure =
   | SharedClosureFailure
   | { reason: "unsupported_task_type" | "missing_code_change_loaders" }
+  | { reason: "missing_sensitivity_loaders"; clause: 0 }
   | { reason: "run_jobs_read_error"; clause: 5 }
   | {
       reason: "change_read_error" | "change_identity_mismatch" | "foreign_change";

@@ -80,7 +80,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 - [x] 3.2c 水量平衡 rSHUD 共有项：P、Qd、AET、ΔS_surf/us/gw/riv 的分项计算（面积、孔隙率、河道面积、IC 读取）；合成迷你项目夹具与小 `.dat` 写出器；本机一次性生成脚本 `scripts/metrics/rshud-crosscheck.R` 与入库的 `expected-rshud.json`。满足 run-metrics「rSHUD cross-check fixture」与 engineering-gates「rSHUD cross-check generator is local-only」（依赖 3.0、3.2a）。
 - [x] 3.2d 积雪/截留扩展项与残差汇总：ΔS_snow/ΔS_ic（使用 3.2b 的常量）；`water_balance_residual`；`zero_precipitation`/`missing_variable`/`ic_shape_mismatch`/`missing_calib`/`interval_undetermined` 等 null 原因；积雪与截留用手算夹具覆盖。满足 run-metrics「Water balance residual」（依赖 3.2b、3.2c）。
 - [x] 3.3 AnalysisPlan 工作区文件层（`analyses/<id>.json` 排他创建、只读解析、id 绑定）；calib 类别表乘积校验（键缺失或重复即拒绝，越界时点名行 index）；`input_digests` 与乘积校验取自同一次读取。满足 analysis-plans「AnalysisPlan workspace file」与「Calib whitelist and category product check」的校验部分（依赖 2.1、2.5、3.0）。
-- [ ] 3.4 sensitivity closure 谓词：恰好一个 plan；作业全部绑定该 plan 且全部终态；有效 run 规则；baseline 必须 succeeded；同一 `stack_id`；metrics `status: ok` 且 sha256 匹配。本刀只新增 sensitivity 谓词，不改 science_assist/code_change。满足 task-cards「sensitivity closure predicate」与「TaskCard workspace file」（依赖 2.2、2.3、3.2a、3.3）。
+- [x] 3.4 sensitivity closure 谓词：恰好一个 plan；作业全部绑定该 plan 且全部终态；有效 run 规则；baseline 必须 succeeded；同一 `stack_id`；metrics `status: ok` 且 sha256 匹配。本刀只新增 sensitivity 谓词，不改 science_assist/code_change。满足 task-cards「sensitivity closure predicate」与「TaskCard workspace file」（依赖 2.2、2.3、3.2a、3.3）。
 - [ ] 3.5 汇总表派生与报告文件层：
   - `SensitivitySummary` 构造：`_pct` 以 baseline 为分母，分母为 0 时给 null；`delta_peak_day` 为差值。
   - 在报告 JSON 提交之前写 `reports/<report_id>.sensitivity.json`；孤立 summary 保留；三类报告文件任一已存在即重分配 report_id。
@@ -382,3 +382,21 @@ Release/exports is selected within the public API pack above. Auth/concurrency/c
 | Documentation / migration | Selected: API comments and this fixture describe new immutable object, arithmetic/source/digest boundaries and non-goals; no migration of existing objects |
 
 Commands: focused AnalysisPlan/product tests plus workspace allocation/publication/physical/readonly and SHUD text suites; pnpm run build; parent built root-API ccw-copy smoke; pnpm run check; openspec validate m5-oat-sensitivity --strict --no-interactive. Publish reproducible inputs, positive/negative outputs, RED/GREEN, read counts, before/after fingerprints and review reports. Only task3.3 closes; shared change and PI gates remain open.
+
+## Issue #654 risk packs and executable evidence
+
+| Pack | Selection and evidence |
+|---|---|
+| Public API / entry | Selected: existing evaluateClosure dispatch and typed sensitivity result/loaders, built root positive/negative smoke |
+| Config / setup | Not selected: no config/default/dependency change |
+| File IO / path safety | Selected: readonly linked plan and digest-bound metrics, unsafe roots/targets/FIFO, physical cwd, no mkdir/write/readdir |
+| Schema / columns / identity | Selected: core plan validation; branded task/plan/job/run/pset bindings; malformed loaded evidence rejected without token leakage |
+| Auth / secrets | Not selected: no permission or model-tool surface; exception/model-payload privacy is covered by controlled error tests |
+| Concurrency / shared state / ordering | Selected for snapshot identity and deterministic selection only: shuffled arrays, repeated failures, two successes, terminal/exhausted state matrix; no new lock or live transaction |
+| Resource / discovery | Selected: only linked plan and effective-success metrics reads; superseded/failed cells trigger no metric reads; existing descriptor safety regression |
+| Legacy compatibility | Selected: unchanged science_assist/code_change suites and facade callers; only the sensitivity unsupported intermediate test migrates |
+| Error / partial output | Selected: explicit clauses0–5, no success with partial pset coverage or ambiguous evidence; no writes/state transitions on failure |
+| Release / packaging | Selected: root exports/type contracts and built adapter smoke; no package/dependency edits |
+| Documentation / migration | Selected: API comments and scoped fixture explain selection, failed-cell rules, readonly evidence and downstream non-goals |
+
+Commands: focused new sensitivity closure/purity/files suites plus unchanged task/code-change closure, workspace readonly and metrics-wire suites; pnpm run build; parent actual built four-cell temporary-workspace smoke and discriminating negative cases; pnpm run check; openspec validate m5-oat-sensitivity --strict --no-interactive. Publish complete inputs, outputs, RED/GREEN, snapshot/hash preservation, original failures and review evidence. Only task3.4 closes; #655/#657/#667 and PI acceptance remain separate.

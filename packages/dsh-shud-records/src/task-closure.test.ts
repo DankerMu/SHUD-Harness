@@ -142,7 +142,7 @@ describe("card and model-authored closure clauses", () => {
     expectDenied(input, [{ reason: "unsupported_task_type" }]);
   });
 
-  test("rejects a parsed sensitivity card despite otherwise ready closure evidence", () => {
+  test("rejects a parsed sensitivity card without sensitivity readers", () => {
     const input = readyCase();
     input.card = TaskCardSchema.parse({
       ...input.card,
@@ -150,7 +150,7 @@ describe("card and model-authored closure clauses", () => {
       source_base_commit: null,
       linked_analyses: ["PLAN-20261107T080000-3f9c"],
     });
-    expectDenied(input, [{ reason: "unsupported_task_type" }]);
+    expectDenied(input, [{ clause: 0, reason: "missing_sensitivity_loaders" }]);
   });
 
   test("unlinked evidence cannot satisfy the nonempty linked_jobs clause", () => {
