@@ -176,6 +176,8 @@ test("code_change validation rejects a changed candidate artifact without changi
       { id: 13, pass: true },
       { id: 14, pass: true },
       { id: 15, pass: false },
+      { id: 16, pass: true },
+      { id: 17, pass: true },
     ]);
     expect(checks[14].vacuous).toBe(false);
     const diagnostic = JSON.stringify(checks[14].details);

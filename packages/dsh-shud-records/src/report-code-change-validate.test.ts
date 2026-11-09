@@ -33,7 +33,7 @@ function validate() {
   return result;
 }
 
-test("canonical facts and artifacts pass fifteen checks without adding closure or cross-object decisions", () => {
+test("canonical facts and artifacts pass seventeen checks without adding closure or cross-object decisions", () => {
   // Foreign task/run references, proposed CRs and differing build dirty paths are not closure checks.
   // Only validator fixtures add real VC artifacts; the renderer's golden fixtures remain unchanged.
   expect(validate()).toEqual({

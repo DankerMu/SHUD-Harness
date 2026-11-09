@@ -1,0 +1,107 @@
+{
+  "ok": true,
+  "checks": [
+    {
+      "id": 1,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 2,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 3,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 4,
+      "pass": true,
+      "vacuous": true,
+      "details": []
+    },
+    {
+      "id": 5,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 6,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 7,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 8,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 9,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 10,
+      "pass": true,
+      "vacuous": true,
+      "details": []
+    },
+    {
+      "id": 11,
+      "pass": true,
+      "vacuous": true,
+      "details": []
+    },
+    {
+      "id": 12,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 13,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 14,
+      "pass": true,
+      "vacuous": true,
+      "details": []
+    },
+    {
+      "id": 15,
+      "pass": true,
+      "vacuous": true,
+      "details": []
+    },
+    {
+      "id": 16,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    },
+    {
+      "id": 17,
+      "pass": true,
+      "vacuous": false,
+      "details": []
+    }
+  ]
+}

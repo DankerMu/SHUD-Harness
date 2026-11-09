@@ -102,7 +102,7 @@ for (const index of [0, 1] as const) {
       });
       const before = snapshotTree(workspace.root);
       const result = validateReport(workspace.cwd, workspace.report.report_id);
-      expect(result.checks).toHaveLength(15);
+      expect(result.checks).toHaveLength(17);
       expect(result.checks[14]).toMatchObject({
         pass: false,
         vacuous: false,

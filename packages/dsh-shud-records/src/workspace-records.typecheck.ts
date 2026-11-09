@@ -614,7 +614,7 @@ const validationOk: boolean = validation.ok;
 const validationCheck: ReportValidationCheck = validation.checks[0];
 const validationCheckId: ReportValidationCheckId = validationCheck.id;
 const firstValidationCheckId: 1 = validation.checks[0].id;
-const lastValidationCheckId: 15 = validation.checks[14].id;
+const lastValidationCheckId: 17 = validation.checks[16].id;
 const validationDetails: readonly ReportValidationDetail[] = validationCheck.details;
 const validationError = new ReportValidationError("parse");
 const validationStage: ReportValidationStage = validationError.stage;
@@ -624,10 +624,10 @@ validateReport(value, id);
 const asynchronousValidation: Promise<ReportValidationResult> = validateReport(cwd, id);
 // @ts-expect-error There is no Markdown override input.
 validateReport(cwd, id, markdown);
-// @ts-expect-error Exactly fifteen ordered checks are returned.
-void validation.checks[15];
+// @ts-expect-error Exactly seventeen ordered checks are returned.
+void validation.checks[17];
 // @ts-expect-error Check ids form a closed numeric domain.
-const invalidValidationId: ReportValidationCheckId = 16;
+const invalidValidationId: ReportValidationCheckId = 18;
 // @ts-expect-error No raw path accompanies root errors.
 void validationError.path;
 // @ts-expect-error Root error constructors cannot accept a path or cause.
