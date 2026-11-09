@@ -107,7 +107,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - 同一切片中更新 `shud:replay` 的副本 provenance oracle（运行副本与准备后输入只差 `DT_YE_IC` 一行）。
   - 验证：`pnpm run check`、`pnpm run shud:tiny`、本机 `shud:replay` 重跑（rivqdown bitwise 不变）。
   - 满足 shud-run-jobs「Shud job submission」的 DT_YE_IC 部分、shud-run-tools「shud_run arguments」的回放副本场景、known-answer-replay「Replay acceptance criteria」的副本部分。
-- [ ] 4.1b 绑定 plan 的提交事务：
+- [x] 4.1b（#660 / PR #705）绑定 plan 的提交事务：
   - 内部请求接收已解析的 calib 覆盖、plan/pset id、threads 与 `input_digests`。
   - 复制之后、任何重写之前核对副本摘要，不等即回滚。
   - 副本 `NUM_OPENMP` 改写为 plan `threads`。
@@ -541,3 +541,19 @@ Commands: unit + integration RED before implementation; focused jobs/tools/runti
 | Auth / dependency / profile | Not selected: no credentials, packages or profile rows |
 
 Commands: RED before implementation; focused jobs suites; `pnpm run build`; `pnpm run check` (incl. docs:check); `pnpm run shud:tiny`; `pnpm run shud:restart`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.1b closes.
+
+## Issue #661 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Concurrency / ordering | Selected: two concurrent same-task/plan/`PSET-2` submissions → exactly one fulfilled, the other rejects naming the pset; no run dir, index entry or provenance for the rejected one; claim is synchronous and once; plan-bound EEXIST redraw (pattern submit-shud-collisions.test.ts:70-100) succeeds without self-rejection; AggregateError rollback (injected cleanup failure) keeps the pair so a same-pset resubmission is still rejected |
+| Persisted state semantics | Selected: existing `running` job, terminal-uncollected `succeeded` job (ledger below limit), and collected job with RunRecord `succeeded` → rejection, `runs/` unchanged, existing files byte-identical; RunJob `failed`, `cancelled`, collect-exhausted ledger, collected `succeeded` + exhausted ledger (documented decision), RunRecord `failed`, rolled-back in-flight (injected failure) → resubmission accepted with new `run-job.json`, failed-job `run-job.json`/`run-record.json`/`collect-error.json` byte-identical |
+| Error handling | Selected: corrupt `collect-error.json` (and unparsable RunJob) → explicit canonical error, not allowed as failed; ledger validation shared with `readLedger` (single implementation) |
+| Legacy compatibility | Selected: different pset and unbound submissions accepted unchanged; existing collision/submission suites green; `pnpm run shud:restart` PASS |
+| File IO | Selected: rejection happens before `prepareInput`'s input walk — a nonexistent `input_dir` with a duplicate pair yields the duplicate error (not ENOENT), and the rejected submission never calls `io.copyFile`/`io.mkdir` (mock pattern submit-shud-collisions.test.ts:26-29); sync readers reuse the factored RunJob/RunRecord/ledger validators |
+| Scientific governance / evidence lineage | Selected: closure's single effective run depends on this check; failed-job files byte-identical after accepted resubmission (lineage); exhausted+succeeded decision recorded in design Risks |
+| Hydrology runtime (Park/Resume durability) | Selected: `pnpm run shud:restart` PASS; restart loses only the in-memory table, persisted non-failed jobs still reject |
+| Test construction note | Use `ccwPlanFixture`/`planRequest` for bound submissions, `queryRecord`/`writeQueryRecord`/`indexed` for seeded jobs, `makeRunRecord`, ledger literals from collect-error-attempts.test.ts, `failNthWrite`, copyFile barrier; set a large `pumpPollMs` (or snapshot after seeding settles) so polling does not auto-collect seeded jobs |
+| Schema / auth / docs / dependency | Not selected: no schema, permission, documentation or package change |
+
+Commands: RED before implementation; focused jobs suites; `pnpm run build`; `pnpm run check`; `pnpm run shud:restart`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.1c closes.

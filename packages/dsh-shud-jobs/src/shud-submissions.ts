@@ -11,7 +11,7 @@ import {
   type RunJob,
 } from "@shud-harness/dsh-shud-core";
 import type { Config } from "./registry.ts";
-import type { StateIndexStore } from "./state-indexes.ts";
+import { indexedRuns, type StateIndexStore } from "./state-indexes.ts";
 import { captureStackLock, generateProvenance, writeJson } from "@shud-harness/dsh-shud-records";
 import { stdoutSource } from "./file-output.ts";
 import {
@@ -28,9 +28,12 @@ import {
   realDirectory,
   verifyInputDigests,
   verifyRun,
+  type PlanBinding,
   type PreparedInput,
   type SubmitShudRequest,
 } from "./shud-input.ts";
+import { readRunJobSync, runFailure } from "./shud-run-file.ts";
+import { readRunEvidenceSync } from "./shud-collect.ts";
 import {
   registerUnowned,
   registrationLabel,
@@ -57,6 +60,36 @@ interface OwnedProvenance {
   path: string;
   parent?: Stats;
   file?: Stats;
+}
+
+/**
+ * Whether this registry's indexes hold a non-failed job of (plan, pset), read synchronously. Failed:
+ * RunJob failed/cancelled, a collect-exhausted ledger, or a collected RunRecord with status failed;
+ * every indexed RunJob is validated and corrupt evidence fails loudly, never counting as failed.
+ */
+function indexedNonFailed(
+  indexes: StateIndexStore,
+  plan: RunJob["analysis_plan_id"],
+  set: RunJob["parameter_set_id"],
+): boolean {
+  const label = "SHUD parameter set check";
+  for (const entry of indexedRuns(indexes.read(), label)) {
+    let failed: boolean;
+    try {
+      const { job } = readRunJobSync(entry);
+      if (job.analysis_plan_id !== plan || job.parameter_set_id !== set) continue;
+      const { exhausted, record } = readRunEvidenceSync(entry, job.status === "collected");
+      failed =
+        job.status === "failed" ||
+        job.status === "cancelled" ||
+        exhausted ||
+        record?.status === "failed";
+    } catch (error) {
+      throw runFailure(label, entry, "run metadata", error);
+    }
+    if (!failed) return true;
+  }
+  return false;
 }
 
 async function removeProvenance(owned: OwnedProvenance): Promise<void> {
@@ -86,6 +119,8 @@ export class ShudSubmissions {
   private readonly reservedRuns = new Set<RunId>();
   private readonly reservedJobs = new Set<JobRecordId>();
   private readonly inFlight = new Set<RunId>();
+  /** In-flight (plan, pset) claims; with the indexes, at most one non-failed job per pair. */
+  private readonly claimedSets = new Set<string>();
   private readonly pending = new Set<Promise<RunJob>>();
   private accepting = true;
 
@@ -111,13 +146,18 @@ export class ShudSubmissions {
 
   submit(request: SubmitShudRequest, producer: ShudProducer): Promise<RunJob> {
     if (!this.accepting) return Promise.reject(new Error("SHUD submission admission is closed"));
+    // Until execute owns it, a claim made in this synchronous segment is released on any throw.
+    const claim: { set?: string } = {};
     try {
       if (typeof producer !== "function")
         throw new Error("submitShud requires an execution producer");
-      const input = prepareInput(request, this.config.stateDir);
+      const input = prepareInput(request, this.config.stateDir, (plan) => {
+        claim.set = this.claimSet(plan);
+      });
       // The id pair is claimed before execute reaches its first filesystem await.
       const reservation = this.reserve(input);
-      const operation = this.execute(input, reservation, producer);
+      const operation = this.execute(input, reservation, producer, claim.set);
+      claim.set = undefined;
       this.pending.add(operation);
       void operation.then(
         () => {
@@ -129,10 +169,26 @@ export class ShudSubmissions {
       );
       return operation;
     } catch (error) {
+      if (claim.set !== undefined) this.claimedSets.delete(claim.set);
       return Promise.reject(
         error instanceof Error ? error : new Error("Submission preflight failed", { cause: error }),
       );
     }
+  }
+
+  /** Check and claim a bound pair in one synchronous step; unbound submissions are unchecked. */
+  private claimSet(plan: PlanBinding): string | undefined {
+    if (plan.analysisPlanId === null || plan.parameterSetId === null) return undefined;
+    const key = `${plan.analysisPlanId}/${plan.parameterSetId}`;
+    if (
+      this.claimedSets.has(key) ||
+      indexedNonFailed(this.indexes, plan.analysisPlanId, plan.parameterSetId)
+    )
+      throw new Error(
+        `Parameter set ${plan.parameterSetId} of analysis plan ${plan.analysisPlanId} already has a non-failed run`,
+      );
+    this.claimedSets.add(key);
+    return key;
   }
 
   private reserve(input: PreparedInput): Reservation {
@@ -162,6 +218,7 @@ export class ShudSubmissions {
     input: PreparedInput,
     initial: Reservation,
     producer: ShudProducer,
+    claimedSet: string | undefined,
   ): Promise<RunJob> {
     let reservation = initial;
     let parent: Stats | undefined;
@@ -392,7 +449,11 @@ export class ShudSubmissions {
       }
       throw error;
     } finally {
-      if (releaseReservation) this.releaseReservation(reservation);
+      // Success (indexed running RunJob) and clean rollback release; failed cleanup keeps both.
+      if (releaseReservation) {
+        this.releaseReservation(reservation);
+        if (claimedSet !== undefined) this.claimedSets.delete(claimedSet);
+      }
     }
   }
 
