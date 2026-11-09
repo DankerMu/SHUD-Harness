@@ -205,3 +205,10 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Selected packs: Public API, File IO/overwrite, Schema/units/identity, Concurrency/publication ordering, Resource/discovery, Legacy compatibility, Error/partial output, Release/exports, Documentation. No auth/config/dependency changes.
 - Scope is task3.5: records summary derivation/serialization/reading, report allocation and rendering input checks, plus this fixture. No #657 per-run rendering, #658 delta Markdown/validator16–17, or #667 tool creation wiring.
 - Evidence floor: semantic report-render/allocation RED, independent arithmetic oracle, byte determinism, exclusive summary-before-JSON and orphan faults, every-render digest checks including repair(b), state-transition summary immutability, unchanged legacy report tests/goldens, built smoke, full check and exact-head CI.
+
+## Issue #656 execution fixture
+
+- Feature, fixture expanded as upstream suggested: authenticated tool preflight observes immutable workspace evidence before any reconciliation/publication. The issue's final Critical Path classification is authoritative: no core schema, report wording or policy change; expanded review still covers identity and path boundaries.
+- Scope: task3.6a, tools citation scanner and tests plus this fixture. Reuse core AnalysisPlanIdSchema and records readonly analysis parser; no records/core/jobs changes, sensitivity tool support, plan ownership requirement, rendering or analysis_ids population.
+- Selected packs: tool entry, file IO, schema/identity, preflight ordering, resource/deduplication, legacy compatibility, controlled errors and documentation. No configuration, dependency, authorization or scientific behavior changes.
+- Evidence: real ToolRuntime semantic missing-plan RED/GREEN; science/code-change valid and invalid plans; four authored fields, standalone boundaries, once-per-invocation reads; no-write/no-reconcile snapshots; unchanged nine-namespace tests; actual built scanner smoke, full check and exact-head CI.
