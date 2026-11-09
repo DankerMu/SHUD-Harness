@@ -114,7 +114,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - 副本 `.cfg.calib` 单键重写（恰好一行，数值为最短往返表示），在 provenance 之前完成。
   - `run-job.json` 首次写入即带 plan/pset id 与 threads；后续状态写入与 collect 原样继承，RunRecord 带同样的两个 id（run-records「RunRecord record」的继承场景）。
   - 满足 shud-run-jobs「Shud job submission」的重写与摘要部分（依赖 2.2、2.5、4.1a；2.5 提供注册表预检用的 calib 白名单）。
-- [ ] 4.1c pset 重复提交检查：注册表在同步 id 占用点检查在途提交与已登记作业；并发时至多一个被接受；失败、取消、收集耗尽或回滚之后可以重提。满足 shud-run-jobs「Shud job submission」的重复检查部分（依赖 4.1b）。
+- [x] 4.1c（#661 / PR #706）pset 重复提交检查：注册表在同步 id 占用点检查在途提交与已登记作业；并发时至多一个被接受；失败、取消、收集耗尽或回滚之后可以重提。满足 shud-run-jobs「Shud job submission」的重复检查部分（依赖 4.1b）。
 - [ ] 4.2 自动 collect 内计算 metrics：
   - 只对 `exit_class: ok` 的 run 计算；写 `metrics.json` 并填 `metrics_summary` 与 numerical_health。
   - 失败隔离：unavailable 由 run-metrics 判定，不写 `collect-error.json`、不计次；`metrics.json` 写失败时字段为 null；非 ok run 不写；已有 RunRecord 时幂等，不改写。
@@ -557,3 +557,24 @@ Commands: RED before implementation; focused jobs suites; `pnpm run build`; `pnp
 | Schema / auth / docs / dependency | Not selected: no schema, permission, documentation or package change |
 
 Commands: RED before implementation; focused jobs suites; `pnpm run build`; `pnpm run check`; `pnpm run shud:restart`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.1c closes.
+
+## Issue #662 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Ordering / persisted state | Selected: genuine ok fixture → `metrics.json` exists with `serializeRunMetrics` bytes, RunRecord `succeeded`, `metrics_summary.sha256` == file sha, `numerical_health` == file values, `artifacts.files` excludes `metrics.json`, no `collect-error.json`, wake has no `metrics=` token; existing exit-0 tests tightened to assert summary and reason |
+| Error isolation (a) | Selected: truncated existing `.dat` or missing `<project>.rivqdown.dat` → `metrics.json` `unavailable` with reason naming the file (`missing_variable:rivqdown`), RunRecord `succeeded`/`ok`, summary → file, health null, no ledger, job `collected`, wake delivered |
+| Partial residual | Selected: missing `<project>.eleyic.dat` or unreadable copy `.cfg.calib` → `metrics.json` `ok`, residual null with `missing_variable:eleyic` / `unreadable_input:<project>.cfg.calib`, other three equal file |
+| Error isolation (b) | Selected: `metrics.json` path occupied by a directory → RunRecord published `succeeded`, summary/health null, no ledger, attempts unchanged, wake text contains `metrics=write_failed`, no leftover temp file; a serializer/compute throw is also (b) |
+| Error isolation (c) | Selected: exit 19 and cancelled → no `metrics.json`, both null, `status: failed` |
+| Idempotence | Selected: committed run-record + metrics, `.dat` rewritten, recollect (automatic and `collectShud`) → both files byte+mtime unchanged; first attempt writes metrics then run-record write fails, retry succeeds → attempts 1 in ledger before retry, ledger bytes unchanged by the successful retry, metrics bytes identical to first |
+| Readonly / legacy | Selected: `collectShud(id, {readonly: true})` computes nothing, writes nothing; pre-M5 committed RunRecord not backfilled |
+| Read-only metrics | Selected: `.dat`, `stdout.log`, `stderr.log`, input copy byte+mtime unchanged across a metrics computation |
+| Runtime oracles | Selected: first-task oracle positive + negative (residual null fixture → non-zero naming criterion); replay oracle positive + negatives (summary null, digest mismatch, reason not `missing_variable:`); rivqdown unchanged |
+| Hydrology runtime / resource | Selected: real `shud:first-task`, `shud:replay` exit 0; `shud:restart` SIGTERM/SIGKILL PASS with `delivered`, retained RunRecords have non-null `metrics_summary`; full-length ccw collect duration (incl. metrics) measured and reported |
+| Scientific governance / lineage | Selected: no invented values; nulls carry reasons; metrics producer for #422 |
+| Documentation | Selected: `Runtime_Lifecycle.md:57` (metrics exemption from collect-error and write position), `:61` (wake token), `Testing_Strategy.md:114`, `Test_Fixtures_And_Command_Matrix.md:163` (producer now known); `Migration_Plan_dsh.md` untouched; `pnpm run docs:check` green |
+| Resource / event loop | Selected: PR reports measured full-length collect duration and the synchronous-stall risk (design Risk) |
+| Auth / dependency / profile | Not selected |
+
+Commands: RED before implementation; focused jobs + runtime suites; `pnpm run build`; `pnpm run check`; `pnpm run shud:first-task <scratch>`; `pnpm run shud:replay <scratch>`; `pnpm run shud:restart`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.2 closes.

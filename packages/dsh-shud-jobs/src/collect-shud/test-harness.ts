@@ -1,7 +1,10 @@
+import { createHash } from "node:crypto";
 import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { expect } from "vitest";
 import { RunRecordSchema, type RunJob, type RunRecord } from "@shud-harness/dsh-shud-core";
+import { readRunMetrics } from "@shud-harness/dsh-shud-records";
+import { makeClosedBudgetRun } from "../../../dsh-shud-records/src/water-balance-test-harness.ts";
 import { type pollFixture, seedRun } from "../poll-shud/test-harness.ts";
 
 export type CollectFixture = Awaited<ReturnType<typeof pollFixture>>;
@@ -108,4 +111,63 @@ export function existingResult(record: RunJob): RunRecord {
 
 export async function expectAbsent(path: string): Promise<void> {
   await expect(io.lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
+}
+
+export const NULL_HEALTH = {
+  water_balance_residual: null,
+  cvode_failures: null,
+  negative_state_count: null,
+  max_solver_dt: null,
+} as const;
+
+/** Two authored solver-failure signatures between ordinary lines; independent of the counter. */
+const METRICS_STDERR = "SUNDIALS_ERROR: first\nordinary solver line\nSUNDIALS_ERROR: second\n";
+
+/** Terminal run with the records closed-budget project (wbmini) as its genuine metrics inputs. */
+export function seedMetricsRun(
+  h: CollectFixture,
+  changes: Partial<RunJob> = {},
+  prepare?: (record: RunJob) => void | Promise<void>,
+): Promise<RunJob> {
+  return seedTerminal(h, { project: "wbmini", ...changes }, async (record) => {
+    makeClosedBudgetRun(record.run_dir);
+    await io.writeFile(join(record.run_dir, "stderr.log"), METRICS_STDERR);
+    await prepare?.(record);
+  });
+}
+
+/** The committed digest binds the exact metrics.json bytes and the record repeats its health. */
+export async function expectMetricsBound(record: RunRecord, runDir: string) {
+  const bytes = await io.readFile(join(runDir, "metrics.json"));
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  expect(record.artifacts.metrics_summary).toEqual({ path: "metrics.json", sha256 });
+  const metrics = readRunMetrics(runDir, sha256);
+  const health = metrics.numerical_health;
+  expect(record.numerical_health).toEqual({
+    water_balance_residual: health.water_balance_residual,
+    cvode_failures: health.cvode_failures,
+    negative_state_count: health.negative_state_count,
+    max_solver_dt: health.max_solver_dt,
+  });
+  return { bytes, metrics };
+}
+
+/** Run-metrics owns availability; collect still publishes the unavailable file and null health. */
+export async function expectUnavailableMetrics(
+  record: RunRecord,
+  runDir: string,
+  reason: string,
+): Promise<void> {
+  const { metrics } = await expectMetricsBound(record, runDir);
+  expect(metrics).toMatchObject({ status: "unavailable", reason });
+  expect(record.numerical_health).toEqual(NULL_HEALTH);
+  expect(record).toMatchObject({ status: "succeeded", exit_class: "ok" });
+  await expectAbsent(join(runDir, "collect-error.json"));
+}
+
+export function wakeText(h: CollectFixture): string {
+  expect(h.followups).toHaveLength(1);
+  return h.followups[0].message.content
+    .flatMap((block) => (block.type === "text" ? [block.text] : []))
+    .join("\n");
 }

@@ -160,7 +160,7 @@ metrics/figure 的具体里程碑、生产者、格式和落点未在本节确�
 注册表路径及后续对象：
 
 - 注册表路径（`shud_run` → collect）：成功运行 exit_code=0、RunRecord.status=succeeded，RunJob/RunRecord 与 stateDir 索引可追溯；独立 `shud:tiny` 不生成这些记录。
-- `numerical_health.water_balance_residual` 在 M2 collect 中为 `null`，不作为 M2 通过条件；后续计算的阈值沿用 [既有阈值](../03_SPEC/SHUD_Output_Variables.md#13-阈值)（pass `<=0.01`），本节不确定其计算里程碑或生产者。
+- `numerical_health` 由 M5 collect 内指标生产（#662，records `computeRunMetrics`）：`exit_class: ok` 的运行写 `runs/<run_id>/metrics.json`，RunRecord `artifacts.metrics_summary` 以所写字节的 sha256 绑定该文件；不可观测项为 `null` 并在 `metrics.json` 写明原因（`max_solver_dt` 在钉版 SHUD 中恒为 `null`）。M2 collect 及 M5 之前已提交的 RunRecord 保持 `null`、不回填，不作为 M2 通过条件；判定阈值沿用 [既有阈值](../03_SPEC/SHUD_Output_Variables.md#13-阈值)（pass `<=0.01`）。
 - `rivqdown` 序列进入 metrics/figure artifact（后续里程碑，非 M2；具体归属未定）；
 - StackLock/DataProvenance 对象接线属于 [M3](Phased_Plan.md#3-m3-mvp-1)；M2 的 `stack_id` / `data_id` 为 null，不能与 RunJob/RunRecord 的已有追溯能力混为一项。
 

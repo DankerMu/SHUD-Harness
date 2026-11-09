@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import * as io from "node:fs/promises";
 import { join } from "node:path";
@@ -12,7 +13,12 @@ import {
   type RunRecord,
 } from "@shud-harness/dsh-shud-core";
 import { readExit } from "./shud-exit.ts";
-import { writeJson } from "@shud-harness/dsh-shud-records";
+import {
+  computeRunMetrics,
+  serializeRunMetrics,
+  writeBytes,
+  writeJson,
+} from "@shud-harness/dsh-shud-records";
 import type { IndexEntry } from "./state-indexes.ts";
 import {
   CollectFailure,
@@ -270,6 +276,47 @@ async function outputFiles(
   return files;
 }
 
+type RunMetricsEvidence = Pick<RunRecord["artifacts"], "metrics_summary"> &
+  Pick<RunRecord, "numerical_health">;
+
+function unobservedMetrics(): RunMetricsEvidence {
+  return {
+    metrics_summary: null,
+    numerical_health: {
+      water_balance_residual: null,
+      cvode_failures: null,
+      negative_state_count: null,
+      max_solver_dt: null,
+    },
+  };
+}
+
+/**
+ * Read-only metrics plus one atomic metrics.json (re)write, before RunRecord publication.
+ * Run-metrics owns availability: an unavailable result is still written with null health.
+ * Any failure here is metrics-only (case b): it never reaches the collect-error ledger, and
+ * the committed record's null summary is the durable receipt the wake text reports.
+ */
+async function publishRunMetrics(job: RunJob): Promise<RunMetricsEvidence> {
+  try {
+    const result = computeRunMetrics(job.run_dir, job.project);
+    const bytes = Buffer.from(serializeRunMetrics(result.metrics), "utf8");
+    const path = join(job.run_dir, "metrics.json");
+    // A residual regular file from a failed earlier attempt is overwritten; anything else is not.
+    await regularFile(path, "metrics publication", true);
+    await writeBytes(path, bytes);
+    return {
+      metrics_summary: {
+        path: "metrics.json",
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      },
+      numerical_health: result.health,
+    };
+  } catch {
+    return unobservedMetrics();
+  }
+}
+
 async function failedAttempt(
   entry: IndexEntry,
   routed: RoutedRun,
@@ -365,6 +412,12 @@ export async function collectRun(
       job.status === "cancelled" || job.cancel_requested_at !== null ? "cancelled" : "lost";
     const exitClass = classifyRunExit(code, missing);
     const files = await outputFiles(job.run_dir, job.project);
+    let metrics = unobservedMetrics();
+    if (exitClass === "ok") {
+      // Routing failure before metrics is an ordinary collect failure, not a metrics failure.
+      verifyRunFile(entry, routed);
+      metrics = await publishRunMetrics(job);
+    }
     const candidate = RunRecordSchema.safeParse({
       run_id: job.run_id,
       job_id: job.job_id,
@@ -385,13 +438,9 @@ export async function collectRun(
         stderr: join(job.run_dir, "stderr.log"),
         shud_output: join(job.run_dir, "output", `${job.project}.out`),
         files,
+        metrics_summary: metrics.metrics_summary,
       },
-      numerical_health: {
-        water_balance_residual: null,
-        cvode_failures: null,
-        negative_state_count: null,
-        max_solver_dt: null,
-      },
+      numerical_health: metrics.numerical_health,
       resources: {
         wall_seconds:
           job.started_at !== null && job.finished_at !== null

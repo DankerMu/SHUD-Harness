@@ -32,6 +32,8 @@ import {
   makeRunRecord,
 } from "../../../packages/dsh-shud-records/src/task-lifecycle-test-harness.ts";
 import { renderReportDocument } from "../../../packages/dsh-shud-records/src/report-render.ts";
+import { completeMetrics } from "../../../packages/dsh-shud-records/src/run-metrics-test-harness.ts";
+import type { RunMetrics } from "../../../packages/dsh-shud-records/src/run-metrics-wire.ts";
 import { REPORT_LIMITATION_TEMPLATES } from "../../../packages/dsh-shud-core/src/governance/wording.ts";
 import { snapshotReportMetricFacts } from "../shud-report-metrics.ts";
 import {
@@ -63,6 +65,48 @@ const prompt =
   "Complete the code_change replay in this workspace using ../openMP/docs/p1e/p1e_strict_omp_design.md, changing only Makefile, src/Model/MD_rhs_core.cpp, src/Model/f.cpp, src/Model/Macros.hpp, src/Model/shud.cpp, then compare the base and candidate keliya runs at threads: 1 and submit the evidence report.";
 
 const sha256 = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
+
+/**
+ * Constructed keliya-shaped collect metrics: keliya writes no storage outputs, so the residual is
+ * null with a missing-variable reason while the other health items remain observed.
+ */
+export function replayRunMetrics(reason = "missing_variable:eleygw"): RunMetrics {
+  const metrics: RunMetrics = completeMetrics();
+  for (const field of [
+    "delta_s_surf",
+    "delta_s_us",
+    "delta_s_gw",
+    "delta_s",
+    "residual",
+  ] as const) {
+    metrics.water_balance[field] = null;
+    metrics.water_balance.reasons[field] = reason;
+  }
+  // Missing state outputs also leave the negative-state count unobserved.
+  for (const field of ["water_balance_residual", "negative_state_count"] as const) {
+    metrics.numerical_health[field] = null;
+    metrics.numerical_health.reasons[field] = reason;
+    metrics.verdicts[field] = "not_available";
+  }
+  return metrics;
+}
+
+/** Bind one run to metric bytes the way collect does: summary digest plus copied health values. */
+export function bindReplayMetrics(
+  files: Record<string, unknown>,
+  record: RunRecord,
+  metrics: RunMetrics = replayRunMetrics(),
+): void {
+  const bytes = JSON.stringify(metrics);
+  record.artifacts.metrics_summary = { path: "metrics.json", sha256: sha256(bytes) };
+  record.numerical_health = {
+    water_balance_residual: metrics.numerical_health.water_balance_residual,
+    cvode_failures: metrics.numerical_health.cvode_failures,
+    negative_state_count: metrics.numerical_health.negative_state_count,
+    max_solver_dt: metrics.numerical_health.max_solver_dt,
+  };
+  files[`runs/${record.run_id}/metrics.json`] = captureReportMetrics(Buffer.from(bytes));
+}
 
 export interface ReplayRecords {
   task: TaskCard;
@@ -294,6 +338,7 @@ function replayRecords(verificationStatus: "passed" | "failed"): ReplayRecords {
     [`reports/${report.report_id}.json`]: report,
   };
   for (const { build, stack, data, job, record } of runs) {
+    bindReplayMetrics(files, record);
     Object.assign(files, {
       [`builds/${build.build_id}/build-record.json`]: build,
       [build.binary_path]: build.rhs_openmp ? "hello" : "abc",

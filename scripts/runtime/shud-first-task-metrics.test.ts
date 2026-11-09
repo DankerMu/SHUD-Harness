@@ -2,6 +2,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import type { RunRecord } from "../../packages/dsh-shud-core/src/schemas/index.ts";
 import {
   completeMetrics,
   digest,
@@ -40,10 +41,68 @@ test("first-task oracle rejects recollected metric bytes that no longer match th
   writeFileSync(join(workspace, path), `${bytes} `);
   fixture.evidence.files = snapshotFirstTaskFiles(workspace);
   expect(() => assertFirstTaskEvidence(fixture.evidence)).toThrow(path);
+  expect(() => assertFirstTaskEvidence(fixture.evidence)).toThrow(
+    expect.objectContaining({ code: "FIRST_TASK_METRICS_DIGEST" }),
+  );
+});
+
+test("first-task oracle accepts the ccw run's bound non-null collect-time metrics", () => {
+  const fixture = makeFirstTaskFixture(workspace);
+  expect(fixture.record.artifacts.metrics_summary).not.toBeNull();
+  expect(assertFirstTaskEvidence(fixture.evidence).criteria.runMetrics).toBe(true);
+});
+
+const nullHealth = (field: keyof RunRecord["numerical_health"]) => (record: RunRecord) => {
+  record.numerical_health[field] = null;
+};
+test.each([
+  ["METRICS_RESIDUAL", "null water_balance_residual", nullHealth("water_balance_residual")],
+  ["METRICS_CVODE", "null cvode_failures", nullHealth("cvode_failures")],
+  ["METRICS_NEGATIVE", "null negative_state_count", nullHealth("negative_state_count")],
+  [
+    "METRICS_MAX_SOLVER_DT",
+    "an observed max_solver_dt",
+    (record: RunRecord) => {
+      record.numerical_health.max_solver_dt = 30;
+    },
+  ],
+] as const)(
+  "first-task oracle names %s for %s on an otherwise accepted run",
+  (criterion, _kind, adjust) => {
+    const fixture = makeFirstTaskFixture(workspace, JSON.stringify(completeMetrics()), adjust);
+    expect(() => assertFirstTaskEvidence(fixture.evidence)).toThrow(
+      expect.objectContaining({ code: `FIRST_TASK_${criterion}` }),
+    );
+  },
+);
+
+test("first-task oracle names METRICS_SUMMARY when the run has no metrics summary", () => {
+  const fixture = makeFirstTaskFixture(workspace, null, (record) => {
+    record.numerical_health = {
+      water_balance_residual: 0.01,
+      cvode_failures: 2,
+      negative_state_count: 3,
+      max_solver_dt: null,
+    };
+  });
+  expect(() => assertFirstTaskEvidence(fixture.evidence)).toThrow(
+    expect.objectContaining({ code: "FIRST_TASK_METRICS_SUMMARY" }),
+  );
+});
+
+test("first-task oracle names METRICS_DIGEST and the file when metrics.json is absent", () => {
+  const fixture = makeFirstTaskFixture(workspace);
+  const path = `runs/${fixture.record.run_id}/metrics.json`;
+  rmSync(join(workspace, path));
+  fixture.evidence.files = snapshotFirstTaskFiles(workspace);
+  expect(() => assertFirstTaskEvidence(fixture.evidence)).toThrow(path);
+  expect(() => assertFirstTaskEvidence(fixture.evidence)).toThrow(
+    expect.objectContaining({ code: "FIRST_TASK_METRICS_DIGEST" }),
+  );
 });
 
 test.each(["old sentence", "missing run segment"] as const)(
-  "first-task oracle rejects %s with otherwise valid null-metric evidence",
+  "first-task oracle rejects %s with otherwise valid metric evidence",
   (kind) => {
     const fixture = makeFirstTaskFixture(workspace);
     expect(assertFirstTaskEvidence(fixture.evidence).criteria.canonicalMarkdown).toBe(true);

@@ -74,13 +74,41 @@ type Predicate =
   | "MARKDOWN"
   | "STACK"
   | "INVARIANTS"
-  | "INPUTS";
+  | "INPUTS"
+  | "METRICS_SUMMARY"
+  | "METRICS_DIGEST"
+  | "METRICS_RESIDUAL"
+  | "METRICS_CVODE"
+  | "METRICS_NEGATIVE"
+  | "METRICS_MAX_SOLVER_DT";
 type EventLog = Pick<SessionLog, "events">;
-function fact(value: unknown, code: Predicate): asserts value {
+function fact(value: unknown, code: Predicate, detail?: string): asserts value {
   if (!value)
-    throw Object.assign(new Error(`First-task predicate failed: ${code}`), {
-      code: `FIRST_TASK_${code}`,
-    });
+    throw Object.assign(
+      new Error(`First-task predicate failed: ${code}${detail === undefined ? "" : `: ${detail}`}`),
+      { code: `FIRST_TASK_${code}` },
+    );
+}
+
+/** Collect-time metrics of the ccw run: each criterion is named on failure. */
+function assertRunMetrics(files: Record<string, unknown>, record: RunRecord): void {
+  const summary = record.artifacts.metrics_summary;
+  fact(summary !== null, "METRICS_SUMMARY");
+  const path = `runs/${record.run_id}/metrics.json`;
+  const captured = files[path];
+  fact(
+    captured !== null &&
+      typeof captured === "object" &&
+      "sha256" in captured &&
+      captured.sha256 === summary.sha256,
+    "METRICS_DIGEST",
+    path,
+  );
+  const health = record.numerical_health;
+  fact(health.water_balance_residual !== null, "METRICS_RESIDUAL");
+  fact(health.cvode_failures !== null, "METRICS_CVODE");
+  fact(health.negative_state_count !== null, "METRICS_NEGATIVE");
+  fact(health.max_solver_dt === null, "METRICS_MAX_SOLVER_DT");
 }
 function parseFiles(files: Record<string, unknown>) {
   const tasks = new Map<string, TaskCard>();
@@ -372,6 +400,7 @@ function assertSnapshot(e: FirstTaskEvidence) {
     GOVERNANCE_INVARIANTS.every((sentence) => markdown.includes(sentence)),
     "INVARIANTS",
   );
+  assertRunMetrics(e.files, record);
   const metricFacts = snapshotReportMetricFacts(e.files, [record]);
   const section5 = markdown.split("## 5. 指标与图表\n")[1]?.split("\n## 6.")[0] ?? "";
   fact(
@@ -408,6 +437,7 @@ function assertSnapshot(e: FirstTaskEvidence) {
       approvalJoined: true,
       taskDone: true,
       recordsJoined: true,
+      runMetrics: true,
       canonicalMarkdown: true,
       stackRecorded: true,
       governanceInvariants: true,

@@ -84,6 +84,31 @@ function parseReplayRecord<T>(
   }
 }
 
+/** keliya writes no storage outputs: residual null for a missing variable, digest-bound file. */
+function assertReplayRunMetrics(files: Record<string, unknown>, run: RunRecord): void {
+  const path = `runs/${run.run_id}/metrics.json`;
+  const summary = run.artifacts.metrics_summary;
+  requireFact(summary !== null, `RunRecord ${run.run_id}: metrics_summary must be non-null`);
+  requireFact(
+    Object.hasOwn(files, path) && artifactDigest(files[path]).sha256 === summary.sha256,
+    `Metrics digest ${path}`,
+  );
+  requireFact(
+    run.numerical_health.water_balance_residual === null,
+    `RunRecord ${run.run_id}: water_balance_residual must be null`,
+  );
+  requireFact(
+    run.numerical_health.max_solver_dt === null,
+    `RunRecord ${run.run_id}: max_solver_dt must be null`,
+  );
+  const [{ metrics }] = snapshotReportMetricFacts(files, [run]);
+  const reason = metrics?.numerical_health.reasons.water_balance_residual;
+  requireFact(
+    typeof reason === "string" && reason.startsWith("missing_variable:"),
+    `Metrics residual reason ${path}: must start with missing_variable:`,
+  );
+}
+
 export function replayRecords(files: Record<string, unknown>, workspace: string): ReplayRecords {
   function records<T>(
     pattern: RegExp,
@@ -300,6 +325,7 @@ export function replayRecords(files: Record<string, unknown>, workspace: string)
         artifactDigest(files[`${outputRoot}/${file.path}`]).size_bytes === file.size_bytes,
         `Artifact size ${job.run_id}/${file.path}`,
       );
+    assertReplayRunMetrics(files, run);
     const compared = `output/keliya.out/keliya.rivqdown.dat`;
     requireFact(
       verification.observed.compared_path === compared &&

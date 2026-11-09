@@ -811,7 +811,7 @@ export class ShudPoll {
       const text =
         typeof outcome === "string"
           ? `SHUD run ${record.run_id}: collection failed; ${outcome}.`
-          : `SHUD run ${outcome.run_id}: exit_class=${outcome.exit_class}; artifacts=${outcome.artifacts.files.length}.`;
+          : `SHUD run ${outcome.run_id}: exit_class=${outcome.exit_class}; artifacts=${outcome.artifacts.files.length}${outcome.exit_class === "ok" && outcome.artifacts.metrics_summary === null ? "; metrics=write_failed" : ""}.`;
       const message = createUserMessage({
         content: [
           {
