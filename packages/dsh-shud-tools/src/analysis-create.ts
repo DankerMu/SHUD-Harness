@@ -8,7 +8,7 @@ import {
   readFileSync,
   realpathSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { defineTool, ToolArgsError, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import {
   AnalysisPlanIdSchema,
@@ -110,7 +110,7 @@ function readEligibleCard(cwd: string, taskId: TaskId): TaskCard {
 function planTaskId(root: string, name: string): unknown {
   try {
     const fd = openSync(
-      join(root, name),
+      `${root}/${name}`,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
     try {
@@ -130,7 +130,8 @@ function planTaskId(root: string, name: string): unknown {
 
 /** The only analyses/ scan: find this card's unlinked plans, never skipping a bad entry. */
 function findOrphan(cwd: string, taskId: TaskId): AnalysisPlan | undefined {
-  const root = join(cwd, "analyses");
+  // Same non-collapsing spelling records publishes plans under: no lexical `..` folding of cwd.
+  const root = `${cwd}/analyses`;
   let names: string[];
   try {
     const stat = lstatSync(root, { throwIfNoEntry: false });
@@ -161,7 +162,8 @@ function findOrphan(cwd: string, taskId: TaskId): AnalysisPlan | undefined {
 function resolveInput(cwd: string, inputDir: string, project: string, sets: ParameterSets) {
   let input: string;
   try {
-    input = realpathSync.native(resolve(cwd, inputDir));
+    // Never path.resolve/join the user path: alias/.. has physical semantics, as raw-guard judges.
+    input = realpathSync.native(isAbsolute(inputDir) ? inputDir : `${cwd}/${inputDir}`);
   } catch {
     throw new Error(`analysis_create input_dir ${inputDir}: not found`);
   }

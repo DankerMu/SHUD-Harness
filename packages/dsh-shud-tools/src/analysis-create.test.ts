@@ -4,6 +4,7 @@ import { AnalysisPlanIdSchema } from "@shud-harness/dsh-shud-core";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { cardPath, expectToolError, OTHER_TASK, TASK } from "./task-linked/test-harness.ts";
 import {
+  aliasedInput,
   analysisHarness,
   DIGEST_FILES,
   planNames,
@@ -108,6 +109,26 @@ test("labels, explicit threads and project are recorded; missing projection is u
   const plan = readPlan(h, value.analysis_plan_id);
   expect(plan).toMatchObject({ threads: 2, project: "ccw", created_by: "unknown" });
   expect(plan.parameter_sets[0].label).toBe("baseline");
+});
+
+test.each([
+  {
+    label: "symlinked input/link",
+    arrange: () => {
+      fs.symlinkSync(h.input, join(h.cwd, "input", "link"));
+      return ["input/link", fs.realpathSync.native(h.input)];
+    },
+  },
+  { label: "link/.. alias", arrange: () => ["link/../ccw", aliasedInput(h, "ccw")] },
+  {
+    label: "absolute link/.. alias",
+    arrange: () => [`${h.cwd}/link/../ccw`, aliasedInput(h, "ccw")],
+  },
+])("$label records the physically resolved input_dir", async ({ arrange }) => {
+  seedCard(h);
+  const [input_dir, expected] = arrange();
+  const value = successValue(await h.invoke({ ...validArgs, input_dir, project: "ccw" }));
+  expect(readPlan(h, value.analysis_plan_id).input_dir).toBe(expected);
 });
 
 test.each([

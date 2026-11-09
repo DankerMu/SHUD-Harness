@@ -140,6 +140,15 @@ test.each([
     },
   },
   {
+    label: "same multiplier on a different key",
+    args: {
+      ...validArgs,
+      parameter_sets: validArgs.parameter_sets.map((set, index) =>
+        index === 3 ? { ...set, changes: { GEOL_KSATV: 2 } } : set,
+      ),
+    },
+  },
+  {
     label: "different order",
     args: {
       ...validArgs,

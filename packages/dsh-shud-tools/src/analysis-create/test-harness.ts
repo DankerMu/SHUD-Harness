@@ -156,6 +156,19 @@ export function seedOrphan(
   return { plan, path };
 }
 
+/**
+ * `link -> deep/inner` plus input copies at `<cwd>/<name>` and `<cwd>/deep/<name>`: a textual
+ * collapse of `link/../<name>` names the first, physical traversal the second. Returns the
+ * physical realpath, the directory the host and raw-guard resolve.
+ */
+export function aliasedInput(h: Pick<AnalysisHarness, "cwd" | "input">, name: string) {
+  const physical = join(h.cwd, "deep", name);
+  for (const dir of [join(h.cwd, name), physical]) fs.cpSync(h.input, dir, { recursive: true });
+  fs.mkdirSync(join(h.cwd, "deep", "inner"));
+  fs.symlinkSync(join(h.cwd, "deep", "inner"), join(h.cwd, "link"));
+  return fs.realpathSync.native(physical);
+}
+
 /** Bytes and listings of every workspace surface the tool must leave untouched on rejection. */
 export async function workspaceSnapshot(h: Pick<AnalysisHarness, "cwd" | "input">) {
   return {

@@ -4,12 +4,14 @@ import type { ApprovalService } from "@deepseek-ai/dsh-user-approval";
 import * as rawGuard from "@shud-harness/dsh-shud-raw-guard";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { RAW_READ_PROVENANCE_REASON } from "../../dsh-shud-raw-guard/src/decide.ts";
-import { expectToolError, TASK } from "./task-linked/test-harness.ts";
+import { expectToolError, TASK, treeOrAbsent } from "./task-linked/test-harness.ts";
 import {
+  aliasedInput,
   analysesDir,
   analysisHarness,
   planNames,
   readCard,
+  readPlan,
   seedCard,
   seedOrphan,
   successValue,
@@ -94,6 +96,45 @@ test.each<Outcome>(["rejected", "allowed-once"])(
       expect(planNames(h)).toEqual([`${value.analysis_plan_id}.json`]);
       expect(readCard(h).linked_analyses).toEqual([value.analysis_plan_id]);
       expect((await workspaceSnapshot(h)).input).toEqual(before.input);
+    }
+  },
+);
+
+// raw-guard judges `link/../rawin` physically (deep/rawin); the tool must read that same directory.
+const aliased = { ...validArgs, input_dir: "link/../rawin", project: "ccw" };
+
+test("raw textual collapse target is neither asked nor read for link/..", async () => {
+  seedCard(h);
+  const physical = aliasedInput(h, "rawin");
+  await h.apply(rawGuard, { rawDirs: ["rawin"] });
+  const seen = await admission("allowed-once");
+  const value = successValue(await h.invoke(aliased));
+  expect(seen.approvals).toEqual([]);
+  expect(seen.executions).toBe(1);
+  expect(readPlan(h, value.analysis_plan_id).input_dir).toBe(physical);
+});
+
+test.each<Outcome>(["rejected", "allowed-once"])(
+  "raw physical link/.. target asks; %s decides what is read",
+  async (outcome) => {
+    seedCard(h);
+    const physical = aliasedInput(h, "rawin");
+    await h.apply(rawGuard, { rawDirs: ["deep/rawin"] });
+    const seen = await admission(outcome);
+    const before = { ...(await workspaceSnapshot(h)), deep: await treeOrAbsent(physical) };
+    const result = await h.invoke(aliased);
+    expect(seen.approvals).toHaveLength(1);
+    expect(seen.approvals[0]).toMatchObject({ reason: RAW_READ_PROVENANCE_REASON });
+    if (outcome === "rejected") {
+      expectToolError(result, /reject/iu);
+      expect(seen.executions).toBe(0);
+      expect({ ...(await workspaceSnapshot(h)), deep: await treeOrAbsent(physical) }).toEqual(
+        before,
+      );
+    } else {
+      const value = successValue(result);
+      expect(seen.executions).toBe(1);
+      expect(readPlan(h, value.analysis_plan_id).input_dir).toBe(physical);
     }
   },
 );
