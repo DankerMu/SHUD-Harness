@@ -2,6 +2,7 @@ import * as io from "node:fs/promises";
 import { basename, join } from "node:path";
 import type * as NodeIo from "node:fs/promises";
 import { beforeEach, expect, test, vi } from "vitest";
+import type { RunJob } from "@shud-harness/dsh-shud-core";
 import { snapshotQueryTree } from "./list-run-jobs/test-harness.ts";
 import { names as listing } from "./submit-shud-build/test-harness.ts";
 import { DUPLICATE, psetFixture } from "./submit-shud-pset/test-harness.ts";
@@ -161,6 +162,37 @@ test("a rollback whose cleanup fails keeps the pset claimed (fail closed)", asyn
     expect(await listing(join(h.cwd, "runs"))).toEqual([retained, other.run_id].sort());
   } finally {
     vi.mocked(io.rm).mockImplementation(actualIo.rm);
+    await h.close();
+  }
+}, 20000);
+
+test("an accepted submission releases its claim, so its later cancellation re-opens the pset", async () => {
+  const h = await psetFixture();
+  try {
+    const killed = await h.submit();
+    const id = killed.dsh_job_id;
+    if (id === null) throw new Error("Accepted submission has no registration identity");
+    expect(h.registry.kill(id, h.ownerId, "cancel PSET-2")).toBe("requested");
+    const terminal = async () =>
+      JSON.parse(await io.readFile(join(killed.run_dir, "run-job.json"), "utf8")) as RunJob;
+    // Registry polling is the terminal-persistence owner; the fixture disables its cadence.
+    await expect
+      .poll(async () => {
+        await h.registry.pollOnce();
+        return (await terminal()).status;
+      })
+      .toBe("cancelled");
+    expect(typeof (await terminal()).finished_at).toBe("string");
+    await expect.poll(() => h.registry.get(id, h.ownerId).status).toBe("killed");
+    const before = await snapshotQueryTree(killed.run_dir);
+    const record = await h.submit();
+    expect(record.parameter_set_id).toBe("PSET-2");
+    expect(JSON.parse(await io.readFile(join(record.run_dir, "run-job.json"), "utf8"))).toEqual(
+      record,
+    );
+    expect(await listing(join(h.cwd, "runs"))).toEqual([killed.run_id, record.run_id].sort());
+    expect(await snapshotQueryTree(killed.run_dir)).toEqual(before);
+  } finally {
     await h.close();
   }
 }, 20000);

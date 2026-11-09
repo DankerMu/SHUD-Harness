@@ -64,8 +64,9 @@ interface OwnedProvenance {
 
 /**
  * Whether this registry's indexes hold a non-failed job of (plan, pset), read synchronously. Failed:
- * RunJob failed/cancelled, a collect-exhausted ledger, or a collected RunRecord with status failed;
- * every indexed RunJob is validated and corrupt evidence fails loudly, never counting as failed.
+ * RunJob failed/cancelled, a collect-exhausted ledger, or a collected RunRecord with status failed.
+ * Entries are read in index order (active, then completed) and the scan returns at the first
+ * non-failed match; corrupt evidence reached before then fails loudly, never counting as failed.
  */
 function indexedNonFailed(
   indexes: StateIndexStore,

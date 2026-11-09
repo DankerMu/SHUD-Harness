@@ -97,6 +97,14 @@ test.each(Object.entries(failed))(
       );
       expect(await listing(join(h.cwd, "runs"))).toEqual([prior.run_id, record.run_id].sort());
       expect(await snapshotQueryTree(prior.run_dir)).toEqual(before);
+      // The held fake SHUD publishes its barrier asynchronously; settle it before the snapshot.
+      await expect
+        .poll(() => fs.existsSync(join(record.run_dir, "submission-barrier.json")))
+        .toBe(true);
+      // The failed job indexed first must not hide the accepted running one from the check.
+      const accepted = await evidence(h);
+      await expect(h.submit()).rejects.toThrow(DUPLICATE);
+      expect(await evidence(h)).toEqual(accepted);
     } finally {
       await h.close();
     }
