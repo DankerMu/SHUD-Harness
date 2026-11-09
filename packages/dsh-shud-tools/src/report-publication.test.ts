@@ -6,6 +6,7 @@ import { JobRecordIdSchema } from "@shud-harness/dsh-shud-core";
 import { renderReport } from "@shud-harness/dsh-shud-records";
 import { barrier } from "../../dsh-shud-jobs/src/state-indexes/test-harness.ts";
 import { enteredBeforeCompletion } from "../../dsh-shud-jobs/src/list-run-jobs/test-harness.ts";
+import { completeMetrics } from "../../dsh-shud-records/src/run-metrics-test-harness.ts";
 import {
   OTHER_TASK,
   cardPath,
@@ -23,6 +24,7 @@ import {
   expectReportError as expectToolError,
   fileSnapshot,
   generated,
+  installMetrics,
   putReport,
   readReport,
   reportHarness,
@@ -228,6 +230,103 @@ test("failed card repair never reaches Markdown; terminal repair publishes no in
     expect(states).toEqual(["done"]);
     expect(getCard(h).linked_reports).toEqual([REPORT]);
     expect(fs.readFileSync(reportPath(h, REPORT, "md"), "utf8")).toBe(renderReport(h.cwd, REPORT));
+  } finally {
+    vi.mocked(fs.renameSync).mockImplementation(nativeFs.renameSync);
+    await h.dispose();
+  }
+});
+
+test("metric digest failure retains the independently reconciled stale card without publishing a report", async () => {
+  const h = await reportHarness();
+  try {
+    const { job, run } = await seedEvidence(h);
+    const metricsPath = installMetrics(job.run_dir, run, completeMetrics());
+    nativeFs.appendFileSync(metricsPath, " ");
+    const stale = putCard(h, plannedCard({ linked_reports: [] }));
+    const before = await cardSnapshot(h);
+    const runsBefore = await treeOrAbsent(join(h.cwd, "runs"));
+    const commits: { bytes: Buffer; mtime: bigint }[] = [];
+    vi.mocked(fs.renameSync).mockImplementation((source, target) => {
+      nativeFs.renameSync(source, target);
+      if (target === cardPath(h)) {
+        commits.push({
+          bytes: nativeFs.readFileSync(cardPath(h)),
+          mtime: nativeFs.statSync(cardPath(h), { bigint: true }).mtimeNs,
+        });
+      }
+    });
+    const message = expectToolError(await h.invoke("report_generate", DRAFT), /metrics\.json/u);
+    expect(message).toContain(`runs/${run.run_id}/metrics.json`);
+    expect(commits).toHaveLength(1);
+    expect(commits[0].bytes).not.toEqual(before.bytes);
+    const updatedAt: unknown = expect.any(String);
+    expect(getCard(h)).toEqual({
+      ...stale,
+      linked_jobs: [job.job_id],
+      stack_id: job.stack_id,
+      data_id: job.data_id,
+      updated_at: updatedAt,
+    });
+    expect(await cardSnapshot(h)).toEqual(commits[0]);
+    expect(await treeOrAbsent(join(h.cwd, "runs"))).toEqual(runsBefore);
+    expect(await treeOrAbsent(join(h.cwd, "reports"))).toBeNull();
+    commits.length = 0;
+    const reconciled = await cardSnapshot(h);
+    expectToolError(await h.invoke("report_generate", DRAFT), /metrics\.json/u);
+    expect(commits).toEqual([]);
+    expect(await cardSnapshot(h)).toEqual(reconciled);
+    expect(await treeOrAbsent(join(h.cwd, "reports"))).toBeNull();
+  } finally {
+    vi.mocked(fs.renameSync).mockImplementation(nativeFs.renameSync);
+    await h.dispose();
+  }
+});
+
+test("metric failure during stale Markdown repair preserves the prior report and the earlier card repair commit", async () => {
+  const h = await reportHarness();
+  try {
+    const { job, run } = await seedEvidence(h);
+    const metricsPath = installMetrics(job.run_dir, run, completeMetrics());
+    const report = generated(h, await h.invoke("report_generate", DRAFT));
+    const committedCard = getCard(h);
+    const reportBefore = await fileSnapshot(reportPath(h, report.report_id));
+    putCard(h, { ...committedCard, status: "running", linked_reports: [] });
+    expect(getCard(h).linked_reports).toEqual([]);
+    expect(getCard(h).status).toBe("running");
+    const markdownPath = reportPath(h, report.report_id, "md");
+    nativeFs.writeFileSync(markdownPath, "# stale report\nwrong watermark\noriginal body\n");
+    const markdownBefore = await fileSnapshot(markdownPath);
+    nativeFs.appendFileSync(metricsPath, " ");
+    const runsBefore = await treeOrAbsent(join(h.cwd, "runs"));
+    const commits: { bytes: Buffer; mtime: bigint }[] = [];
+    vi.mocked(fs.renameSync).mockImplementation((source, target) => {
+      nativeFs.renameSync(source, target);
+      if (target === cardPath(h)) {
+        commits.push({
+          bytes: nativeFs.readFileSync(cardPath(h)),
+          mtime: nativeFs.statSync(cardPath(h), { bigint: true }).mtimeNs,
+        });
+      }
+    });
+    const message = expectToolError(
+      await h.invoke("report_validate", { report_id: report.report_id }),
+      /render/u,
+    );
+    expect(message).toContain(report.report_id);
+    expect(commits).toHaveLength(1);
+    const updatedAt: unknown = expect.any(String);
+    expect(getCard(h)).toEqual({ ...committedCard, updated_at: updatedAt });
+    expect(await cardSnapshot(h)).toEqual(commits[0]);
+    expect(await fileSnapshot(reportPath(h, report.report_id))).toEqual(reportBefore);
+    expect(await fileSnapshot(markdownPath)).toEqual(markdownBefore);
+    expect(await treeOrAbsent(join(h.cwd, "runs"))).toEqual(runsBefore);
+    commits.length = 0;
+    const repaired = await cardSnapshot(h);
+    expectToolError(await h.invoke("report_validate", { report_id: report.report_id }), /render/u);
+    expect(commits).toEqual([]);
+    expect(await cardSnapshot(h)).toEqual(repaired);
+    expect(await fileSnapshot(reportPath(h, report.report_id))).toEqual(reportBefore);
+    expect(await fileSnapshot(markdownPath)).toEqual(markdownBefore);
   } finally {
     vi.mocked(fs.renameSync).mockImplementation(nativeFs.renameSync);
     await h.dispose();

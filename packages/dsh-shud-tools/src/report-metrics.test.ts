@@ -1,14 +1,14 @@
 import * as fs from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "vitest";
-import type { RunRecord } from "@shud-harness/dsh-shud-core";
-import { serializeRunMetrics, type RunMetrics } from "@shud-harness/dsh-shud-records";
+import type { RunMetrics } from "@shud-harness/dsh-shud-records";
 import { completeMetrics, digest } from "../../dsh-shud-records/src/run-metrics-test-harness.ts";
 import { treeOrAbsent } from "./task-linked/test-harness.ts";
 import {
   DRAFT,
   expectReportError,
   generated,
+  installMetrics,
   reportHarness,
   seedCodeChangeEvidence,
   seedEvidence,
@@ -16,15 +16,6 @@ import {
 
 const FIXED =
   "max_solver_dt 在钉版 SHUD 中不可观测（PrintFinalStats 未被调用），各运行该项恒为 null，不作判定";
-
-function installMetrics(runDir: string, run: RunRecord, metrics: RunMetrics) {
-  const bytes = serializeRunMetrics(metrics);
-  const path = join(runDir, "metrics.json");
-  fs.writeFileSync(path, bytes);
-  run.artifacts.metrics_summary = { path: "metrics.json", sha256: digest(bytes) };
-  fs.writeFileSync(join(runDir, "run-record.json"), JSON.stringify(run));
-  return path;
-}
 
 function passingMetrics(): RunMetrics {
   const metrics = completeMetrics();

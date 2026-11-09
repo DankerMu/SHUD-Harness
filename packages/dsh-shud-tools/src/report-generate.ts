@@ -42,7 +42,13 @@ const parameters = {
     description: "Nonempty authored summary, preserved verbatim.",
   },
   observations: { type: "array", items: { type: "string" }, required: true },
-  limitations: { type: "array", items: { type: "string" }, required: true },
+  limitations: {
+    type: "array",
+    items: { type: "string" },
+    required: true,
+    description:
+      "Authored limitations only. Do not supply the exact system-owned max_solver_dt limitation as an array entry.",
+  },
   pi_questions: { type: "array", items: { type: "string" }, required: true },
 } as const;
 
@@ -94,6 +100,9 @@ async function generateReport(
   // Reject before any reconciliation publication or creating workspace read.
   readGeneratableTask(cwd, taskId);
   checkReportCitations(cwd, jobs, authored);
+  if (authored.limitations.includes(REPORT_LIMITATION_TEMPLATES.max_solver_dt)) {
+    throw new ToolArgsError(["limitations must not contain the system-owned max_solver_dt entry"]);
+  }
   const taskJobs = await jobs.listRunJobsByTask(taskId);
   const initial = readGeneratableTask(cwd, taskId);
   const reconciled = reconcileTaskCard(initial, taskJobs);

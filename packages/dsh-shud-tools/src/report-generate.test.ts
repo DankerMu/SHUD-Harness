@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as io from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, vi } from "vitest";
-import { type TaskCard } from "@shud-harness/dsh-shud-core";
+import { REPORT_LIMITATION_TEMPLATES, type TaskCard } from "@shud-harness/dsh-shud-core";
 import { renderReport } from "@shud-harness/dsh-shud-records";
 import { INVARIANTS } from "../../dsh-shud-records/src/report-validation-test-harness.ts";
 import { observedStart } from "../../dsh-shud-jobs/src/detached-shud/test-harness.ts";
@@ -103,6 +103,135 @@ test("appends deterministic limitations for a succeeded run without metrics", as
     await h.dispose();
   }
 });
+
+test("rejects an authored exact max_solver_dt limitation before stale-card reconciliation", async () => {
+  const h = await reportHarness();
+  try {
+    const { job, run } = await seedEvidence(h);
+    expect(job.status).toBe("collected");
+    expect(run.status).toBe("succeeded");
+    putCard(h, { ...getCard(h), status: "planned", runtime_phase: null, linked_jobs: [] });
+    const before = await treeOrAbsent(h.cwd);
+    const cardBefore = await cardSnapshot(h);
+    expect(await treeOrAbsent(join(h.cwd, "reports"))).toBeNull();
+    const query = vi.spyOn(h.registry, "listRunJobsByTask");
+    const ledger = vi.spyOn(h.registry, "readCollectErrorAttempts");
+    const collect = vi.spyOn(h.registry, "collectShud");
+    try {
+      const message = expectToolError(
+        await h.invoke("report_generate", {
+          ...DRAFT,
+          limitations: [...DRAFT.limitations, REPORT_LIMITATION_TEMPLATES.max_solver_dt],
+        }),
+        /limitations/u,
+      );
+      expect(message).toContain("max_solver_dt");
+      expect(query).not.toHaveBeenCalled();
+      expect(ledger).not.toHaveBeenCalled();
+      expect(collect).not.toHaveBeenCalled();
+      expect(await treeOrAbsent(h.cwd)).toEqual(before);
+      expect(await cardSnapshot(h)).toEqual(cardBefore);
+      expect(await treeOrAbsent(join(h.cwd, "reports"))).toBeNull();
+    } finally {
+      query.mockRestore();
+      ledger.mockRestore();
+      collect.mockRestore();
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("regeneration rejects prior generated limitations without changing the committed report or card", async () => {
+  const h = await reportHarness();
+  try {
+    await seedEvidence(h);
+    const report = generated(h, await h.invoke("report_generate", DRAFT));
+    const card = getCard(h);
+    const before = await treeOrAbsent(h.cwd);
+    const cardBefore = await cardSnapshot(h);
+    const query = vi.spyOn(h.registry, "listRunJobsByTask");
+    const ledger = vi.spyOn(h.registry, "readCollectErrorAttempts");
+    const collect = vi.spyOn(h.registry, "collectShud");
+    try {
+      const message = expectToolError(
+        await h.invoke("report_generate", { ...DRAFT, limitations: report.limitations }),
+        /limitations/u,
+      );
+      expect(message).toContain("max_solver_dt");
+      expect(query).not.toHaveBeenCalled();
+      expect(ledger).not.toHaveBeenCalled();
+      expect(collect).not.toHaveBeenCalled();
+      expect(await treeOrAbsent(h.cwd)).toEqual(before);
+      expect(await cardSnapshot(h)).toEqual(cardBefore);
+      expect(getCard(h)).toEqual(card);
+      expect(getCard(h).linked_reports).toEqual([report.report_id]);
+    } finally {
+      query.mockRestore();
+      ledger.mockRestore();
+      collect.mockRestore();
+    }
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("quoted fixed text and other authored fields remain allowed with one exact system limitation", async () => {
+  const h = await reportHarness();
+  try {
+    const { run } = await seedEvidence(h);
+    const fixed = REPORT_LIMITATION_TEMPLATES.max_solver_dt;
+    const quoted = `Quoted for discussion: "${fixed}" is not an authored measurement.`;
+    const authored = {
+      ...DRAFT,
+      summary: fixed,
+      observations: [fixed],
+      limitations: [quoted],
+      pi_questions: [fixed],
+    };
+    const report = generated(h, await h.invoke("report_generate", authored));
+    expect(report.summary).toBe(fixed);
+    expect(report.observations).toEqual([fixed]);
+    expect(report.pi_questions).toEqual([fixed]);
+    expect(report.limitations).toEqual([
+      quoted,
+      fixed,
+      `运行 ${run.run_id} 的指标不可用，原因为 metrics_summary is null`,
+    ]);
+    expect(report.limitations.filter((entry) => entry === fixed)).toHaveLength(1);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test.each(["missing task", "missing citation"] as const)(
+  "%s retains preflight error precedence over an exact system limitation collision",
+  async (kind) => {
+    const h = await reportHarness();
+    try {
+      if (kind === "missing citation") await seedEvidence(h);
+      const before = await treeOrAbsent(h.cwd);
+      const query = vi.spyOn(h.registry, "listRunJobsByTask");
+      try {
+        const message = expectToolError(
+          await h.invoke("report_generate", {
+            ...DRAFT,
+            summary: kind === "missing citation" ? "REPORT-20990101T000000-ffff" : DRAFT.summary,
+            limitations: [REPORT_LIMITATION_TEMPLATES.max_solver_dt],
+          }),
+          kind === "missing citation" ? /citation unavailable/u : /task|missing/iu,
+        );
+        expect(message).not.toContain("max_solver_dt");
+        expect(query).not.toHaveBeenCalled();
+        expect(await treeOrAbsent(h.cwd)).toEqual(before);
+      } finally {
+        query.mockRestore();
+      }
+    } finally {
+      await h.dispose();
+    }
+  },
+);
 
 test.each([
   "created",
