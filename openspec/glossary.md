@@ -73,7 +73,7 @@ status: living
 | 输出语义下限 | output_semantics floor | 特定类别变更的最低语义级别地板 | 同上 |
 | 语义级别下限 | semantic level floor / `semantic_floor` | 仓库内受测 path→floor 常量派生的最低级别；全部匹配取最大、未匹配取 numerical_implementation，不由 LLM 降级 | [Gating §1.1](../docs/03_SPEC/Scientific_Change_Gating_Spec.md#11-分类的确定性下限semantic-level-floor) |
 | 下限类别集合 | `floor_categories` | 观测路径命中全部 floor 值的排序去重集合，包含被更高 floor 遮盖的类别；最大值为 semantic_floor | 同上 |
-| 治理根 | governance roots / `governance-immutable` | tasks、stacks、provenance、reports、runs、changes、patches、verifications、builds；M4 模型文件/shell 工具不得写、由领域工具拥有；shell 判定为启发式 | [Workspace §9](../docs/03_SPEC/Workspace_Conventions.md#9-路径安全) |
+| 治理根 | governance roots / `governance-immutable` | tasks、stacks、provenance、reports、runs、changes、patches、verifications、builds、analyses；M4 模型文件/shell 工具不得写、由领域工具拥有；shell 判定为启发式 | [Workspace §9](../docs/03_SPEC/Workspace_Conventions.md#9-路径安全) |
 | PI 门 | PI gate | 高风险动作阻塞等待 PI 显式决策的状态 | [Scientific_Change_Gating_Spec](../docs/03_SPEC/Scientific_Change_Gating_Spec.md) + [PI_Decision_Comments_Spec](../docs/03_SPEC/PI_Decision_Comments_Spec.md) |
 | PI 门决定 | `PiGateDecision` | M3 报告 decision_history 条目：decision_id/report_id/approval_ref/outcome/comment/decided_at；只在工具获 allowed-once 后记录，approval_ref 为本次 callId，经 session log 关联审批；accepted 的 comment 为 null，其余非空 | [M3 evidence-reports](specs/evidence-reports/spec.md#requirement-pigatedecision-record) |
 | 决策卡 | decision card | *_review 门的结构化选项卡（3 实分支 + 推荐 + 自由输入，仿 AskUserQuestion） | [Theory_To_Code_Governance_Spec](../docs/03_SPEC/Theory_To_Code_Governance_Spec.md) §5.0 |

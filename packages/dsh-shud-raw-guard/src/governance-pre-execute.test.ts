@@ -265,3 +265,52 @@ test("editor string mutations still deny while view preserves the downstream res
     await runtime.close();
   }
 });
+
+test("model file and shell writes into analyses are denied while reads delegate", async () => {
+  const runtime = await governanceRuntime();
+  try {
+    mkdirSync(join(runtime.cwd, "analyses"));
+    const plan = "analyses/PLAN-20261108T093000-5c1e.json";
+    const path = join(runtime.cwd, plan);
+    writeFileSync(path, '{"analysis_plan_id":"PLAN-20261108T093000-5c1e"}\n');
+    const before = statSync(path, { bigint: true }).mtimeNs;
+    const blocked = vi.fn(() => Promise.resolve<PreToolDecision>({ kind: "cancel" }));
+    for (const [role, name, args] of [
+      ["coordinator", "write", { file_path: plan, content: "{}" }],
+      ["coordinator", "write", { file_path: "analyses/new.json", content: "{}" }],
+      ["worker", "bash", { command: `sed -i 's/2/3/' ${plan}` }],
+      ["worker", "bash", { command: "echo {} > analyses/x.json" }],
+    ] as const) {
+      runtime.current.preset = role;
+      const result = await runtime.decide(name, args, blocked);
+      expect(result.kind).toBe("deny");
+      expect(result).toHaveProperty("reason", expect.stringContaining("immutable"));
+      expect(result).toHaveProperty("reason", expect.stringContaining("analysis_create"));
+    }
+    expect(blocked).not.toHaveBeenCalled();
+    expect(runtime.audit).toEqual([
+      ["deny write governance-immutable"],
+      ["deny write governance-immutable"],
+      ["deny bash governance-immutable"],
+      ["deny bash governance-immutable"],
+    ]);
+    expect(JSON.stringify(runtime.audit)).not.toContain("analyses");
+    expect(readFileSync(path, "utf8")).toBe('{"analysis_plan_id":"PLAN-20261108T093000-5c1e"}\n');
+    expect(statSync(path, { bigint: true }).mtimeNs).toBe(before);
+    runtime.audit.length = 0;
+    runtime.current.preset = "coder";
+    const downstream: PreToolDecision = { kind: "ask", reason: "independent policy" };
+    for (const [name, args] of [
+      ["bash", { command: `cat ${plan}` }],
+      ["bash", { command: "ls analyses" }],
+      ["read", { file_path: plan }],
+    ] as const) {
+      const next = vi.fn(() => Promise.resolve(downstream));
+      expect(await runtime.decide(name, args, next)).toBe(downstream);
+      expect(next).toHaveBeenCalledTimes(1);
+    }
+    expect(runtime.audit).toEqual([]);
+  } finally {
+    await runtime.close();
+  }
+});

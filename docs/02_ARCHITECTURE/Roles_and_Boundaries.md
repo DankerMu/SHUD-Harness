@@ -162,7 +162,7 @@ Coder 不负责：
 ```text
 - 直接修改 baseline、主分支或默认参数（必须走 ChangeRequest + gate）；
 - 决定变更是否被接受；
-- 改写 tasks/stacks/provenance/reports/runs/changes/patches/verifications/builds 九个治理根；
+- 改写 tasks/stacks/provenance/reports/runs/changes/patches/verifications/builds/analyses 十个治理根；
 - git commit 改变钉定 HEAD，或把未跟踪新文件、删除、重命名纳入本次切片；
 - 在 M4 之外跳过高风险 implementation_mapping/bundle 路由；M4 的特定替代门见 Agent_Architecture §4.4a。
 ```

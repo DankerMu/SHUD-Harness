@@ -222,7 +222,7 @@ $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指
 <data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```
 
-M4 新目录由 [m4-mvp-2](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md) 分项实现，工程交付与人工功能验收已记入 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M4 回放源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写；通用 `task_create(code_change)` 钉定的是调用方检出的当前有效 HEAD。九个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
+M4 新目录由 [m4-mvp-2](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md) 分项实现，工程交付与人工功能验收已记入 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M4 回放源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写；通用 `task_create(code_change)` 钉定的是调用方检出的当前有效 HEAD。十个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
 
 ## 3. 与 dsh 的边界
 
