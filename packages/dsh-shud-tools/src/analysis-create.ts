@@ -6,9 +6,8 @@ import {
   openSync,
   readdirSync,
   readFileSync,
-  realpathSync,
 } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { defineTool, ToolArgsError, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import {
   AnalysisPlanIdSchema,
@@ -32,7 +31,7 @@ import {
   WorkspaceRecordError,
   writeWorkspaceRecord,
 } from "@shud-harness/dsh-shud-records";
-import { effectiveProject } from "./project-default.ts";
+import { effectiveProject, physicalInputDir } from "./project-default.ts";
 import { strictTool } from "./strict-tool.ts";
 
 const parameters = {
@@ -162,8 +161,7 @@ function findOrphan(cwd: string, taskId: TaskId): AnalysisPlan | undefined {
 function resolveInput(cwd: string, inputDir: string, project: string, sets: ParameterSets) {
   let input: string;
   try {
-    // Never path.resolve/join the user path: alias/.. has physical semantics, as raw-guard judges.
-    input = realpathSync.native(isAbsolute(inputDir) ? inputDir : `${cwd}/${inputDir}`);
+    input = physicalInputDir(cwd, inputDir);
   } catch {
     throw new Error(`analysis_create input_dir ${inputDir}: not found`);
   }
