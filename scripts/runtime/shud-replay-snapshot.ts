@@ -386,17 +386,21 @@ export function collectReplayFiles(workspace: string): Record<string, unknown> {
           metrics ||
           /^reports\/[^/]+\.md$/u.test(name) ||
           /^builds\/[^/]+\/make\.(?:stdout|stderr)\.log$/u.test(name);
-        if (plain) {
+        // Raw prepared cfg bytes let the judge derive the submission's DT_YE_IC rewrite.
+        const preparedCfg = name === "input/keliya/keliya.cfg.para";
+        if (plain || preparedCfg) {
           regular(path, "workspace record");
           const content = readFileBounded(path, bytes.remaining).bytes;
           bytes.remaining -= content.length;
-          const source = content.toString("utf8");
+          // Screen before encoding: base64 hides secrets; latin-1 maps every cfg byte.
+          const source = content.toString(preparedCfg ? "latin1" : "utf8");
           screen(source);
-          files[name] = metrics
-            ? captureReportMetrics(content)
-            : json
-              ? (JSON.parse(source) as unknown)
-              : source;
+          files[name] =
+            metrics || preparedCfg
+              ? captureReportMetrics(content)
+              : json
+                ? (JSON.parse(source) as unknown)
+                : source;
         } else files[name] = digest(path, "sha256", hashBudget);
       },
       names,

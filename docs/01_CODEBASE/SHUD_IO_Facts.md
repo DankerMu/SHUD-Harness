@@ -65,7 +65,7 @@ canonical_for: [shud-io-facts]
 - 按行读取时跳过**首字节**为 `#`、`\n`、`\0`、空格的行 — Source: `SHUD/src/classes/Model_Control.cpp`:109-113
 - 首字节为 tab 的行不被跳过，随后 `sscanf(str, "%s %lf", ...)` 接受 key 前的空白（包括 tab 后的空格）；这与首字节为空格的整行被忽略不同 — Source: `SHUD/src/classes/Model_Control.cpp`:110-114
 - key 大小写不敏感（`strcasecmp`）；`START`/`END` 读取到以天计的 `DayStart`/`DayEnd` — Source: `SHUD/src/classes/Model_Control.cpp`:116-149
-- Harness 提交与 `shud:tiny` 共用 END 更新器：仅替换有效 END 条目的数值，保留 key 大小写、其它字节、注释与行尾；要求覆盖时若没有有效 END 则失败。更新作用于复制后的输入，不改原输入；`input_bytes` 统计 END 改写前实际复制的文件字节 — Source: `packages/dsh-shud-jobs/src/shud-end.ts`:5-21；`packages/dsh-shud-jobs/src/shud-input.ts`:105-126；`packages/dsh-shud-jobs/src/shud-submissions.ts`:168-174；`scripts/runtime/shud-tiny.sh`:17-19
+- Harness 提交与 `shud:tiny` 共用 END 更新器：仅替换有效 END 条目的数值，保留 key 大小写、其它字节、注释与行尾；要求覆盖时若没有有效 END 则失败。提交另对每个副本的 `<project>.cfg.para` 确保 `DT_YE_IC 1440`（截留储量 `eleyic` 输出开关，不参与求解）：有效行按同一扫描规则原位改值，没有则按文件首个行尾追加 `DT_YE_IC\t1440`；`shud:tiny` 的 CLI 入口只改 END。更新作用于复制后的输入，不改原输入；`input_bytes` 统计任何改写前实际复制的文件字节 — Source: `packages/dsh-shud-jobs/src/shud-cfg-rewrite.ts`:20-79；`packages/dsh-shud-jobs/src/shud-input.ts`:151-173；`packages/dsh-shud-jobs/src/shud-submissions.ts`:195-211；`scripts/runtime/shud-tiny.sh`:17-19
 
 ## forcing.csv — 非标准 CSV header
 
@@ -145,7 +145,7 @@ reviewer 只标注需要人工确认的位置，不下结论；无法确定单�
 - [ ] .att: 检查是否处理了 BC 负值（= Dirichlet 边界条件）
 - [ ] .riv 解析: 验证是否处理了双段（河段 + 河型参数）
 - [ ] .riv: 检查是否允许负 slope 值
-- [ ] .cfg.para: 验证 key 大小写不敏感，首字节空格行被跳过但 tab 开头行可解析；END 覆盖保留无关字节且只修改副本
+- [ ] .cfg.para: 验证 key 大小写不敏感，首字节空格行被跳过但 tab 开头行可解析；END 覆盖与提交的 `DT_YE_IC 1440` 重写保留无关字节且只修改副本
 - [ ] .cfg.calib: 验证是否区分乘法/加法（+后缀）参数
 - [ ] forcing.csv: 验证 header 解析（第一行 4 个值: NumRows NumCols StartDate EndDate）
 - [ ] TabularData 通用: 验证是否用空格/tab 分隔（不是逗号）

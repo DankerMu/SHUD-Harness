@@ -339,7 +339,7 @@ M2 注册表 apply 时先取得 `stateDir/lock`，在 Cordis `[Service.init]` �
 
 ### Job 提交阶段
 - [ ] `run-job.json` 与活动索引先落盘，再返回含持久 id 和当前 `dsh_job_id` 的工具结果；`created`/`submitted` 是启动状态，不是排队。
-- [ ] 运行目录以 lstat 复核，完整复制输入，只改副本 `END`；失败回滚目录和索引，原输入不变。
+- [ ] 运行目录以 lstat 复核，完整复制输入，只改副本 `END` 与 `DT_YE_IC`（后者每次提交写入 1440）；失败回滚目录和索引，原输入不变。
 - [ ] 无 owner 登记经注册表自身无作用域上下文的瞬时全局控制器完成，`finally` 释放；不改变非 shud owner/作用域准入。
 - [ ] `/bin/sh` 包装进程 detached、stdio 落文件；先原子写 `wrapper.pid`，自然退出再原子写 `exit_code`；不经宿主 subprocess 服务。
 - [ ] 提交在途集合覆盖 `created` 到 `running` 写出的窗口，轮询不误判 `lost`。

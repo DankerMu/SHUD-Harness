@@ -81,7 +81,9 @@ describe("SHUD execution transaction through the actual registry", () => {
         expect(await readFile(join(h.inputDir, name))).toEqual(original);
         const expected =
           name === "tiny.cfg.para"
-            ? Buffer.from("# synthetic input\r\nSTART\t0\r\nEND\t30\r\nOTHER\t17\r\n")
+            ? Buffer.from(
+                "# synthetic input\r\nSTART\t0\r\nEND\t30\r\nOTHER\t17\r\nDT_YE_IC\t1440\r\n",
+              )
             : original;
         expect(await readFile(join(record.run_dir, "input", "tiny", name))).toEqual(expected);
       }
@@ -99,10 +101,10 @@ describe("SHUD execution transaction through the actual registry", () => {
   });
 
   test.each([
-    ["END\t7\r\n", "END\t30\r\n"],
-    ["end 7 # retain comment\n", "end 30 # retain comment\n"],
-    ["\tEnD\t7\n", "\tEnD\t30\n"],
-    [" END 999\n#END 123\n\nEND 7\n", " END 999\n#END 123\n\nEND 30\n"],
+    ["END\t7\r\n", "END\t30\r\nDT_YE_IC\t1440\r\n"],
+    ["end 7 # retain comment\n", "end 30 # retain comment\nDT_YE_IC\t1440\n"],
+    ["\tEnD\t7\n", "\tEnD\t30\nDT_YE_IC\t1440\n"],
+    [" END 999\n#END 123\n\nEND 7\n", " END 999\n#END 123\n\nEND 30\nDT_YE_IC\t1440\n"],
   ])(
     "updates effective END tokens without rewriting unrelated bytes: %j",
     async (parameter, expected) => {

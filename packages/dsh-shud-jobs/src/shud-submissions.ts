@@ -14,7 +14,7 @@ import type { Config } from "./registry.ts";
 import type { StateIndexStore } from "./state-indexes.ts";
 import { captureStackLock, generateProvenance, writeJson } from "@shud-harness/dsh-shud-records";
 import { stdoutSource } from "./file-output.ts";
-import { updateEnd } from "./shud-end.ts";
+import { ensureOutputInterval, SUBMISSION_OUTPUT_INTERVAL, updateEnd } from "./shud-cfg-rewrite.ts";
 import { BuildOwnershipError, prepareBuild, type PreparedBuild } from "./shud-build.ts";
 import {
   copyInput,
@@ -194,11 +194,21 @@ export class ShudSubmissions {
       const location = { parent, directory: owned };
       const inputBytes = await copyInput(input, reservation.runDir);
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
-      if (input.endDays !== null)
-        await updateEnd(
-          join(reservation.runDir, "input", input.project, `${input.project}.cfg.para`),
-          input.endDays,
-        );
+      const parameters = join(
+        reservation.runDir,
+        "input",
+        input.project,
+        `${input.project}.cfg.para`,
+      );
+      if (input.endDays !== null) await updateEnd(parameters, input.endDays);
+      // Every copy writes the output switch before StackLock/provenance, so provenance hashes
+      // exactly the bytes SHUD reads; a failure takes the single rollback below.
+      await ensureOutputInterval(
+        parameters,
+        SUBMISSION_OUTPUT_INTERVAL.key,
+        SUBMISSION_OUTPUT_INTERVAL.minutes,
+      );
+      verifyRun(input.runsDir, parent, reservation.runDir, owned);
       await io.mkdir(join(reservation.runDir, "output"));
       await io.writeFile(join(reservation.runDir, "stdout.log"), "", { flag: "wx" });
       await io.writeFile(join(reservation.runDir, "stderr.log"), "", { flag: "wx" });

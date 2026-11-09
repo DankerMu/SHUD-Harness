@@ -16,7 +16,7 @@ trap cleanup EXIT HUP INT TERM
 mkdir -p "$WS/input/ccw" "$WS/output"
 cp -R "$INPUT"/. "$WS/input/ccw/"
 # Use the same byte-preserving, solver-compatible END updater as submitted runs.
-node "$ROOT/packages/dsh-shud-jobs/src/shud-end.ts" "$WS/input/ccw/ccw.cfg.para" "$DAYS"
+node "$ROOT/packages/dsh-shud-jobs/src/shud-cfg-rewrite.ts" "$WS/input/ccw/ccw.cfg.para" "$DAYS"
 echo "shud:tiny: running $SHUD_BIN ccw for $DAYS days in $WS"
 start=$(date +%s)
 set +e

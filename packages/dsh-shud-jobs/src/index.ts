@@ -6,3 +6,4 @@ export type { ShudProducer } from "./shud-submissions.ts";
 export { produceDetachedShud, startDetachedShud } from "./detached-shud.ts";
 export type { ShudExecution, ShudLifecycle, ShudProcessIdentity } from "./detached-shud.ts";
 export type { CollectShudOptions } from "./shud-collect.ts";
+export { submittedParameterBytes } from "./shud-cfg-rewrite.ts";

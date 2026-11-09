@@ -28,7 +28,16 @@ function capturedReplay() {
   for (const [relative, value] of Object.entries(fixture.files)) {
     const path = join(workspace, relative);
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, typeof value === "string" ? value : JSON.stringify(value));
+    // Retained raw bytes (the prepared cfg.para receipt) are written back as those bytes.
+    const captured = value as { bytes_base64?: unknown };
+    writeFileSync(
+      path,
+      typeof value === "string"
+        ? value
+        : typeof captured.bytes_base64 === "string"
+          ? Buffer.from(captured.bytes_base64, "base64")
+          : JSON.stringify(value),
+    );
   }
   Object.assign(fixture.files, collectReplayFiles(workspace));
   refreshReplayRunArtifacts(fixture);

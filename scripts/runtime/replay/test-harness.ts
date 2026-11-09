@@ -42,6 +42,8 @@ import {
 } from "./session/test-harness.ts";
 import type { ReplayEvidence } from "../shud-replay-evidence.ts";
 import { argumentsOf, calls, data, resultFor } from "../shud-evidence-events.ts";
+import { captureReportMetrics } from "../shud-web-driver.ts";
+import { submittedParameterBytes } from "../../../packages/dsh-shud-jobs/src/shud-cfg-rewrite.ts";
 import { object, requireFact } from "../shud-restart-evidence.ts";
 
 const PIN = "9a422e5eb708df7d2f8b4066a3083a031d679a82";
@@ -381,13 +383,20 @@ export function makeReplayFixture(
     "keliya.tsd.forc": preparedForcing,
     "keliya.mesh": "abc",
   };
+  // Every submission writes DT_YE_IC into its cfg.para copy; other inputs are copied verbatim.
+  const runFiles: Record<string, string> = {
+    ...inputFiles,
+    "keliya.cfg.para": submittedParameterBytes(Buffer.from(preparedCfg)).toString("latin1"),
+  };
   for (const [path, bytes] of Object.entries(inputFiles)) {
-    records.files[`input/keliya/${path}`] = bytes;
+    // The collector retains the prepared cfg.para raw bytes so the judge can derive that rewrite.
+    records.files[`input/keliya/${path}`] =
+      path === "keliya.cfg.para" ? captureReportMetrics(Buffer.from(bytes)) : bytes;
     for (const run of records.runs)
-      records.files[`runs/${run.job.run_id}/input/keliya/${path}`] = bytes;
+      records.files[`runs/${run.job.run_id}/input/keliya/${path}`] = runFiles[path];
   }
   for (const run of records.runs) {
-    run.data.sources.files = Object.entries(inputFiles).map(([path, bytes]) => ({
+    run.data.sources.files = Object.entries(runFiles).map(([path, bytes]) => ({
       path,
       sha256: sha256(bytes),
       size_bytes: Buffer.byteLength(bytes),

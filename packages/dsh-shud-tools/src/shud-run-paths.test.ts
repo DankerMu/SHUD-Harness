@@ -3,6 +3,7 @@ import { cp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/pr
 import { join } from "node:path";
 import { expect, test } from "vitest";
 import { readRecord } from "../../dsh-shud-jobs/src/poll-shud/test-harness.ts";
+import { submittedCopy } from "../../dsh-shud-jobs/src/submit-shud/test-harness.ts";
 import { createToolHarness } from "./test-harness.ts";
 
 test.each([
@@ -92,7 +93,9 @@ test.each(["relative", "trailing separator", "alias", "dot", "dotdot", "native a
       });
       for (const [path, original] of Object.entries(h.originals)) {
         expect(await readFile(join(h.inputDir, path))).toEqual(original);
-        expect(await readFile(join(entry.run_dir, "input", "tiny", path))).toEqual(original);
+        expect(await readFile(join(entry.run_dir, "input", "tiny", path))).toEqual(
+          submittedCopy(path, original),
+        );
       }
       if (kind === "native alias traversal") {
         expect(await readFile(join(entry.run_dir, "input", "tiny", "native-marker"), "utf8")).toBe(

@@ -64,7 +64,7 @@ test("shud_run returns durable and current job ids while the native solver is st
       expect(await readFile(join(h.inputDir, path))).toEqual(original);
     }
     expect(await readFile(join(record.run_dir, "input", "tiny", "tiny.cfg.para"), "utf8")).toBe(
-      "# synthetic input\r\nSTART\t0\r\nEND\t30\r\nOTHER\t17\r\n",
+      "# synthetic input\r\nSTART\t0\r\nEND\t30\r\nOTHER\t17\r\nDT_YE_IC\t1440\r\n",
     );
     const rendered = result.content
       .filter((block) => block.type === "text")
