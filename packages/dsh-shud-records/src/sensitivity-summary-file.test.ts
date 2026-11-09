@@ -166,7 +166,10 @@ test.each(["json", "shape", "task", "analysis", "run"] as const)(
       failure = error;
     }
     expect(failure).toBeInstanceOf(ReportRenderError);
-    expect(failure).toMatchObject({ path: report.sensitivity_summary!.path });
+    expect(failure).toMatchObject({
+      path: report.sensitivity_summary!.path,
+      stage: kind === "json" ? "parse" : "schema",
+    });
     expect(String(failure)).not.toContain("private-summary-payload");
     expect(reportSnapshot()).toEqual(before);
     expect(fs.readFileSync(summaryPath, "utf8")).toBe(bytes);

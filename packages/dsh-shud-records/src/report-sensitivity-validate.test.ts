@@ -14,6 +14,7 @@ import {
   COVERAGE,
   makeSensitivityWorkspace,
   PARAMETER_RANGE,
+  run,
   type SensitivityWorkspace,
 } from "./report-sensitivity-test-harness.ts";
 import { digest, snapshotTree } from "./run-metrics-test-harness.ts";
@@ -137,6 +138,30 @@ test.each(["parse", "schema"] as const)(
     expect(result.checks[15].details).toEqual(unavailable);
     expect(result.checks[16]).toEqual({ id: 17, pass: true, vacuous: false, details: [] });
     expect(JSON.stringify(result)).not.toContain("private-summary-payload");
+  },
+);
+
+test.each(["analysis", "run"] as const)(
+  "digest-matching %s binding mismatch fails item 16 as render-unavailable while item 17 passes",
+  (kind) => {
+    workspace.publishReport({
+      ...workspace.report,
+      ...(kind === "analysis"
+        ? { analysis_ids: ["PLAN-20261108T100000-ffff"] }
+        : { linked_runs: workspace.report.linked_runs.filter((id) => id !== run(5)) }),
+    });
+    const before = fs.statSync(workspace.summaryPath, { bigint: true }).mtimeNs;
+    const result = validateUnchanged();
+    expect(failing(result.checks).map(({ id }) => id)).toEqual([8, 9, 12, 13, 16]);
+    expect(result.checks[15].details).toEqual([{ code: "render_unavailable", stage: "schema" }]);
+    expect(result.checks[16]).toEqual({ id: 17, pass: true, vacuous: false, details: [] });
+    expect(fs.readFileSync(workspace.summaryPath, "utf8")).toBe(workspace.summaryBytes);
+    expect(fs.statSync(workspace.summaryPath, { bigint: true }).mtimeNs).toBe(before);
+    expect(
+      JSON.parse(
+        fs.readFileSync(join(workspace.cwd, `reports/${workspace.report.report_id}.json`), "utf8"),
+      ),
+    ).toMatchObject({ status: "draft" });
   },
 );
 

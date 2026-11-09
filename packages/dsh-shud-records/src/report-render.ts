@@ -134,20 +134,29 @@ function renderSensitivityDelta(
   return `### Sensitivity summary\n\n${source.join("\n")}\n\n${rows}`;
 }
 
-/** Sensitivity §7: failed RunRecords plus RunRecord-less superseded jobs, in job_id order. */
+function failedRunLine(runId: string, exitClass: string): string {
+  return `- ${metadata(runId)}: ${metadata(exitClass)}`;
+}
+
+/**
+ * Sensitivity §7 in job_id order: failed loaded RunRecords plus every non-ok superseded entry
+ * whose run is not loaded. linked_runs is not digest-bound, so the companion's stored exit_class
+ * keeps a superseded failure visible when its run is dropped; a loaded run is listed once.
+ */
 function sensitivityRisks(runs: readonly RunRecord[], summary: SensitivitySummary): string[] {
+  const loaded = new Set<string>(runs.map((run) => run.run_id));
   const entries = [
     ...runs
       .filter((run) => run.status !== "succeeded")
-      .map((run) => ({
-        job_id: run.job_id,
-        line: `- ${metadata(run.run_id)}: ${metadata(run.exit_class)}`,
-      })),
+      .map((run) => ({ job_id: run.job_id, line: failedRunLine(run.run_id, run.exit_class) })),
     ...summary.superseded_runs
-      .filter((entry) => entry.exit_class === null)
+      .filter((entry) => entry.exit_class !== "ok" && !loaded.has(entry.run_id))
       .map((entry) => ({
         job_id: entry.job_id,
-        line: `- ${metadata(entry.run_id)}: no RunRecord (job_id: ${metadata(entry.job_id)}, terminal_state: ${metadata(entry.terminal_state)})`,
+        line:
+          entry.exit_class === null
+            ? `- ${metadata(entry.run_id)}: no RunRecord (job_id: ${metadata(entry.job_id)}, terminal_state: ${metadata(entry.terminal_state)})`
+            : failedRunLine(entry.run_id, entry.exit_class),
       })),
   ];
   entries.sort((left, right) =>
@@ -461,7 +470,7 @@ export function renderReportDocument(
     summary === null
       ? runs
           .filter((run) => run.status !== "succeeded")
-          .map((run) => `- ${metadata(run.run_id)}: ${metadata(run.exit_class)}`)
+          .map((run) => failedRunLine(run.run_id, run.exit_class))
       : sensitivityRisks(runs, summary);
   for (const { record } of codeChangeFacts.verifications) {
     if (record.status === "failed") {

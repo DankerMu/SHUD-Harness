@@ -1,7 +1,13 @@
 import * as fs from "node:fs";
 import { CODE_CHANGE_SECTION5_WORDING } from "@shud-harness/dsh-shud-core";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { readReferencedSensitivitySummary, renderReport, ReportRenderError } from "./index.ts";
+import {
+  parseSensitivitySummary,
+  readReferencedSensitivitySummary,
+  renderReport,
+  ReportRenderError,
+  validateReport,
+} from "./index.ts";
 import { section } from "./report-code-change-test-harness.ts";
 import { readReportInput, readReportMetricFacts, readReportRun } from "./report-inputs.ts";
 import { renderReportDocument } from "./report-render.ts";
@@ -232,6 +238,50 @@ test("section 7 order follows job_id code points, not linked_runs order", () => 
   workspace.publishReport(reversed);
   const risks = section(renderReport(workspace.cwd, reversed.report_id), 7);
   expect(risks.split("\n").map((line) => line.slice(2, 26))).toEqual([run(2), run(3), run(4)]);
+});
+
+test("section 7 keeps a superseded failed run dropped from linked_runs, from the bound companion", () => {
+  const dropped = {
+    ...workspace.report,
+    linked_runs: workspace.report.linked_runs.filter((id) => id !== run(2)),
+  };
+  workspace.publishReport(dropped);
+  const risks = section(renderReport(workspace.cwd, dropped.report_id), 7);
+  expect(risks).toBe(
+    [
+      `- ${run(2)}: cvode`,
+      `- ${run(3)}: no RunRecord (job_id: ${job(3)}, terminal_state: cancelled)`,
+      `- ${run(4)}: cvode`,
+    ].join("\n"),
+  );
+  expect(risks.split(run(2)).length - 1).toBe(1);
+  expect(validateReport(workspace.cwd, dropped.report_id).ok).toBe(true);
+});
+
+test("section 7 omits a superseded run whose stored exit_class is ok", () => {
+  const summary = parseSensitivitySummary(JSON.parse(workspace.summaryBytes));
+  summary.superseded_runs.push({
+    parameter_set_id: "PSET-4",
+    job_id: job(7),
+    run_id: run(7),
+    terminal_state: "collected",
+    exit_class: "ok",
+  } as (typeof summary.superseded_runs)[number]);
+  const bytes = JSON.stringify(summary);
+  fs.writeFileSync(workspace.summaryPath, bytes);
+  workspace.publishReport({
+    ...workspace.report,
+    sensitivity_summary: { path: workspace.summaryRelative, sha256: digest(bytes) },
+  });
+  const risks = section(renderReport(workspace.cwd, workspace.report.report_id), 7);
+  expect(risks).toBe(
+    [
+      `- ${run(2)}: cvode`,
+      `- ${run(3)}: no RunRecord (job_id: ${job(3)}, terminal_state: cancelled)`,
+      `- ${run(4)}: cvode`,
+    ].join("\n"),
+  );
+  expect(risks).not.toContain(run(7));
 });
 
 function pureInputs() {
