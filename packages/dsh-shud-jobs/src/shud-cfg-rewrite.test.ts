@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { expect, test } from "vitest";
 import {
+  applyCalibMultiplier,
+  calibMultipliedBytes,
   ensureOutputInterval,
   ensureOutputIntervalBytes,
   submittedParameterBytes,
@@ -220,6 +222,85 @@ test("the CLI entry still rewrites only END", async () => {
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("Usage: shud-cfg-rewrite.ts") as unknown,
     });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+// SHUD reads calib lines with `sscanf(str, "%s %lf")` after the same first-byte skip
+// (SHUD/src/classes/ModelConfigure.cpp:450-455), so the rewritten value must read back exactly.
+test.each([
+  [
+    "ccw GEOL_KSATH doubled; other lines byte-identical",
+    "GEOL_KSATH\t1\nGEOL_KSATV\t1\nGEOL_KMACSATH\t0.1\n",
+    "GEOL_KSATH",
+    2,
+    "GEOL_KSATH\t2\nGEOL_KSATV\t1\nGEOL_KMACSATH\t0.1\n",
+  ],
+  [
+    "case-insensitive key, separator, trailing bytes and CRLF kept",
+    "#\xff note\r\n\tlc_rough  0.3 # tuned\r\nLC_DROOT\t1\r\n",
+    "LC_ROUGH",
+    0.5,
+    "#\xff note\r\n\tlc_rough  0.15 # tuned\r\nLC_DROOT\t1\r\n",
+  ],
+  [
+    "commented and space-led duplicates are not effective",
+    "# RIV_ROUGH 9\n RIV_ROUGH 9\nRIV_ROUGH\t1\nRIV_ROUGHX 9",
+    "RIV_ROUGH",
+    1.5,
+    "# RIV_ROUGH 9\n RIV_ROUGH 9\nRIV_ROUGH\t1.5\nRIV_ROUGHX 9",
+  ],
+  ["hexadecimal baseline", "GEOL_KSATV 0x1.8p1\n", "GEOL_KSATV", 0.5, "GEOL_KSATV 1.5\n"],
+  ["negative zero keeps its sign", "GEOL_KSATV\t-0\n", "GEOL_KSATV", 2, "GEOL_KSATV\t-0\n"],
+])("calib multiplier: %s", (_name, before, key, multiplier, expected) => {
+  const source = latin1(before);
+  const retained = Buffer.from(source);
+  expect(calibMultipliedBytes(source, key, multiplier)).toEqual(latin1(expected));
+  expect(source).toEqual(retained);
+});
+
+test("calib values use the shortest round-trip decimal of the product", () => {
+  for (const base of ["1", "0.3", "0.1", "0.7", "123.456", "1e-7", "3.3333333333333335"]) {
+    for (const multiplier of [0.5, 0.6, 0.75, 0.9, 1.1, 1.25, 1.5, 2]) {
+      const output = calibMultipliedBytes(latin1(`LC_ROUGH\t${base}\n`), "LC_ROUGH", multiplier);
+      const token = /^LC_ROUGH\t(\S+)\n$/u.exec(output.toString("latin1"))?.[1];
+      const product = Number(base) * multiplier;
+      expect(token).toBe(String(product));
+      expect(Number(token)).toBe(product);
+    }
+  }
+});
+
+test.each([
+  ["absent", "GEOL_KSATV\t1\n"],
+  ["only a comment", "# GEOL_KSATH 1\n"],
+  ["only space-led", " GEOL_KSATH 1\n"],
+  ["two effective lines", "GEOL_KSATH\t1\ngeol_ksath 2\n"],
+  ["two lines, one unparsable", "GEOL_KSATH\t1\nGEOL_KSATH abc\n"],
+  ["unparsable value", "GEOL_KSATH\t1abc\n"],
+  ["infinite value", "GEOL_KSATH\tinf\n"],
+  ["NaN value", "GEOL_KSATH\tnan\n"],
+  ["overflowing product", "GEOL_KSATH\t1e308\n"],
+])("calib rewrite rejects %s naming the key without touching the file", async (_name, text) => {
+  const directory = await mkdtemp(join(tmpdir(), "shud-cfg-rewrite-"));
+  const path = join(directory, "fixture.cfg.calib");
+  try {
+    await writeFile(path, text);
+    await expect(applyCalibMultiplier(path, "GEOL_KSATH", 2)).rejects.toThrow("GEOL_KSATH");
+    expect(await readFile(path, "utf8")).toBe(text);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the calib file rewrite replaces only the value token", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "shud-cfg-rewrite-"));
+  const path = join(directory, "fixture.cfg.calib");
+  try {
+    await writeFile(path, "GEOL_KSATH\t1\r\nLC_ROUGH 0.3");
+    await applyCalibMultiplier(path, "LC_ROUGH", 0.5);
+    expect(await readFile(path, "utf8")).toBe("GEOL_KSATH\t1\r\nLC_ROUGH 0.15");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
