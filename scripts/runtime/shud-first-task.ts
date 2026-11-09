@@ -12,6 +12,7 @@ import {
   WebHost,
   BUFFER_LIMIT,
   cleanupOwnedRuns,
+  captureReportMetrics,
   command,
   cwdOf,
   directoryNames,
@@ -154,7 +155,7 @@ function childIds(root: SessionLog): string[] {
   }
   return child === undefined ? [] : [child];
 }
-function snapshotFiles(workspace: string): Record<string, unknown> {
+export function snapshotFirstTaskFiles(workspace: string): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   const budget = { remaining: BUFFER_LIMIT };
   function read(relative: string): void {
@@ -164,7 +165,11 @@ function snapshotFiles(workspace: string): Record<string, unknown> {
     budget.remaining -= file.bytes.length;
     const source = file.bytes.toString("utf8");
     screen(source);
-    result[relative] = relative.endsWith(".md") ? source : (JSON.parse(source) as unknown);
+    result[relative] = relative.endsWith("/metrics.json")
+      ? captureReportMetrics(file.bytes)
+      : relative.endsWith(".md")
+        ? source
+        : (JSON.parse(source) as unknown);
   }
   for (const directory of ["tasks", "runs", "reports", "stacks", "provenance"]) {
     const path = join(workspace, directory);
@@ -180,7 +185,7 @@ function snapshotFiles(workspace: string): Record<string, unknown> {
       );
       if (directory === "tasks") read(`${directory}/${name}/task.json`);
       else if (directory === "runs") {
-        for (const file of ["run-job.json", "run-record.json"])
+        for (const file of ["run-job.json", "run-record.json", "metrics.json"])
           if (fs.existsSync(join(path, name, file))) read(`${directory}/${name}/${file}`);
       } else if (name.endsWith(".json") || name.endsWith(".md")) read(`${directory}/${name}`);
     }
@@ -406,7 +411,7 @@ async function run(config: Config, abort: AbortSignal): Promise<void> {
       home,
       root,
       children: [...children.values()],
-      files: snapshotFiles(workspace),
+      files: snapshotFirstTaskFiles(workspace),
       actualStack: {
         commits,
         llm: {

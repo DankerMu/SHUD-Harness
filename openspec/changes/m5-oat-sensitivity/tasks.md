@@ -86,7 +86,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - 在报告 JSON 提交之前写 `reports/<report_id>.sensitivity.json`；孤立 summary 保留；三类报告文件任一已存在即重分配 report_id。
   - 满足 evidence-reports「Sensitivity summary derivation」「Report write order and repair」与「Report workspace files」的 `.sensitivity.json` 部分（依赖 2.4、3.2a、3.4）。
 - [x] 3.6a Citation existence check 识别 `PLAN-` 令牌，并按安全读解析 `analyses/<id>.json`。满足 evidence-reports「Citation existence check」（依赖 2.1、3.3）。
-- [ ] 3.6b 非 sensitivity 报告切换为指标渲染（一刀完成，不留中间态）：
+- [x] 3.6b 非 sensitivity 报告切换为指标渲染（一刀完成，不留中间态）：
   - science_assist/code_change 的"无指标 artifact"自动 limitation 与 `metric_fact` 恒真特例删除。
   - §5 渲染逐 run 指标表（值原样输出最短往返串，null 用固定记号）。
   - `report_generate` 追加阈值派生 limitation 与 `max_solver_dt` 固定 limitation（`report-generate.ts` 的追加点）。
@@ -94,7 +94,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - science_assist/code_change 黄金文件。
   - 同一切片中更新 `shud:first-task` 与 `shud:replay` 的 §5 文本 oracle，并附本机重跑证据。
   - 「Report workspace files」的 `metrics.json` 渲染输入部分（经 3.2a 的读取器安全读、sha256 核对、缺失时 `not_available`）归本刀。
-  - 本刀早于 4.2：真实 run 还没有 `metrics.json`，§5 表各值按 null 记号加原因渲染。因此本刀 oracle 只断言表结构与旧固定句消失，指标非 null 的断言由 4.2 加入。
+  - 本刀早于 4.2：真实 run 的 `metrics_summary` 仍为 null，§5 指标单元格按 spec 渲染为 `not_available`；只有已引用 `metrics.json` 内的 null 值才渲染 `null` 加原因。本刀 oracle 只断言表结构与旧固定句消失，指标非 null 的断言由 4.2 加入。
   - 满足 task-cards「science_assist closure predicate」，evidence-reports「Deterministic facts table」「Report template」「code_change report wording constant」「Deterministic report limitations」的非 sensitivity 部分，以及 agent-presets「Local first-task acceptance script」与 known-answer-replay「Replay acceptance criteria」的报告文本部分（依赖 2.5、3.2a）。
 - [ ] 3.6c sensitivity 报告渲染与校验：Δ 汇总表；失败 cell 行；被取代 run 按 `linked_jobs` 顺序列出；覆盖声明与"agent 建议值"；`report_validate` 第 16/17 项（含工具描述中的检查项计数）；sensitivity 黄金文件；`docs/03_SPEC/Report_Generation_Spec.md` 中检查项计数 15 → 17 及 (4)(10)(11) 的 M3 恒真表述随代码刷新。满足 evidence-reports「report_validate」与「Deterministic report limitations」「Report template」的 sensitivity 部分（依赖 3.5、3.6a、3.6b）。
 - Suggested fixture level: expanded - 文件格式读取器、持久化文件、closure 谓词与报告措辞护栏（Critical Path #6/#7）
@@ -463,3 +463,25 @@ Before implementation, the parent captured raw legacy creation bytes with the bu
 Required cases: successful real report generation for both existing card types with legal PLAN in observations; plan belongs to a different task and is still accepted; generated analysis_ids stays empty and sensitivity_summary null. Missing standalone PLAN in each authored field rejects before writes, and the stale-card case observes zero job-query/collection calls plus exact tree/card bytes/mtime. Missing analyses stays missing. Target/root symlink and special files, malformed JSON/schema, foreign embedded id and injected read failure preserve link/target/plan bytes/mtime and return token without payload or absolute paths. Literal cases include PLAN-0001, uppercase suffix, XPLAN-20261108T093000-5c1e, PLAN-20261108T093000-5c1e_x and DEC; none creates analyses or reads a plan. Duplicate valid PLAN across summary/observations/limitations/pi_questions reads exactly once, while a later invocation observes changed/missing bytes.
 
 Verification: parent semantic tracer RED, focused tools citation suites + report-generation compatibility GREEN, pnpm run build, actual built checkReportCitations filesystem smoke, pnpm run check, openspec validate m5-oat-sensitivity --strict --no-interactive, expanded three-seat review, exact-head all-jobs-success CI. Only task3.6a closes; no #657/#658/#667 or shared-change archive.
+
+## Issue #657 risk packs and executable evidence
+
+| Pack | Required executable evidence |
+|---|---|
+| Public API / type cutover | All ClosureResult consumers and five pure-render callsites migrated; no obsolete field aliases; meaningful failure tuple/type checks remain |
+| File IO / identity / resources | Canonical readRunMetrics reused; referenced-only reads; null artifact no read; missing/tamper/bad JSON/schema/root/run/target links/special files fail with file identity; renderer, validator and generation share boundary; bytes/mtime preserved |
+| Numerical display | Stored 0.0008 and123456.789 exactly, fractions/exponent boundaries via JSON.stringify; null+reason versus absent not_available; three verdicts only, max_solver_dt value without verdict; source_ref id/path/SHA and run order |
+| Ordering / partial output | Generation metric failures before report publication; initial reconcile retained; later render/repair preserve existing commit semantics; source metric changes observed on next render |
+| Limitations / governance | Authored items first; one fixed max_solver_dt entry; run then residual/cvode/negative order; warn/fail/not_available only, values11fail/10warn, no pass/per-run-max/coverage/agent-range/failed-cell entries; empty authored limitations still fail |
+| Legacy compatibility | Frozen M3 input files/output and both old goldens: all non-section5 bytes identical; ten headings, four invariants, empty M3 section7; persisted JSON unchanged; existing code-change closure/wording-scan rules retained |
+| Runtime / packaging | Built APIs and both pure-render oracles; exact captured metric bytes bind expected SHA; valid and old-sentence/missing-section negatives for first-task/replay; real commands both exit0 with canonical log/workspace evidence |
+| Documentation / decisions | Scoped proposal/design/task plan and API comments; target domain docs already aligned; no new architecture/threshold decision |
+| Config / dependency / auth / science | Not selected; unchanged, automated existing approvals are engineering-only |
+
+Acceptance matrix: science and code-change generate with null/unavailable metrics and non-pass verdicts without changing closure run clauses; residual0.03warn yields one health entry plus fixed entry, other pass values add none; negative10warn/11fail preserve numeric value; two-run report still one fixed entry. Code-change first paragraph is new constant and not persisted in JSON; adversarial model prose cannot alter it. No-change reports with verification references still omit it. All seven metric values, three verdicts, reasons and source references come only from bound metrics; unavailable files render their stored null/reasons, null artifacts render not_available. Tamper/delete/unsafe metrics reject without report/source mutation. Validator remains15checks, check14 logic and4/10 comments unchanged; #658 owns their later change.
+
+Review-qualified boundaries: an exact authored max_solver_dt fixed-entry collision (fresh call or regeneration reusing prior generated limitations) rejects before query/reconcile/writes, with controlled field/entry diagnostic and no report/link changes. Non-exact quotations and other authored fields remain allowed; no forbidden-phrase expansion. Two actual ToolRuntime ordering tests must show (a) a stale card's independent reconciliation survives a later metrics digest failure without report publication and (b) committed report/card state, including an earlier entry-repair card commit when applicable, survives metrics-caused Markdown repair failure; preserve relevant bytes/mtime and fault evidence.
+
+Runtime proof is required separately for each first-task and replay oracle: round-trip synthetic non-null metrics.json through its real collector -> snapshot adapter -> pure-render call, bind SHA256 to original captured bytes, and include a whitespace-preservation case. For each oracle a digest-mismatch/tamper counterfactual must fail and identify runs/<run_id>/metrics.json. Shared-adapter-only coverage or empty-metrics placeholders cannot satisfy either path. Keep real #657 runs on current null-artifact collection behavior; do not add #662 non-null collection assertions. Both oracle paths must also reject old sentence and missing per-run segment with other evidence valid, retaining exact rerender equality and all approvals/identity/preservation predicates. No full real baseline rerun is needed to reproduce already-specified obsolete wording; semantic RED uses focused old renderer/tool/oracle paths.
+
+Commands: focused records/tools/core/runtime suites; pnpm run build; parent built smoke and frozen byte comparison; pnpm run check; pnpm run shud:first-task <scratch>; pnpm run shud:replay <scratch>; strict OpenSpec validation; expanded three-seat review and exact-head all-success CI. Only task3.6b closes. Full runtime evidence is required, shared M5 change is not archived, and no PI gate is closed.

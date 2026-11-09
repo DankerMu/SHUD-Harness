@@ -38,7 +38,6 @@ test("missing and mismatched reader capabilities fail closed without changing le
     expect(result).toMatchObject({
       ok: false,
       failures: [{ clause: 0, reason: "missing_sensitivity_loaders" }],
-      metric_fact: true,
     });
   }
   expect(deriveSensitivityClosure(input.card, input.runJobs, input.records, input.draft)).toEqual({
@@ -82,8 +81,6 @@ test.each(["narrowed", "generic"] as const)(
         ? evaluateClosure(input.card, input.runJobs, input.records, input.draft, erased)
         : evaluateClosure(genericCard, input.runJobs, input.records, input.draft, erased);
     expect(result).toMatchObject({ ok: false, failures: [{ clause: 0 }] });
-    expect(result.metric_fact).toBe(true);
-    expect(typeof result.automatic_limitation).toBe("string");
     expect(result).not.toHaveProperty("selected");
     expect(reads).toEqual({ plans: [], metrics: [] });
     expect(legacy.readChange).not.toHaveBeenCalled();
@@ -111,8 +108,6 @@ test("dual-capability loaders cannot enter the direct sensitivity predicate", ()
     unsafe,
   );
   expect(result).toMatchObject({ ok: false, failures: [{ clause: 0 }] });
-  expect(result).not.toHaveProperty("metric_fact");
-  expect(result).not.toHaveProperty("automatic_limitation");
   expect(result).not.toHaveProperty("selected");
   expect(reads).toEqual({ plans: [], metrics: [] });
   expect(dual.readChange).not.toHaveBeenCalled();

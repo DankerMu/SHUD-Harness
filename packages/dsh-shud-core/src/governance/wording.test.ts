@@ -189,21 +189,6 @@ describe("forbidden report phrases", () => {
 });
 
 describe("code_change section 5 wording", () => {
-  test("exports the exact canonical sentence through the public core API", () => {
-    expect(CODE_CHANGE_SECTION5_WORDING).toBe(
-      "本里程碑无指标 artifact；验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。",
-    );
-  });
-
-  test("retains the scientific limitation and differs from M3 science_assist wording", () => {
-    expect(CODE_CHANGE_SECTION5_WORDING).toContain("不构成并行正确性、性能或模型改进结论");
-    expect(CODE_CHANGE_SECTION5_WORDING).not.toBe("本里程碑无指标 artifact，见 limitations");
-  });
-
-  test("is not a forbidden report phrase", () => {
-    expect(FORBIDDEN_REPORT_PHRASES).not.toContain(CODE_CHANGE_SECTION5_WORDING);
-  });
-
   test("returns no hits for the full sentence in model-authored observations", () => {
     expect(
       scanForbiddenPhrases({

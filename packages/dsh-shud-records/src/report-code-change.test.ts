@@ -7,7 +7,6 @@ import { makeReportDecision } from "./report-render-test-harness.ts";
 import { realFs } from "./report-validation-test-harness.ts";
 import {
   CODE_CHANGE_WORDING,
-  LEGACY_WORDING,
   makeCodeChangeWorkspace,
   section,
   snapshotTree,
@@ -38,12 +37,20 @@ function render() {
   return result;
 }
 
+// Keep the frozen pre-M5 hashes: restore only the excluded section, never regenerate an oracle.
+function preMetricsBytes(markdown: string): string {
+  return markdown.replace(
+    /(?<=## 5\. 指标与图表\n\n)[\s\S]*?(?=\n\n## 6\.)/u,
+    "本里程碑无指标 artifact，见 limitations",
+  );
+}
+
 test("code-change facts match the independently authored complete golden without publishing", () => {
   const markdown = render();
   expect(markdown).toBe(golden);
   expect(markdown.endsWith("\n")).toBe(true);
-  expect(section(markdown, 5)).toBe(CODE_CHANGE_WORDING);
-  expect(section(markdown, 5)).toBe(CODE_CHANGE_SECTION5_WORDING);
+  expect(section(markdown, 5).split("\n\n")[0]).toBe(CODE_CHANGE_WORDING);
+  expect(section(markdown, 5).split("\n\n")[0]).toBe(CODE_CHANGE_SECTION5_WORDING);
   expect(realFs.readFileSync(join(workspace.cwd, workspace.reportPath), "utf8")).not.toContain(
     CODE_CHANGE_WORDING,
   );
@@ -103,7 +110,7 @@ test.each(["not_run", "running", "inconclusive", "waived_by_pi"] as const)(
   },
 );
 
-test("verification-only reports render ordered VC and shared build facts with the legacy section 5", () => {
+test("verification-only reports render ordered VC and shared builds without the code-change paragraph", () => {
   workspace.report.change_ids = [];
   workspace.republish();
   realFs.rmSync(join(workspace.cwd, "changes"), { recursive: true });
@@ -120,7 +127,6 @@ test("verification-only reports render ordered VC and shared build facts with th
     "### BuildRecord BUILD-20261102T090000-f6a7",
     "### BuildRecord BUILD-20261102T090000-a7b8",
   ]);
-  expect(section(markdown, 5)).toBe(LEGACY_WORDING);
   expect(markdown).not.toContain(CODE_CHANGE_WORDING);
 });
 
@@ -133,7 +139,7 @@ test("change-only reports choose the fixed wording without reading VCs or builds
   expect(section(markdown, 3)).toContain("### ChangeRequest CHG-20261102T090000-b002");
   expect(markdown).not.toContain("### VerificationCase");
   expect(markdown).not.toContain("### BuildRecord");
-  expect(section(markdown, 5)).toBe(CODE_CHANGE_WORDING);
+  expect(section(markdown, 5).split("\n\n")[0]).toBe(CODE_CHANGE_WORDING);
   expect(section(markdown, 7)).toBe("- RUN-20261029T080000-a001: cvode");
 });
 
@@ -151,10 +157,9 @@ test("StackLock build rows are independent facts and never discover uncited buil
     "- build_id: BUILD-20261102T090000-a7b8",
   ]);
   expect(markdown).not.toContain("### BuildRecord");
-  expect(section(markdown, 5)).toBe(LEGACY_WORDING);
 });
 
-test("missing-key M3 input is readonly and preserves the existing two-run golden byte for byte", () => {
+test("missing-key M3 input is readonly and preserves all pre-change bytes outside section 5", () => {
   workspace.fixture.stacks[0].build_id = null;
   workspace.fixture.stacks[1].build_id = null;
   workspace.publishFixture();
@@ -168,8 +173,8 @@ test("missing-key M3 input is readonly and preserves the existing two-run golden
   ).toEqual({ ...legacy, change_ids: [], verification_ids: [] });
   const markdown = render();
   expect(markdown).toBe(legacyGolden);
-  expect(Buffer.byteLength(markdown)).toBe(4035);
-  expect(createHash("sha256").update(markdown).digest("hex")).toBe(
+  expect(Buffer.byteLength(preMetricsBytes(markdown))).toBe(4035);
+  expect(createHash("sha256").update(preMetricsBytes(markdown)).digest("hex")).toBe(
     "4620ac33c381c2ece739b5bb7f863aead720bd54ef505680857224a33bf54827",
   );
   expect(markdown).not.toMatch(/### (?:ChangeRequest|VerificationCase|BuildRecord)|^- build_id:/m);
@@ -179,7 +184,7 @@ test("missing-key M3 input is readonly and preserves the existing two-run golden
   expect(bytes).not.toContain('"verification_ids"');
 });
 
-test("single-successful-run M3 rendering retains the frozen pre-change built bytes", () => {
+test("single-successful-run M3 rendering retains frozen pre-change bytes outside section 5", () => {
   workspace.fixture.stacks[0].build_id = null;
   workspace.fixture.stacks[1].build_id = null;
   workspace.publishFixture();
@@ -192,12 +197,11 @@ test("single-successful-run M3 rendering retains the frozen pre-change built byt
   legacy.llm_response_models = [workspace.fixture.runs[0].llm.response_model];
   workspace.publish(workspace.reportPath, legacy);
   const markdown = render();
-  // Independent oracle: frozen actual pre-change built renderReport, recorded in D12.
-  expect(Buffer.byteLength(markdown)).toBe(2768);
-  expect(createHash("sha256").update(markdown).digest("hex")).toBe(
+  // Independent oracle: frozen actual pre-change built renderReport, excluding only section 5.
+  expect(Buffer.byteLength(preMetricsBytes(markdown))).toBe(2768);
+  expect(createHash("sha256").update(preMetricsBytes(markdown)).digest("hex")).toBe(
     "1f7916272f888169970cd53a3752bd681bf3b6e3b38bdc1aa74b04272f2c8356",
   );
-  expect(section(markdown, 5)).toBe(LEGACY_WORDING);
   expect(section(markdown, 7)).not.toContain("RUN-");
   expect(markdown).not.toMatch(/### (?:ChangeRequest|VerificationCase|BuildRecord)|^- build_id:/m);
 });
@@ -213,7 +217,7 @@ test("authored claims, fake headings and template tokens cannot replace the fixe
   workspace.republish();
   const markdown = render();
   expect(section(markdown, 1)).toBe(workspace.report.summary);
-  expect(section(markdown, 5)).toBe(CODE_CHANGE_WORDING);
+  expect(section(markdown, 5).split("\n\n")[0]).toBe(CODE_CHANGE_WORDING);
   expect(section(markdown, 6)).toContain(workspace.report.limitations[0]);
   expect(section(markdown, 6)).toContain(workspace.report.observations[0]);
   expect(section(markdown, 8)).toBe(workspace.report.pi_questions[0]);
@@ -253,7 +257,7 @@ test.each([
     if (field === "failure_reason") expect(section(markdown, 7)).toContain(encoded);
     expect(markdown).not.toContain("\n## injected");
     expect(markdown).not.toContain("&amp;#124;");
-    expect(section(markdown, 5)).toBe(CODE_CHANGE_WORDING);
+    expect(section(markdown, 5).split("\n\n")[0]).toBe(CODE_CHANGE_WORDING);
   },
 );
 
@@ -314,6 +318,6 @@ test.each([
     expect(markdown.split("\n")[1]).toBe(header);
     if (footer === null) expect(markdown).not.toContain("not accepted by PI");
     else expect(markdown.trimEnd().split("\n").at(-1)).toBe(footer);
-    expect(section(markdown, 5)).toBe(CODE_CHANGE_WORDING);
+    expect(section(markdown, 5).split("\n\n")[0]).toBe(CODE_CHANGE_WORDING);
   },
 );

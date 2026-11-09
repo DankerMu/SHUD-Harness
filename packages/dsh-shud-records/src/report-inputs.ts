@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   RunRecordSchema,
   type BuildId,
@@ -17,6 +17,8 @@ import {
 } from "./workspace-records.ts";
 import { regularTarget, resolveManagedRoot } from "./workspace-paths.ts";
 import { ReportRenderError } from "./report-render-error.ts";
+import { readRunMetricsAt, type RunMetrics } from "./run-metrics-wire.ts";
+import { ShudInputError } from "./shud-input-file.ts";
 
 type ReportInputKind = "report" | "stack" | "data" | "change" | "verification" | "build";
 
@@ -127,4 +129,42 @@ export function readReportRun(cwd: string, runId: RunId): RunRecord {
   if (!parsed.success) throw new ReportRenderError("schema", path);
   if (parsed.data.run_id !== runId) throw new ReportRenderError("identity", path);
   return parsed.data;
+}
+
+export interface ReportMetricFacts {
+  readonly run_id: RunId;
+  readonly source_ref: { readonly path: string; readonly sha256: string } | null;
+  readonly metrics: RunMetrics | null;
+}
+
+/** Fresh, referenced-only reads; runs and run directories remain untrusted relative ancestors. */
+export function readReportMetricFacts(
+  cwd: string,
+  runs: readonly RunRecord[],
+): ReportMetricFacts[] {
+  return runs.map((run) => {
+    const reference = run.artifacts.metrics_summary;
+    if (reference === null) return { run_id: run.run_id, source_ref: null, metrics: null };
+    const path = `runs/${run.run_id}/metrics.json`;
+    try {
+      return {
+        run_id: run.run_id,
+        source_ref: { path, sha256: reference.sha256 },
+        metrics: readRunMetricsAt(
+          isAbsolute(cwd) ? cwd : `${process.cwd()}/${cwd || "."}`,
+          path,
+          reference.sha256,
+        ),
+      };
+    } catch (error) {
+      throw new ReportRenderError(
+        error instanceof ShudInputError
+          ? error.stage === "unsafe"
+            ? "target"
+            : error.stage
+          : "read",
+        path,
+      );
+    }
+  });
 }

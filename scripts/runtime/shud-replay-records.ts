@@ -24,9 +24,11 @@ import {
 import {
   GOVERNANCE_INVARIANTS,
   CODE_CHANGE_SECTION5_WORDING,
+  REPORT_LIMITATION_TEMPLATES,
 } from "../../packages/dsh-shud-core/src/governance/wording.ts";
 import { renderReportDocument } from "../../packages/dsh-shud-records/lib/report-render.js";
 import { object, requireFact } from "./shud-restart-evidence.ts";
+import { snapshotReportMetricFacts } from "./shud-report-metrics.ts";
 
 import { REPLAY_COMMIT, REPLAY_FILES } from "./shud-replay-contract.ts";
 export interface ReplayRecords {
@@ -343,8 +345,19 @@ export function replayRecords(files: Record<string, unknown>, workspace: string)
   requireFact(
     typeof markdown === "string" &&
       GOVERNANCE_INVARIANTS.every((sentence) => markdown.includes(sentence)) &&
-      markdown.includes(CODE_CHANGE_SECTION5_WORDING),
+      markdown.split("## 5. 指标与图表\n\n")[1]?.split("\n\n")[0] ===
+        CODE_CHANGE_SECTION5_WORDING &&
+      !markdown.includes("本里程碑无指标 artifact") &&
+      report.limitations.filter((entry) => entry === REPORT_LIMITATION_TEMPLATES.max_solver_dt)
+        .length === 1,
     `Report Markdown invariants ${report.report_id}`,
+  );
+  const reportRuns = report.linked_runs.map((id) => runs.find((run) => run.run_id === id)!);
+  const metricFacts = snapshotReportMetricFacts(files, reportRuns);
+  const section5 = markdown.split("## 5. 指标与图表\n")[1]?.split("\n## 6.")[0] ?? "";
+  requireFact(
+    reportRuns.every((run) => section5.includes(`| ${run.run_id} |`)),
+    `Report Markdown facts ${report.report_id}`,
   );
   requireFact(
     markdown ===
@@ -352,11 +365,12 @@ export function replayRecords(files: Record<string, unknown>, workspace: string)
         report,
         report.stack_ids.map((id) => stacks.find((stack) => stack.stack_id === id)!),
         report.data_ids.map((id) => provenance.find((data) => data.data_id === id)!),
-        report.linked_runs.map((id) => runs.find((run) => run.run_id === id)!),
+        reportRuns,
         {
           changes: [change],
           verifications: [{ record: verification, baseBuild: base, candidateBuild: candidate }],
         },
+        metricFacts,
       ).markdown,
     `Report Markdown facts ${report.report_id}`,
   );

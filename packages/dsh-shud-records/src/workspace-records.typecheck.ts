@@ -310,7 +310,6 @@ declare const closureJobs: readonly ClosureRunJob[];
 declare const records: readonly RunRecord[];
 declare const draft: ClosureDraft;
 const closure: ClosureResult = evaluateClosure(task, closureJobs, records, draft);
-const metricFact: true = closure.metric_fact;
 if (closure.ok) {
   const noFailures: readonly [] = closure.failures;
   void noFailures;
@@ -331,8 +330,6 @@ const mutableLimitations: string[] = draft.limitations;
 const emptyFailure: ClosureResult = {
   ok: false,
   failures: [],
-  metric_fact: true,
-  automatic_limitation: "",
 };
 // @ts-expect-error Job-specific failures require the affected branded job id.
 const unidentifiedFailure: ClosureFailure = { reason: "collect_exhausted" };
@@ -340,7 +337,6 @@ const unidentifiedFailure: ClosureFailure = { reason: "collect_exhausted" };
 const unknownFailure: ClosureFailure = { reason: "model_says_incomplete" };
 void [
   closure,
-  metricFact,
   missingAttempts,
   mutableLimitations,
   emptyFailure,
@@ -504,8 +500,6 @@ sensitivityReaders.readRunMetrics("RUN-20261108T093000-0001", "a".repeat(64));
 const sensitivityAsyncMetrics = () => Promise.resolve(sensitivityMetrics);
 // @ts-expect-error Metrics loaders must remain synchronous.
 const sensitivityAsyncReader: SensitivityObjectLoaders["readRunMetrics"] = sensitivityAsyncMetrics;
-// @ts-expect-error Sensitivity results do not contain the legacy no-metrics assertion.
-void sensitivityNarrowed.metric_fact;
 if (sensitivityNarrowed.ok) {
   const sensitivitySelectedRun: RunId = sensitivityNarrowed.selected[0].run_id;
   const sensitivitySelectedMetrics: RunMetrics | null = sensitivityNarrowed.selected[0].metrics;

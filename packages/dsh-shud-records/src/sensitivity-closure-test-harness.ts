@@ -140,7 +140,5 @@ export function evaluateSensitivity(
   const result = evaluateClosure(input.card, input.runJobs, input.records, input.draft, loaders);
   expect(input).toStrictEqual(before);
   expect(result).not.toBeInstanceOf(Promise);
-  expect(result).not.toHaveProperty("metric_fact");
-  expect(result).not.toHaveProperty("automatic_limitation");
   return result;
 }

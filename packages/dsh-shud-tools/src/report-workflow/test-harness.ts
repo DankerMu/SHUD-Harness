@@ -17,8 +17,10 @@ import {
   createChangeRequest,
   createVerificationCase,
   renderReport,
+  serializeRunMetrics,
   writeChangePatch,
   writeWorkspaceRecord,
+  type RunMetrics,
 } from "@shud-harness/dsh-shud-records";
 import { expect } from "vitest";
 import { createToolHarness } from "../test-harness.ts";
@@ -26,6 +28,7 @@ import { TASK, plannedCard, putCard } from "../task-linked/test-harness.ts";
 import { seedQueryRun } from "../../../dsh-shud-jobs/src/list-run-jobs/test-harness.ts";
 import { makeRunRecord } from "../../../dsh-shud-records/src/task-lifecycle-test-harness.ts";
 import { makeRenderingFixture } from "../../../dsh-shud-records/src/report-workspace-test-harness.ts";
+import { digest } from "../../../dsh-shud-records/src/run-metrics-test-harness.ts";
 import {
   makeEvidenceReport,
   makeReportDecision,
@@ -109,6 +112,15 @@ export async function seedEvidence(
     }),
   );
   return { job, run, stack, data };
+}
+
+export function installMetrics(runDir: string, run: RunRecord, metrics: RunMetrics) {
+  const bytes = serializeRunMetrics(metrics);
+  const path = join(runDir, "metrics.json");
+  fs.writeFileSync(path, bytes);
+  run.artifacts.metrics_summary = { path: "metrics.json", sha256: digest(bytes) };
+  fs.writeFileSync(join(runDir, "run-record.json"), JSON.stringify(run));
+  return path;
 }
 
 export async function seedCodeChangeEvidence(h: ReportHarness) {

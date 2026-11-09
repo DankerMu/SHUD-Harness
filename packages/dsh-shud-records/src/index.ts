@@ -126,6 +126,7 @@ export {
   ReportStateError,
 } from "./report-state.ts";
 export { renderReport } from "./report-render.ts";
+export { readReportMetricFacts, type ReportMetricFacts } from "./report-inputs.ts";
 export { ReportRenderError } from "./report-render-error.ts";
 export type { ReportRenderStage } from "./report-render-error.ts";
 export { validateReport, ReportValidationError } from "./report-validate.ts";

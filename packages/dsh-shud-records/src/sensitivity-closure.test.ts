@@ -94,6 +94,4 @@ test("sensitivity closure selects four collected successes in plan order", () =>
     ],
     superseded: [],
   });
-  expect(result).not.toHaveProperty("metric_fact");
-  expect(result).not.toHaveProperty("automatic_limitation");
 });

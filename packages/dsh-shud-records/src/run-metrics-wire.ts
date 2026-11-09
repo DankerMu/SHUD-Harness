@@ -26,7 +26,7 @@ export const HEALTH_FIELDS = [
   "negative_state_count",
   "max_solver_dt",
 ] as const;
-const VERDICT_FIELDS = [
+export const VERDICT_FIELDS = [
   "water_balance_residual",
   "cvode_failures",
   "negative_state_count",
@@ -261,10 +261,27 @@ export function serializeRunMetrics(value: RunMetrics): string {
 
 /** The digest binds the same safe byte observation that is subsequently decoded. */
 export function readRunMetrics(runDir: string, expectedSha256: string): RunMetrics {
+  return readRunMetricsAt(runDir, "metrics.json", expectedSha256);
+}
+
+/** Keep managed ancestors relative to the caller's trusted workspace, not a new trusted base. */
+export function readRunMetricsAt(
+  baseDir: string,
+  relativePath: string,
+  expectedSha256: string,
+): RunMetrics {
   if (typeof expectedSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(expectedSha256)) {
     throw new ShudInputError("parse", "metrics.json", "invalid expected sha256 digest");
   }
-  const observed = readShudInputFile(runDir, "metrics.json");
+  const observed = readShudInputFile(baseDir, relativePath);
+  return decodeRunMetrics(observed, expectedSha256);
+}
+
+/** Decode one already-hashed byte observation; filesystem and snapshot adapters share this owner. */
+export function decodeRunMetrics(
+  observed: { bytes: Buffer; sha256: string },
+  expectedSha256: string,
+): RunMetrics {
   if (observed.sha256 !== expectedSha256) {
     throw new ShudInputError("parse", "metrics.json", "sha256 digest mismatch");
   }

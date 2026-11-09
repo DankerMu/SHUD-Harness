@@ -17,8 +17,6 @@ import {
 const SUCCESS = {
   ok: true,
   failures: [],
-  metric_fact: true,
-  automatic_limitation: "本里程碑无指标 artifact，不能据此作指标或模型改进结论。",
 };
 
 function denied(result: ClosureResult, facts: Record<string, unknown>): void {

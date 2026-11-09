@@ -124,6 +124,7 @@ export function readShudInputFile(
       throw new ShudInputError("unsafe", path, "target identity changed");
     }
   };
+  recheck();
   const observed = readVerifiedDescriptor(
     target,
     inspected,

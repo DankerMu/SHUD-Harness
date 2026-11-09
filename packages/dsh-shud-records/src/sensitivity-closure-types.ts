@@ -78,7 +78,7 @@ export interface SensitivitySupersededRun extends SensitivityRunIdentity {
   collect_error_attempts: number;
 }
 
-/** No legacy metric_fact/no-artifact limitation: sensitivity success requires real metrics. */
+/** Sensitivity success carries the selected runs and their validated metric evidence. */
 export type SensitivityClosureResult =
   | {
       ok: true;

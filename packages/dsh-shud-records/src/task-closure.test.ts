@@ -63,8 +63,6 @@ function evaluateFrozen(input: ClosureCase): ClosureResult {
 
   expect(input).toStrictEqual(before);
   expect(result).not.toBeInstanceOf(Promise);
-  expect(result.metric_fact).toBe(true);
-  expect(result.automatic_limitation).toContain("无指标 artifact");
   for (const sentinel of [
     "private-task-text-439",
     "private-observation-439",

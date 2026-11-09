@@ -16,21 +16,21 @@ import {
 
 /**
  * Evaluate prevalidated evidence synchronously, without implicit IO, logging or mutation.
- * The future caller owns ledger reads (absent ledger -> explicit 0), reconciliation,
- * report persistence and appending automatic_limitation. Invalid counts fail closed.
+ * The caller owns ledger reads (absent ledger -> explicit 0), reconciliation,
+ * report persistence and deterministic limitations. Invalid counts fail closed.
  * Current M3 policy retains attempts >= MAX_COLLECT_ATTEMPTS as a blocker even after
  * direct collection produced a successful record; this helper neither resets the ledger
  * nor gives record success precedence. Evidence must uniquely identify this task's job
  * and its matching job_id/run_id record. Unrelated evidence is ignored.
  * The three authored arrays are counted as supplied, without prose classification or
- * automatic augmentation. M3 has no metric artifacts, so metric_fact is explicitly true.
+ * automatic augmentation. Metric availability and verdicts do not alter these run clauses.
  * A successful result establishes closure only, not approval or a TaskCard transition.
  * code_change requires explicit object loaders in the fifth argument and fails closed
  * without them. Its task-job snapshot, records and draft are the existing arguments;
  * this facade never queries a backend. Sensitivity requires its own explicit readers.
- * Its loaded result carries selections, never legacy no-metrics claims. The old signature
- * remains ClosureResult: a sensitivity card without those readers returns only a clause-0
- * failure with legacy metadata. Generic cards with new/union readers return the result union;
+ * Its loaded result carries selections. The original signature remains ClosureResult:
+ * a sensitivity card without those readers returns only a clause-0 failure.
+ * Generic cards with new/union readers return the result union;
  * loader shape alone cannot promise sensitivity output for a science/code-change card.
  * Families exclude opposing capabilities statically and at runtime. "Missing" includes a
  * conflicting family: dual sensitivity/code-change inputs fail before invoking readers.

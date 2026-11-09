@@ -199,7 +199,12 @@ Task: TASK-20261027T080005-1234
 
 ## 5. 指标与图表
 
-本里程碑无指标 artifact；验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。
+验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。
+
+| Run | Metrics status | peak_flow_m3d | peak_day | total_runoff_m3 | water_balance_residual | cvode_failures | negative_state_count | max_solver_dt | water_balance_residual verdict | cvode_failures verdict | negative_state_count verdict | Metrics path | SHA256 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| RUN-20261029T080000-b002 | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available |
+| RUN-20261029T080000-a001 | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available | not_available |
 
 ## 6. 观测与解释限制
 

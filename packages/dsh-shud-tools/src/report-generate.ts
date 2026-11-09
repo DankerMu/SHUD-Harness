@@ -1,6 +1,7 @@
 import { defineTool, ToolArgsError, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import {
   DataIdSchema,
+  REPORT_LIMITATION_TEMPLATES,
   StackIdSchema,
   TaskIdSchema,
   type RunRecord,
@@ -11,11 +12,13 @@ import {
   createEvidenceReport,
   evaluateClosure,
   readChangePatch,
+  readReportMetricFacts,
   readWorkspaceRecord,
   reconcileTaskCard,
   transitionTask,
   writeWorkspaceRecord,
   type ClosureRunJob,
+  type ReportMetricFacts,
 } from "@shud-harness/dsh-shud-records";
 import { checkReportCitations, type AuthoredReport } from "./report-citations.ts";
 import {
@@ -39,9 +42,54 @@ const parameters = {
     description: "Nonempty authored summary, preserved verbatim.",
   },
   observations: { type: "array", items: { type: "string" }, required: true },
-  limitations: { type: "array", items: { type: "string" }, required: true },
+  limitations: {
+    type: "array",
+    items: { type: "string" },
+    required: true,
+    description:
+      "Authored limitations only. Do not supply the exact system-owned max_solver_dt limitation as an array entry.",
+  },
   pi_questions: { type: "array", items: { type: "string" }, required: true },
 } as const;
+
+/** Append only deterministic non-sensitivity limitations, never satisfying authored counts. */
+function metricLimitations(
+  runs: readonly RunRecord[],
+  facts: readonly ReportMetricFacts[],
+): string[] {
+  const limitations: string[] = [REPORT_LIMITATION_TEMPLATES.max_solver_dt];
+  for (const [index, { run_id, metrics }] of facts.entries()) {
+    if (metrics === null || metrics.status === "unavailable") {
+      if (runs[index].status === "succeeded") {
+        limitations.push(
+          REPORT_LIMITATION_TEMPLATES.metrics_unavailable
+            .replace("<run_id>", run_id)
+            .replace("<reason>", () => metrics?.reason ?? "metrics_summary is null"),
+        );
+      }
+      continue;
+    }
+    for (const metric of [
+      "water_balance_residual",
+      "cvode_failures",
+      "negative_state_count",
+    ] as const) {
+      const verdict = metrics.verdicts[metric];
+      if (verdict === "pass") continue;
+      const value = metrics.numerical_health[metric];
+      limitations.push(
+        REPORT_LIMITATION_TEMPLATES.numerical_health
+          .replace("<run_id>", run_id)
+          .replace("<metric>", metric)
+          .replace("<verdict>", verdict)
+          .replace("<value_or_reason>", () =>
+            value === null ? metrics.numerical_health.reasons[metric]! : JSON.stringify(value),
+          ),
+      );
+    }
+  }
+  return limitations;
+}
 
 async function generateReport(
   cwd: string,
@@ -52,6 +100,9 @@ async function generateReport(
   // Reject before any reconciliation publication or creating workspace read.
   readGeneratableTask(cwd, taskId);
   checkReportCitations(cwd, jobs, authored);
+  if (authored.limitations.includes(REPORT_LIMITATION_TEMPLATES.max_solver_dt)) {
+    throw new ToolArgsError(["limitations must not contain the system-owned max_solver_dt entry"]);
+  }
   const taskJobs = await jobs.listRunJobsByTask(taskId);
   const initial = readGeneratableTask(cwd, taskId);
   const reconciled = reconcileTaskCard(initial, taskJobs);
@@ -90,12 +141,14 @@ async function generateReport(
     if (!record) throw new Error(`report_generate missing record for ${jobId}`);
     return record;
   });
+  const metricFacts = readReportMetricFacts(cwd, ordered);
+  const limitations = [...authored.limitations, ...metricLimitations(ordered, metricFacts)];
   const now = new Date().toISOString();
   const report = createEvidenceReport(cwd, {
     task_id: taskId,
     status: "draft",
     ...authored,
-    limitations: [...authored.limitations, closure.automatic_limitation],
+    limitations,
     linked_runs: ordered.map((record) => record.run_id),
     stack_ids: [...new Set(ordered.map((record) => StackIdSchema.parse(record.stack_id)))],
     data_ids: [...new Set(ordered.map((record) => DataIdSchema.parse(record.data_id)))],

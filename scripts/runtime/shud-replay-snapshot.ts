@@ -6,6 +6,7 @@ import { BuildRecordSchema, type RunJob } from "../../packages/dsh-shud-core/src
 import { object, requireFact, text } from "./shud-restart-evidence.ts";
 import {
   BUFFER_LIMIT,
+  captureReportMetrics,
   directoryNames,
   load,
   readFileBounded,
@@ -375,12 +376,14 @@ export function collectReplayFiles(workspace: string): Record<string, unknown> {
       root,
       (path) => {
         const name = relative(workspace, path);
+        const metrics = /^runs\/[^/]+\/metrics\.json$/u.test(name);
         const json =
           /^(?:tasks\/[^/]+\/task|changes\/[^/]+|builds\/[^/]+\/build-record|runs\/[^/]+\/run-(?:job|record)|stacks\/[^/]+|provenance\/[^/]+|verifications\/[^/]+|reports\/[^/]+|input\/keliya\/PREPARED)\.json$/u.test(
             name,
           );
         const plain =
           json ||
+          metrics ||
           /^reports\/[^/]+\.md$/u.test(name) ||
           /^builds\/[^/]+\/make\.(?:stdout|stderr)\.log$/u.test(name);
         if (plain) {
@@ -389,7 +392,11 @@ export function collectReplayFiles(workspace: string): Record<string, unknown> {
           bytes.remaining -= content.length;
           const source = content.toString("utf8");
           screen(source);
-          files[name] = json ? (JSON.parse(source) as unknown) : source;
+          files[name] = metrics
+            ? captureReportMetrics(content)
+            : json
+              ? (JSON.parse(source) as unknown)
+              : source;
         } else files[name] = digest(path, "sha256", hashBudget);
       },
       names,
