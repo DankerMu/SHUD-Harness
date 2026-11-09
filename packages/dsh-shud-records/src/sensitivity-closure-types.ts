@@ -3,6 +3,7 @@ import type {
   AnalysisPlanId,
   JobRecordId,
   RunId,
+  RunJob,
   RunRecord,
 } from "@shud-harness/dsh-shud-core";
 import type { RunMetrics } from "./run-metrics-wire.ts";
@@ -70,6 +71,13 @@ export interface SensitivitySelection extends SensitivityRunIdentity {
   metrics: RunMetrics | null;
 }
 
+/** Validated closure-owned evidence; downstream derivation must not join another snapshot. */
+export interface SensitivitySupersededRun extends SensitivityRunIdentity {
+  job: RunJob;
+  record: RunRecord | null;
+  collect_error_attempts: number;
+}
+
 /** No legacy metric_fact/no-artifact limitation: sensitivity success requires real metrics. */
 export type SensitivityClosureResult =
   | {
@@ -78,7 +86,7 @@ export type SensitivityClosureResult =
       analysis_plan_id: AnalysisPlanId;
       plan: AnalysisPlan;
       selected: readonly SensitivitySelection[];
-      superseded: readonly SensitivityRunIdentity[];
+      superseded: readonly SensitivitySupersededRun[];
     }
   | {
       ok: false;

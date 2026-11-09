@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
+import { EvidenceReportSchema } from "@shud-harness/dsh-shud-core";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { renderReport, validateReport } from "./index.ts";
+import { renderReport, ReportRenderError, validateReport } from "./index.ts";
 import {
   CHECK_SHAPE,
   makeValidationWorkspace,
@@ -34,6 +35,37 @@ beforeEach(() => {
 });
 afterEach(() => {
   nativeFs.rmSync(workspace.root, { recursive: true, force: true });
+});
+
+test("missing sensitivity summary fails render without changing the report", () => {
+  const summaryPath = `reports/${workspace.fixture.report.report_id}.sensitivity.json`;
+  const report = EvidenceReportSchema.parse({
+    ...workspace.fixture.report,
+    analysis_ids: ["PLAN-20261029T080000-a001"],
+    sensitivity_summary: { path: summaryPath, sha256: "a".repeat(64) },
+  });
+  workspace.publish(workspace.reportPath, report);
+  const reportPath = join(workspace.cwd, workspace.reportPath);
+  const bytes = nativeFs.readFileSync(reportPath);
+  const mtimeNs = nativeFs.statSync(reportPath, { bigint: true }).mtimeNs;
+  expect(nativeFs.existsSync(join(workspace.cwd, summaryPath))).toBe(false);
+
+  let failure: unknown;
+  try {
+    renderReport(workspace.cwd, report.report_id);
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(nativeFs.readFileSync(reportPath)).toEqual(bytes);
+  expect(nativeFs.statSync(reportPath, { bigint: true }).mtimeNs).toBe(mtimeNs);
+  expect(nativeFs.existsSync(join(workspace.cwd, summaryPath))).toBe(false);
+  expect(failure).toBeInstanceOf(ReportRenderError);
+  const expectedPath: unknown = expect.stringContaining(summaryPath);
+  expect(failure).toMatchObject({
+    stage: "missing",
+    path: expectedPath,
+  });
 });
 
 test.each(["ordinary", "alias", "physical-parent"] as const)(

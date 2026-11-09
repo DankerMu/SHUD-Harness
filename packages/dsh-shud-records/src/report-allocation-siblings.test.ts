@@ -63,7 +63,7 @@ test("flat report allocation publishes in the physical cwd without touching the 
   expect(fs.statSync(lexicalReports, { bigint: true }).mtimeNs).toBe(before.mtimeNs);
 });
 
-test.each(["json", "md"])(
+test.each(["json", "md", "sensitivity.json"])(
   "existing %s sibling forces a fresh report id and preserves old bytes and mtime",
   (extension) => {
     const path = join(cwd, "reports", `REPORT-20261027T080005-3f9c.${extension}`);

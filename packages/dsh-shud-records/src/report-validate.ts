@@ -34,6 +34,7 @@ import {
 } from "./report-render.ts";
 import { hashDescriptor } from "./hash-descriptor.ts";
 import { regularTarget } from "./workspace-paths.ts";
+import { readReferencedSensitivitySummary } from "./sensitivity-summary-file.ts";
 
 export type ReportValidationStage = ReportRenderStage;
 export type ReportValidationCheckId =
@@ -387,6 +388,7 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
     try {
       const codeChangeFacts = readReportCodeChangeFacts(cwd, report);
       verifications = codeChangeFacts.verifications.map(({ record }) => record);
+      readReferencedSensitivitySummary(cwd, report);
       document = renderReportDocument(
         report,
         stacks.values,

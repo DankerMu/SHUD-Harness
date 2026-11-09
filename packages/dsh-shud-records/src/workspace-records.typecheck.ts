@@ -21,6 +21,8 @@ import type {
 } from "@shud-harness/dsh-shud-core";
 import {
   createAnalysisPlan,
+  createEvidenceReport,
+  type EvidenceReportCreationInput,
   checkCalibProducts,
   readWorkspaceRecord,
   writeWorkspaceRecord,
@@ -40,6 +42,12 @@ import {
   codeChangeClosure,
   createSensitivityClosureLoaders,
   deriveSensitivityClosure,
+  buildSensitivitySummary,
+  parseSensitivitySummary,
+  serializeSensitivitySummary,
+  readReferencedSensitivitySummary,
+  type SensitivitySummary,
+  type SensitivitySupersededRun,
   isReportMarkdownStale,
   applyDecision,
   markReportReviewed,
@@ -545,6 +553,41 @@ const sensitivityDualUnion: ClosureResult | SensitivityClosureResult = sensitivi
 // @ts-expect-error An explicitly intersected loader cannot promise only legacy result fields.
 const sensitivityDualLegacy: ClosureResult = sensitivityDualResult;
 void [sensitivityDualUnion, sensitivityDualLegacy];
+
+declare const exactPlanBytes: Uint8Array;
+if (sensitivityNarrowed.ok) {
+  const summary: SensitivitySummary = buildSensitivitySummary(sensitivityNarrowed, exactPlanBytes);
+  const serialized: string = serializeSensitivitySummary(summary);
+  const parsed: SensitivitySummary = parseSensitivitySummary(value);
+  const referenced: SensitivitySummary | null = readReferencedSensitivitySummary(cwd, report);
+  const superseded: readonly SensitivitySupersededRun[] = sensitivityNarrowed.superseded;
+  for (const entry of superseded) {
+    const retainedJob: RunJob = entry.job;
+    const retainedRecord: RunRecord | null = entry.record;
+    const attempts: number = entry.collect_error_attempts;
+    void [retainedJob, retainedRecord, attempts];
+  }
+  // @ts-expect-error The builder hashes exact bytes, not an independently supplied plan object.
+  buildSensitivitySummary(sensitivityNarrowed, analysis);
+  void [serialized, parsed, referenced];
+}
+// @ts-expect-error A failed or unnarrowed closure cannot authorize summary derivation.
+buildSensitivitySummary(sensitivityNarrowed, exactPlanBytes);
+
+declare const summaryReportFields: EvidenceReportCreationInput;
+declare const summaryArtifact: SensitivitySummary;
+const createdSummaryReport: EvidenceReport = createEvidenceReport(
+  cwd,
+  summaryReportFields,
+  summaryArtifact,
+);
+const createdLegacyReport: EvidenceReport = createEvidenceReport(cwd, report);
+// @ts-expect-error Creation consumes summary data, not caller-owned serialized bytes.
+createEvidenceReport(cwd, summaryReportFields, "summary bytes");
+const { analysis_ids: ownedAnalysisLinks, ...withoutAnalysisLinks } = summaryReportFields;
+// @ts-expect-error Analysis links remain required and caller-owned.
+const missingAnalysisLinks: EvidenceReportCreationInput = withoutAnalysisLinks;
+void [createdSummaryReport, createdLegacyReport, missingAnalysisLinks, ownedAnalysisLinks];
 
 const stale: boolean = isReportMarkdownStale(report, undefined);
 isReportMarkdownStale(report, "# EvidenceReport\nDRAFT — not accepted by PI\n");

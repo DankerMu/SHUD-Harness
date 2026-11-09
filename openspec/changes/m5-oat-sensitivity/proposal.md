@@ -197,3 +197,11 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Selected packs: Public API, File IO/path safety, Schema/identity/status, shared-state ordering, Resource/discovery, Legacy compatibility, Error handling, Release/exports, Documentation. No new auth/config/dependency surface.
 - Scope is task3.4 in records source/tests plus this fixture. Add the sensitivity predicate and readonly adapters, not report/tool wiring, summary derivation, core schema changes or job collection.
 - Evidence floor: semantic unsupported-to-success RED/GREEN at the existing facade, all clauses0–5, failed/retried/two-successful cells, deterministic selection, real safe plan/metrics files and digest failures, unchanged legacy closure behavior, built public smoke, full check and exact-head CI. Shared change remains open.
+
+## Issue #655 execution fixture
+
+- Issue type: feature. Fixture level: expanded; agree with upstream for deterministic numeric evidence, companion publication and rendering input integrity. Critical Paths #2/#6/#7 apply, including records-owned JSON format/provenance; core schemas/projections remain unchanged.
+- Blast radius: wrong relative deltas, lost failed/superseded evidence, orphan overwrite, or rendering from altered summary bytes.
+- Selected packs: Public API, File IO/overwrite, Schema/units/identity, Concurrency/publication ordering, Resource/discovery, Legacy compatibility, Error/partial output, Release/exports, Documentation. No auth/config/dependency changes.
+- Scope is task3.5: records summary derivation/serialization/reading, report allocation and rendering input checks, plus this fixture. No #657 per-run rendering, #658 delta Markdown/validator16–17, or #667 tool creation wiring.
+- Evidence floor: semantic report-render/allocation RED, independent arithmetic oracle, byte determinism, exclusive summary-before-JSON and orphan faults, every-render digest checks including repair(b), state-transition summary immutability, unchanged legacy report tests/goldens, built smoke, full check and exact-head CI.
