@@ -46,10 +46,6 @@ for (const status of ["planned", "running", "reporting"] as const) {
         summary: DRAFT.summary,
         observations: DRAFT.observations,
         pi_questions: DRAFT.pi_questions,
-        limitations: [
-          ...DRAFT.limitations,
-          "本里程碑无指标 artifact，不能据此作指标或模型改进结论。",
-        ],
         linked_runs: [run.run_id],
         stack_ids: [stack.stack_id],
         data_ids: [data.data_id],
@@ -83,6 +79,30 @@ for (const status of ["planned", "running", "reporting"] as const) {
     }
   });
 }
+
+test("appends deterministic limitations for a succeeded run without metrics", async () => {
+  const h = await reportHarness();
+  try {
+    const { run } = await seedEvidence(h);
+    expect(run.status).toBe("succeeded");
+    expect(run.artifacts.metrics_summary).toBeNull();
+    const evidenceBefore = await treeOrAbsent(join(h.cwd, "runs"));
+
+    const report = generated(h, await h.invoke("report_generate", DRAFT));
+
+    expect(report.limitations).toEqual([
+      ...DRAFT.limitations,
+      "max_solver_dt 在钉版 SHUD 中不可观测（PrintFinalStats 未被调用），各运行该项恒为 null，不作判定",
+      expect.stringMatching(new RegExp(`^运行 ${run.run_id} 的指标不可用，原因为 \\S.*$`, "u")),
+    ]);
+    expect(report.limitations).not.toContain(
+      "本里程碑无指标 artifact，不能据此作指标或模型改进结论。",
+    );
+    expect(await treeOrAbsent(join(h.cwd, "runs"))).toEqual(evidenceBefore);
+  } finally {
+    await h.dispose();
+  }
+});
 
 test.each([
   "created",

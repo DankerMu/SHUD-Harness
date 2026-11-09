@@ -20,7 +20,7 @@ export const GOVERNANCE_INVARIANTS = Object.freeze([
 ] as const);
 
 export const CODE_CHANGE_SECTION5_WORDING =
-  "本里程碑无指标 artifact；验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。" as const;
+  "验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。" as const;
 
 export const REPORT_LIMITATION_TEMPLATES = Object.freeze({
   coverage:

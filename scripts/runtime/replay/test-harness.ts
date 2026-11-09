@@ -32,6 +32,8 @@ import {
   makeRunRecord,
 } from "../../../packages/dsh-shud-records/src/task-lifecycle-test-harness.ts";
 import { renderReportDocument } from "../../../packages/dsh-shud-records/src/report-render.ts";
+import { REPORT_LIMITATION_TEMPLATES } from "../../../packages/dsh-shud-core/src/governance/wording.ts";
+import { snapshotReportMetricFacts } from "../shud-report-metrics.ts";
 import {
   replayLogs,
   type ReplayCollectionScenario,
@@ -242,7 +244,10 @@ function replayRecords(verificationStatus: "passed" | "failed"): ReplayRecords {
         ? "The constructed output digests differ."
         : "Both constructed output digests are equal.",
     ],
-    limitations: ["This is not scientific or PI acceptance."],
+    limitations: [
+      "This is not scientific or PI acceptance.",
+      REPORT_LIMITATION_TEMPLATES.max_solver_dt,
+    ],
     linked_runs: runs.map(({ job }) => job.run_id),
     stack_ids: runs.map(({ stack }) => stack.stack_id),
     data_ids: runs.map(({ data }) => data.data_id),
@@ -326,6 +331,10 @@ function renderReplayReport(records: ReplayRecords): void {
         },
       ],
     },
+    snapshotReportMetricFacts(
+      records.files,
+      records.runs.map(({ record }) => record),
+    ),
   ).markdown;
 }
 

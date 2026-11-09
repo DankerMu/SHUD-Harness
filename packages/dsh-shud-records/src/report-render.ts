@@ -16,12 +16,15 @@ import {
   readReportCodeChangeFacts,
   readReportInput,
   readReportRun,
+  readReportMetricFacts,
   type ReportCodeChangeFacts,
+  type ReportMetricFacts,
 } from "./report-inputs.ts";
 import { ReportRenderError } from "./report-render-error.ts";
 import { reportWatermark } from "./report-watermark.ts";
 import { regularTarget } from "./workspace-paths.ts";
 import { readReferencedSensitivitySummary } from "./sensitivity-summary-file.ts";
+import { FLOW_FIELDS, HEALTH_FIELDS, VERDICT_FIELDS } from "./run-metrics-wire.ts";
 
 type Metadata = string | number | bigint | boolean | null;
 const TEMPLATE_PATH = fileURLToPath(new URL("../templates/evidence_report.md", import.meta.url));
@@ -46,6 +49,37 @@ export function metadata(value: Metadata): string {
 function table(headers: readonly string[], rows: readonly (readonly Metadata[])[]): string {
   const row = (cells: readonly Metadata[]) => `| ${cells.map(metadata).join(" | ")} |`;
   return [row(headers), row(headers.map(() => "---")), ...rows.map(row)].join("\n");
+}
+
+function renderMetrics(facts: readonly ReportMetricFacts[]): string {
+  const cell = (value: number | null, reason: string | null): string =>
+    value === null ? `null (${reason})` : JSON.stringify(value);
+  return table(
+    [
+      "Run",
+      "Metrics status",
+      ...FLOW_FIELDS,
+      ...HEALTH_FIELDS,
+      ...VERDICT_FIELDS.map((field) => `${field} verdict`),
+      "Metrics path",
+      "SHA256",
+    ],
+    facts.map(({ run_id, source_ref, metrics }) => [
+      run_id,
+      metrics?.status ?? "not_available",
+      ...FLOW_FIELDS.map((field) =>
+        metrics === null ? "not_available" : cell(metrics.flow[field], metrics.flow.reasons[field]),
+      ),
+      ...HEALTH_FIELDS.map((field) =>
+        metrics === null
+          ? "not_available"
+          : cell(metrics.numerical_health[field], metrics.numerical_health.reasons[field]),
+      ),
+      ...VERDICT_FIELDS.map((field) => metrics?.verdicts[field] ?? "not_available"),
+      source_ref?.path ?? "not_available",
+      source_ref?.sha256 ?? "not_available",
+    ]),
+  );
 }
 
 function renderStack(stack: StackLock): string {
@@ -298,9 +332,9 @@ function projectTemplate(fields: Readonly<Record<string, string>>): ReportDocume
 /**
  * Synchronously project fresh, schema-validated same-workspace evidence into Markdown.
  * Routing and embedded identities are checked; arrays keep their declared order. Only
- * cited report/stack/provenance/run/change/verification/build JSON, its immutable
- * sensitivity companion when referenced, and the module-relative packaged template are read.
- * No TaskCard, patches, logs, binaries, output artifacts,
+ * cited report/stack/provenance/run/change/verification/build JSON, bound metrics,
+ * its immutable sensitivity companion when referenced, and the module-relative template
+ * are read. No TaskCard, patches, logs, binaries, other output artifacts,
  * raw inputs, clock, model calls or Markdown reads occur. Build pairs stay in VC order;
  * StackLock build ids are displayed without discovering additional build records.
  * Source records/status/timestamps are unchanged; missing managed directories are never
@@ -317,7 +351,9 @@ export function renderReport(cwd: string, reportId: unknown): string {
   const runs = report.linked_runs.map((runId) => readReportRun(cwd, runId));
   const codeChangeFacts = readReportCodeChangeFacts(cwd, report);
   readReferencedSensitivitySummary(cwd, report);
-  return renderReportDocument(report, stacks, data, runs, codeChangeFacts, watermark).markdown;
+  const metricFacts = readReportMetricFacts(cwd, runs);
+  return renderReportDocument(report, stacks, data, runs, codeChangeFacts, metricFacts, watermark)
+    .markdown;
 }
 
 /** Canonical projection from already validated evidence; not a public injection API. */
@@ -327,6 +363,7 @@ export function renderReportDocument(
   data: readonly DataProvenance[],
   runs: readonly RunRecord[],
   codeChangeFacts: ReportCodeChangeFacts,
+  metricFacts: readonly ReportMetricFacts[],
   watermark = reportWatermark(report),
 ): ReportDocument {
   const risks = runs
@@ -353,10 +390,10 @@ export function renderReportDocument(
       ]),
     ].join("\n\n"),
     runs: renderRuns(runs),
-    metrics:
-      report.change_ids.length === 0
-        ? "本里程碑无指标 artifact，见 limitations"
-        : CODE_CHANGE_SECTION5_WORDING,
+    metrics: [
+      ...(report.change_ids.length === 0 ? [] : [CODE_CHANGE_SECTION5_WORDING]),
+      renderMetrics(metricFacts),
+    ].join("\n\n"),
     observations: report.observations.join("\n\n"),
     limitations: report.limitations.join("\n\n"),
     invariants: GOVERNANCE_INVARIANTS.join("\n"),

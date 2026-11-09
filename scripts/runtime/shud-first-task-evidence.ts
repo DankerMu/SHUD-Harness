@@ -14,11 +14,15 @@ import {
   type StackLock,
   type TaskCard,
 } from "../../packages/dsh-shud-core/src/schemas/index.ts";
-import { GOVERNANCE_INVARIANTS } from "../../packages/dsh-shud-core/src/governance/wording.ts";
+import {
+  GOVERNANCE_INVARIANTS,
+  REPORT_LIMITATION_TEMPLATES,
+} from "../../packages/dsh-shud-core/src/governance/wording.ts";
 // Runtime scripts require the normal workspace build, as do shud:tiny/restart.
 // The source renderer's transitive dependencies are not Node strip-only compatible.
 import { renderReportDocument } from "../../packages/dsh-shud-records/lib/report-render.js";
 import { object, text } from "./shud-restart-evidence.ts";
+import { snapshotReportMetricFacts } from "./shud-report-metrics.ts";
 import type { SessionLog } from "./shud-session-log.ts";
 import {
   data,
@@ -368,12 +372,25 @@ function assertSnapshot(e: FirstTaskEvidence) {
     GOVERNANCE_INVARIANTS.every((sentence) => markdown.includes(sentence)),
     "INVARIANTS",
   );
+  const metricFacts = snapshotReportMetricFacts(e.files, [record]);
+  const section5 = markdown.split("## 5. 指标与图表\n")[1]?.split("\n## 6.")[0] ?? "";
+  fact(
+    section5.includes(`| ${record.run_id} |`) &&
+      !markdown.includes("本里程碑无指标 artifact") &&
+      report.limitations.filter((entry) => entry === REPORT_LIMITATION_TEMPLATES.max_solver_dt)
+        .length === 1,
+    "MARKDOWN",
+  );
   fact(
     markdown ===
-      renderReportDocument(report, [stack], [provenance], [record], {
-        changes: [],
-        verifications: [],
-      }).markdown,
+      renderReportDocument(
+        report,
+        [stack],
+        [provenance],
+        [record],
+        { changes: [], verifications: [] },
+        metricFacts,
+      ).markdown,
     "MARKDOWN",
   );
   fact(
@@ -414,6 +431,11 @@ export function assertFirstTaskEvidence(evidence: FirstTaskEvidence) {
   try {
     return assertSnapshot(evidence);
   } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Invalid report metrics evidence ")) {
+      throw Object.assign(new Error(`First-task predicate failed: MARKDOWN: ${error.message}`), {
+        code: "FIRST_TASK_MARKDOWN",
+      });
+    }
     if (error instanceof Error && "predicate" in error && typeof error.predicate === "string")
       throw Object.assign(new Error(`First-task predicate failed: ${error.predicate}`), {
         code: `FIRST_TASK_${error.predicate}`,

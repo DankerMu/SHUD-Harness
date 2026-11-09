@@ -19,8 +19,7 @@ import {
 
 // Literal expected wording from the issue/spec, not the renderer or constant under test.
 export const CODE_CHANGE_WORDING =
-  "本里程碑无指标 artifact；验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。";
-export const LEGACY_WORDING = "本里程碑无指标 artifact，见 limitations";
+  "验证判定见 §3 VerificationCase 表。bitwise 一致只证明候选在 N=1 下与 serial baseline 输出一致，不构成并行正确性、性能或模型改进结论。";
 
 export interface CodeChangeWorkspace extends ValidationWorkspace {
   report: EvidenceReport;

@@ -77,6 +77,15 @@ export function readFileBounded(path: string, limit = BUFFER_LIMIT) {
   }
 }
 
+/** Retain original bytes, including whitespace, rather than reserializing parsed metrics. */
+export function captureReportMetrics(bytes: Buffer) {
+  return {
+    bytes_base64: bytes.toString("base64"),
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    size_bytes: bytes.length,
+  };
+}
+
 /** Streaming discovery keeps directory fanout out of unbounded readdir arrays. */
 export function* directoryNames(
   path: string,

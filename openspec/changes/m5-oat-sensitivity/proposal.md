@@ -212,3 +212,11 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Scope: task3.6a, tools citation scanner and tests plus this fixture. Reuse core AnalysisPlanIdSchema and records readonly analysis parser; no records/core/jobs changes, sensitivity tool support, plan ownership requirement, rendering or analysis_ids population.
 - Selected packs: tool entry, file IO, schema/identity, preflight ordering, resource/deduplication, legacy compatibility, controlled errors and documentation. No configuration, dependency, authorization or scientific behavior changes.
 - Evidence: real ToolRuntime semantic missing-plan RED/GREEN; science/code-change valid and invalid plans; four authored fields, standalone boundaries, once-per-invocation reads; no-write/no-reconcile snapshots; unchanged nine-namespace tests; actual built scanner smoke, full check and exact-head CI.
+
+## Issue #657 execution fixture
+
+- Feature, expanded fixture, Critical Path #6. One atomic cross-package report cutover: records closure/render input/projection, core's one code-change wording constant, tools limitation append point, and first-task/replay text oracles. Splitting these commits across main would contradict the report or leave a mandatory runtime gate red.
+- Invariant: displayed metric facts and derived limitations come from the same identity/digest-bound per-run evidence, never model prose or recomputation; unavailable metrics do not block otherwise-valid non-sensitivity closure.
+- Selected packs: public/type contracts, file IO and digest identity, numerical display, ordering/partial publication, resource/read-set, legacy compatibility, runtime evidence/packaging, wording governance and documentation. No dependency/config/auth/scientific threshold change.
+- Scope is task3.6b only. Do not implement collect-time metrics/#662, sensitivity generation/#667, delta/superseded rendering or validator16/17/#658. Existing records and consumed evidence are not migrated or rewritten.
+- Required delivery includes full local check, actual built report smoke, immutable pre-cutover section5-excluded byte oracle, real shud:first-task and shud:replay exit0 with canonical logs/workspaces, three-seat review and exact-head CI. Automated script approvals remain engineering-only.

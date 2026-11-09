@@ -85,7 +85,7 @@ test("fake headings and original-looking tokens cannot change trusted sections i
   workspace.verifications[0].reviewer_notes = [`## 7. metadata heading\n${SECRET}`];
   workspace.republish();
   const markdown = renderReport(workspace.cwd, workspace.report.report_id);
-  expect(section(markdown, 5)).toBe(CODE_CHANGE_WORDING);
+  expect(section(markdown, 5).split("\n\n")[0]).toBe(CODE_CHANGE_WORDING);
   expect(section(markdown, 6)).toContain(workspace.report.limitations[0]);
   const result = validate();
   expect(result.checks.filter(({ pass }) => !pass).map(({ id }) => id)).toEqual([13]);

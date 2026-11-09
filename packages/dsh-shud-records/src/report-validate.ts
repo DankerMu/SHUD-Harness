@@ -23,7 +23,12 @@ import {
   type VerificationCase,
   type VerificationId,
 } from "@shud-harness/dsh-shud-core";
-import { readReportCodeChangeFacts, readReportInput, readReportRun } from "./report-inputs.ts";
+import {
+  readReportCodeChangeFacts,
+  readReportInput,
+  readReportRun,
+  readReportMetricFacts,
+} from "./report-inputs.ts";
 import { ReportRenderError, type ReportRenderStage } from "./report-render-error.ts";
 import {
   metadata,
@@ -395,6 +400,7 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
         data.values,
         runs.values,
         codeChangeFacts,
+        readReportMetricFacts(cwd, runs.values),
       );
     } catch (error) {
       renderStage = controlledStage(error);

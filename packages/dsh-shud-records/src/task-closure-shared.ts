@@ -90,15 +90,9 @@ export type ClosureFailure =
       job_id: JobRecordId;
     };
 
-export type ClosureResult = {
-  metric_fact: true;
-  automatic_limitation: string;
-} & (
+export type ClosureResult =
   | { ok: true; failures: readonly [] }
-  | { ok: false; failures: readonly [ClosureFailure, ...ClosureFailure[]] }
-);
-
-const AUTOMATIC_LIMITATION = "本里程碑无指标 artifact，不能据此作指标或模型改进结论。";
+  | { ok: false; failures: readonly [ClosureFailure, ...ClosureFailure[]] };
 
 function hasFailures(
   failures: ClosureFailure[],
@@ -107,9 +101,7 @@ function hasFailures(
 }
 
 export function closureResult(failures: ClosureFailure[]): ClosureResult {
-  return hasFailures(failures)
-    ? { ok: false, failures, metric_fact: true, automatic_limitation: AUTOMATIC_LIMITATION }
-    : { ok: true, failures: [], metric_fact: true, automatic_limitation: AUTOMATIC_LIMITATION };
+  return hasFailures(failures) ? { ok: false, failures } : { ok: true, failures: [] };
 }
 
 /** One implementation of the authored-input and all-linked-run clauses for both task types. */

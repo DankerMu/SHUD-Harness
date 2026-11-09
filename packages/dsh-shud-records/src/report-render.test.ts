@@ -170,7 +170,6 @@ test("renderReport has the ten canonical headings and four literal governance st
     "## 9. 建议下一步",
     "## 10. 附录：命令、日志、artifact manifest",
   ]);
-  expect(result).toContain("\n本里程碑无指标 artifact，见 limitations\n");
   const governance = [
     "单流域/单事件指标提升不等于模型改进",
     "校准结果不等于结构验证",
