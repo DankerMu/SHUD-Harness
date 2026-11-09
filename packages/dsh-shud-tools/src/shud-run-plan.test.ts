@@ -75,7 +75,11 @@ test("a linked plan's PSET-3 runs with the plan window, threads, override and di
   const after = await h.effects();
   expect(after.input).toEqual(before.input);
   expect(after.analyses).toEqual(before.analyses);
-  expect(readCard(h)).toMatchObject({ status: "running", linked_jobs: [job.job_id] });
+  expect(readCard(h)).toMatchObject({
+    status: "running",
+    linked_jobs: [job.job_id],
+    linked_analyses: [plan],
+  });
 }, 20_000);
 
 test("the baseline set forwards no override and keeps the calib copy unchanged", async () => {

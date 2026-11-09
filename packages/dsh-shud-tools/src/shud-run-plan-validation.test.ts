@@ -178,10 +178,46 @@ test.each(mismatches)(
       },
       message,
     );
+    // Positive control: the mock sees the records package's plan read, so the zero-access
+    // assertions in this file observe real reads rather than a blind spy.
+    expect(governedCalls(/\/analyses\//u)).not.toEqual([]);
     expect(governedCalls(/\/(?:tasks|runs)(?:\/|$)/u)).toEqual([]);
     expect(await cardSnapshot(h)).toEqual(card);
   },
 );
+
+test("a missing plan with no analyses/ root is rejected without creating it", async () => {
+  seedCard(h, { linked_analyses: [MISSING_PLAN] });
+  const card = await cardSnapshot(h);
+  expect((await h.effects()).analyses).toBeNull();
+  await rejectsWithoutEffects(
+    {
+      task_id: TASK,
+      input_dir: "input/ccw",
+      analysis_plan_id: MISSING_PLAN,
+      parameter_set_id: "PSET-3",
+    },
+    new RegExp(`analysis_plan_id ${MISSING_PLAN}.*missing`, "u"),
+  );
+  // A read never creates the plan root: analyses/ stays absent, not an empty directory.
+  expect((await h.effects()).analyses).toBeNull();
+  expect(governedCalls(/\/(?:tasks|runs)(?:\/|$)/u)).toEqual([]);
+  expect(await cardSnapshot(h)).toEqual(card);
+});
+
+test("a schema-valid plan whose analysis_plan_id differs from its filename is rejected", async () => {
+  const id = AnalysisPlanIdSchema.parse("PLAN-20261108T093000-f11e");
+  seedCard(h, { linked_analyses: [id] });
+  const { plan } = seedOrphan(h, id, { analysis_plan_id: "PLAN-20261108T093000-b0d7" });
+  expect(plan.analysis_plan_id).not.toBe(id);
+  const card = await cardSnapshot(h);
+  await rejectsWithoutEffects(
+    { task_id: TASK, input_dir: "input/ccw", analysis_plan_id: id, parameter_set_id: "PSET-3" },
+    new RegExp(`analysis_plan_id ${id}.*identity`, "u"),
+  );
+  expect(governedCalls(/\/(?:tasks|runs)(?:\/|$)/u)).toEqual([]);
+  expect(await cardSnapshot(h)).toEqual(card);
+});
 
 test.each([
   ["unparsable", "{not json"],

@@ -24,7 +24,15 @@ afterEach(async () => {
   await h.dispose();
 });
 
-const runNames = () => fs.readdirSync(join(h.cwd, "runs")).sort();
+/** Run directory names; an absent runs/ root is empty (the registry may or may not leave it). */
+function runNames() {
+  try {
+    return fs.readdirSync(join(h.cwd, "runs")).sort();
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
+    throw error;
+  }
+}
 
 /** Every effect but the runs/ tree, which live solvers keep writing; run names are checked apart. */
 async function effectsBesideRuns() {
@@ -74,6 +82,7 @@ test("a running job of the same pset rejects the resubmission naming the pset", 
   // A different pset of the same plan is not a duplicate.
   const other = await returnedRun(h, await h.run(plan, { parameter_set_id: "PSET-2" }));
   expect(readCard(h).linked_jobs).toEqual([first.job_id, other.job_id].sort());
+  expect(readCard(h).linked_analyses).toEqual([plan]);
 }, 30_000);
 
 test("a collected succeeded job of the same pset rejects the resubmission", async () => {
