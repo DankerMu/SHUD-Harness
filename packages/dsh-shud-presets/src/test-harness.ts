@@ -11,6 +11,7 @@ import { vi } from "vitest";
 export const COORDINATOR_DELEGATIONS = ["subagent", "subagent_coder", "subagent_reviewer"];
 export const COORDINATOR_TOOLS = [
   "task_create",
+  "analysis_create",
   "report_generate",
   "report_validate",
   "report_submit",
@@ -49,6 +50,7 @@ export const ROLE_CASES = [
 ] as const;
 const GLOBAL_TOOLS = [
   "task_create",
+  "analysis_create",
   "report_generate",
   "report_validate",
   "report_submit",

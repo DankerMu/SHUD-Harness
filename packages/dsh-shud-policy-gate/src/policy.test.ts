@@ -39,6 +39,11 @@ test.each([
     reason: "Role reviewer cannot call tool change_submit.",
   },
   { role: "reviewer", tool: "job_kill", reason: "Role reviewer cannot call tool job_kill." },
+  ...(["worker", "coder", "reviewer"] as const).map((role) => ({
+    role,
+    tool: "analysis_create",
+    reason: `Role ${role} cannot call tool analysis_create.`,
+  })),
 ])("$role calling $tool receives the canonical deny", async ({ role, tool, reason }) => {
   const h = await createPolicyHarness({ preset: role });
   try {
@@ -73,6 +78,7 @@ test.each([
   { role: "worker", tool: "shud_collect" },
   { role: "worker", tool: "job_output" },
   { role: "coordinator", tool: "task_create" },
+  { role: "coordinator", tool: "analysis_create" },
   { role: "coordinator", tool: "subagent" },
   { role: "coordinator", tool: "shud_collect" },
   { role: "coordinator", tool: "subagent_coder" },

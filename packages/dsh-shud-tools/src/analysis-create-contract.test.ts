@@ -160,10 +160,10 @@ test("a valid call whose backend fails delegates exactly once without retry", as
   expect(fs.existsSync(join(h.cwd, "tasks", TASK, "task.json"))).toBe(true);
 });
 
-test.each(["coordinator", "worker", "coder", "reviewer"] as const)(
-  "%s has no analysis_create surface until #665 exposes it",
+test.each(["coordinator", "worker", "coder", "reviewer", "repo_explorer"] as const)(
+  "%s sees analysis_create only when it is the coordinator",
   (role) => {
     expect(CANONICAL_HARNESS_ROLES).toContain(role);
-    expect(isRoleToolIdAllowed(role, "analysis_create")).toBe(false);
+    expect(isRoleToolIdAllowed(role, "analysis_create")).toBe(role === "coordinator");
   },
 );
