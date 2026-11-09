@@ -23,7 +23,11 @@
       "project": ["src/**/*.ts"]
     },
     "packages/dsh-shud-jobs": {
-      "entry": ["src/**/*.test.ts", "src/shud-cfg-rewrite.ts"],
+      "entry": [
+        "src/**/*.test.ts",
+        "src/shud-cfg-rewrite.ts",
+        "src/submit-shud-request.typecheck.ts"
+      ],
       "project": ["src/**/*.ts"]
     },
     "packages/dsh-shud-tools": {

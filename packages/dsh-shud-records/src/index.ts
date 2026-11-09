@@ -70,7 +70,8 @@ export type { ShudDat, ShudDatRow } from "./shud-dat.ts";
 export { computeRunMetrics } from "./run-metrics.ts";
 export { serializeRunMetrics, readRunMetrics } from "./run-metrics-wire.ts";
 export type { RunMetrics, RunMetricsHealth, MetricsInput } from "./run-metrics-wire.ts";
-export { ShudInputError } from "./shud-input-file.ts";
+export { ShudInputError, readShudInputFile } from "./shud-input-file.ts";
+export { shudTextNumber } from "./shud-text-number.ts";
 export type { ShudInputStage } from "./shud-input-file.ts";
 export { buildSensitivitySummary } from "./sensitivity-summary.ts";
 export {

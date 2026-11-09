@@ -102,7 +102,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 
 ## 4. jobs：提交重写与 collect 内 metrics（Critical Path #4）
 
-- [ ] 4.1a 所有提交都在副本 `.cfg.para` 中确保 `DT_YE_IC 1440`（字节保真，多行全部改写，末行无行尾时先补行尾），在 provenance 之前完成，失败按既有回滚。
+- [x] 4.1a（#659 / PR #703）所有提交都在副本 `.cfg.para` 中确保 `DT_YE_IC 1440`（字节保真，多行全部改写，末行无行尾时先补行尾），在 provenance 之前完成，失败按既有回滚。
   - `shud-end.ts` 原地重构为 `shud-cfg-rewrite.ts`，不保留旧文件；同一刀更新全部引用：`packages/dsh-shud-jobs/src/shud-submissions.ts:17` 的 import、`shud-end.test.ts` 随之改名为 `shud-cfg-rewrite.test.ts`、`shud-end.ts:27` 的 Usage 字符串、`scripts/runtime/shud-tiny.sh:19`、`knip.json` entry、`docs/01_CODEBASE/SHUD_IO_Facts.md:68`、`docs/04_IMPLEMENTATION/Runtime_Lifecycle.md:63`。
   - 同一切片中更新 `shud:replay` 的副本 provenance oracle（运行副本与准备后输入只差 `DT_YE_IC` 一行）。
   - 验证：`pnpm run check`、`pnpm run shud:tiny`、本机 `shud:replay` 重跑（rivqdown bitwise 不变）。
@@ -522,3 +522,22 @@ Commands: focused records/tools suites; semantic RED before implementation for d
 | Auth / dependency / profile / science | Not selected: no credentials, packages, profile rows; DT_YE_IC is an output switch, not a physics/default-parameter change |
 
 Commands: unit + integration RED before implementation; focused jobs/tools/runtime suites; `pnpm run build`; `pnpm run check`; `pnpm run shud:tiny`; `pnpm run shud:first-task <scratch>`; `pnpm run shud:restart`; `pnpm run shud:replay <scratch>`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.1a closes.
+
+## Issue #660 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Public API (internal request) | Selected: exported `SubmitShudRequest` gains four optional snake_case fields; tools compile unchanged; typecheck tests for field types |
+| Preflight validation | Selected: each issue-listed illegal request (two overrides, `SOIL_BETA`, multiplier 1 or 3, overrides with null ids, bound with null threads, bound with null/`{}`/`../ccw.cfg.calib` digests, unbound with non-null digests, unpaired ids, bad brand) rejects with a reason and no run directory and no input read |
+| File IO / path safety | Selected: digest check reuses `readShudInputFile`; integration: mismatch on `ccw.cfg.calib`, missing `ccw.para.lc`, key naming a directory → error names relative path, full rollback; all-equal → success; symlink/special rejection covered by the reader's existing tests |
+| Schema / numeric | Selected: `GEOL_KSATH\t1\n`×2 → `GEOL_KSATH\t2\n`; `LC_ROUGH` 0.3×0.5 → `0.15` with separator/EOL kept; round-trip property `Number(String(b*m)) === b*m`; 0/2 effective calib lines or `#`-only → fail naming key; non-finite value → fail |
+| NUM_OPENMP | Selected: ccw `NUM_OPENMP\t8\n` bound threads 1 → `NUM_OPENMP\t1\n`; comment-only `# NUM_OPENMP 4` with threads 2 → appends `DT_YE_IC\t1440\n` then `NUM_OPENMP\t2\n`; unbound threads 2 → unchanged, no append, wrapper env both vars 2 |
+| Error handling / rollback | Selected: every new failure point (digest, NUM_OPENMP write, calib count/value, read/write injection) → no run dir, no index entry, no provenance, no wrapper, source unchanged; a lock pre-seeded by an earlier successful submission in `stacks/` stays present and byte-identical |
+| Persisted state / ordering | Selected: provenance sha of `ccw.cfg.calib` and `ccw.cfg.para` == rewritten copy; `run-job.json` first `created` write contains ids + threads; `shud-collect.ts` copies ids so collected RunRecord ids equal RunJob ids (RED today: null); unbound run-job `toEqual` at submit-shud.test.ts:56 unchanged |
+| Concurrency / shared state | Selected: baseline + three perturbed psets in one env → four equal `stack_id`, one lock in `stacks/`, perturbed calib hashes differ from baseline |
+| Legacy compatibility | Selected: baseline pset `.cfg.calib` byte-identical, `.cfg.para` differs only at END/DT_YE_IC/NUM_OPENMP; existing unbound jobs/tools suites unchanged and green; `pnpm run shud:tiny`, `pnpm run shud:restart` PASS |
+| Hydrology runtime | Selected: calib/NUM_OPENMP semantics cited to pinned SHUD source (`%lf` read-back, `omp_set_num_threads` from cfg) in tests/comments |
+| Documentation | Selected: `Runtime_Lifecycle.md:26`, `Park_Resume_Design.md:342`, `Minimal_Schemas.md:197`, `SHUD_IO_Facts.md:68` (rewrite list + source line refs) updated; recorded boundary deviation; `pnpm run docs:check` green |
+| Auth / dependency / profile | Not selected: no credentials, packages or profile rows |
+
+Commands: RED before implementation; focused jobs suites; `pnpm run build`; `pnpm run check` (incl. docs:check); `pnpm run shud:tiny`; `pnpm run shud:restart`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.1b closes.

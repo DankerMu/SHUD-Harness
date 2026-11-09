@@ -194,7 +194,7 @@ notify:
 
 **ID 规范：** `JOB-YYYYMMDDTHHMMSS-xxxx` / `RUN-YYYYMMDDTHHMMSS-xxxx` 取代 `JOB-NNNN` / `RUN-NNNN`；时间为 UTC、精确到秒，`xxxx` 为 4 位小写十六进制。同一次 `generateRunIdentifiers()` 调用共享时间戳和随机段，分别返回品牌类型 `JobRecordId` / `RunId`。旧格式、大写随机段或将 dsh 登记 id 填入 `job_id` 均被拒绝。运行目录与索引的碰撞检查由提交层负责，不由 schema/id 生成函数访问文件系统。
 
-**M3 提交关联（#443）：** `shud_run` 使用的注册表 `submitShud` 请求可携带品牌 `task_id`，未提供时写 `null`，显式 `null` 或非法值在文件系统操作前拒绝；本刀不新增工具参数或回写 TaskCard。输入完整复制并完成可选 END 改写与 `DT_YE_IC 1440` 副本重写后，调用规范 `captureStackLock`，再等待 `generateProvenance` 对运行副本（重写后字节）计算文件 hash/字节数；在首次 `created` RunJob 原子写之前，StackLock 与本次 DataProvenance 已持久化。该次写入同时包含 `task_id`、非空 `stack_id`、非空 `data_id`，后续 collect 原样继承；schema 仍允许三者为 `null`，M2 恢复与旧结果不迁移。
+**M3 提交关联（#443）：** `shud_run` 使用的注册表 `submitShud` 请求可携带品牌 `task_id`，未提供时写 `null`，显式 `null` 或非法值在文件系统操作前拒绝；本刀不新增工具参数或回写 TaskCard。输入完整复制、（绑定 plan 时）核对 `input_digests` 并完成可选 END 改写、`DT_YE_IC 1440`、（绑定 plan 时）`NUM_OPENMP = threads` 与（有覆盖时）单个 calib 键 `b × m` 的副本重写后，调用规范 `captureStackLock`，再等待 `generateProvenance` 对运行副本（重写后字节）计算文件 hash/字节数；在首次 `created` RunJob 原子写之前，StackLock 与本次 DataProvenance 已持久化。该次写入同时包含 `task_id`、非空 `stack_id`、非空 `data_id`，后续 collect 原样继承；schema 仍允许三者为 `null`，M2 恢复与旧结果不迁移。
 
 **M4 运行绑定：** `build_id`、`threads`、`binary_sha256` 缺键各按 `null` 解析，默认值之后校验 `binary_sha256` 非 null 当且仅当 `build_id` 非 null。`threads` 接受正整数或 null，拒绝 0、负数、小数与字符串；它不是仅允许 1 的 schema，N=1 是回放验证门。有 build 的提交校验 BuildRecord 与二进制摘要，复制二进制到本次运行目录 `bin/shud` 并执行副本；首次 `created` 即记录三字段，collect 原样继承。提供 threads 时设置 `OMP_NUM_THREADS` 与 `SHUD_RHS_THREADS`；缺省不设置，继承宿主环境。旧 M2/M3 文件读取不改写。
 

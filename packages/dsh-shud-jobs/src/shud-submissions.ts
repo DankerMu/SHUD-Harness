@@ -14,13 +14,19 @@ import type { Config } from "./registry.ts";
 import type { StateIndexStore } from "./state-indexes.ts";
 import { captureStackLock, generateProvenance, writeJson } from "@shud-harness/dsh-shud-records";
 import { stdoutSource } from "./file-output.ts";
-import { ensureOutputInterval, SUBMISSION_OUTPUT_INTERVAL, updateEnd } from "./shud-cfg-rewrite.ts";
+import {
+  applyCalibMultiplier,
+  ensureOutputInterval,
+  SUBMISSION_OUTPUT_INTERVAL,
+  updateEnd,
+} from "./shud-cfg-rewrite.ts";
 import { BuildOwnershipError, prepareBuild, type PreparedBuild } from "./shud-build.ts";
 import {
   copyInput,
   existingPath,
   prepareInput,
   realDirectory,
+  verifyInputDigests,
   verifyRun,
   type PreparedInput,
   type SubmitShudRequest,
@@ -194,20 +200,29 @@ export class ShudSubmissions {
       const location = { parent, directory: owned };
       const inputBytes = await copyInput(input, reservation.runDir);
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
-      const parameters = join(
-        reservation.runDir,
-        "input",
-        input.project,
-        `${input.project}.cfg.para`,
-      );
+      const copy = join(reservation.runDir, "input", input.project);
+      const { plan } = input;
+      // A plan-bound copy must be the digest-checked baseline input before any rewrite.
+      if (plan.inputDigests !== null) verifyInputDigests(copy, plan.inputDigests);
+      const parameters = join(copy, `${input.project}.cfg.para`);
       if (input.endDays !== null) await updateEnd(parameters, input.endDays);
-      // Every copy writes the output switch before StackLock/provenance, so provenance hashes
-      // exactly the bytes SHUD reads; a failure takes the single rollback below.
+      // Every rewrite precedes StackLock/provenance, so provenance hashes exactly the bytes SHUD
+      // reads; a failure takes the single rollback below.
       await ensureOutputInterval(
         parameters,
         SUBMISSION_OUTPUT_INTERVAL.key,
         SUBMISSION_OUTPUT_INTERVAL.minutes,
       );
+      // Pinned SHUD calls omp_set_num_threads(NUM_OPENMP) over OMP_NUM_THREADS
+      // (SHUD/src/classes/Model_Control.cpp:130, SHUD/src/Model/shud.cpp:56).
+      if (plan.analysisPlanId !== null && input.threads !== null)
+        await ensureOutputInterval(parameters, "NUM_OPENMP", input.threads);
+      if (plan.calibOverride !== null)
+        await applyCalibMultiplier(
+          join(copy, `${input.project}.cfg.calib`),
+          plan.calibOverride.key,
+          plan.calibOverride.multiplier,
+        );
       verifyRun(input.runsDir, parent, reservation.runDir, owned);
       await io.mkdir(join(reservation.runDir, "output"));
       await io.writeFile(join(reservation.runDir, "stdout.log"), "", { flag: "wx" });
@@ -239,6 +254,8 @@ export class ShudSubmissions {
         run_id: reservation.run_id,
         job_id: reservation.job_id,
         task_id: input.taskId,
+        analysis_plan_id: plan.analysisPlanId,
+        parameter_set_id: plan.parameterSetId,
         stack_id: stack.stack_id,
         data_id: data.data_id,
         build_id: input.buildId,

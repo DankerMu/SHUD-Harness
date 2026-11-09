@@ -333,6 +333,8 @@ export async function collectRun(
       run_id: job.run_id,
       job_id: job.job_id,
       task_id: job.task_id,
+      analysis_plan_id: job.analysis_plan_id,
+      parameter_set_id: job.parameter_set_id,
       stack_id: job.stack_id,
       data_id: job.data_id,
       build_id: job.build_id,

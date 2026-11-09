@@ -2,7 +2,9 @@ import { constants, lstatSync, readdirSync, realpathSync, type Stats } from "nod
 import * as io from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import {
+  AnalysisPlanSchema,
   BuildIdSchema,
+  CALIB_WHITELIST,
   containsPath,
   isProjectComponent,
   RunJobSchema,
@@ -11,6 +13,12 @@ import {
   type RunJob,
   type TaskId,
 } from "@shud-harness/dsh-shud-core";
+import { readShudInputFile } from "@shud-harness/dsh-shud-records";
+
+interface CalibOverride {
+  key: keyof typeof CALIB_WHITELIST;
+  multiplier: number;
+}
 
 export interface SubmitShudRequest {
   cwd: string;
@@ -25,6 +33,20 @@ export interface SubmitShudRequest {
   label?: RunJob["label"];
   owner_session: RunJob["owner_session"];
   llm: RunJob["llm"];
+  // Internal plan binding, never model-visible; shud_run resolves a plan into these fields.
+  analysis_plan_id?: RunJob["analysis_plan_id"];
+  parameter_set_id?: RunJob["parameter_set_id"];
+  /** Empty or exactly one already-resolved whitelist key and multiplier. */
+  calib_overrides?: CalibOverride[];
+  /** Plan-checked sha256 of baseline input files, keyed by POSIX path relative to input_dir. */
+  input_digests?: Record<string, string> | null;
+}
+
+interface PlanBinding {
+  analysisPlanId: RunJob["analysis_plan_id"];
+  parameterSetId: RunJob["parameter_set_id"];
+  calibOverride: CalibOverride | null;
+  inputDigests: Record<string, string> | null;
 }
 
 interface InputItem {
@@ -40,6 +62,7 @@ export interface PreparedInput {
   taskId: TaskId | null;
   buildId: BuildId | null;
   threads: number | null;
+  plan: PlanBinding;
   endDays: RunJob["end_days"];
   label: RunJob["label"];
   ownerSession: RunJob["owner_session"];
@@ -63,6 +86,54 @@ export function realDirectory(path: string): Stats {
   return stat;
 }
 
+/** Pure validation of the internal plan fields; it runs before any filesystem operation. */
+function planBinding(request: SubmitShudRequest, threads: number | null): PlanBinding {
+  const plan = RunJobSchema.shape.analysis_plan_id.safeParse(request.analysis_plan_id ?? null);
+  if (!plan.success) throw new Error("analysis_plan_id must be a valid AnalysisPlanId or null");
+  const set = RunJobSchema.shape.parameter_set_id.safeParse(request.parameter_set_id ?? null);
+  if (!set.success) throw new Error("parameter_set_id must be PSET-1..PSET-5 or null");
+  if ((plan.data === null) !== (set.data === null))
+    throw new Error("analysis_plan_id and parameter_set_id must both be set or both be null");
+  const bound = plan.data !== null;
+  const overrides: unknown = request.calib_overrides ?? [];
+  if (!Array.isArray(overrides) || overrides.length > 1)
+    throw new Error("calib_overrides must be an array of at most one override");
+  let calibOverride: CalibOverride | null = null;
+  if (overrides.length === 1) {
+    const [entry] = overrides as unknown[];
+    const fields = typeof entry === "object" && entry !== null ? Object.keys(entry) : [];
+    const { key, multiplier } = (entry ?? {}) as Partial<CalibOverride>;
+    // The plan schema owns the whitelist and the [0.5, 2], != 1 multiplier rule.
+    const changes = AnalysisPlanSchema.shape.parameter_sets.element.shape.changes;
+    if (
+      fields.length !== 2 ||
+      typeof key !== "string" ||
+      !Object.hasOwn(CALIB_WHITELIST, key) ||
+      !changes.safeParse({ [key]: multiplier }).success
+    )
+      throw new Error("calib_overrides entry must be a whitelisted key with a valid multiplier");
+    if (!bound) throw new Error("calib_overrides require analysis_plan_id and parameter_set_id");
+    calibOverride = { key, multiplier: multiplier as number };
+  }
+  const digests: unknown = request.input_digests ?? null;
+  if (!bound) {
+    if (digests !== null) throw new Error("input_digests must be null without a plan binding");
+    return { analysisPlanId: null, parameterSetId: null, calibOverride, inputDigests: null };
+  }
+  if (threads === null) throw new Error("threads is required for a plan-bound submission");
+  const parsed = AnalysisPlanSchema.shape.input_digests.safeParse(digests);
+  if (!parsed.success || Object.keys(parsed.data).length === 0)
+    throw new Error(
+      "input_digests must map POSIX-relative input paths to lowercase sha256 digests",
+    );
+  return {
+    analysisPlanId: plan.data,
+    parameterSetId: set.data,
+    calibOverride,
+    inputDigests: parsed.data,
+  };
+}
+
 export function prepareInput(request: SubmitShudRequest, stateDir: string): PreparedInput {
   const task = request.task_id === undefined ? null : TaskIdSchema.safeParse(request.task_id);
   if (task !== null && !task.success) throw new Error("task_id must be a valid TaskId");
@@ -74,6 +145,7 @@ export function prepareInput(request: SubmitShudRequest, stateDir: string): Prep
   if (!parsedThreads.success || (request.threads !== undefined && parsedThreads.data === null))
     throw new Error("threads must be a positive safe integer");
   const threads = parsedThreads.data;
+  const plan = planBinding(request, threads);
   const project = RunJobSchema.shape.project.parse(request.project);
   if (!isProjectComponent(project)) {
     throw new Error("project must be one contained path component");
@@ -140,12 +212,30 @@ export function prepareInput(request: SubmitShudRequest, stateDir: string): Prep
     taskId,
     buildId,
     threads,
+    plan,
     endDays,
     label,
     ownerSession,
     llm,
     items,
   };
+}
+
+/**
+ * Read-only check that the run copy is the plan's baseline input: each listed file is read once
+ * through the records SHUD input reader (contained relative path, real-directory ancestors,
+ * regular no-follow file) and its sha256 must equal the plan digest.
+ */
+export function verifyInputDigests(copyDir: string, digests: Record<string, string>): void {
+  for (const [relative, expected] of Object.entries(digests)) {
+    let actual: string;
+    try {
+      actual = readShudInputFile(copyDir, relative).sha256;
+    } catch (error) {
+      throw new Error(`Cannot verify input digest of ${relative}`, { cause: error });
+    }
+    if (actual !== expected) throw new Error(`Input digest mismatch: ${relative}`);
+  }
 }
 
 export async function copyInput(input: PreparedInput, runDir: string): Promise<number> {
