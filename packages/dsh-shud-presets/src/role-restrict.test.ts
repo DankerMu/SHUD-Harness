@@ -35,6 +35,7 @@ describe("shud-role-restrict public lifecycle", () => {
       expect(caller.session.header.agentPreset).toBe("coordinator");
       await caller.announce();
       expect(caller.surface()).toEqual(expected);
+      expect(caller.surface().includes("analysis_create")).toBe(role === "coordinator");
       expect(restrict).toHaveBeenCalledTimes(1);
       expect([...(restrict.mock.calls[0]?.[0].allow ?? [])].sort()).toEqual(inherited);
       for (const delegate of COORDINATOR_DELEGATIONS) {

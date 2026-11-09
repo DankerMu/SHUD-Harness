@@ -7,6 +7,7 @@ const { DEFAULT_SHUD_POLICY_GATE_CONTEXT } = core;
 const EXPECTED_TOOL_IDS = {
   coordinator: [
     "task_create",
+    "analysis_create",
     "report_generate",
     "report_validate",
     "report_submit",
