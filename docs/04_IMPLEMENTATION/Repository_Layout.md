@@ -115,7 +115,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 {"type":"code_change","title":"调整已跟踪源码","question_or_goal":"生成绑定当前源码基线的变更证据"}
 ```
 
-`type` 只接受 `science_assist` / `code_change`，`title` 与 `question_or_goal` 必须非空；未知参数拒绝。工作区只取调用会话 cwd，源检出固定为 `repos/SHUD`，不接受路径参数、不代建或修改源仓库。`code_change` 在创建任务目录前验证真实目录、物理 Git 根与完整 40 位小写十六进制 HEAD，将其钉定为 `source_base_commit`；成功返回 `task_id` 与 `status: planned`，卡片初始链接为空。`science_assist` 保持空 pin，完全不访问 `repos/`。
+`type` 只接受 `science_assist` / `code_change` / `sensitivity`，`title` 与 `question_or_goal` 必须非空；未知参数拒绝。工作区只取调用会话 cwd，源检出固定为 `repos/SHUD`，不接受路径参数、不代建或修改源仓库。`code_change` 在创建任务目录前验证真实目录、物理 Git 根与完整 40 位小写十六进制 HEAD，将其钉定为 `source_base_commit`；成功返回 `task_id` 与 `status: planned`，卡片初始链接为空。`science_assist` 与 `sensitivity` 保持空 pin，完全不访问 `repos/`；`sensitivity` 卡初始 `linked_analyses` 为空，plan 只由 `analysis_create` 创建并链接。
 
 修改该独立检出内的已跟踪文件后调用 `change_create`；下例 `task_id` 须替换为实际建卡返回值：
 

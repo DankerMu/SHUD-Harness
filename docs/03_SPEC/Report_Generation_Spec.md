@@ -33,7 +33,7 @@ M5 的实现基线改为 collect 内生产 `runs/<run_id>/metrics.json` 与 nume
 
 M4 的 code_change closure 只按卡片链接读取 ChangeRequest、patch、VerificationCase，并复用既有运行与收集次数子句，按 [code_change closure](../02_ARCHITECTURE/Agent_Architecture.md#7-closure-判据) 六子句检查；VC 的 base/candidate BuildRecord 属于后续确定性事实表读取，不新增 build/pin/thread closure 条件。失败 VC 不阻止报告生成，但必须可见；缺失或不安全证据仍拒绝。`change_ids`、`verification_ids` 按首次出现顺序来自 closure 所用同一新鲜 TaskCard，保留 proposed CR 与 failed VC，不由模型提供；science_assist 报告两者为空。
 
-本页 M5 输入与模板描述是实现前的书面契约；§3 整节记录当前 M4 实现（两类生成谓词、九类品牌引用、17 项 validator），不是 M5 的最终工具面。PLAN 引用、安全读取与 sensitivity 生成接线分别随 #656/#667 交付；validator 第 (16)/(17) 项已随 #658 交付，sensitivity 报告的工具生成路径仍待 #667。
+本页 M5 输入与模板描述是实现前的书面契约；§3 整节记录当前实现（三类生成谓词、九类品牌引用、17 项 validator），不是 M5 的最终工具面。PLAN 引用、安全读取与 sensitivity 生成接线分别随 #656/#667 交付；validator 第 (16)/(17) 项已随 #658 交付；sensitivity 报告经 `report_generate` 先写 `reports/<report_id>.sensitivity.json` 再写报告 JSON（#667）。
 
 ## 3. 生成流程
 
@@ -54,7 +54,7 @@ coordinator 提供叙述参数
 
 工具不另调 LLM、不自行计算科学指标。引用参数中的 `TASK-/STACK-/DATA-/RUN-/JOB-/REPORT-` 及 M4 `CHG-/VC-/BUILD-` 品牌 id 逐一解析；缺失引用返回工具错误，不写 draft、不自动重试，由 coordinator 修正后重新生成。M4 的 VC artifact 哈希复核仅限第 (15) 项，不扩展为通用 artifact registry 或语义审查。
 
-仅 `science_assist` 与 `code_change` 有生成谓词；`engineering` / `ops` 在查询作业或对账前返回含实际类型的错误，允许的状态仍为 planned/running/reporting。九类品牌引用只匹配独立、格式合法的令牌，去重后经规范 readonly 读取校验；嵌入较长标识符的片段、畸形令牌和 DEC 不扩大为引用。缺失的 changes/verifications/builds 根不会因拒绝而创建。
+仅 `science_assist`、`code_change` 与 `sensitivity` 有生成谓词；`engineering` / `ops` 在查询作业或对账前返回含实际类型的错误，允许的状态仍为 planned/running/reporting。九类品牌引用只匹配独立、格式合法的令牌，去重后经规范 readonly 读取校验；嵌入较长标识符的片段、畸形令牌和 DEC 不扩大为引用。缺失的 changes/verifications/builds 根不会因拒绝而创建。
 
 报告 JSON 是提交点，其后 TaskCard/Markdown 失败不回滚已提交对象；下一次针对同报告的工具调用按 [写入与修复契约](../../openspec/specs/evidence-reports/spec.md) 修复。重新生成总是新 report_id，保留旧报告字节与决定历史，不把旧终态改回 draft。
 
