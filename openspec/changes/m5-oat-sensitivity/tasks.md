@@ -81,7 +81,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 - [x] 3.2d 积雪/截留扩展项与残差汇总：ΔS_snow/ΔS_ic（使用 3.2b 的常量）；`water_balance_residual`；`zero_precipitation`/`missing_variable`/`ic_shape_mismatch`/`missing_calib`/`interval_undetermined` 等 null 原因；积雪与截留用手算夹具覆盖。满足 run-metrics「Water balance residual」（依赖 3.2b、3.2c）。
 - [x] 3.3 AnalysisPlan 工作区文件层（`analyses/<id>.json` 排他创建、只读解析、id 绑定）；calib 类别表乘积校验（键缺失或重复即拒绝，越界时点名行 index）；`input_digests` 与乘积校验取自同一次读取。满足 analysis-plans「AnalysisPlan workspace file」与「Calib whitelist and category product check」的校验部分（依赖 2.1、2.5、3.0）。
 - [x] 3.4 sensitivity closure 谓词：恰好一个 plan；作业全部绑定该 plan 且全部终态；有效 run 规则；baseline 必须 succeeded；同一 `stack_id`；metrics `status: ok` 且 sha256 匹配。本刀只新增 sensitivity 谓词，不改 science_assist/code_change。满足 task-cards「sensitivity closure predicate」与「TaskCard workspace file」（依赖 2.2、2.3、3.2a、3.3）。
-- [ ] 3.5 汇总表派生与报告文件层：
+- [x] 3.5 汇总表派生与报告文件层：
   - `SensitivitySummary` 构造：`_pct` 以 baseline 为分母，分母为 0 时给 null；`delta_peak_day` 为差值。
   - 在报告 JSON 提交之前写 `reports/<report_id>.sensitivity.json`；孤立 summary 保留；三类报告文件任一已存在即重分配 report_id。
   - 满足 evidence-reports「Sensitivity summary derivation」「Report write order and repair」与「Report workspace files」的 `.sensitivity.json` 部分（依赖 2.4、3.2a、3.4）。
@@ -400,3 +400,50 @@ Commands: focused AnalysisPlan/product tests plus workspace allocation/publicati
 | Documentation / migration | Selected: API comments and scoped fixture explain selection, failed-cell rules, readonly evidence and downstream non-goals |
 
 Commands: focused new sensitivity closure/purity/files suites plus unchanged task/code-change closure, workspace readonly and metrics-wire suites; pnpm run build; parent actual built four-cell temporary-workspace smoke and discriminating negative cases; pnpm run check; openspec validate m5-oat-sensitivity --strict --no-interactive. Publish complete inputs, outputs, RED/GREEN, snapshot/hash preservation, original failures and review evidence. Only task3.4 closes; #655/#657/#667 and PI acceptance remain separate.
+
+## Issue #655 risk packs and executable evidence
+
+| Pack | Selection and evidence |
+|---|---|
+| Public API / entry | Selected: builder/serializer/reader and canonical report creation, built root smoke and registered type contracts |
+| Config / setup | Not selected: no config, dependency, profile or runtime host changes |
+| File IO / overwrite | Selected: summary no-clobber publication, all three sibling collisions, unsafe roots/targets, digest reads, no orphan rewrite/delete |
+| Schema / units / identity | Selected: exact plan-byte hash, bound plan/task/run/pset/metrics facts, numeric/reason shape, -25%/+2day oracle and zero-day distinction |
+| Auth / secrets | Not selected: no approval/permission change; controlled errors and no raw payload/absolute metadata leakage covered within IO/wire tests |
+| Concurrency / ordering | Selected: summary visible before JSON commit, failure injection and ownership, no new multi-process atomicity claim |
+| Resource / discovery | Selected: shared safe reader and descriptor cleanup, linked-only rendering, no scan/rederive/recompute at repair |
+| Legacy compatibility | Selected: unchanged science/code-change tests/goldens plus fixed-ID/time raw creation bytes, validation/repair byte and mtime preservation, and null-summary no-content-IO evidence below |
+| Error / partial outputs | Selected: no JSON on summary failure, orphan retained on JSON failure, render/repair refusal on missing/tampered summary, nonfinite delta rejection |
+| Release / packaging | Selected: built public API plus existing tools repair smoke; no manifest/dependency changes |
+| Documentation / migration | Selected: scoped fixture/API comments explain immutable companion, arithmetic/reasons, error boundaries and deferred rendering; no core object count change |
+
+Required arithmetic/data cases: baseline200/day44 vs150/day46 -> -25/+2; zero runoff denominator -> null/zero_baseline; baseline day0 vs3 ->3; null operand ->metric_null; baseline_row and failed run_failed; preserved cvode19; superseded jobs with/without records and exhausted fallback; two relocations/report ids from identical plan/metrics bytes give identical summary bytes. Commands: focused new summary/publication/render tests plus legacy report/closure/reader suites, pnpm run build, actual built records + existing repair(b) smoke, pnpm run check, openspec validate m5-oat-sensitivity --strict --no-interactive. Only task3.5 closes; no #657/#658/#667 work or shared-change archive.
+
+### Issue #655 executable oracle details
+
+The selected packs above map to this matrix; structural wire assertions and actual built output establish no ranking/elasticity/mechanism fields or computations, not new permanent prose-wording tests.
+
+| Oracle | Required observation |
+|---|---|
+| Legacy JSON bytes | Against base3340294f2fd75bb1f50e708de0970c23443443dd, fixed Date/id entropy creates science/code-change raw JSON with identical bytes, including analysis_ids:[] and sensitivity_summary:null; parsed equality is insufficient |
+| Legacy render/repair | Existing 4035-byte science golden SHA2564620ac33c381c2ece739b5bb7f863aead720bd54ef505680857224a33bf54827 and 8880-byte code-change golden SHA2565929fd0762c514fa9631c0454e5b1fcef2eeeb28cfbd879b2fa4040a12ce8a02 remain unchanged; legacy validation and repair preserve prior byte/mtime semantics and do no summary-content IO |
+| Single selection source | Builder receives one successful closure result and exact plan bytes, no independent job/record collection or callback; #654 selection tests stay unchanged; failed-then-success selection yields success row and only superseded failure |
+| Superseded metadata | Preserve closure/card order rather than sorting; cover collected/failed/cancelled/collect_exhausted, absent-record null exit_class and present-record class, using retained validated closure evidence |
+| Relative arithmetic | Independent 200/44 to150/46 yields -25/+2; include non-integral shortest-roundtrip output; separately zero each percentage baseline and preserve other computable deltas |
+| Day/null precedence | Baseline day0 to3 gives3 with no zero_baseline day reason; null on either side of each delta yields metric_null, including null-over-zero; baseline_row wins even for null/zero baseline metrics |
+| Metric versus delta reasons | Successful metric nulls preserve their loaded reasons and residual verdict; metric_reasons never substitutes for the exactly three delta_reasons fields |
+| Failed row | All four metric slots, residual verdict and three deltas null; run_failed reasons, cvode exit19 and identities retained; no succeeded inputs entry; never metric_null for failed-row deltas |
+| Nonfinite arithmetic | Valid finite operands whose percentage/day result overflows reject before publication with controlled error; no silently serialized null and no new fallback reason |
+| Independent wire oracle | Author exact expected JSON bytes/key order/digest independently of serializer; include all top-level, row, superseded and input fields and core method version, without index/ranking/elasticity/interpretation fields |
+| Non-first baseline | Plan order still owns rows/inputs, flagged baseline owns arithmetic; no first-row assumption |
+| Byte identity | Different report ids/workspace paths with identical plan/metrics bytes produce identical summary; no generated report id/time/host/input_dir/workspace metadata; whitespace-only plan variant changes exact plan_sha256 and summary, changed bound metrics changes inputs digest |
+| Wire/identity negatives | Exact plan bytes versus closure mismatch, malformed shape/version, task/analysis/run/pset mismatch and invalid null/reason pairs reject with controlled stage/file, no raw payload echo or writes |
+| Publication order | Observe exclusive summary before JSON commit; report reference has exact reports/<id>.sensitivity.json and independently hashed bytes |
+| Failure/orphan ownership | Injected summary-publication fault leaves no report JSON and yields a controlled sensitivity_summary-step error, with no fallback publication/overwrite; pre-commit JSON fault after summary leaves JSON and Markdown absent (no committed report references the orphan), preserves orphan bytes/mtimeNs, and next allocation uses a fresh id without reuse/overwrite |
+| Three-sibling collisions | Existing JSON/Markdown cases plus summary-only collision for sensitivity and legacy allocations; every old sibling keeps bytes/mtimeNs |
+| Renderer freshness | Intact render, tamper/delete/symlink rejection naming file, then exact-byte restoration succeeds; report JSON unchanged, absent stays absent, tampered bytes/targets preserved, no cache/rederive |
+| Canonical validator | Unreadable summary yields existing 15-check render_unavailable result, not new16/17 checks and not renderer-style thrown root error; report JSON bytes/mtimeNs remain unchanged and the exact missing/tampered/unsafe summary state is not repaired |
+| Repair(b) | Delete/stale Markdown to actually trigger existing repairReportEntry: intact summary publishes canonical Markdown; missing/digest-mismatch/unsafe summary returns render+report_id with no Markdown publication, plan/metrics discovery, rederive or summary rewrite; both success/failure preserve report JSON bytes/mtimeNs, and failure preserves the exact missing/tampered/unsafe summary state |
+| State transitions | Existing reviewed/accepted publication paths leave summary bytes/mtimeNs unchanged; no tool implementation changes |
+
+Before implementation, the parent captured raw legacy creation bytes with the built base and fixed time/entropy in local issue-655 evidence; those consumed oracle bytes are immutable and will be published with the program/results. Report-only tooling proof uses existing built repair functions from a throwaway program, not new tools source/tests or model/PI calls.

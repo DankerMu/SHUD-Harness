@@ -21,6 +21,7 @@ import {
 import { ReportRenderError } from "./report-render-error.ts";
 import { reportWatermark } from "./report-watermark.ts";
 import { regularTarget } from "./workspace-paths.ts";
+import { readReferencedSensitivitySummary } from "./sensitivity-summary-file.ts";
 
 type Metadata = string | number | bigint | boolean | null;
 const TEMPLATE_PATH = fileURLToPath(new URL("../templates/evidence_report.md", import.meta.url));
@@ -297,8 +298,9 @@ function projectTemplate(fields: Readonly<Record<string, string>>): ReportDocume
 /**
  * Synchronously project fresh, schema-validated same-workspace evidence into Markdown.
  * Routing and embedded identities are checked; arrays keep their declared order. Only
- * cited report/stack/provenance/run/change/verification/build JSON and the module-relative
- * packaged template are read. No TaskCard, patches, logs, binaries, output artifacts,
+ * cited report/stack/provenance/run/change/verification/build JSON, its immutable
+ * sensitivity companion when referenced, and the module-relative packaged template are read.
+ * No TaskCard, patches, logs, binaries, output artifacts,
  * raw inputs, clock, model calls or Markdown reads occur. Build pairs stay in VC order;
  * StackLock build ids are displayed without discovering additional build records.
  * Source records/status/timestamps are unchanged; missing managed directories are never
@@ -314,6 +316,7 @@ export function renderReport(cwd: string, reportId: unknown): string {
   const data = report.data_ids.map((dataId) => readReportInput(cwd, "data", dataId));
   const runs = report.linked_runs.map((runId) => readReportRun(cwd, runId));
   const codeChangeFacts = readReportCodeChangeFacts(cwd, report);
+  readReferencedSensitivitySummary(cwd, report);
   return renderReportDocument(report, stacks, data, runs, codeChangeFacts, watermark).markdown;
 }
 

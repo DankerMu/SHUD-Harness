@@ -128,7 +128,7 @@ function validateBlock(
   }
 }
 
-function validateRunMetrics(value: unknown): asserts value is RunMetrics {
+export function validateRunMetrics(value: unknown): asserts value is RunMetrics {
   const document = strictObject(value, [
     "method_version",
     "status",

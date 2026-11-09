@@ -4,7 +4,7 @@
  * Eight-kind reads always bind change/verification/build/analysis identities; readonly also
  * binds legacy identities without mkdir. Build reads never create a published build directory.
  * Safe Markdown facades share managed-path guards and the canonical atomic byte writer;
- * report allocation protects both siblings. Stack capture exclusively creates or reuses locks.
+ * report allocation protects JSON, Markdown and immutable summary siblings. Stack capture reuses locks.
  * Generic overwrite remains limited to task/data/report.
  * Change/verification/analysis first publication and companion patches use exclusive link commits;
  * only existing valid ChangeRequests can be rewritten through the atomic replacement writer.
@@ -34,6 +34,13 @@
  * Run metrics computation exposes read-only flow, health and six-store water-budget
  * diagnostics. Serialization owns the strict canonical wire format; metrics.json reads
  * bind the caller's digest before parsing. These APIs never write an artifact.
+ * Sensitivity summaries consume one successful closure and exact plan bytes, retaining
+ * failed/superseded facts without reselection. Their records-owned wire format contains
+ * only relative deltas and provenance; overflow rejects rather than serializing as null.
+ * Referenced companions are safely reread and digest/identity checked for each render
+ * and validator projection, never rederived or rewritten. Summary Markdown is deferred.
+ * Report creation owns companion references and exclusively publishes summary bytes before
+ * atomic report JSON. A later JSON failure retains the immutable orphan for collision avoidance.
  * Provenance inventories prepared input bytes before allocation. Task transition,
  * reconciliation and closure helpers are pure; callers own evidence reads, approval,
  * report augmentation and persistence. Reconciliation identity signals no write.
@@ -63,6 +70,20 @@ export { serializeRunMetrics, readRunMetrics } from "./run-metrics-wire.ts";
 export type { RunMetrics, RunMetricsHealth, MetricsInput } from "./run-metrics-wire.ts";
 export { ShudInputError } from "./shud-input-file.ts";
 export type { ShudInputStage } from "./shud-input-file.ts";
+export { buildSensitivitySummary } from "./sensitivity-summary.ts";
+export {
+  serializeSensitivitySummary,
+  parseSensitivitySummary,
+} from "./sensitivity-summary-wire.ts";
+export { readReferencedSensitivitySummary } from "./sensitivity-summary-file.ts";
+export { SensitivitySummaryError } from "./sensitivity-summary-types.ts";
+export type {
+  SensitivitySummary,
+  SensitivitySummaryRow,
+  SummaryMetric,
+  SummaryDelta,
+  SummaryDeltaReason,
+} from "./sensitivity-summary-types.ts";
 export { readShudTextInput, parseShudTextInput } from "./shud-text-input.ts";
 export { checkCalibProducts, CalibProductError } from "./calib-products.ts";
 export type {
@@ -88,6 +109,7 @@ export type {
   SensitivityClosureResult,
   SensitivityRunIdentity,
   SensitivitySelection,
+  SensitivitySupersededRun,
 } from "./sensitivity-closure-types.ts";
 export type {
   ClosureRunJob,
@@ -132,6 +154,7 @@ export {
   WorkspaceRecordError,
 } from "./workspace-records.ts";
 export type {
+  EvidenceReportCreationInput,
   WorkspaceRecordMap,
   WorkspaceRecordKind,
   MutableWorkspaceRecordKind,

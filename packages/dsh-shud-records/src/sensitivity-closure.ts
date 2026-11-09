@@ -229,6 +229,13 @@ export function deriveSensitivityClosure(
   const selectedJobs = new Set(effective.map((candidate) => candidate.job_id));
   const superseded = candidates
     .filter((candidate) => !selectedJobs.has(candidate.job_id))
-    .map(({ job_id, run_id, parameter_set_id }) => ({ job_id, run_id, parameter_set_id }));
+    .map(({ job_id, run_id, parameter_set_id, job, record, attempts }) => ({
+      job_id,
+      run_id,
+      parameter_set_id,
+      job,
+      record: record ?? null,
+      collect_error_attempts: attempts,
+    }));
   return { ok: true, failures: [], analysis_plan_id, plan, selected, superseded };
 }
