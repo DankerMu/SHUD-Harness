@@ -13,10 +13,12 @@ test("shud_run advertises a closed model contract with optional task, build and 
       required: ["input_dir"],
     });
     expect(Object.keys(schema?.parameters?.properties ?? {}).sort()).toEqual([
+      "analysis_plan_id",
       "build_id",
       "end_days",
       "input_dir",
       "label",
+      "parameter_set_id",
       "project",
       "task_id",
       "threads",

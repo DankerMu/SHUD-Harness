@@ -70,10 +70,12 @@ test("planned and second running task submissions preserve metadata and sorted l
     const schema = h.runtime.schemas(h.agent).find((tool) => tool.name === "shud_run");
     expect(schema?.parameters).toMatchObject({ type: "object", additionalProperties: false });
     expect(Object.keys(schema?.parameters?.properties ?? {}).sort()).toEqual([
+      "analysis_plan_id",
       "build_id",
       "end_days",
       "input_dir",
       "label",
+      "parameter_set_id",
       "project",
       "task_id",
       "threads",

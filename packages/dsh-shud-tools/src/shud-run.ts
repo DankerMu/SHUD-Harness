@@ -17,6 +17,7 @@ import {
   writeWorkspaceRecord,
 } from "@shud-harness/dsh-shud-records";
 import { effectiveProject } from "./project-default.ts";
+import { checkCardBinding, planArguments, resolvePlan } from "./shud-run-plan.ts";
 import { strictTool } from "./strict-tool.ts";
 
 const parameters = {
@@ -45,6 +46,19 @@ const parameters = {
   threads: {
     type: "integer",
     description: "Optional positive safe integer thread count for this run.",
+  },
+  analysis_plan_id: {
+    type: "string",
+    description:
+      "Optional PLAN-YYYYMMDDTHHMMSS-xxxx id of the sensitivity plan linked to task_id; requires " +
+      "parameter_set_id and task_id. input_dir, project, end_days and threads must match the plan; " +
+      "omitted end_days and threads take the plan values.",
+  },
+  parameter_set_id: {
+    type: "string",
+    description:
+      "Optional PSET-1..PSET-5 parameter set of analysis_plan_id; its calibration values come " +
+      "only from the plan.",
   },
 } as const;
 
@@ -112,6 +126,7 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
         }
         threads = parsed.data;
       }
+      const binding = planArguments(args, taskId);
       const session = exec.agent?.session;
       const cwd = session?.header.cwd;
       const owner = session?.id;
@@ -129,10 +144,20 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
         );
       }
       const project = effectiveProject("shud_run", args.input_dir, args.project);
+      // Plan checks precede the task query, card reconciliation and every write.
+      const plan =
+        binding &&
+        resolvePlan(cwd, binding, {
+          inputDir: args.input_dir,
+          project,
+          endDays: args.end_days,
+          threads,
+        });
       if (taskId !== undefined) {
         const taskJobs = await jobs.listRunJobsByTask(taskId);
         // Read only after the query: this synchronous boundary publishes an independent repair.
         const card = readRunnableTask(cwd, taskId);
+        checkCardBinding(card, binding);
         const reconciled = reconcileTaskCard(card, taskJobs);
         if (reconciled !== card) writeWorkspaceRecord(cwd, "task", reconciled);
       }
@@ -148,6 +173,7 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
           ...(threads === undefined ? {} : { threads }),
           owner_session: owner,
           llm: { response_model: model, response_model_source: "configured" },
+          ...plan,
         },
         produceDetachedShud,
       );

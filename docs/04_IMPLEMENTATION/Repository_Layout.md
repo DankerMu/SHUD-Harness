@@ -77,7 +77,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 {"input_dir":"input/ccw","end_days":30,"label":"ccw END=30"}
 ```
 
-当前接受 `input_dir`、可选 `project`、`end_days`、`label`、品牌 `task_id`、品牌 `build_id` 与正安全整数 `threads`；未知参数（包括 `workdir`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
+当前接受 `input_dir`、可选 `project`、`end_days`、`label`、品牌 `task_id`、品牌 `build_id`、正安全整数 `threads`，以及成对的品牌 `analysis_plan_id` 与 `parameter_set_id`（须同时带 `task_id`；绑定 sensitivity 卡已链接 plan 的一个参数集，覆盖值、输入摘要、窗口与线程只取自 plan）；未知参数（包括 `workdir`、`calib_overrides`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
 
 **M4 扩参契约（#534 运行时与 #539 shud_run 工具参数均已交付）**：新增可选品牌 `build_id` 与正整数 `threads`；零、负数、小数、字符串或非法品牌在文件系统操作前拒绝。未知参数的负例保留 workdir，不再以合法整数 threads 作未知键。注册表解析本工作区 `builds/<build_id>/build-record.json`，校验普通可执行二进制及 SHA256，复制到 `runs/<run_id>/bin/shud` 并执行副本；RunJob/RunRecord 原样记录 build_id、threads、binary_sha256，StackLock 记录构建来源。threads 提供时设置 OMP_NUM_THREADS/SHUD_RHS_THREADS，缺省不新增环境变量；无 build 沿用配置 shudBin。M4 对所有提交新增 tsd.forc 解析与外部 forcing 只读哈希，缺失或解析失败拒绝，不把无 build 路径称为完全无行为变化。详见 [shud_run arguments](../../openspec/specs/shud-run-tools/spec.md#requirement-shud_run-arguments)。
 
