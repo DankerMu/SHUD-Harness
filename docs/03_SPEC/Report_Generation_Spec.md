@@ -11,7 +11,7 @@ canonical_for: [language-guard, reviewer-checklist]
 
 M3 设计依据见 [m3-mvp-1 design D7/D8](../../openspec/changes/archive/2026-11-01-m3-mvp-1/design.md#d7-evidencereport-生成模板与水印)，当前契约以 [evidence-reports](../../openspec/specs/evidence-reports/spec.md) 为准。`dsh-shud-tools` 已挂载 `report_generate`、`report_validate` 与 PI 终态工具 `report_submit` / `report_decide`；生成与校验不代行终态审批。已挂载工具用法见 [Repository Layout](../04_IMPLEMENTATION/Repository_Layout.md)。
 
-M4 实现契约为 [evidence-reports](../../openspec/specs/evidence-reports/spec.md)。`report_generate` 已接入规范 code_change closure，`report_validate` 已执行下列 15 项检查；自动工程审批不等于 PI 验收，人工回放与限制见 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M3 science_assist 的报告字节、七态水印与审批状态机保持不变。
+M4 实现契约为 [evidence-reports](../../openspec/specs/evidence-reports/spec.md)。`report_generate` 已接入规范 code_change closure，`report_validate` 已执行下列 17 项检查；自动工程审批不等于 PI 验收，人工回放与限制见 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M3 science_assist 的报告字节、七态水印与审批状态机保持不变。
 
 ## 1. 报告定位
 
@@ -33,7 +33,7 @@ M5 的实现基线改为 collect 内生产 `runs/<run_id>/metrics.json` 与 nume
 
 M4 的 code_change closure 只按卡片链接读取 ChangeRequest、patch、VerificationCase，并复用既有运行与收集次数子句，按 [code_change closure](../02_ARCHITECTURE/Agent_Architecture.md#7-closure-判据) 六子句检查；VC 的 base/candidate BuildRecord 属于后续确定性事实表读取，不新增 build/pin/thread closure 条件。失败 VC 不阻止报告生成，但必须可见；缺失或不安全证据仍拒绝。`change_ids`、`verification_ids` 按首次出现顺序来自 closure 所用同一新鲜 TaskCard，保留 proposed CR 与 failed VC，不由模型提供；science_assist 报告两者为空。
 
-本页 M5 输入与模板描述是实现前的书面契约；§3 整节记录当前 M4 实现（两类生成谓词、九类品牌引用、15 项 validator），不是 M5 的最终工具面。PLAN 引用、安全读取与 sensitivity 生成接线分别随 #656/#667 交付，新增 validator 检查随 #658 同步；本次文档切片不提前改写既有 15 项计数或宣称这些代码已实现。
+本页 M5 输入与模板描述是实现前的书面契约；§3 整节记录当前 M4 实现（两类生成谓词、九类品牌引用、17 项 validator），不是 M5 的最终工具面。PLAN 引用、安全读取与 sensitivity 生成接线分别随 #656/#667 交付；validator 第 (16)/(17) 项已随 #658 交付，sensitivity 报告的工具生成路径仍待 #667。
 
 ## 3. 生成流程
 
@@ -47,7 +47,7 @@ coordinator 提供叙述参数
 → 写 reports/<report_id>.json（draft）
 → TaskCard reporting / linked_reports 回写
 → 读取确定性事实表并渲染同名 .md
-→ report_validate 的 15 项确定性检查
+→ report_validate 的 17 项确定性检查
 → reviewed
 → report_submit / report_decide 经宿主审批
 ```
@@ -62,11 +62,11 @@ coordinator 提供叙述参数
 
 `report_validate` 先执行卡片与 Markdown 首部修复，再检查新鲜报告是否为 draft。修复独立提交，后续前置条件或 validator 失败不撤销修复、也不改报告 JSON。卡片修复只使用既有合法转换，不重开 done/cancelled，不以较早已链接报告移动卡片；未链接终态报告先在内存中完成全部转换，再一次发布最终卡片。正确水印下的正文差异不触发修复。
 
-M4 校验结果为 `{ report_id, status, ok, checks }`，成功与检查失败都完整返回规范 15 项；检查失败保持 draft，而请求根、前置条件、入口修复或结果发布失败仍为工具错误。VC artifact 的读取、摘要或描述符关闭失败属于第 (15) 项失败，不中断其余检查。通过后仅提交 reviewed JSON 并更新 Markdown，不产生 PI 决定。raw-guard 在执行前保护生成的 reports 命名空间与本任务目标，以及校验的确切 JSON/Markdown 对和关联任务修复目标，写保护不提供审批绕过。
+M4 校验结果为 `{ report_id, status, ok, checks }`，成功与检查失败都完整返回规范 17 项；检查失败保持 draft，而请求根、前置条件、入口修复或结果发布失败仍为工具错误。VC artifact 的读取、摘要或描述符关闭失败属于第 (15) 项失败，不中断其余检查。通过后仅提交 reviewed JSON 并更新 Markdown，不产生 PI 决定。raw-guard 在执行前保护生成的 reports 命名空间与本任务目标，以及校验的确切 JSON/Markdown 对和关联任务修复目标，写保护不提供审批绕过。
 
 规范 `renderReport` / `validateReport` 及工具的入口 Markdown 修复、最终渲染共用无创建副作用的引用读取：报告、StackLock、DataProvenance 的路径安全、schema 与文件内 id 绑定由共享 readonly 工作区读取负责。缺失的 `reports` / `stacks` / `provenance` 目录保持不存在，包括配置为 raw 的引用根；不通过扩大 raw 拒绝范围或工具侧重复解析来掩盖读取副作用。普通三参数 `readWorkspaceRecord` 的既有创建目录行为不变。
 
-校验依据是当前 JSON/引用记录的规范渲染，不信任已有 Markdown 正文。第 (8)、(14) 项只查看模板拥有的 §7/§5 区间，模型文本中的伪造编号标题不能补齐证据。其它 stack/data/run/change/build 引用或渲染失败时仍返回全部 15 项，并独立检查每个可读 VC 的 artifact；已有成功事实读取可复用，不通过失败的上游投影跳过 artifact 检查。相对于成功入口修复后的基准，检查失败不再写报告、卡片或证据。
+校验依据是当前 JSON/引用记录的规范渲染，不信任已有 Markdown 正文。第 (8)、(14) 项只查看模板拥有的 §7/§5 区间，模型文本中的伪造编号标题不能补齐证据。其它 stack/data/run/change/build 引用或渲染失败时仍返回全部 17 项，并独立检查每个可读 VC 的 artifact；已有成功事实读取可复用，不通过失败的上游投影跳过 artifact 检查。相对于成功入口修复后的基准，检查失败不再写报告、卡片或证据。
 
 ## 4. 报告模板
 
@@ -274,27 +274,29 @@ Markdown 由 JSON 及其引用记录确定性渲染；PI 通过 dsh 对话提供
 
 ## 8. Reviewer 检查清单
 
-`report_validate` 是 draft → reviewed 唯一入口；每次列出全部 15 项结果，任一失败保持 draft，不消耗额外 LLM 调用。确定性 validator（D）：
+`report_validate` 是 draft → reviewed 唯一入口；每次列出全部 17 项结果，任一失败保持 draft，不消耗额外 LLM 调用。确定性 validator（D）：
 
 1. StackLock 引用存在且 id 一致；
 2. DataProvenance 引用存在；
 3. 每个 linked_run 有 RunRecord；
-4. 指标来自确定性 artifact（M3 无指标，恒真并明确标注）；
+4. 指标来自确定性 artifact（由构造保证：指标只由事实表从 sha256 锁定的 `metrics.json` 与 `.sensitivity.json` 渲染，恒为通过并标注）；
 5. limitations 非空；
 6. pi_questions 非空；
 7. 模型撰写节无十条禁止用语，命中指出短语与字段；
 8. 失败运行与每个 failed VerificationCase 在“风险和失败项”列出；失败运行受生成 closure 限制，失败 VC 不被隐藏；
 9. 每个 dirty 仓库在 Markdown 有标注；
-10. 关键指标有 source_ref（M3 无指标，恒真并明确标注）；
-11. 图表观察有 artifact ref（M3 无图表，恒真并明确标注）；
+10. 关键指标有 source_ref（由构造保证：每行带 source_ref，sha256 不符即渲染失败，恒为通过并标注）；
+11. 图表观察有 artifact ref（报告无图表，恒真项并明确标注）；
 12. 四句 GOVERNANCE_INVARIANTS 在渲染 Markdown 中逐字出现；
 13. 整份 Markdown 不匹配 REPORT_SECRET_PATTERN；失败只指出所在节，不回显密钥匹配文本。
 14. `change_ids` 非空时，Markdown §5 逐字含 code_change 固定句；为空时通过并标注不适用；
 15. 按工作区文件安全规则读取每个 `verification_ids` 引用的 VC，校验 schema 及文件内 vc_id 与引用相等；其两个 artifact_refs 的每级路径组件与目标经 lstat 验证，不跟随链接，目标必须是会话 cwd 物理位置下的普通文件。按原 POSIX 路径组件遍历，不能把 `file/.` 或 `file/` 规范化为普通文件。使用 no-follow/nonblocking 打开、描述符身份校验及有界缓冲 SHA256；第一、第二项分别等于 observed.base_sha256/candidate_sha256。缺失、不安全、不可读、身份变化、摘要不符或关闭失败均使本项失败；空 verification_ids 时通过并标注不适用。
+16. `sensitivity_summary` 非 null 时，渲染 Markdown 逐字含覆盖声明（只由 `.sensitivity.json` 的 `project`、`end_days` 与 `rows` 键和倍率经 core 模板实例化，不读 `analyses/`）与“参数范围为 agent 建议值，未经 PI 确认”；缺任一句失败并以 `sensitivity_statement_missing` 指出 `coverage` 或 `parameter_range`；`.sensitivity.json` 不可用而无法渲染时按渲染不可用失败；为 null 时通过并标注不适用。
+17. `sensitivity_summary` 非 null 时，其 `path` 按工作区文件安全规则解析为普通文件 `reports/<report_id>.sensitivity.json` 且字节 sha256 等于引用值；缺失、不安全、不可读或不等时失败，诊断 `sensitivity_summary_invalid` 带该路径与 stage。该文件每次校验只读取一次，结果同时决定本项与第 (16) 项的渲染输入；sha256 相符但 JSON/schema 无效时本项通过、第 (16) 项按渲染不可用失败；为 null 时通过并标注不适用。
 
 第 (15) 项的受控诊断包含 `vc_id`、零起始 `artifact_index`、相对 `path` 与失败 `stage`；路径中所有 `REPORT_SECRET_PATTERN` 命中替换为 `[REDACTED]`，普通相对路径保持原文。不返回解析后的绝对路径、原始系统异常或其 cause；多个路径脱敏后相同时仍由 VC 与下标区分。打开成功的描述符只尝试关闭一次，关闭失败不假定资源已释放、不盲目重试；路径与身份复查不构成针对外部并发写入的原子快照。第 (13) 项继续只指出节号，不回显匹配值。
 
-第 (4)、(10)、(11) 项在 M3/M4 无指标/图表产物时恒真并明确标注，不伪造 artifact。不按路径含 tmp 或位于 `$TMPDIR` 拒绝报告：scratch 工作区与运行目录是合法事实来源。语义判断（L）仍由 PI 审阅，M4 reviewer 只补工程判定字段，不执行下列三项 LLM 语义判断：
+第 (4)、(10) 项由构造保证、第 (11) 项为恒真项，均恒为通过并在结果中以 `vacuous` 标注，不伪造 artifact。不按路径含 tmp 或位于 `$TMPDIR` 拒绝报告：scratch 工作区与运行目录是合法事实来源。语义判断（L）仍由 PI 审阅，M4 reviewer 只补工程判定字段，不执行下列三项 LLM 语义判断：
 
 - calibration 是否被换述为结构验证；
 - PI comment 是否被误当科学事实；

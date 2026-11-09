@@ -38,7 +38,9 @@
  * failed/superseded facts without reselection. Their records-owned wire format contains
  * only relative deltas and provenance; overflow rejects rather than serializing as null.
  * Referenced companions are safely reread and digest/identity checked for each render
- * and validator projection, never rederived or rewritten. Summary Markdown is deferred.
+ * and validator projection, never rederived or rewritten. Sensitivity reports render its rows
+ * verbatim after the per-run metrics and list failed/superseded runs in job_id order; core
+ * wording alone instantiates the coverage, agent-range and failed-cell limitations.
  * Report creation owns companion references and exclusively publishes summary bytes before
  * atomic report JSON. A later JSON failure retains the immutable orphan for collision avoidance.
  * Provenance inventories prepared input bytes before allocation. Task transition,
@@ -47,7 +49,7 @@
  * code_change closure requires explicit synchronous object readers and a preloaded task-job
  * snapshot with ledger counts. Every linked object is schema/identity checked; valid failed
  * verification is reportable evidence, not a veto, and closure neither approves nor writes.
- * Report rendering and fifteen-clause validation freshly read cited evidence without
+ * Report rendering and seventeen-clause validation freshly read cited evidence without
  * publication. Validation hashes VC artifacts and returns controlled facts, not scientific
  * or PI approval; artifact paths redact secrets, root errors omit paths and raw causes.
  * The watermark stale predicate is pure.
@@ -77,6 +79,8 @@ export {
 } from "./sensitivity-summary-wire.ts";
 export { readReferencedSensitivitySummary } from "./sensitivity-summary-file.ts";
 export { SensitivitySummaryError } from "./sensitivity-summary-types.ts";
+export { deriveSensitivityLimitations } from "./sensitivity-limitations.ts";
+export type { SensitivityLimitations } from "./sensitivity-limitations.ts";
 export type {
   SensitivitySummary,
   SensitivitySummaryRow,

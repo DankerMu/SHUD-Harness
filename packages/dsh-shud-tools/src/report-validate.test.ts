@@ -8,6 +8,7 @@ import {
 } from "@shud-harness/dsh-shud-records";
 import { CHECK_SHAPE, SECRET } from "../../dsh-shud-records/src/report-validation-test-harness.ts";
 import { installUnsafe } from "../../dsh-shud-records/src/test-harness.ts";
+import { createReportValidateTool } from "./report-validate.ts";
 import {
   OTHER_TASK,
   cardPath,
@@ -30,7 +31,13 @@ import {
   terminalReport,
 } from "./report-workflow/test-harness.ts";
 
-test("validation returns the exact fifteen canonical checks and publishes reviewed JSON then canonical Markdown", async () => {
+test("model-visible description names the seventeen canonical checks", () => {
+  const { description } = createReportValidateTool();
+  expect(description).toContain("seventeen canonical checks");
+  expect(description).not.toMatch(/fifteen/iu);
+});
+
+test("validation returns the exact seventeen canonical checks and publishes reviewed JSON then canonical Markdown", async () => {
   const h = await reportHarness();
   try {
     const { run } = await seedEvidence(h);

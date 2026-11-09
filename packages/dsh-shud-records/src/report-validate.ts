@@ -40,10 +40,12 @@ import {
 import { hashDescriptor } from "./hash-descriptor.ts";
 import { regularTarget } from "./workspace-paths.ts";
 import { readReferencedSensitivitySummary } from "./sensitivity-summary-file.ts";
+import { deriveSensitivityLimitations } from "./sensitivity-limitations.ts";
+import type { SensitivitySummary } from "./sensitivity-summary-types.ts";
 
 export type ReportValidationStage = ReportRenderStage;
 export type ReportValidationCheckId =
-  1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
+  1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17;
 
 type ReferenceFailure = {
   readonly code: "reference_unavailable";
@@ -86,6 +88,15 @@ export type ReportValidationDetail =
       readonly invariant: (typeof GOVERNANCE_INVARIANTS)[number];
     }
   | { readonly code: "secret_detected"; readonly section: ReportSectionId }
+  | {
+      readonly code: "sensitivity_statement_missing";
+      readonly statement: "coverage" | "parameter_range";
+    }
+  | {
+      readonly code: "sensitivity_summary_invalid";
+      readonly path: string;
+      readonly stage: ReportValidationStage;
+    }
   | { readonly code: "render_unavailable"; readonly stage: ReportValidationStage };
 
 export interface ReportValidationCheck<
@@ -115,6 +126,8 @@ export interface ReportValidationResult {
     ReportValidationCheck<13>,
     ReportValidationCheck<14>,
     ReportValidationCheck<15>,
+    ReportValidationCheck<16>,
+    ReportValidationCheck<17>,
   ];
 }
 
@@ -181,6 +194,22 @@ function failedVerificationDetails(
   return verifications
     .filter((record) => record.status === "failed" && !risks.includes(record.vc_id))
     .map((record) => ({ code: "failed_verification_missing", vc_id: record.vc_id }));
+}
+
+/** Coverage (from the companion only, never analyses/) and agent-range sentences, verbatim. */
+function statementDetails(
+  document: ReportDocument,
+  summary: SensitivitySummary,
+): ReportValidationDetail[] {
+  const [coverage, parameterRange] = deriveSensitivityLimitations(summary).leading;
+  return (
+    [
+      ["coverage", coverage],
+      ["parameter_range", parameterRange],
+    ] as const
+  )
+    .filter(([, sentence]) => !document.markdown.includes(sentence))
+    .map(([statement]) => ({ code: "sensitivity_statement_missing", statement }));
 }
 
 function sameIdentity(left: Stats, right: Stats): boolean {
@@ -353,8 +382,11 @@ function secretDetails(document: ReportDocument): ReportValidationDetail[] {
 /**
  * Validate fresh same-workspace report evidence without publishing or changing state.
  * Root/routing errors throw a stage-only error; every schema-valid root receives all
- * fifteen ordered checks even if references or the canonical projection fail. Checks
- * 4/10/11 are M3-vacuous; 14/15 are inapplicable without their respective references.
+ * seventeen ordered checks even if references or the canonical projection fail. Checks
+ * 4/10 are vacuous because metrics are guaranteed by construction (digest-bound facts with
+ * source refs), 11 is always true (no figures); 14-17 are inapplicable without their
+ * references. The sensitivity companion is read once, independently of other references:
+ * that single outcome decides 17 (file/digest/identity) and feeds the projection for 16.
  * Existing Markdown and logs are not read; VC artifacts are hashed without writes.
  * This is enumerated evidence/wording lint, not closure or PI semantic approval.
  * All report/reference reads are non-creating; missing managed directories remain absent.
@@ -385,6 +417,13 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
     (runId) => readReportRun(cwd, runId),
     (runId, stage) => ({ code: "reference_unavailable", kind: "run", id: runId, stage }),
   );
+  let summary: SensitivitySummary | null = null;
+  let summaryStage: ReportValidationStage | undefined;
+  try {
+    summary = readReferencedSensitivitySummary(cwd, report);
+  } catch (error) {
+    summaryStage = controlledStage(error);
+  }
   const firstFailure = stacks.failures[0] ?? data.failures[0] ?? runs.failures[0];
   let renderStage = firstFailure?.stage;
   let document: ReportDocument | undefined;
@@ -393,15 +432,18 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
     try {
       const codeChangeFacts = readReportCodeChangeFacts(cwd, report);
       verifications = codeChangeFacts.verifications.map(({ record }) => record);
-      readReferencedSensitivitySummary(cwd, report);
-      document = renderReportDocument(
-        report,
-        stacks.values,
-        data.values,
-        runs.values,
-        codeChangeFacts,
-        readReportMetricFacts(cwd, runs.values),
-      );
+      if (summaryStage === undefined) {
+        document = renderReportDocument(
+          report,
+          stacks.values,
+          data.values,
+          runs.values,
+          codeChangeFacts,
+          readReportMetricFacts(cwd, runs.values),
+          undefined,
+          summary,
+        );
+      } else renderStage = summaryStage;
     } catch (error) {
       renderStage = controlledStage(error);
     }
@@ -469,6 +511,32 @@ export function validateReport(cwd: string, reportId: unknown): ReportValidation
       15,
       [...verificationEvidence.failures, ...artifactDetails(cwd, verificationEvidence.values)],
       report.verification_ids.length === 0,
+    ),
+    clause(
+      16,
+      report.sensitivity_summary === null
+        ? []
+        : document === undefined || summary === null
+          ? unavailable
+          : statementDetails(document, summary),
+      report.sensitivity_summary === null,
+    ),
+    clause(
+      17,
+      // Digest-matching parse/schema failures are readable intact files; they fail 16 only.
+      report.sensitivity_summary === null ||
+        summaryStage === undefined ||
+        summaryStage === "parse" ||
+        summaryStage === "schema"
+        ? []
+        : [
+            {
+              code: "sensitivity_summary_invalid",
+              path: report.sensitivity_summary.path,
+              stage: summaryStage,
+            },
+          ],
+      report.sensitivity_summary === null,
     ),
   ];
   return { ok: checks.every((check) => check.pass), checks };

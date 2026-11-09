@@ -55,6 +55,12 @@ beforeEach(() => {
     linked_runs: runs.map((run) => run.run_id),
     analysis_ids: [summary.analysis_plan_id],
     sensitivity_summary: { path: relative, sha256: EXPECTED_SUMMARY_SHA256 },
+    // Literal kinds 1/2 for this companion so the intact report also passes item 16.
+    limitations: [
+      ...workspace.fixture.report.limitations,
+      "仅在 ccw 单流域、90 天窗口、相对 baseline 测试了 GEOL_KSATH×2, LC_ROUGH×2；未覆盖其它参数、取值与窗口",
+      "参数范围为 agent 建议值，未经 PI 确认",
+    ],
   });
   workspace.publish(workspace.reportPath, report);
   fs.writeFileSync(summaryPath, EXPECTED_SUMMARY_BYTES);
@@ -107,7 +113,7 @@ test.each(["delete", "tamper", "symlink", "directory"] as const)(
 );
 
 test.each(["delete", "tamper", "symlink"] as const)(
-  "validator's separate projection rejects %s without adding checks or repairing files",
+  "validator's separate projection rejects %s in all seventeen checks without repairing files",
   (change) => {
     const before = reportSnapshot();
     const outside = join(workspace.root, "validator-target.json");
@@ -119,7 +125,7 @@ test.each(["delete", "tamper", "symlink"] as const)(
     const result = validateReport(workspace.cwd, report.report_id);
     expect(result.ok).toBe(false);
     expect(result.checks.map((check) => check.id)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
     ]);
     expect(result.checks.flatMap((check) => check.details)).toContainEqual({
       code: "render_unavailable",
@@ -160,7 +166,10 @@ test.each(["json", "shape", "task", "analysis", "run"] as const)(
       failure = error;
     }
     expect(failure).toBeInstanceOf(ReportRenderError);
-    expect(failure).toMatchObject({ path: report.sensitivity_summary!.path });
+    expect(failure).toMatchObject({
+      path: report.sensitivity_summary!.path,
+      stage: kind === "json" ? "parse" : "schema",
+    });
     expect(String(failure)).not.toContain("private-summary-payload");
     expect(reportSnapshot()).toEqual(before);
     expect(fs.readFileSync(summaryPath, "utf8")).toBe(bytes);

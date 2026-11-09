@@ -25,6 +25,11 @@ import { reportWatermark } from "./report-watermark.ts";
 import { regularTarget } from "./workspace-paths.ts";
 import { readReferencedSensitivitySummary } from "./sensitivity-summary-file.ts";
 import { FLOW_FIELDS, HEALTH_FIELDS, VERDICT_FIELDS } from "./run-metrics-wire.ts";
+import {
+  SUMMARY_DELTAS,
+  SUMMARY_METRICS,
+  type SensitivitySummary,
+} from "./sensitivity-summary-types.ts";
 
 type Metadata = string | number | bigint | boolean | null;
 const TEMPLATE_PATH = fileURLToPath(new URL("../templates/evidence_report.md", import.meta.url));
@@ -80,6 +85,84 @@ function renderMetrics(facts: readonly ReportMetricFacts[]): string {
       source_ref?.sha256 ?? "not_available",
     ]),
   );
+}
+
+/** Stored companion rows verbatim: JSON numbers, literal null plus its stored reason. */
+function renderSensitivityDelta(
+  reference: NonNullable<EvidenceReport["sensitivity_summary"]>,
+  summary: SensitivitySummary,
+): string {
+  const value = (cell: string | number | boolean | null): string =>
+    cell === null ? "null" : typeof cell === "string" ? cell : JSON.stringify(cell);
+  const reasoned = (cell: number | null, reason: string | null): string =>
+    cell === null ? `null (${reason})` : JSON.stringify(cell);
+  const rows = table(
+    [
+      "parameter_set_id",
+      "label",
+      "baseline",
+      "key",
+      "multiplier",
+      "job_id",
+      "run_id",
+      "status",
+      "exit_code",
+      "exit_class",
+      ...SUMMARY_METRICS,
+      "water_balance_residual verdict",
+      ...SUMMARY_DELTAS,
+    ],
+    summary.rows.map((row) => [
+      ...[
+        row.parameter_set_id,
+        row.label,
+        row.baseline,
+        row.key,
+        row.multiplier,
+        row.job_id,
+        row.run_id,
+        row.status,
+        row.exit_code,
+        row.exit_class,
+      ].map(value),
+      ...SUMMARY_METRICS.map((field) => reasoned(row[field], row.metric_reasons[field])),
+      value(row.water_balance_residual_verdict),
+      ...SUMMARY_DELTAS.map((field) => reasoned(row[field], row.delta_reasons[field])),
+    ]),
+  );
+  const source = [`- path: ${metadata(reference.path)}`, `- sha256: ${metadata(reference.sha256)}`];
+  return `### Sensitivity summary\n\n${source.join("\n")}\n\n${rows}`;
+}
+
+function failedRunLine(runId: string, exitClass: string): string {
+  return `- ${metadata(runId)}: ${metadata(exitClass)}`;
+}
+
+/**
+ * Sensitivity §7 in job_id order: failed loaded RunRecords plus every non-ok superseded entry
+ * whose run is not loaded. linked_runs is not digest-bound, so the companion's stored exit_class
+ * keeps a superseded failure visible when its run is dropped; a loaded run is listed once.
+ */
+function sensitivityRisks(runs: readonly RunRecord[], summary: SensitivitySummary): string[] {
+  const loaded = new Set<string>(runs.map((run) => run.run_id));
+  const entries = [
+    ...runs
+      .filter((run) => run.status !== "succeeded")
+      .map((run) => ({ job_id: run.job_id, line: failedRunLine(run.run_id, run.exit_class) })),
+    ...summary.superseded_runs
+      .filter((entry) => entry.exit_class !== "ok" && !loaded.has(entry.run_id))
+      .map((entry) => ({
+        job_id: entry.job_id,
+        line:
+          entry.exit_class === null
+            ? `- ${metadata(entry.run_id)}: no RunRecord (job_id: ${metadata(entry.job_id)}, terminal_state: ${metadata(entry.terminal_state)})`
+            : failedRunLine(entry.run_id, entry.exit_class),
+      })),
+  ];
+  entries.sort((left, right) =>
+    left.job_id < right.job_id ? -1 : left.job_id > right.job_id ? 1 : 0,
+  );
+  return entries.map((entry) => entry.line);
 }
 
 function renderStack(stack: StackLock): string {
@@ -350,13 +433,25 @@ export function renderReport(cwd: string, reportId: unknown): string {
   const data = report.data_ids.map((dataId) => readReportInput(cwd, "data", dataId));
   const runs = report.linked_runs.map((runId) => readReportRun(cwd, runId));
   const codeChangeFacts = readReportCodeChangeFacts(cwd, report);
-  readReferencedSensitivitySummary(cwd, report);
+  const summary = readReferencedSensitivitySummary(cwd, report);
   const metricFacts = readReportMetricFacts(cwd, runs);
-  return renderReportDocument(report, stacks, data, runs, codeChangeFacts, metricFacts, watermark)
-    .markdown;
+  return renderReportDocument(
+    report,
+    stacks,
+    data,
+    runs,
+    codeChangeFacts,
+    metricFacts,
+    watermark,
+    summary,
+  ).markdown;
 }
 
-/** Canonical projection from already validated evidence; not a public injection API. */
+/**
+ * Canonical projection from already validated evidence; not a public injection API.
+ * A referenced sensitivity companion must be supplied as already read by the caller:
+ * its absence (or a companion for a report without one) fails loud, never silently omitted.
+ */
 export function renderReportDocument(
   report: EvidenceReport,
   stacks: readonly StackLock[],
@@ -365,10 +460,18 @@ export function renderReportDocument(
   codeChangeFacts: ReportCodeChangeFacts,
   metricFacts: readonly ReportMetricFacts[],
   watermark = reportWatermark(report),
+  summary: SensitivitySummary | null = null,
 ): ReportDocument {
-  const risks = runs
-    .filter((run) => run.status !== "succeeded")
-    .map((run) => `- ${metadata(run.run_id)}: ${metadata(run.exit_class)}`);
+  const reference = report.sensitivity_summary;
+  if ((reference === null) !== (summary === null)) {
+    throw new ReportRenderError("missing", reference?.path);
+  }
+  const risks =
+    summary === null
+      ? runs
+          .filter((run) => run.status !== "succeeded")
+          .map((run) => failedRunLine(run.run_id, run.exit_class))
+      : sensitivityRisks(runs, summary);
   for (const { record } of codeChangeFacts.verifications) {
     if (record.status === "failed") {
       risks.push(`- ${metadata(record.vc_id)}: ${metadata(record.failure_reason ?? "null")}`);
@@ -393,6 +496,9 @@ export function renderReportDocument(
     metrics: [
       ...(report.change_ids.length === 0 ? [] : [CODE_CHANGE_SECTION5_WORDING]),
       renderMetrics(metricFacts),
+      ...(reference === null || summary === null
+        ? []
+        : [renderSensitivityDelta(reference, summary)]),
     ].join("\n\n"),
     observations: report.observations.join("\n\n"),
     limitations: report.limitations.join("\n\n"),

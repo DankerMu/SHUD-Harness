@@ -124,7 +124,7 @@ test("each public render and validation projection consumes fresh digest-bound m
   expect(metricRows()[0]?.[2]).toBe("987.654");
   const before = snapshotTree(workspace.root);
   const validation = validateReport(workspace.cwd, workspace.fixture.report.report_id);
-  expect(validation.checks).toHaveLength(15);
+  expect(validation.checks).toHaveLength(17);
   expect(validation.checks.find(({ id }) => id === 8)?.pass).toBe(true);
   expect(snapshotTree(workspace.root)).toEqual(before);
 });
@@ -137,7 +137,7 @@ test("metric reasons remain escaped section-5 metadata and participate in the ex
   workspace.publishMetrics(0, metrics);
   expect(metricRows()[0]?.[6]).toBe(`null (${SECRET}&#124;&#10;## 6. {{summary}})`);
   const validation = validateReport(workspace.cwd, workspace.fixture.report.report_id);
-  expect(validation.checks).toHaveLength(15);
+  expect(validation.checks).toHaveLength(17);
   expect(validation.checks.find(({ id }) => id === 13)).toMatchObject({
     pass: false,
     details: [{ code: "secret_detected", section: 5 }],

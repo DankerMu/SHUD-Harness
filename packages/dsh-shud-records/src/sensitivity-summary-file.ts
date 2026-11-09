@@ -40,7 +40,9 @@ export function readReferencedSensitivitySummary(
       summary.task_id !== parsed.data.task_id ||
       summary.rows.some((row) => !parsed.data.linked_runs.includes(row.run_id))
     )
-      throw new ReportRenderError("identity", path);
+      // Intact, digest-matching bytes that disagree with the report: a content mismatch
+      // (validator item 16 render_unavailable), not a missing/unsafe/unequal file (item 17).
+      throw new ReportRenderError("schema", path);
     return summary;
   } catch (error) {
     if (error instanceof ReportRenderError) throw error;

@@ -21,7 +21,7 @@ import {
   type ValidationWorkspace,
 } from "./report-validation-test-harness.ts";
 
-// Public contract: synchronous { ok, checks }, exactly fifteen ordered entries.
+// Public contract: synchronous { ok, checks }, exactly seventeen ordered entries.
 // Root errors expose only a controlled stage; reference failures remain check results.
 // Only artifact diagnostics may carry a secret-redacted relative path.
 vi.mock("node:fs", async (original) => {
@@ -144,7 +144,7 @@ function expectRootError(stage: string, id: unknown): void {
   expect(fs.renameSync).not.toHaveBeenCalled();
 }
 
-test("returns fifteen passing clauses with 4/10/11 M3-vacuous and 14/15 inapplicable", () => {
+test("returns seventeen passing clauses: 4/10 by construction, 11 always true, 14-17 inapplicable", () => {
   const result = validate();
   expect(result.checks).toEqual(
     CHECK_SHAPE.map((entry) => ({ ...entry, pass: true, details: [] })),
@@ -222,7 +222,7 @@ describe.each([
   { kind: "run", id: 3, field: "run_id", prefix: "RUN" },
 ] as const)("$kind reference failures", ({ kind, id, field, prefix }) => {
   test.each(["missing", "parse", "schema", "identity", "read"] as const)(
-    "reports %s without aborting any of the fifteen clauses",
+    "reports %s without aborting any of the seventeen clauses",
     (stage) => {
       const input = selectInput(workspace, kind);
       const target = join(realFs.realpathSync.native(workspace.cwd), input.path);
@@ -294,7 +294,7 @@ describe.each([
   );
 });
 
-test("collects every reference failure and authored failure in the same fifteen-result response", () => {
+test("collects every reference failure and authored failure in the same seventeen-result response", () => {
   for (const { path, kind } of renderingInputs(workspace.fixture)) {
     if (kind !== "report") realFs.unlinkSync(join(workspace.cwd, path));
   }

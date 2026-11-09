@@ -99,7 +99,7 @@ test.each([
     expect(String(failure)).not.toContain("private metric read error");
     const validation = validateReport(workspace.cwd, workspace.fixture.report.report_id);
     expect(validation.ok).toBe(false);
-    expect(validation.checks).toHaveLength(15);
+    expect(validation.checks).toHaveLength(17);
     expect(validation.checks.find(({ id }) => id === 8)?.details).toContainEqual({
       code: "render_unavailable",
       stage,
