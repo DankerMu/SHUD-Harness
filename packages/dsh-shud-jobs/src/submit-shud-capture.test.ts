@@ -93,7 +93,7 @@ test.each([false, true])(
               "binary.dat": Buffer.from([0, 255, 1, 128, 10]),
               "nested/forcing.dat": Buffer.from("original forcing bytes\n"),
               "tiny.cfg.para": Buffer.from(
-                "# synthetic input\r\nSTART\t0\r\nEND\t30\r\nOTHER\t17\r\n",
+                "# synthetic input\r\nSTART\t0\r\nEND\t30\r\nOTHER\t17\r\nDT_YE_IC\t1440\r\n",
               ),
               "tiny.tsd.forc": Buffer.from(
                 "1 20000101\n./input/tiny/nested\nID Lon Lat X Y Z Filename\n1 0 0 0 0 0 forcing.dat\n",

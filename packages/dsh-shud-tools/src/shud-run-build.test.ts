@@ -7,7 +7,7 @@ import {
   binarySha256,
   fileSnapshot,
 } from "../../dsh-shud-jobs/src/submit-shud-build/test-harness.ts";
-import { writeInputTree } from "../../dsh-shud-jobs/src/submit-shud/test-harness.ts";
+import { submittedCopy, writeInputTree } from "../../dsh-shud-jobs/src/submit-shud/test-harness.ts";
 import { expectNativeReceipt, seedBuild } from "./shud-run-build/test-harness.ts";
 import { createToolHarness } from "./test-harness.ts";
 import { returnedRun } from "./task-linked/test-harness.ts";
@@ -86,7 +86,7 @@ test("shud_run executes the selected workspace build with requested threads", as
   }
 }, 15_000);
 
-test("shud_run preserves the full synthetic keliya cfg when end_days is omitted", async () => {
+test("shud_run preserves the synthetic keliya cfg except DT_YE_IC when end_days is omitted", async () => {
   const h = await createToolHarness();
   try {
     const cfg =
@@ -123,8 +123,12 @@ test("shud_run preserves the full synthetic keliya cfg when end_days is omitted"
       (await readFile(join(job.run_dir, "thread-receipt"), "utf8")).split("\n").slice(0, 2),
     ).toEqual(["1", "1"]);
     expect(await readFile(join(job.run_dir, "input", "keliya", "keliya.cfg.para"))).toEqual(
-      Buffer.from(cfg),
+      Buffer.from(`${cfg}DT_YE_IC\t1440\r\n`),
     );
+    for (const [name, bytes] of Object.entries(originals))
+      expect(await readFile(join(job.run_dir, "input", "keliya", name))).toEqual(
+        submittedCopy(name, bytes, "keliya"),
+      );
     await writeFile(join(job.run_dir, "allow-exit"), "");
     await expectNativeReceipt(job.run_dir, "exit_code", "0\n");
     expect(await Promise.all(paths.map(fileSnapshot))).toEqual(snapshots);

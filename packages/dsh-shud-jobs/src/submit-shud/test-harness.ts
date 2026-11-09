@@ -7,6 +7,7 @@ import { RunJobSchema, type RunJob } from "@shud-harness/dsh-shud-core";
 import {
   ShudJobRegistry,
   startDetachedShud,
+  submittedParameterBytes,
   type ShudExecution,
   type ShudLifecycle,
 } from "../index.ts";
@@ -52,6 +53,18 @@ export async function snapshotTree(root: string): Promise<TreeSnapshot> {
   }
   await visit("");
   return snapshot;
+}
+
+/** Expected run-copy bytes: identical to the source except the submission's cfg.para transform. */
+export function submittedCopy(name: string, bytes: Buffer, project = "tiny"): Buffer {
+  return name === `${project}.cfg.para` ? submittedParameterBytes(bytes) : bytes;
+}
+
+export function submittedTree(source: TreeSnapshot, project = "tiny"): TreeSnapshot {
+  const name = `${project}.cfg.para`;
+  const entry = source[name];
+  if (entry?.kind !== "file") throw new Error(`Snapshot has no ${name}`);
+  return { ...source, [name]: { kind: "file", bytes: submittedCopy(name, entry.bytes, project) } };
 }
 
 export async function submissionFixture(

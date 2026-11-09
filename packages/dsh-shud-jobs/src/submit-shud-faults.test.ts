@@ -5,11 +5,13 @@ import type * as NodeIo from "node:fs/promises";
 import type * as NodeFs from "node:fs";
 import type { JobOutcome } from "@deepseek-ai/dsh-jobs";
 import { RunIdSchema, RunJobSchema } from "@shud-harness/dsh-shud-core";
+import { captureStackLock } from "@shud-harness/dsh-shud-records";
 import { ShudJobRegistry } from "./index.ts";
 import { createHarness, producer as ordinaryProducer } from "./test-harness.ts";
 import { barrier } from "./state-indexes/test-harness.ts";
 import {
   actualRegistry,
+  snapshotTree,
   submissionFixture,
   submissionProducer,
 } from "./submit-shud/test-harness.ts";
@@ -49,6 +51,32 @@ beforeEach(() => {
 
 function containing(fragment: string): unknown {
   return expect.stringContaining(fragment);
+}
+
+/** Pre-existing evidence another run owns: a real StackLock and an unrelated provenance file. */
+async function seedEvidence(h: Awaited<ReturnType<typeof submissionFixture>>) {
+  captureStackLock({ ...h.config, cwd: h.cwd, hostVersion: "previous-host" }, h.request.llm);
+  await io.mkdir(join(h.cwd, "provenance"), { recursive: true });
+  await io.writeFile(
+    join(h.cwd, "provenance", "DATA-20261029T031500-ffff.json"),
+    "unrelated provenance bytes\n",
+  );
+  const state = async () => {
+    const roots = ["stacks", "provenance"].map((name) => join(h.cwd, name));
+    const entries = await Promise.all(
+      roots.map(async (root) => {
+        const names = await io.readdir(root);
+        const stats = await Promise.all(
+          names.map((name) => io.stat(join(root, name), { bigint: true })),
+        );
+        return { tree: await snapshotTree(root), mtimes: stats.map((stat) => stat.mtimeNs) };
+      }),
+    );
+    expect(entries.every(({ mtimes }) => mtimes.length === 1)).toBe(true);
+    return entries;
+  };
+  const before = await state();
+  return async () => expect(await state()).toEqual(before);
 }
 
 test("record/index/registration order is durable and the in-flight guard precedes created persistence", async () => {
@@ -99,7 +127,7 @@ test("record/index/registration order is durable and the in-flight guard precede
   }
 });
 
-test.each(["copy", "created", "active", "submitted", "identified", "producer"])(
+test.each(["copy", "rewrite", "created", "active", "submitted", "identified", "producer"])(
   "%s failure rolls back owned state and never leaves a controller",
   async (phase) => {
     const h = await submissionFixture();
@@ -108,6 +136,7 @@ test.each(["copy", "created", "active", "submitted", "identified", "producer"])(
     try {
       await h.apply(ShudJobRegistry, h.config);
       const registry = actualRegistry(h.ctx);
+      const evidenceRetained = phase === "rewrite" ? await seedEvidence(h) : undefined;
       if (phase === "copy") {
         vi.mocked(io.copyFile).mockImplementation(async (source, target, flags) => {
           if (String(source).endsWith("nested/forcing.dat"))
@@ -131,6 +160,9 @@ test.each(["copy", "created", "active", "submitted", "identified", "producer"])(
         }
         if (phase === "active" && target === join(h.stateDir, "active.json"))
           throw new Error("injected active failure");
+        // The run-copy cfg.para is only replaced by the DT_YE_IC rewrite in a request without end_days.
+        if (phase === "rewrite" && String(target).endsWith("/input/tiny/tiny.cfg.para"))
+          throw new Error("injected rewrite failure");
         await actualIo.rename(source, target);
       });
       await expect(
@@ -151,6 +183,11 @@ test.each(["copy", "created", "active", "submitted", "identified", "producer"])(
       );
       for (const [name, bytes] of Object.entries(h.originals))
         expect(await io.readFile(join(h.inputDir, name))).toEqual(bytes);
+      if (evidenceRetained) {
+        expect(recordWrites).toBe(0);
+        expect(execution.handles).toEqual([]);
+        await evidenceRetained();
+      }
     } finally {
       await execution.finish();
       await h.dispose();

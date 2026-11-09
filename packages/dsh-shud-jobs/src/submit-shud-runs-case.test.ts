@@ -8,6 +8,7 @@ import {
   snapshotTree,
   submissionFixture,
   submissionProducer,
+  submittedCopy,
   writeInputTree,
 } from "./submit-shud/test-harness.ts";
 
@@ -99,7 +100,9 @@ test("existing Runs with disjoint input records the physical run path and preser
     );
     if (alias === undefined) expect(await io.readdir(existing)).toEqual(["sentinel"]);
     for (const [name, bytes] of Object.entries(h.originals)) {
-      expect(await io.readFile(join(expectedRun, "input", "tiny", name))).toEqual(bytes);
+      expect(await io.readFile(join(expectedRun, "input", "tiny", name))).toEqual(
+        submittedCopy(name, bytes),
+      );
       expect(await io.readFile(join(h.inputDir, name))).toEqual(bytes);
     }
   } finally {

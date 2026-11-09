@@ -96,7 +96,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - 「Report workspace files」的 `metrics.json` 渲染输入部分（经 3.2a 的读取器安全读、sha256 核对、缺失时 `not_available`）归本刀。
   - 本刀早于 4.2：真实 run 的 `metrics_summary` 仍为 null，§5 指标单元格按 spec 渲染为 `not_available`；只有已引用 `metrics.json` 内的 null 值才渲染 `null` 加原因。本刀 oracle 只断言表结构与旧固定句消失，指标非 null 的断言由 4.2 加入。
   - 满足 task-cards「science_assist closure predicate」，evidence-reports「Deterministic facts table」「Report template」「code_change report wording constant」「Deterministic report limitations」的非 sensitivity 部分，以及 agent-presets「Local first-task acceptance script」与 known-answer-replay「Replay acceptance criteria」的报告文本部分（依赖 2.5、3.2a）。
-- [ ] 3.6c sensitivity 报告渲染与校验：Δ 汇总表；失败 cell 行；被取代 run 按 `linked_jobs` 顺序列出；覆盖声明与"agent 建议值"；`report_validate` 第 16/17 项（含工具描述中的检查项计数）；sensitivity 黄金文件；`docs/03_SPEC/Report_Generation_Spec.md` 中检查项计数 15 → 17 及 (4)(10)(11) 的 M3 恒真表述随代码刷新。满足 evidence-reports「report_validate」与「Deterministic report limitations」「Report template」的 sensitivity 部分（依赖 3.5、3.6a、3.6b）。
+- [x] 3.6c（#658 / PR #702）sensitivity 报告渲染与校验：Δ 汇总表；失败 cell 行；被取代 run 按 `linked_jobs` 顺序列出；覆盖声明与"agent 建议值"；`report_validate` 第 16/17 项（含工具描述中的检查项计数）；sensitivity 黄金文件；`docs/03_SPEC/Report_Generation_Spec.md` 中检查项计数 15 → 17 及 (4)(10)(11) 的 M3 恒真表述随代码刷新。满足 evidence-reports「report_validate」与「Deterministic report limitations」「Report template」的 sensitivity 部分（依赖 3.5、3.6a、3.6b）。
 - Suggested fixture level: expanded - 文件格式读取器、持久化文件、closure 谓词与报告措辞护栏（Critical Path #6/#7）
 - Minimal mergeable slice: 3.0 首刀（共享读取器没有消费者，可独立保绿）；3.1 独立；3.2a 依赖 3.0/3.1；3.2b 只依赖 2.5；3.2c 依赖 3.2a；3.2d 依赖 3.2b/3.2c；3.3 依赖 3.0；3.4 依赖 3.2a 与 3.3；3.5 依赖 3.4；3.6a 依赖 3.3；3.6b 依赖 3.2a；3.6c 依赖 3.5、3.6a 与 3.6b
 
@@ -505,3 +505,20 @@ Commands: focused records/tools/core/runtime suites; pnpm run build; parent buil
 Acceptance matrix: the issue's 13 acceptance bullets map to tests above (the 1→5 tools-side composition bullet partially, remainder recorded for #667) plus a new sensitivity golden (4 psets, PSET-3 effective run failed cvode, PSET-2 superseded failed run) with its 17-check validation result checked in.
 
 Commands: focused records/tools suites; semantic RED before implementation for delta segment, §7 superseded entry and checks 16/17; `pnpm run build`; parent built smoke rendering/validating the sensitivity fixture from `lib/`; `pnpm run check`; `pnpm run shud:first-task <fresh scratch>` and `pnpm run shud:replay <fresh scratch>` (both exit 0; evidence = session-log `report_validate` tool/result with `checks.length === 17` and ok, for the science_assist and code_change reports respectively — the oracles themselves only assert ok/status); strict OpenSpec validation; expanded three-seat review; exact-head CI all success. Only task3.6c closes; shared change not archived.
+
+## Issue #659 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Public API / CLI entry | Selected: `shud-cfg-rewrite.ts` CLI updates only END (unit test on CLI path + real `shud:tiny` exit 0 with `.dat` < 2 min); Usage string renamed; `git grep -n "shud-end" -- ':!openspec/changes'` → 0 |
+| File IO / byte fidelity | Selected: unit matrix — present (`dt_ye_ic  0\r\n` → `dt_ye_ic  1440\r\n`), commented `# DT_YE_IC 60` untouched, multiple effective lines all rewritten, absent+CRLF+no trailing EOL → bytes+`\r\n`+`DT_YE_IC\t1440`+`\r\n`, no EOL at all → `\n`, empty file, latin-1 high bytes preserved |
+| Ordering / provenance | Selected: integration — ccw `end_days: 30` copy END 30 + appended line, source bytes unchanged, run-job `running`; provenance `cfg.para` sha256 == rewritten copy sha256 |
+| Error handling / rollback | Selected: new `rewrite` phase in the existing phase table `submit-shud-faults.test.ts:102-141` (mock `node:fs/promises` readFile and/or the write path only for the run-copy `cfg.para`) → no `runs/<run_id>/`, no active/completed index entry, pre-seeded `stacks/` and `provenance/` byte-for-byte unchanged, no wrapper launched, source unchanged; `verifyRun` after rewrite |
+| Concurrency / shared state | Selected: rollback path reuses existing stateDir lock/index handling; existing concurrency tests unchanged and green |
+| Legacy compatibility | Selected: build_id+threads submission also gets DT_YE_IC with NUM_OPENMP/START/END bytes unchanged; `input_bytes` = pre-rewrite copied bytes; every listed jobs/tools copy assertion converted to exact `pureTransform(source)` (tree-level helper for snapshotTree sites), none removed; mixed-version VC pair fail-closed documented as non-goal |
+| Replay oracle | Selected: snapshot captures prepared cfg raw bytes; evidence requires run-copy sha == sha256(pureTransform(prepared)); forged fixtures (one extra changed line; NUM_OPENMP changed) → exit 1 naming `keliya.cfg.para`; other files provenance == prepared; records join unchanged |
+| Hydrology runtime | Selected: real `shud:replay` exit 0, VC passed, rivqdown bitwise unchanged; `shud:first-task` and `shud:restart` PASS as submission-path regression |
+| Documentation | Selected: `SHUD_IO_Facts.md:68,148`, `Runtime_Lifecycle.md:26,63`, `Repository_Layout.md:84`, `Park_Resume_Design.md:342`, `Minimal_Schemas.md:197` updated (three beyond the issue = recorded deviation); `Migration_Plan_dsh.md` untouched; `pnpm run docs:check` green |
+| Auth / dependency / profile / science | Not selected: no credentials, packages, profile rows; DT_YE_IC is an output switch, not a physics/default-parameter change |
+
+Commands: unit + integration RED before implementation; focused jobs/tools/runtime suites; `pnpm run build`; `pnpm run check`; `pnpm run shud:tiny`; `pnpm run shud:first-task <scratch>`; `pnpm run shud:restart`; `pnpm run shud:replay <scratch>`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.1a closes.

@@ -11,6 +11,8 @@ import {
   snapshotTree,
   submissionFixture,
   submissionProducer,
+  submittedCopy,
+  submittedTree,
   writeInputTree,
 } from "./submit-shud/test-harness.ts";
 
@@ -38,7 +40,9 @@ describe("submission filesystem boundaries", () => {
       );
       expect(record.input_dir).toBe(await realpath(h.inputDir));
       for (const [name, bytes] of Object.entries(h.originals)) {
-        expect(await readFile(join(record.run_dir, "input", "tiny", name))).toEqual(bytes);
+        expect(await readFile(join(record.run_dir, "input", "tiny", name))).toEqual(
+          submittedCopy(name, bytes),
+        );
         expect(await readFile(join(alias, name))).toEqual(bytes);
       }
     } finally {
@@ -290,7 +294,9 @@ describe("capture destinations preserve original input trees", () => {
         expect(record.stack_id).toMatch(/^STACK-/u);
         expect(record.data_id).toMatch(/^DATA-/u);
         expect(await snapshotTree(input)).toEqual(before);
-        expect(await snapshotTree(join(record.run_dir, "input", "tiny"))).toEqual(before);
+        expect(await snapshotTree(join(record.run_dir, "input", "tiny"))).toEqual(
+          submittedTree(before),
+        );
         expect(registry.indexes.read().active).toEqual([
           { run_id: record.run_id, job_id: record.job_id, run_dir: record.run_dir },
         ]);
@@ -330,7 +336,9 @@ describe("capture destinations preserve original input trees", () => {
           expect(record.status).toBe("running");
           expect(record.input_dir).toBe(await realpath(input));
           expect(record.data_id).toMatch(/^DATA-/u);
-          expect(await snapshotTree(join(record.run_dir, "input", "tiny"))).toEqual(before);
+          expect(await snapshotTree(join(record.run_dir, "input", "tiny"))).toEqual(
+            submittedTree(before),
+          );
           expect((await readdir(join(h.cwd, "provenance"))).sort()).toEqual(
             [`${record.data_id}.json`, "original-input"].sort(),
           );

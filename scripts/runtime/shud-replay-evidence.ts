@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { join } from "node:path";
+import { submittedParameterBytes } from "../../packages/dsh-shud-jobs/src/shud-cfg-rewrite.ts";
 import type { SessionLog } from "./shud-session-log.ts";
 import { object, requireFact } from "./shud-restart-evidence.ts";
 import { replayAsks, assertReplayFlow } from "./shud-replay-flow.ts";
@@ -104,6 +106,23 @@ export function assertReplayPreservation(
   }
 }
 
+const SUBMITTED_CFG = "keliya.cfg.para";
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** The collector retains the prepared cfg.para raw bytes; the receipt must prove them. */
+function retainedBytes(value: unknown, path: string): Buffer {
+  const captured = object(value);
+  requireFact(typeof captured.bytes_base64 === "string", `Missing retained bytes ${path}`);
+  const bytes = Buffer.from(captured.bytes_base64, "base64");
+  requireFact(
+    bytes.toString("base64") === captured.bytes_base64 &&
+      sha256(bytes) === captured.sha256 &&
+      bytes.length === captured.size_bytes,
+    `Retained byte receipt mismatch ${path}`,
+  );
+  return bytes;
+}
+
 /** No IO or model-text verdicts: the live gate and independent snapshots use this seam. */
 export function assertReplayEvidence(snapshot: ReplayEvidence) {
   // Excess approvals are a failure even for an otherwise unfinished canonical prefix.
@@ -137,15 +156,28 @@ export function assertReplayEvidence(snapshot: ReplayEvidence) {
       `Preparation rewrite receipt ${path}`,
     );
   }
+  // Every submission writes DT_YE_IC into its cfg.para copy and copies all other inputs verbatim:
+  // exact digest equality leaves no room for another changed line (NUM_OPENMP, END) or file.
+  const preparedCfg = `input/keliya/${SUBMITTED_CFG}`;
+  const submittedCfg = sha256(
+    submittedParameterBytes(retainedBytes(snapshot.files[preparedCfg], preparedCfg)),
+  );
   for (const [path, hash] of Object.entries(prepared)) {
     if (path !== "PREPARED.json")
       requireFact(
         artifactDigest(snapshot.files[`input/keliya/${path}`]).sha256 === hash,
         `Prepared input artifact ${path}`,
       );
+    const expected = path === SUBMITTED_CFG ? submittedCfg : hash;
+    for (const job of r.jobs)
+      requireFact(
+        artifactDigest(snapshot.files[`runs/${job.run_id}/input/keliya/${path}`]).sha256 ===
+          expected,
+        `Run copy ${job.run_id}/${path}`,
+      );
     for (const provenance of r.provenance)
       requireFact(
-        provenance.sources.files.some((file) => file.path === path && file.sha256 === hash),
+        provenance.sources.files.some((file) => file.path === path && file.sha256 === expected),
         `Prepared input run provenance ${path}`,
       );
   }

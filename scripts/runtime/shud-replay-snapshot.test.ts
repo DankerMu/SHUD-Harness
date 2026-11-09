@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expect, test } from "vitest";
@@ -22,13 +23,16 @@ function workspaceFixture() {
   for (const [relative, value] of Object.entries(snapshot.files)) {
     const path = join(root, relative);
     fs.mkdirSync(dirname(path), { recursive: true });
+    const captured = value as { bytes_base64?: unknown };
     fs.writeFileSync(
       path,
       typeof value === "string"
         ? value
-        : relative === "input/keliya/PREPARED.json"
-          ? `${JSON.stringify(value, null, 2)}\n`
-          : JSON.stringify(value),
+        : typeof captured.bytes_base64 === "string"
+          ? Buffer.from(captured.bytes_base64, "base64")
+          : relative === "input/keliya/PREPARED.json"
+            ? `${JSON.stringify(value, null, 2)}\n`
+            : JSON.stringify(value),
     );
   }
   return {
@@ -94,6 +98,27 @@ test("cleanup argv is authorized by successful owned base/candidate build result
     expect(() => policy.expectedArgv(foreign)).toThrow("canonical build binding");
     fs.writeFileSync(join(job.run_dir, "bin/shud"), "different bytes");
     expect(() => policy.expectedArgv(job)).toThrow("binary digest");
+  } finally {
+    h.dispose();
+  }
+});
+
+test("retains the prepared cfg.para raw bytes and screens their latin-1 view", () => {
+  const h = workspaceFixture();
+  try {
+    const path = join(h.root, "input/keliya/keliya.cfg.para");
+    const bytes = Buffer.from(
+      "START\t12053\nEND\t12143\n# \xff\xe9 note\nNUM_OPENMP\t1\n",
+      "latin1",
+    );
+    fs.writeFileSync(path, bytes);
+    expect(collectReplayFiles(h.root)["input/keliya/keliya.cfg.para"]).toEqual({
+      bytes_base64: bytes.toString("base64"),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      size_bytes: bytes.length,
+    });
+    fs.writeFileSync(path, Buffer.concat([bytes, Buffer.from(`# sk-${"a".repeat(24)}\n`)]));
+    expect(() => collectReplayFiles(h.root)).toThrow("Secret detected");
   } finally {
     h.dispose();
   }

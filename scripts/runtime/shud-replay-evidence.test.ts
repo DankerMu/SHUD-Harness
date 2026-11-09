@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { expect, test } from "vitest";
 import { assertReplayEvidence, type ReplayEvidence } from "./shud-replay-evidence.ts";
-import { makeReplayFixture } from "./replay/test-harness.ts";
+import { makeReplayFixture, refreshReplayRunArtifacts } from "./replay/test-harness.ts";
 import { object } from "./shud-restart-evidence.ts";
 
 function expectRejected(snapshot: ReplayEvidence, fragments: string[]) {
@@ -99,3 +100,54 @@ test.each([
     }
   },
 );
+
+test("the run copies carry the prepared cfg plus exactly one DT_YE_IC line", () => {
+  const { snapshot, runs } = makeReplayFixture();
+  // Literal oracle: the constructed prepared cfg has no DT_YE_IC line, so one LF line is appended.
+  for (const { job } of runs)
+    expect(snapshot.files[`runs/${job.run_id}/input/keliya/keliya.cfg.para`]).toBe(
+      "START\t12053\nEND\t12143\nNUM_OPENMP\t1\nDT_YE_IC\t1440\n",
+    );
+  expect(
+    Buffer.from(
+      String(object(snapshot.files["input/keliya/keliya.cfg.para"]).bytes_base64),
+      "base64",
+    ).toString("latin1"),
+  ).toBe("START\t12053\nEND\t12143\nNUM_OPENMP\t1\n");
+});
+
+test.each([
+  ["one extra changed line", (cfg: string) => cfg.replace("START\t12053", "START\t12054")],
+  ["NUM_OPENMP rewritten", (cfg: string) => cfg.replace("NUM_OPENMP\t1", "NUM_OPENMP\t8")],
+  ["END rewritten", (cfg: string) => cfg.replace("END\t12143", "END\t30")],
+  ["DT_YE_IC absent", (cfg: string) => cfg.replace("DT_YE_IC\t1440\n", "")],
+])(
+  "rejects a coherent run copy and provenance that differ from the prepared cfg beyond DT_YE_IC: %s",
+  (_name, forge) => {
+    const fixture = makeReplayFixture();
+    const { job, data } = fixture.runs[1];
+    const path = `runs/${job.run_id}/input/keliya/keliya.cfg.para`;
+    const forged = forge(String(fixture.snapshot.files[path]));
+    expect(forged).not.toBe(fixture.snapshot.files[path]);
+    fixture.snapshot.files[path] = forged;
+    // Keep the existing provenance == run-copy join satisfied so only the new oracle can reject.
+    const entry = data.sources.files.find((file) => file.path === "keliya.cfg.para")!;
+    entry.sha256 = createHash("sha256").update(forged).digest("hex");
+    entry.size_bytes = Buffer.byteLength(forged);
+    refreshReplayRunArtifacts(fixture);
+    expectRejected(fixture.snapshot, ["keliya.cfg.para", job.run_id, "Run copy"]);
+  },
+);
+
+test.each([
+  ["tampered base64", (bytes: Record<string, unknown>) => ({ ...bytes, bytes_base64: "QUJD" })],
+  [
+    "missing raw bytes",
+    ({ sha256, size_bytes }: Record<string, unknown>) => ({ sha256, size_bytes }),
+  ],
+])("rejects a prepared cfg receipt without verifiable raw bytes: %s", (_name, tamper) => {
+  const { snapshot } = makeReplayFixture();
+  const path = "input/keliya/keliya.cfg.para";
+  snapshot.files[path] = tamper(object(snapshot.files[path]));
+  expectRejected(snapshot, [path]);
+});

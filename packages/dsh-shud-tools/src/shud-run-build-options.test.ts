@@ -10,6 +10,7 @@ import {
   fileSnapshot,
 } from "../../dsh-shud-jobs/src/submit-shud-build/test-harness.ts";
 import { waitForRecovery } from "../../dsh-shud-jobs/src/reconcile-shud/test-harness.ts";
+import { submittedCopy } from "../../dsh-shud-jobs/src/submit-shud/test-harness.ts";
 import { createToolHarness } from "./test-harness.ts";
 import { expectNativeReceipt, seedBuild } from "./shud-run-build/test-harness.ts";
 import {
@@ -144,7 +145,7 @@ test.each(options.flatMap((row) => [false, true].map((inherited) => ({ ...row, i
       expect(process.env.SHUD_RHS_THREADS).toBe(inherited ? "9" : undefined);
       expect(job.run_dir).toBe(join(await io.realpath(h.cwd), "runs", job.run_id));
       expect(await io.readFile(join(job.run_dir, "input", "tiny", "tiny.cfg.para"))).toEqual(
-        h.originals["tiny.cfg.para"],
+        submittedCopy("tiny.cfg.para", h.originals["tiny.cfg.para"]),
       );
       const taskPath = linked && build ? cardPath(h, build.build.task_id) : undefined;
       const cardBefore = taskPath ? await fileSnapshot(taskPath) : undefined;
