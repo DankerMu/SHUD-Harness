@@ -21,6 +21,7 @@ import {
   validationFailure,
   verifyRunFile,
   isTerminal,
+  readOptionalJsonSync,
   updateRunJob,
   type RoutedRun,
 } from "./shud-run-file.ts";
@@ -61,15 +62,8 @@ interface CollectLedger {
   at: string;
 }
 
-async function readLedger(runDir: string): Promise<CollectLedger | undefined> {
-  const path = join(runDir, "collect-error.json");
-  if (!(await regularFile(path, "collect-error ledger", true))) return undefined;
-  let value: unknown;
-  try {
-    value = JSON.parse(await io.readFile(path, "utf8"));
-  } catch (error) {
-    throw collectFailure("collect-error ledger", error);
-  }
+/** The single canonical ledger validation, shared by the async and synchronous readers. */
+function validLedger(value: unknown): CollectLedger {
   if (
     typeof value !== "object" ||
     value === null ||
@@ -91,6 +85,18 @@ async function readLedger(runDir: string): Promise<CollectLedger | undefined> {
   return { attempts: value.attempts, last_error: value.last_error, at: value.at };
 }
 
+async function readLedger(runDir: string): Promise<CollectLedger | undefined> {
+  const path = join(runDir, "collect-error.json");
+  if (!(await regularFile(path, "collect-error ledger", true))) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(await io.readFile(path, "utf8"));
+  } catch (error) {
+    throw collectFailure("collect-error ledger", error);
+  }
+  return validLedger(value);
+}
+
 /** Read retained attempt evidence independently of the committed-record checkpoint. */
 export async function readCollectErrorAttempts(runDir: string): Promise<number> {
   return (await readLedger(runDir))?.attempts ?? 0;
@@ -105,12 +111,42 @@ async function existingRecord(entry: IndexEntry): Promise<RunRecord | undefined>
   } catch (error) {
     throw collectFailure("run-record JSON", error);
   }
+  return validRecord(entry, value);
+}
+
+/** The single canonical RunRecord schema and identity check of an indexed run. */
+function validRecord(entry: IndexEntry, value: unknown): RunRecord {
   const parsed = RunRecordSchema.safeParse(value);
   if (!parsed.success) throw validationFailure("RunRecord", parsed.error.issues);
   if (parsed.data.run_id !== entry.run_id || parsed.data.job_id !== entry.job_id) {
     throw new CollectFailure("run-record identity", "MISMATCH");
   }
   return parsed.data;
+}
+
+/**
+ * Synchronous retained-evidence read for one routed run: the canonical ledger (exhausted at
+ * MAX_COLLECT_ATTEMPTS, read even beside a committed record) and, when requested, the committed
+ * RunRecord, which must exist. Corrupt or unsafe evidence throws; it is never "absent".
+ */
+export function readRunEvidenceSync(
+  entry: IndexEntry,
+  collected: boolean,
+): { exhausted: boolean; record: RunRecord | undefined } {
+  const ledger = readOptionalJsonSync(
+    join(entry.run_dir, "collect-error.json"),
+    "collect-error ledger",
+    "collect-error ledger",
+  );
+  const attempts = ledger === undefined ? 0 : validLedger(ledger).attempts;
+  if (!collected) return { exhausted: attempts >= MAX_COLLECT_ATTEMPTS, record: undefined };
+  const record = readOptionalJsonSync(
+    join(entry.run_dir, "run-record.json"),
+    "run-record",
+    "run-record JSON",
+  );
+  if (record === undefined) throw new CollectFailure("run-record", "MISSING");
+  return { exhausted: attempts >= MAX_COLLECT_ATTEMPTS, record: validRecord(entry, record) };
 }
 
 /** Queue-owned readonly retrieval: never enter checkpoint generation or collected projection. */

@@ -76,6 +76,34 @@ function assertConsistent(active: readonly IndexEntry[], completed: readonly Ind
   }
 }
 
+/**
+ * Every indexed run once, active first. completeActive publishes completed before removing active,
+ * so only the exact identity may be deduplicated; conflicting identities remain errors.
+ */
+export function indexedRuns(snapshot: IndexSnapshot, label: string): IndexEntry[] {
+  const runs = new Map<RunId, IndexEntry>();
+  const jobs = new Map<JobRecordId, IndexEntry>();
+  const unique: IndexEntry[] = [];
+  for (const entry of [...snapshot.active, ...snapshot.completed]) {
+    const priorRun = runs.get(entry.run_id);
+    const priorJob = jobs.get(entry.job_id);
+    if (priorRun || priorJob) {
+      if (
+        priorRun &&
+        priorJob?.run_id === entry.run_id &&
+        priorRun.job_id === entry.job_id &&
+        priorRun.run_dir === entry.run_dir
+      )
+        continue;
+      throw new Error(`${label} ${entry.run_id}: conflicting index identity`);
+    }
+    runs.set(entry.run_id, entry);
+    jobs.set(entry.job_id, entry);
+    unique.push(entry);
+  }
+  return unique;
+}
+
 /** One registry's durable indexes and exclusive lifetime ownership of their state directory. */
 export class StateIndexStore {
   private readonly lock: StateLock;

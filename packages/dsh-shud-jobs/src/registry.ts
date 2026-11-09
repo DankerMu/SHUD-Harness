@@ -16,11 +16,11 @@ import {
 import type { StackCaptureConfig } from "@shud-harness/dsh-shud-records";
 import type { SubmitShudRequest } from "./shud-input.ts";
 import { ShudSubmissions, type ShudProducer } from "./shud-submissions.ts";
-import { StateIndexStore, type IndexEntry } from "./state-indexes.ts";
+import { indexedRuns, StateIndexStore } from "./state-indexes.ts";
 import { ShudPoll, type CompletionReceipt } from "./shud-poll.ts";
 import { ShudCancellation } from "./shud-cancellation.ts";
 import { createRecoveryReporter } from "./shud-recovery-log.ts";
-import { collectFailure, readRunFile, validationFailure, verifyRunFile } from "./shud-run-file.ts";
+import { readRunFile, runFailure, validationFailure, verifyRunFile } from "./shud-run-file.ts";
 import { readCollectErrorAttempts, type CollectShudOptions } from "./shud-collect.ts";
 
 export interface Config extends ParentConfig, Omit<StackCaptureConfig, "cwd"> {
@@ -76,41 +76,18 @@ function assertExecutableFile(path: string): void {
 
 /** Query one owned index snapshot without entering the mutation/collection queues. */
 async function queryRunJobs(store: StateIndexStore, taskId: TaskId): Promise<RunJob[]> {
-  const snapshot = store.read();
-  const runs = new Map<RunId, IndexEntry>();
-  const jobs = new Map<JobRecordId, IndexEntry>();
   const matches: RunJob[] = [];
-  for (const entries of [snapshot.active, snapshot.completed]) {
-    for (const entry of entries) {
-      const priorRun = runs.get(entry.run_id);
-      const priorJob = jobs.get(entry.job_id);
-      if (priorRun || priorJob) {
-        // completeActive publishes completed before removing active. Only the exact identity
-        // may be deduplicated, with active precedence; conflicting identities remain errors.
-        if (
-          priorRun &&
-          priorJob?.run_id === entry.run_id &&
-          priorRun.job_id === entry.job_id &&
-          priorRun.run_dir === entry.run_dir
-        )
-          continue;
-        throw new Error(`SHUD task query ${entry.run_id}: conflicting index identity`);
-      }
-      runs.set(entry.run_id, entry);
-      jobs.set(entry.job_id, entry);
-      try {
-        const routed = await readRunFile(entry);
-        verifyRunFile(entry, routed);
-        const parsed = RunJobSchema.safeParse(routed.raw);
-        if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
-        // Every indexed record is validated, including null/other-task records. A later
-        // failure rejects the whole request rather than exposing these accumulated matches.
-        if (parsed.data.task_id === taskId) matches.push(parsed.data);
-      } catch (error) {
-        const failure = collectFailure("run metadata", error);
-        failure.message = `SHUD task query ${entry.run_id}: ${failure.stage}: ${failure.code}`;
-        throw failure;
-      }
+  for (const entry of indexedRuns(store.read(), "SHUD task query")) {
+    try {
+      const routed = await readRunFile(entry);
+      verifyRunFile(entry, routed);
+      const parsed = RunJobSchema.safeParse(routed.raw);
+      if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
+      // Every indexed record is validated, including null/other-task records. A later
+      // failure rejects the whole request rather than exposing these accumulated matches.
+      if (parsed.data.task_id === taskId) matches.push(parsed.data);
+    } catch (error) {
+      throw runFailure("SHUD task query", entry, "run metadata", error);
     }
   }
   return matches.sort((left, right) =>
@@ -134,9 +111,7 @@ async function queryCollectErrorAttempts(
     verifyRunFile(entry, routed);
     return attempts;
   } catch (error) {
-    const failure = collectFailure("collect-error ledger", error);
-    failure.message = `SHUD collect attempts ${entry.run_id}: ${failure.stage}: ${failure.code}`;
-    throw failure;
+    throw runFailure("SHUD collect attempts", entry, "collect-error ledger", error);
   }
 }
 

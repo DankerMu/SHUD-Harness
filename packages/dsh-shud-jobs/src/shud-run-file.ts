@@ -158,6 +158,30 @@ export function normalizeCollectFailureReason(message: string): string {
   return `${prefix}${stage}: ${codes.join("+")}`;
 }
 
+/** An indexed run's controlled failure, prefixed by the operation and its run_id. */
+export function runFailure(
+  label: string,
+  entry: IndexEntry,
+  stage: string,
+  error: unknown,
+): CollectFailure {
+  const failure = collectFailure(stage, error);
+  failure.message = `${label} ${entry.run_id}: ${failure.stage}: ${failure.code}`;
+  return failure;
+}
+
+function absentFile(error: unknown, stage: string, optional: boolean): undefined {
+  if (optional && error instanceof Error && "code" in error && error.code === "ENOENT")
+    return undefined;
+  throw collectFailure(stage, error);
+}
+
+function regularStat(stat: Stats, stage: string): Stats {
+  if (stat.isSymbolicLink()) throw new CollectFailure(stage, "SYMLINK");
+  if (!stat.isFile()) throw new CollectFailure(stage, "NOT_REGULAR");
+  return stat;
+}
+
 export async function regularFile(
   path: string,
   stage: string,
@@ -167,13 +191,28 @@ export async function regularFile(
   try {
     stat = await io.lstat(path);
   } catch (error) {
-    if (optional && error instanceof Error && "code" in error && error.code === "ENOENT")
-      return undefined;
-    throw collectFailure(stage, error);
+    return absentFile(error, stage, optional);
   }
-  if (stat.isSymbolicLink()) throw new CollectFailure(stage, "SYMLINK");
-  if (!stat.isFile()) throw new CollectFailure(stage, "NOT_REGULAR");
-  return stat;
+  return regularStat(stat, stage);
+}
+
+/**
+ * Synchronous optional regular JSON file read for registry-owned records; undefined only when the
+ * file is truly absent. Callers validate the value with the same validator as the async reader.
+ */
+export function readOptionalJsonSync(path: string, stage: string, jsonStage: string): unknown {
+  let stat: Stats;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    return absentFile(error, stage, true);
+  }
+  regularStat(stat, stage);
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch (error) {
+    throw collectFailure(jsonStage, error);
+  }
 }
 
 export interface RoutedRun {
@@ -235,6 +274,19 @@ function routeRun(entry: IndexEntry, raw: unknown, parent: Stats, directory: Sta
   return { raw: value, status: status.data, parent, directory };
 }
 
+/** Fresh synchronous read: run path ownership, routed identity and the full RunJob schema. */
+export function readRunJobSync(entry: IndexEntry): { job: RunJob; routed: RoutedRun } {
+  const parent = realDirectory(dirname(entry.run_dir));
+  const directory = realDirectory(entry.run_dir);
+  const path = join(entry.run_dir, "run-job.json");
+  // A raw lstat errno keeps each caller's own failure stage.
+  regularStat(lstatSync(path), "run metadata");
+  const routed = routeRun(entry, JSON.parse(readFileSync(path, "utf8")), parent, directory);
+  const parsed = RunJobSchema.safeParse(routed.raw);
+  if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
+  return { job: parsed.data, routed };
+}
+
 /** No yield between the fresh validated read, transition and atomic publication. */
 export function updateRunJob(
   entry: IndexEntry,
@@ -243,22 +295,14 @@ export function updateRunJob(
 ): RunJob {
   try {
     if (expected) verifyRunFile(entry, expected);
-    const parent = realDirectory(dirname(entry.run_dir));
-    const directory = realDirectory(entry.run_dir);
-    const path = join(entry.run_dir, "run-job.json");
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) throw new CollectFailure("run metadata", "SYMLINK");
-    if (!stat.isFile()) throw new CollectFailure("run metadata", "NOT_REGULAR");
-    const routed = routeRun(entry, JSON.parse(readFileSync(path, "utf8")), parent, directory);
-    const parsed = RunJobSchema.safeParse(routed.raw);
-    if (!parsed.success) throw validationFailure("RunJob", parsed.error.issues);
-    const next = transition(parsed.data);
-    if (next === parsed.data) return next;
+    const { job, routed } = readRunJobSync(entry);
+    const next = transition(job);
+    if (next === job) return next;
     const checked = RunJobSchema.safeParse(next);
     if (!checked.success) throw validationFailure("RunJob", checked.error.issues);
-    routeRun(entry, checked.data, parent, directory);
+    routeRun(entry, checked.data, routed.parent, routed.directory);
     verifyRunFile(entry, routed);
-    writeJsonSync(path, checked.data);
+    writeJsonSync(join(entry.run_dir, "run-job.json"), checked.data);
     return checked.data;
   } catch (error) {
     throw collectFailure("run-job publication", error);

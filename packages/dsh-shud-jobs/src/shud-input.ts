@@ -42,7 +42,7 @@ export interface SubmitShudRequest {
   input_digests?: Record<string, string> | null;
 }
 
-interface PlanBinding {
+export interface PlanBinding {
   analysisPlanId: RunJob["analysis_plan_id"];
   parameterSetId: RunJob["parameter_set_id"];
   calibOverride: CalibOverride | null;
@@ -134,7 +134,15 @@ function planBinding(request: SubmitShudRequest, threads: number | null): PlanBi
   };
 }
 
-export function prepareInput(request: SubmitShudRequest, stateDir: string): PreparedInput {
+/**
+ * `bound` runs synchronously right after the pure plan validation, before any filesystem
+ * operation, so a caller can decide on the binding before the input is resolved or walked.
+ */
+export function prepareInput(
+  request: SubmitShudRequest,
+  stateDir: string,
+  bound: (plan: PlanBinding) => void,
+): PreparedInput {
   const task = request.task_id === undefined ? null : TaskIdSchema.safeParse(request.task_id);
   if (task !== null && !task.success) throw new Error("task_id must be a valid TaskId");
   const taskId = task === null ? null : task.data;
@@ -146,6 +154,7 @@ export function prepareInput(request: SubmitShudRequest, stateDir: string): Prep
     throw new Error("threads must be a positive safe integer");
   const threads = parsedThreads.data;
   const plan = planBinding(request, threads);
+  bound(plan);
   const project = RunJobSchema.shape.project.parse(request.project);
   if (!isProjectComponent(project)) {
     throw new Error("project must be one contained path component");
