@@ -1,4 +1,3 @@
-import { basename } from "node:path";
 import { defineTool, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import {
   BuildIdSchema,
@@ -17,6 +16,7 @@ import {
   transitionTask,
   writeWorkspaceRecord,
 } from "@shud-harness/dsh-shud-records";
+import { effectiveProject } from "./project-default.ts";
 import { strictTool } from "./strict-tool.ts";
 
 const parameters = {
@@ -128,10 +128,7 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
           "shud_run requires a configured model in the request header or agent options",
         );
       }
-      const project = args.project ?? basename(args.input_dir);
-      if (args.project === undefined && (project === "" || project === "." || project === "..")) {
-        throw new Error("shud_run requires an explicit project for this input_dir");
-      }
+      const project = effectiveProject("shud_run", args.input_dir, args.project);
       if (taskId !== undefined) {
         const taskJobs = await jobs.listRunJobsByTask(taskId);
         // Read only after the query: this synchronous boundary publishes an independent repair.

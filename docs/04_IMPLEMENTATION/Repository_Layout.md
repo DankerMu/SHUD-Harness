@@ -22,7 +22,7 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/change_submit/shud_build/verification_run/report_generate/report_validate/report_submit/report_decide
+    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/change_submit/shud_build/verification_run/report_generate/report_validate/report_submit/report_decide/analysis_create
     dsh-shud-records/               # 已实现四对象文件层、StackLock/provenance 采集、报告渲染/校验/状态机；非 Cordis 插件
       templates/                   # 已用于报告渲染的 Markdown 模板，仅此一个落点
     dsh-shud-policy-gate/           # 已挂载全局 tools/pre-execute，角色 deny + 报告 ask + 变更完整性/级别决策
