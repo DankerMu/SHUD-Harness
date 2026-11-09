@@ -1,4 +1,5 @@
 import {
+  AnalysisPlanIdSchema,
   BuildIdSchema,
   ChangeIdSchema,
   DataIdSchema,
@@ -19,10 +20,10 @@ export interface AuthoredReport {
   pi_questions: string[];
 }
 
-// Only standalone tokens in the nine specified namespaces are citations. The core brands
+// Only standalone tokens in the specified namespaces are citations. The core brands
 // remain authoritative; DEC and malformed/embedded substrings are ordinary authored text.
 const CITATION =
-  /(?<![A-Za-z0-9_-])(?:TASK|STACK|DATA|REPORT|RUN|JOB|CHG|VC|BUILD)-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}(?![A-Za-z0-9_-])/gu;
+  /(?<![A-Za-z0-9_-])(?:TASK|STACK|DATA|REPORT|RUN|JOB|CHG|VC|BUILD|PLAN)-[0-9]{8}T[0-9]{6}-[0-9a-f]{4}(?![A-Za-z0-9_-])/gu;
 
 export function checkReportCitations(
   cwd: string,
@@ -56,6 +57,10 @@ export function checkReportCitations(
           });
         } else if (token.startsWith("BUILD-")) {
           readWorkspaceRecord(cwd, "build", BuildIdSchema.parse(token), { readonly: true });
+        } else if (token.startsWith("PLAN-")) {
+          readWorkspaceRecord(cwd, "analysis", AnalysisPlanIdSchema.parse(token), {
+            readonly: true,
+          });
         } else {
           const id = token.startsWith("RUN-")
             ? RunIdSchema.parse(token)

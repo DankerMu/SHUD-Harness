@@ -85,7 +85,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - `SensitivitySummary` 构造：`_pct` 以 baseline 为分母，分母为 0 时给 null；`delta_peak_day` 为差值。
   - 在报告 JSON 提交之前写 `reports/<report_id>.sensitivity.json`；孤立 summary 保留；三类报告文件任一已存在即重分配 report_id。
   - 满足 evidence-reports「Sensitivity summary derivation」「Report write order and repair」与「Report workspace files」的 `.sensitivity.json` 部分（依赖 2.4、3.2a、3.4）。
-- [ ] 3.6a Citation existence check 识别 `PLAN-` 令牌，并按安全读解析 `analyses/<id>.json`。满足 evidence-reports「Citation existence check」（依赖 2.1、3.3）。
+- [x] 3.6a Citation existence check 识别 `PLAN-` 令牌，并按安全读解析 `analyses/<id>.json`。满足 evidence-reports「Citation existence check」（依赖 2.1、3.3）。
 - [ ] 3.6b 非 sensitivity 报告切换为指标渲染（一刀完成，不留中间态）：
   - science_assist/code_change 的"无指标 artifact"自动 limitation 与 `metric_fact` 恒真特例删除。
   - §5 渲染逐 run 指标表（值原样输出最短往返串，null 用固定记号）。
@@ -447,3 +447,19 @@ The selected packs above map to this matrix; structural wire assertions and actu
 | State transitions | Existing reviewed/accepted publication paths leave summary bytes/mtimeNs unchanged; no tool implementation changes |
 
 Before implementation, the parent captured raw legacy creation bytes with the built base and fixed time/entropy in local issue-655 evidence; those consumed oracle bytes are immutable and will be published with the program/results. Report-only tooling proof uses existing built repair functions from a throwaway program, not new tools source/tests or model/PI calls.
+
+## Issue #656 risk packs and executable evidence
+
+| Pack | Decision and evidence |
+|---|---|
+| Tool entry / packaging | Selected: real strict-tool ToolRuntime report_generate on science_assist and code_change; built scanner smoke |
+| File IO / schema / identity | Selected: valid analysis, missing root/file, invalid JSON/schema/id, unsafe root/target, read failure; reuse #653 parser and preserve bytes/mtime |
+| Ordering / errors | Selected: stale-card negative case before list/reconcile/collect; token-only controlled error, no native payload/absolute path, workspace tree unchanged |
+| Resource / deduplication | Selected: same PLAN across all four fields reads once before registry query; independent later invocation rereads; no discovery/creation |
+| Legacy compatibility | Selected: existing nine-namespace citation suites and report-generate tests without assertion changes; DEC/embedded/malformed remain literal |
+| Documentation | Selected: scoped fixture and scanner comment; no new architecture/threshold decision |
+| Config / dependency / auth / science | Not selected: unchanged |
+
+Required cases: successful real report generation for both existing card types with legal PLAN in observations; plan belongs to a different task and is still accepted; generated analysis_ids stays empty and sensitivity_summary null. Missing standalone PLAN in each authored field rejects before writes, and the stale-card case observes zero job-query/collection calls plus exact tree/card bytes/mtime. Missing analyses stays missing. Target/root symlink and special files, malformed JSON/schema, foreign embedded id and injected read failure preserve link/target/plan bytes/mtime and return token without payload or absolute paths. Literal cases include PLAN-0001, uppercase suffix, XPLAN-20261108T093000-5c1e, PLAN-20261108T093000-5c1e_x and DEC; none creates analyses or reads a plan. Duplicate valid PLAN across summary/observations/limitations/pi_questions reads exactly once, while a later invocation observes changed/missing bytes.
+
+Verification: parent semantic tracer RED, focused tools citation suites + report-generation compatibility GREEN, pnpm run build, actual built checkReportCitations filesystem smoke, pnpm run check, openspec validate m5-oat-sensitivity --strict --no-interactive, expanded three-seat review, exact-head all-jobs-success CI. Only task3.6a closes; no #657/#658/#667 or shared-change archive.
