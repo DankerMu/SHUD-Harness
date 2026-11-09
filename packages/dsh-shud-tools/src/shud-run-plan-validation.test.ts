@@ -256,6 +256,7 @@ test("a plan of this card that the card does not link is rejected before reconci
     new RegExp(`analysis_plan_id ${plan.analysis_plan_id} is not linked to task ${TASK}`, "u"),
   );
   expect(await cardSnapshot(h)).toEqual(card);
+  expect(getCard(h).linked_analyses).toEqual([]);
   expect(await h.effects()).toEqual(before);
 });
 

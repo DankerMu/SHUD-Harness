@@ -111,41 +111,47 @@ test("code_change validates root and HEAD before making task directories and lea
   expect(sourceSnapshot(h)).toEqual(before);
 });
 
-test.each(["missing", "broken-repos", "broken-checkout"])(
-  "science_assist never inspects the %s checkout namespace",
-  async (kind) => {
-    if (kind === "broken-repos") fs.symlinkSync(join(h.root, "missing"), join(h.cwd, "repos"));
-    if (kind === "broken-checkout") {
-      fs.mkdirSync(join(h.cwd, "repos"));
-      fs.symlinkSync(join(h.root, "missing"), h.source);
+test.each(
+  (["science_assist", "sensitivity"] as const).flatMap((type) =>
+    (["missing", "broken-repos", "broken-checkout"] as const).map((kind) => [type, kind] as const),
+  ),
+)("%s never inspects the %s checkout namespace or analyses", async (type, kind) => {
+  if (kind === "broken-repos") fs.symlinkSync(join(h.root, "missing"), join(h.cwd, "repos"));
+  if (kind === "broken-checkout") {
+    fs.mkdirSync(join(h.cwd, "repos"));
+    fs.symlinkSync(join(h.root, "missing"), h.source);
+  }
+  const repos = join(h.cwd, "repos");
+  const analyses = join(h.cwd, "analyses");
+  vi.mocked(fs.lstatSync).mockImplementation((...args) => {
+    if (String(args[0]).startsWith(repos)) throw new Error(PRIVATE);
+    return native.lstatSync(...args);
+  });
+  vi.mocked(childProcess.execFile).mockClear();
+  vi.mocked(fs.readFileSync).mockClear();
+  vi.mocked(fs.mkdirSync).mockClear();
+  const result = valueOf(await h.invoke("task_create", { ...taskArgs, type }));
+  const entries = fs.readdirSync(join(h.cwd, "tasks"));
+  expect(entries).toEqual([result.task_id]);
+  const card: unknown = JSON.parse(
+    native.readFileSync(join(h.cwd, "tasks", entries[0], "task.json"), "utf8"),
+  );
+  expect(card).toMatchObject({
+    type,
+    source_base_commit: null,
+    status: "planned",
+    linked_analyses: [],
+  });
+  expect(childProcess.execFile).not.toHaveBeenCalled();
+  for (const root of [repos, analyses]) {
+    for (const operation of [fs.lstatSync, fs.readFileSync, fs.mkdirSync]) {
+      expect(vi.mocked(operation).mock.calls.some(([path]) => String(path).startsWith(root))).toBe(
+        false,
+      );
     }
-    const repos = join(h.cwd, "repos");
-    vi.mocked(fs.lstatSync).mockImplementation((...args) => {
-      if (String(args[0]).startsWith(repos)) throw new Error(PRIVATE);
-      return native.lstatSync(...args);
-    });
-    vi.mocked(childProcess.execFile).mockClear();
-    vi.mocked(fs.readFileSync).mockClear();
-    const result = valueOf(await h.invoke("task_create", { ...taskArgs, type: "science_assist" }));
-    const entries = fs.readdirSync(join(h.cwd, "tasks"));
-    expect(entries).toEqual([result.task_id]);
-    const card: unknown = JSON.parse(
-      native.readFileSync(join(h.cwd, "tasks", entries[0], "task.json"), "utf8"),
-    );
-    expect(card).toMatchObject({
-      type: "science_assist",
-      source_base_commit: null,
-      status: "planned",
-    });
-    expect(childProcess.execFile).not.toHaveBeenCalled();
-    expect(
-      vi.mocked(fs.lstatSync).mock.calls.some(([path]) => String(path).startsWith(repos)),
-    ).toBe(false);
-    expect(
-      vi.mocked(fs.readFileSync).mock.calls.some(([path]) => String(path).startsWith(repos)),
-    ).toBe(false);
-  },
-);
+  }
+  expect(native.existsSync(analyses)).toBe(false);
+});
 
 test.each(["native", "git"])("checkout %s faults suppress private cause details", async (kind) => {
   seedSource(h);
