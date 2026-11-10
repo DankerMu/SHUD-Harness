@@ -454,3 +454,41 @@ Root `report_generate` call/result seq271/272（`call_00_JV7yCC9WTqfBIlFasuGV051
 原始回执保留于本地 `.workplans/issue-549/` 的 `manual-closure-sessions.json`、`manual-report-inspection.json`、`manual-verification-confirmation.json`、`manual-thread-repair-*.json`、`manual-pi-functional-approval.json` 与 `engineering-evidence-receipt.json`；本节已发布离开本机仍可审查的事件、标识、结果和边界，不以本地路径代替摘要。服务已按 PI 授权停止：所属宿主进程及 56134 监听消失，`active.json=[]`，owner lock 移除、永久 `.lock-guard` 保留；`manual-service-shutdown.json` 记录旧候选与 accepted report/task/VC 字节未变，scratch/home 原件保留。
 
 收口规范已同步至 [canonical known-answer-replay](../openspec/specs/known-answer-replay/spec.md#requirement-epic-close-pi-acceptance-for-replay)，历史设计与任务在 [2026-11-05-m4-mvp-2 archive](../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md) 保留；归档日期与原始事件时间分别记账。
+
+### M5 automatic engineering sensitivity run
+
+`pnpm run shud:sensitivity <scratch-workspace>` 在 SHUD-Harness `72db9d9b`（dsh `dsh-v0.2.1-rc.2`、`deepseek-flash-guan` / DMXAPI、SHUD submodule `3aec6575`）上首次尝试即 exit 0，评估器报告 13 条判据全部成立，见 [#672](https://github.com/DankerMu/SHUD-Harness/issues/672)。这是脚本在独立 `DSH_HOME` 中自动对唯一一次 `report_submit` 审批回 allowed-once 的工程运行，**不是 PI 验收**；M5 功能验收由 [#675](https://github.com/DankerMu/SHUD-Harness/issues/675) 另行记账。本节不构成模型改进、校准结论、敏感性指数或参数排名。
+
+| 工程证据 | ID |
+|---|---|
+| Root coordinator / worker session | `session-4733c1bd-55f3-40bd-a458-201aa0d386d3` / `fdc46a21-5eb9-473a-9b5f-72bab7533e91` |
+| Task / AnalysisPlan / StackLock | `TASK-20261110T195001-3df9` / `PLAN-20261110T195003-f2ee` / `STACK-20261110T195012-d9bb` |
+| PSET-1 baseline / PSET-2 `GEOL_KSATH`×0.5 | `RUN-20261110T195012-66d9` / `RUN-20261110T195012-603a` |
+| PSET-3 `GEOL_KSATH`×2 / PSET-4 `LC_ROUGH`×2 | `RUN-20261110T195012-82d1` / `RUN-20261110T195012-c340` |
+| Report | `REPORT-20261110T195058-4cd0` accepted |
+
+Root 会话中唯一的审批对（`seq` 仅在该会话内有序）：
+
+```jsonl
+{"seq":52,"type":"approval/asked","data":{"id":"bf7e52e2-9d36-4535-a989-631870104629","toolName":"report_submit","callId":"call_00_paH5raNYoETyndVyn1FX2022","reason":"PI approval required for report REPORT-20261110T195058-4cd0"}}
+{"seq":53,"type":"approval/decided","data":{"id":"bf7e52e2-9d36-4535-a989-631870104629","outcome":"allowed-once"}}
+```
+
+O2 实测（design Open Questions O2，`end_days: 90`、`threads: 1`，`OMP_NUM_THREADS=SHUD_RHS_THREADS=1`）：
+
+| Run | RunRecord `resources.wall_seconds` | 求解器自报 `Time used by model` |
+|---|---|---|
+| PSET-1 baseline | 17.279 | 16.564 s |
+| PSET-2 | 16.07 | 15.292 s |
+| PSET-3 | 19.249 | 18.371 s |
+| PSET-4 | 17.131 | 16.242 s |
+| 批外重复（baseline 输入逐字节副本） | 未记录（`repeat.json` 无耗时字段） | 14.632 s |
+
+- 批内 baseline `ccw.rivqdown.dat` sha256 `b3f63a5c4cbad0a4c6160482dec06b909c7b7cabf7b55365d62dd8f48e01fc72`；批外重复 sha256 `b3f63a5c4cbad0a4c6160482dec06b909c7b7cabf7b55365d62dd8f48e01fc72`；两者相同。
+- 四个批内 run 同一秒提交并并发执行（运行目录 14:50:12 创建、14:50:27–14:50:31 结束），重复运行在宿主停止后单独执行；wall_seconds 是观测窗口，不是独立的求解器耗时，两组数字不是同负载下的性能对比。
+
+保留的限制：
+
+- 单流域、单次、`threads: 1` 的目标产物字节一致，只说明这一配置下的重复性；不证明 `threads>1` 的确定性（Non-Goal）、其它产物一致、性能结论或科学有效性。
+- 整个脚本墙钟 88 s，远小于 45 分钟等待上限；本次未触发 #718 的流程内恢复、INCONCLUSIVE 重跑或任何失败分支，不声称覆盖。
+- 原件（工作区、`DSH_HOME`、session log、`preparation.json`、`repeat.json`）按本地证据契约留本机 `TMPDIR`，不入库；本节已发布的标识、事件与哈希可脱离本机审查。
