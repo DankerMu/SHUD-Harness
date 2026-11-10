@@ -18,11 +18,15 @@ import { waitForRecovery } from "./reconcile-shud/test-harness.ts";
 import {
   existingResult,
   expectAbsent,
+  expectUnavailableMetrics,
   outputRoot,
   publishExit,
   readLedger,
   seedTerminal,
 } from "./collect-shud/test-harness.ts";
+
+// Synthetic fixtures carry no SHUD text inputs: run-metrics reports the first required one.
+const NO_INPUT_REASON = "missing:input/tiny/tiny.sp.riv";
 
 const numericClasses = {
   0: "ok",
@@ -94,6 +98,11 @@ test.each(Object.entries(numericClasses))(
         (Date.parse(observed.finished_at) - Date.parse(observed.started_at)) / 1000,
       );
       expect(Number.isFinite(Date.parse(result.collected_at))).toBe(true);
+      if (code === 0) await expectUnavailableMetrics(result, job.run_dir, NO_INPUT_REASON);
+      else {
+        expect(result.artifacts.metrics_summary).toBeNull();
+        await expectAbsent(join(job.run_dir, "metrics.json"));
+      }
       expect((await readRecord(job.run_dir)).status).toBe("collected");
       await producer.doneObserved;
       expect(producer.durableAtSettle[0].status).toBe(code === 0 ? "succeeded" : "failed");
@@ -158,6 +167,7 @@ test("the online dispatcher automatically collects after terminal persistence an
       JSON.parse(await io.readFile(join(job.run_dir, "run-record.json"), "utf8")),
     );
     expect(result.exit_class).toBe("ok");
+    await expectUnavailableMetrics(result, job.run_dir, NO_INPUT_REASON);
     const terminal = producer.durableAtSettle[0];
     expect(result.resources.wall_seconds).toBeGreaterThanOrEqual(0);
     if (terminal.started_at === null || terminal.finished_at === null)
@@ -205,6 +215,7 @@ test("collection copies prescribed references and provenance but disk-only times
         max_solver_dt: null,
       },
     });
+    await expectUnavailableMetrics(result, job.run_dir, NO_INPUT_REASON);
     expect(h.registry.list()).toEqual([]);
   } finally {
     await h.close();

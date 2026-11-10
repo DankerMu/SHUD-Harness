@@ -192,7 +192,7 @@ collect 内指标：自动 collect 与 `shud_collect` 触发的 collect SHALL �
 
 #### Scenario: residual-only gaps keep metrics ok
 - **WHEN** 一个退出码为 0 的作业结束，其余输出完整，而输出目录缺少 `<project>.eleyic.dat`，或副本 `<project>.cfg.calib` 不可安全读取
-- **THEN** `metrics.json` 的 `status` 为 `ok`，只有 `water_balance_residual` 为 `null`（原因 `missing_variable:eleyic` 或 `unreadable_input:<project>.cfg.calib`），峰值类指标照常计算；RunRecord 的 `numerical_health` 中 `water_balance_residual` 为 `null`，`cvode_failures`、`negative_state_count` 与 `max_solver_dt` 等于 `metrics.json` 中的对应值；`metrics_summary` 指向该文件，没有 `collect-error.json`
+- **THEN** `metrics.json` 的 `status` 为 `ok`，只有 `water_balance_residual` 为 `null`（原因 `missing_variable:eleyic` 或 `unreadable_input:input/<project>/<project>.cfg.calib`），峰值类指标照常计算；RunRecord 的 `numerical_health` 中 `water_balance_residual` 为 `null`，`cvode_failures`、`negative_state_count` 与 `max_solver_dt` 等于 `metrics.json` 中的对应值；`metrics_summary` 指向该文件，没有 `collect-error.json`
 
 #### Scenario: metrics.json write failure still publishes the record
 - **WHEN** 一个退出码为 0 的作业结束，而写 `metrics.json` 失败（如运行目录下该路径已被一个目录占用）

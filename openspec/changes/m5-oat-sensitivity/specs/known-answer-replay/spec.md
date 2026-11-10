@@ -9,7 +9,7 @@
 - `builds/` 恰两个 BuildRecord：base 记录 `change_id: null`、`patch_sha256: null`、`rhs_openmp: false`；候选记录 `change_id` 为该 CR、`patch_sha256` 等于该 CR 的 `patch_sha256`、`rhs_openmp: true`，且其 `builds/<build_id>/make.stdout.log` 含 `-fopenmp` 字串（候选二进制以 OpenMP 编译链接的直接证据）；两者 `source_commit` 均等于 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，`exit_code: 0`；
 - 两个 `collected` RunJob：`threads: 1`、`build_id` 各对应上述两条、RunRecord `status: succeeded`、`project: keliya`、DataProvenance `sources.external_files` 恰 32 项；
 - 两个运行副本 `runs/<run_id>/input/keliya/` 中，`keliya.cfg.para` 与准备后的 `input/keliya/keliya.cfg.para` 相比只多出或改写了 `DT_YE_IC` 一行（值 1440，其余行逐字节相同；两个 run 绑定 `build_id` 而不绑定 plan，`NUM_OPENMP` 与 `END` 不改写），其它输入文件与准备后的副本逐字节相同；DataProvenance `sources.files` 的文件集合等于准备后 `input/keliya/` 的文件集合（不含 `PREPARED.json`），其中 `keliya.cfg.para` 的 sha256 等于该运行副本的 sha256，其余文件的 sha256 等于准备后 `input/keliya/` 中同名文件的 sha256；
-- 两个 RunRecord 的 `numerical_health.water_balance_residual` 均为 null，其 `artifacts.metrics_summary` 非 null 且 sha256 与 `runs/<run_id>/metrics.json` 一致，该 `metrics.json` 记录的 residual 原因以 `missing_variable:` 开头（keliya 的 `keliya.cfg.para` 中 `DT_YE_SNOW`、`DT_YE_SURF`、`DT_YE_UNSAT`、`DT_YE_GW` 均为 0，不输出储量变量）；`max_solver_dt` 为 null；
+- 两个 RunRecord 的 `artifacts.metrics_summary` 非 null 且 sha256 与 `runs/<run_id>/metrics.json` 一致；该 `metrics.json` 的 `status` 为 `unavailable`，`reason` 精确等于 `parse:input/keliya/keliya.sp.mesh`；`numerical_health` 的 `water_balance_residual`、`cvode_failures`、`negative_state_count`、`max_solver_dt` 均为 null（PI 2026-11-09 对 #662 裁定 (A)：keliya 的 `keliya.sp.mesh` 节点表 `AqDepth`/`Elevation` 与单元表 `Zmax` 含 `NA`，records 对表格逐单元格做数值校验，整份指标不可计算；replay 精确钉住该现状，records 解析不变）；
 - `verifications/` 恰一个 VC，`status: passed`（exit 0 条件），`base_build_id`/`candidate_build_id` 对应；rivqdown bitwise 判定不因 `DT_YE_IC` 写入或 metrics 计算而改变或放宽；
 - 报告 `accepted`、TaskCard `done`、`linked_changes`/`linked_verifications` 各一项；报告 `.md` 含 StackLock 两份且 `build_id` 互异、含 CR 与 VC 事实表、四句不变式与 code_change §5 固定句逐字出现；
 - 四角色会话 header（`agentPreset` 为 coordinator/coder/worker/reviewer）各至少一个，coordinator 的 `header.tools` 含 `subagent`、`subagent_coder`、`subagent_reviewer`；
@@ -19,9 +19,10 @@
 - **WHEN** 回放完成，检查两个运行副本的 `keliya.cfg.para` 与 DataProvenance
 - **THEN** 两份副本相对准备后的 `input/keliya/keliya.cfg.para` 只有 `DT_YE_IC` 一行不同，DataProvenance 中该文件的 sha256 等于副本哈希，其余文件哈希等于准备后 `input/keliya/` 中同名文件的哈希；任一其它行或其它文件不同时脚本判定失败并点名该文件，exit 1
 
-#### Scenario: keliya residual is null with a missing-variable reason
+#### Scenario: keliya metrics are unavailable with the mesh parse reason
 - **WHEN** 回放的两个 RunRecord 被收集
-- **THEN** 两者 `water_balance_residual` 为 null，`metrics.json` 的 residual 原因以 `missing_variable:` 开头；若 residual 非 null、原因不是 `missing_variable:*` 或 `metrics_summary` 为 null，脚本判定失败，exit 1
+- **THEN** 两者 `metrics_summary` 非 null 且 sha256 等于 `metrics.json` 字节的 sha256，`metrics.json` 为 `status: unavailable`、`reason: parse:input/keliya/keliya.sp.mesh`，`numerical_health` 四项均为 null
+- **AND** `metrics_summary` 为 null、sha256 不一致、`status` 不是 `unavailable`、`reason` 不精确相等或任一 `numerical_health` 项非 null 时，脚本判定失败并点名该判据，exit 1
 
 #### Scenario: criteria evaluated from evidence only
 - **WHEN** 模型文本声称验证通过但 `verifications/` 为空

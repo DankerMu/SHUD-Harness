@@ -30,7 +30,11 @@ import { renderReportDocument } from "../../packages/dsh-shud-records/lib/report
 import { object, requireFact } from "./shud-restart-evidence.ts";
 import { snapshotReportMetricFacts } from "./shud-report-metrics.ts";
 
-import { REPLAY_COMMIT, REPLAY_FILES } from "./shud-replay-contract.ts";
+import {
+  KELIYA_METRICS_UNAVAILABLE_REASON,
+  REPLAY_COMMIT,
+  REPLAY_FILES,
+} from "./shud-replay-contract.ts";
 export interface ReplayRecords {
   task: TaskCard;
   change: ChangeRequest;
@@ -82,6 +86,25 @@ function parseReplayRecord<T>(
     });
     throw new Error(`Invalid evidence ${path}: ${fields.join(", ") || "schema"}`, { cause: error });
   }
+}
+
+/** keliya metrics are pinned unavailable (#662 option A): digest-bound file, exact reason, all-null health. */
+function assertReplayRunMetrics(files: Record<string, unknown>, run: RunRecord): void {
+  const path = `runs/${run.run_id}/metrics.json`;
+  const summary = run.artifacts.metrics_summary;
+  requireFact(summary !== null, `RunRecord ${run.run_id}: metrics_summary must be non-null`);
+  requireFact(
+    Object.hasOwn(files, path) && artifactDigest(files[path]).sha256 === summary.sha256,
+    `Metrics digest ${path}`,
+  );
+  const [{ metrics }] = snapshotReportMetricFacts(files, [run]);
+  requireFact(metrics?.status === "unavailable", `Metrics status ${path}: must be unavailable`);
+  requireFact(
+    metrics.reason === KELIYA_METRICS_UNAVAILABLE_REASON,
+    `Metrics reason ${path}: must equal ${KELIYA_METRICS_UNAVAILABLE_REASON}`,
+  );
+  for (const [field, value] of Object.entries(run.numerical_health))
+    requireFact(value === null, `RunRecord ${run.run_id}: numerical_health.${field} must be null`);
 }
 
 export function replayRecords(files: Record<string, unknown>, workspace: string): ReplayRecords {
@@ -300,6 +323,7 @@ export function replayRecords(files: Record<string, unknown>, workspace: string)
         artifactDigest(files[`${outputRoot}/${file.path}`]).size_bytes === file.size_bytes,
         `Artifact size ${job.run_id}/${file.path}`,
       );
+    assertReplayRunMetrics(files, run);
     const compared = `output/keliya.out/keliya.rivqdown.dat`;
     requireFact(
       verification.observed.compared_path === compared &&

@@ -119,7 +119,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - 只对 `exit_class: ok` 的 run 计算；写 `metrics.json` 并填 `metrics_summary` 与 numerical_health。
   - 失败隔离：unavailable 由 run-metrics 判定，不写 `collect-error.json`、不计次；`metrics.json` 写失败时字段为 null；非 ok run 不写；已有 RunRecord 时幂等，不改写。
   - 同一切片中：
-    - 更新 `shud:first-task` oracle（ccw run 的 numerical_health 三项非 null）与 `shud:replay` oracle（keliya residual 为 null，原因 `missing_variable`）；
+    - 更新 `shud:first-task` oracle（ccw run 的 numerical_health 三项非 null）与 `shud:replay` oracle（keliya `metrics.json` 为 `unavailable`、原因 `parse:input/keliya/keliya.sp.mesh`、`numerical_health` 四项 null；PI 2026-11-09 裁定 #662 (A)）；
     - 重跑 `shud:first-task`、`shud:replay`、`shud:restart`（SIGTERM/SIGKILL 两用例全长 ccw，`delivered` 判据不放宽），附三份本机证据；
     - 全长 run 的 collect 耗时写进 PR。
   - 满足 shud-run-jobs「Automatic collect」、run-metrics「Metrics computed at collect」，以及 agent-presets「Local first-task acceptance script」与 known-answer-replay「Replay acceptance criteria」的 metrics 部分（依赖 2.2、3.2d、4.1a）。
@@ -310,7 +310,7 @@ Commands: focused dat tests plus unchanged shud-text-formats/numeric/IO, compare
 | Resource / concurrency | One safe pass per target; process state files serially; descriptor fault cleanup shared and exercised; no atomic snapshot or same-inode immutability claim |
 | Governance / docs | Core classifier/method constant reused; tolerance remains -1e-10; max_solver_dt not in verdicts; lower-bound and final-interval approximation explicit; no scientific verdict, thresholds or formula changes |
 
-Core fixtures: ccw-like sole outlet1 and multi-outlet unordered reach/column IDs; negative -1e-6×3 plus -1e-12→3, exact -1e-10 excluded; two exact line-start SUNDIALS_ERROR: lines→2 with prefixed nonmatches ignored; max_solver_dt always null. Missing rivystage with other negative values gives null, never partial count; keliya-like missing states keeps all flow values and status ok. Unavailable tests include missing cfg.ic, symlink mesh and malformed eleygw. Check method_version/verdict keys and core threshold boundary transitions without changing status.
+Core fixtures: ccw-like sole outlet1 and multi-outlet unordered reach/column IDs; negative -1e-6×3 plus -1e-12→3, exact -1e-10 excluded; two exact line-start SUNDIALS_ERROR: lines→2 with prefixed nonmatches ignored; max_solver_dt always null. Missing rivystage with other negative values gives null, never partial count; storage-less missing states keep all flow values and status ok. Unavailable tests include missing cfg.ic, symlink mesh and malformed eleygw. Check method_version/verdict keys and core threshold boundary transitions without changing status.
 
 Boundary fixtures: no rows, missing/duplicate outlet column, nonfinite outlet versus unrelated column, nonfinite time/date, finite-sum overflow, equal zero/negative intervals under the literal formula, reordered tie rows; successful-read manifests remain deterministic on controlled failure. Reader checks wrong digest, same digest malformed JSON/shape, symlink/ancestor/FIFO and unchanged bytes. Reject invalid serializer input rather than NaN/Infinity implicit JSON null. Water-balance constructed-value round-trip fixes every field/order; its producers remain task3.2c/d, and this internal intermediate is never written by production.
 
@@ -683,3 +683,24 @@ Commands: tests first (RED), `pnpm run check`, strict OpenSpec validation, compa
 | Oracle / tools / profile | Not selected: unchanged by design |
 
 Commands: tests first (RED), `pnpm run check`, `pnpm run build && pnpm run profile:smoke`, 5× `pnpm run shud:first-task`, strict OpenSpec validation, compact review, exact-head CI.
+
+## Issue #662 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Ordering / persisted state | Selected: genuine ok fixture → `metrics.json` exists with `serializeRunMetrics` bytes, RunRecord `succeeded`, `metrics_summary.sha256` == file sha, `numerical_health` == file values, `artifacts.files` excludes `metrics.json`, no `collect-error.json`, wake has no `metrics=` token; existing exit-0 tests tightened to assert summary and reason |
+| Error isolation (a) | Selected: truncated existing `.dat` or missing `<project>.rivqdown.dat` → `metrics.json` `unavailable` with reason naming the file (`missing_variable:rivqdown`), RunRecord `succeeded`/`ok`, summary → file, health null, no ledger, job `collected`, wake delivered |
+| Partial residual | Selected: missing `<project>.eleyic.dat` or unreadable copy `.cfg.calib` → `metrics.json` `ok`, residual null with `missing_variable:eleyic` / `unreadable_input:input/<project>/<project>.cfg.calib`, other three equal file |
+| Error isolation (b) | Selected: `metrics.json` path occupied by a directory → RunRecord published `succeeded`, summary/health null, no ledger, attempts unchanged, wake text contains `metrics=write_failed`, no leftover temp file; a serializer/compute throw is also (b) |
+| Error isolation (c) | Selected: exit 19 and cancelled → no `metrics.json`, both null, `status: failed` |
+| Idempotence | Selected: committed run-record + metrics, `.dat` rewritten, recollect (automatic and `collectShud`) → both files byte+mtime unchanged; first attempt writes metrics then run-record write fails, retry succeeds → attempts 1 in ledger before retry, ledger bytes unchanged by the successful retry, metrics bytes identical to first |
+| Readonly / legacy | Selected: `collectShud(id, {readonly: true})` computes nothing, writes nothing; pre-M5 committed RunRecord not backfilled |
+| Read-only metrics | Selected: `.dat`, `stdout.log`, `stderr.log`, input copy byte+mtime unchanged across a metrics computation |
+| Runtime oracles | Selected: first-task oracle positive + negative (residual null fixture → non-zero naming criterion); replay oracle positive (`unavailable`, reason exactly `parse:input/keliya/keliya.sp.mesh`, four health fields null, digest bound) + negatives (summary null, digest mismatch, `status: ok`, a different reason, any non-null health field); rivqdown unchanged (PI 2026-11-09, #662 option A) |
+| Hydrology runtime / resource | Selected: real `shud:first-task`, `shud:replay` exit 0; `shud:restart` SIGTERM/SIGKILL PASS with `delivered`, retained RunRecords have non-null `metrics_summary`; full-length ccw collect duration (incl. metrics) measured and reported |
+| Scientific governance / lineage | Selected: no invented values; nulls carry reasons; metrics producer for #422 |
+| Documentation | Selected: `Runtime_Lifecycle.md:57` (metrics exemption from collect-error and write position), `:61` (wake token), `Testing_Strategy.md:114`, `Test_Fixtures_And_Command_Matrix.md:163` (producer now known); `Migration_Plan_dsh.md` untouched; `pnpm run docs:check` green |
+| Resource / event loop | Selected: PR reports measured full-length collect duration and the synchronous-stall risk (design Risk) |
+| Auth / dependency / profile | Not selected |
+
+Commands: RED before implementation; focused jobs + runtime suites; `pnpm run build`; `pnpm run check`; `pnpm run shud:first-task <scratch>`; `pnpm run shud:replay <scratch>`; `pnpm run shud:restart`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.2 closes.

@@ -32,6 +32,18 @@ import {
   makeRunRecord,
 } from "../../../packages/dsh-shud-records/src/task-lifecycle-test-harness.ts";
 import { renderReportDocument } from "../../../packages/dsh-shud-records/src/report-render.ts";
+import { completeMetrics } from "../../../packages/dsh-shud-records/src/run-metrics-test-harness.ts";
+import {
+  FLOW_FIELDS,
+  HEALTH_FIELDS,
+  MAX_SOLVER_DT_REASON,
+  VERDICT_FIELDS,
+  WATER_FIELDS,
+  nullMetricBlock,
+  serializeRunMetrics,
+  type RunMetrics,
+} from "../../../packages/dsh-shud-records/src/run-metrics-wire.ts";
+import { KELIYA_METRICS_UNAVAILABLE_REASON } from "../shud-replay-contract.ts";
 import { REPORT_LIMITATION_TEMPLATES } from "../../../packages/dsh-shud-core/src/governance/wording.ts";
 import { snapshotReportMetricFacts } from "../shud-report-metrics.ts";
 import {
@@ -63,6 +75,48 @@ const prompt =
   "Complete the code_change replay in this workspace using ../openMP/docs/p1e/p1e_strict_omp_design.md, changing only Makefile, src/Model/MD_rhs_core.cpp, src/Model/f.cpp, src/Model/Macros.hpp, src/Model/shud.cpp, then compare the base and candidate keliya runs at threads: 1 and submit the evidence report.";
 
 const sha256 = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
+
+/**
+ * Constructed keliya-shaped collect metrics: the whole computation is unavailable for one
+ * top-level reason, every value null, exactly as records finalizes an unavailable run.
+ */
+export function replayRunMetrics(reason: string = KELIYA_METRICS_UNAVAILABLE_REASON): RunMetrics {
+  const metrics: RunMetrics = completeMetrics();
+  metrics.status = "unavailable";
+  metrics.reason = reason;
+  metrics.flow = nullMetricBlock(FLOW_FIELDS, reason);
+  metrics.water_balance = {
+    formula_source: metrics.water_balance.formula_source,
+    ...nullMetricBlock(WATER_FIELDS, reason),
+    approximation: metrics.water_balance.approximation,
+  };
+  metrics.numerical_health = {
+    ...nullMetricBlock(HEALTH_FIELDS, reason),
+    negative_state_count_note: metrics.numerical_health.negative_state_count_note,
+  };
+  // Structural unobservability keeps its own reason even in an unavailable document.
+  metrics.numerical_health.reasons.max_solver_dt = MAX_SOLVER_DT_REASON;
+  for (const field of VERDICT_FIELDS) metrics.verdicts[field] = "not_available";
+  return metrics;
+}
+
+/** Bind one run to metric bytes the way collect does: summary digest plus copied health values. */
+export function bindReplayMetrics(
+  files: Record<string, unknown>,
+  record: RunRecord,
+  metrics: RunMetrics = replayRunMetrics(),
+): void {
+  // The real serializer validates the constructed shape before any oracle sees it.
+  const bytes = serializeRunMetrics(metrics);
+  record.artifacts.metrics_summary = { path: "metrics.json", sha256: sha256(bytes) };
+  record.numerical_health = {
+    water_balance_residual: metrics.numerical_health.water_balance_residual,
+    cvode_failures: metrics.numerical_health.cvode_failures,
+    negative_state_count: metrics.numerical_health.negative_state_count,
+    max_solver_dt: metrics.numerical_health.max_solver_dt,
+  };
+  files[`runs/${record.run_id}/metrics.json`] = captureReportMetrics(Buffer.from(bytes));
+}
 
 export interface ReplayRecords {
   task: TaskCard;
@@ -294,6 +348,7 @@ function replayRecords(verificationStatus: "passed" | "failed"): ReplayRecords {
     [`reports/${report.report_id}.json`]: report,
   };
   for (const { build, stack, data, job, record } of runs) {
+    bindReplayMetrics(files, record);
     Object.assign(files, {
       [`builds/${build.build_id}/build-record.json`]: build,
       [build.binary_path]: build.rhs_openmp ? "hello" : "abc",

@@ -12,13 +12,25 @@ import {
   makeRunRecord,
   makeTaskCard,
 } from "../../../packages/dsh-shud-records/src/task-lifecycle-test-harness.ts";
-import { digest } from "../../../packages/dsh-shud-records/src/run-metrics-test-harness.ts";
+import {
+  completeMetrics,
+  digest,
+} from "../../../packages/dsh-shud-records/src/run-metrics-test-harness.ts";
+import type { RunRecord } from "../../../packages/dsh-shud-core/src/schemas/index.ts";
 import type { FirstTaskEvidence } from "../shud-first-task-evidence.ts";
 import type { SessionLog } from "../shud-session-log.ts";
 import { snapshotFirstTaskFiles } from "../shud-first-task.ts";
 
-/** Synthetic accepted evidence with real report files; no host, solver, credentials or historic logs. */
-export function makeFirstTaskFixture(workspace: string, metricBytes?: string) {
+/**
+ * Synthetic accepted evidence with real report files; no host, solver, credentials or historic logs.
+ * The ccw run carries collect-time metrics by default; null bytes omit metrics.json and its summary,
+ * and `adjust` edits the committed RunRecord before it is written, collected and rendered.
+ */
+export function makeFirstTaskFixture(
+  workspace: string,
+  metricBytes: string | null = JSON.stringify(completeMetrics()),
+  adjust?: (record: RunRecord) => void,
+) {
   const home = join(workspace, "private-home");
   const base = makeRenderingFixture();
   const stack = base.stacks[0];
@@ -35,9 +47,17 @@ export function makeFirstTaskFixture(workspace: string, metricBytes?: string) {
     llm: { response_model: stack.llm.response_model, response_model_source: "response" },
   });
   const record = makeRunRecord(job, { llm: job.llm });
-  if (metricBytes !== undefined) {
+  if (metricBytes !== null) {
     record.artifacts.metrics_summary = { path: "metrics.json", sha256: digest(metricBytes) };
+    // Literal values of completeMetrics().numerical_health, as collect copies them.
+    record.numerical_health = {
+      water_balance_residual: 0.01,
+      cvode_failures: 2,
+      negative_state_count: 3,
+      max_solver_dt: null,
+    };
   }
+  adjust?.(record);
   const report = makeEvidenceReport({
     task_id: job.task_id!,
     status: "accepted",
@@ -76,7 +96,7 @@ export function makeFirstTaskFixture(workspace: string, metricBytes?: string) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(value));
   }
-  if (metricBytes !== undefined) writeFileSync(join(job.run_dir, "metrics.json"), metricBytes);
+  if (metricBytes !== null) writeFileSync(join(job.run_dir, "metrics.json"), metricBytes);
   const markdownPath = `reports/${report.report_id}.md`;
   writeFileSync(join(workspace, markdownPath), renderReport(workspace, report.report_id));
 
