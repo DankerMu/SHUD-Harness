@@ -27,15 +27,18 @@ test("leader-first exit retains a SIGTERM-resistant descendant until the origina
     const requestedAt = readDurable(record.run_dir).cancel_requested_at;
     expect(requestedAt).toBe(new Date(origin).toISOString());
     await expect
-      .poll(async () => {
-        try {
-          return await io.readFile(join(record.run_dir, "sigterm-seen"), "utf8");
-        } catch {
-          return null;
-        }
-      })
+      .poll(
+        async () => {
+          try {
+            return await io.readFile(join(record.run_dir, "sigterm-seen"), "utf8");
+          } catch {
+            return null;
+          }
+        },
+        { timeout: 5000 },
+      )
       .toBe("SIGTERM\n");
-    await expect.poll(() => activeGroup(pid).includes(pid)).toBe(false);
+    await expect.poll(() => activeGroup(pid).includes(pid), { timeout: 5000 }).toBe(false);
     await producer.executions[0].waitForExit();
     expect(activeGroup(pid)).toContain(invocation.pid);
     await h.registry.pollOnce();

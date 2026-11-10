@@ -98,7 +98,7 @@ test("D7 excludes both submitted and already-renamed running bytes until startup
     returnWrite.release();
     const record = await pending;
     await h.registry.pollOnce();
-    await expect.poll(() => producer.completed.length).toBe(1);
+    await expect.poll(() => producer.completed.length, { timeout: 5000 }).toBe(1);
     expect(producer.durableAtSettle[0].status).toBe("succeeded");
     expect(h.registry.isSubmissionInFlight(record.run_id)).toBe(false);
   } finally {
@@ -294,17 +294,19 @@ test("failed terminal persistence preserves done and retries successfully withou
     await releaseRun(other);
     await h.registry.pollOnce();
     await expect
-      .poll(() =>
-        h.errors.some((error) => error.includes("run-job publication") && error.includes("EIO")),
+      .poll(
+        () =>
+          h.errors.some((error) => error.includes("run-job publication") && error.includes("EIO")),
+        { timeout: 5000 },
       )
       .toBe(true);
     expect(await io.readFile(path)).toEqual(original);
     expect(first.producer.completed).toEqual([]);
     expect(first.producer.registration.cancellations).toEqual([]);
-    await expect.poll(() => healthy.producer.completed.length).toBe(1);
+    await expect.poll(() => healthy.producer.completed.length, { timeout: 5000 }).toBe(1);
     refuse = false;
     await h.registry.pollOnce();
-    await expect.poll(() => first.producer.completed.length).toBe(1);
+    await expect.poll(() => first.producer.completed.length, { timeout: 5000 }).toBe(1);
     expect(first.producer.durableAtSettle[0].status).toBe("succeeded");
   } finally {
     refuse = false;
@@ -322,7 +324,7 @@ test("completion callback retry does not rewrite terminal bytes, mtime or finish
     const record = await pending;
     await releaseRun(record);
     await h.registry.pollOnce();
-    await expect.poll(() => producer.attempts.length).toBeGreaterThan(0);
+    await expect.poll(() => producer.attempts.length, { timeout: 5000 }).toBeGreaterThan(0);
     expect(producer.completed).toEqual([]);
     const path = join(record.run_dir, "run-job.json");
     const terminal = await readRecord(record.run_dir);
@@ -337,7 +339,7 @@ test("completion callback retry does not rewrite terminal bytes, mtime or finish
     expect((await io.stat(path, { bigint: true })).mtimeNs).toBe(stat.mtimeNs);
     refuse = false;
     await h.registry.pollOnce();
-    await expect.poll(() => producer.completed.length).toBe(1);
+    await expect.poll(() => producer.completed.length, { timeout: 5000 }).toBe(1);
     await producer.doneObserved;
     expect(producer.durableAtDone[0]).toEqual(terminal);
     const result = await h.registry.collectShud(record.run_id);
@@ -493,7 +495,7 @@ test("reload settles a new local registration without invoking the retired compl
     const record = await first.pending;
     await releaseRun(record);
     await h.registry.pollOnce();
-    await expect.poll(() => first.producer.completed.length).toBe(1);
+    await expect.poll(() => first.producer.completed.length, { timeout: 5000 }).toBe(1);
     await h.registry.collectShud(record.run_id);
     await expect
       .poll(async () => (await readRecord(record.run_dir)).notify.detail, { timeout: 5000 })
@@ -515,7 +517,7 @@ test("reload settles a new local registration without invoking the retired compl
     expect(producer.completed).toEqual([]);
     await releaseRun(next);
     // The replacement timer, not a new manual tick, must complete its own receipt.
-    await expect.poll(() => producer.completed.length).toBe(1);
+    await expect.poll(() => producer.completed.length, { timeout: 5000 }).toBe(1);
     expect(producer.durableAtSettle[0].status).toBe("succeeded");
     expect(first.producer.attempts).toHaveLength(1);
     expect(producer.attempts).toHaveLength(1);

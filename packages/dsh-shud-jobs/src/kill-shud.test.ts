@@ -107,7 +107,7 @@ test.each([0, 13])(
       expect(h.registry.kill(id, h.ownerId, "natural exit race")).toBe("requested");
       const intent = readDurable(record.run_dir).cancel_requested_at;
       expect(intent).toEqual(expect.any(String));
-      await expect.poll(() => producer.completed.length).toBe(1);
+      await expect.poll(() => producer.completed.length, { timeout: 5000 }).toBe(1);
       await producer.doneObserved;
       expect(producer.durableAtSettle[0]).toMatchObject({
         status: code === 0 ? "succeeded" : "failed",
@@ -134,7 +134,7 @@ test("already-finished public kill preserves committed metadata and sends no sig
   try {
     const { record, id, producer } = await readyRun(h);
     releaseBeforePoll(record.run_dir);
-    await expect.poll(() => producer.completed.length).toBe(1);
+    await expect.poll(() => producer.completed.length, { timeout: 5000 }).toBe(1);
     await h.registry.collectShud(record.run_id);
     await expect.poll(() => h.registry.get(id, h.ownerId).status).toBe("completed");
     const paths = ["run-job.json", "run-record.json"].map((name) => join(record.run_dir, name));

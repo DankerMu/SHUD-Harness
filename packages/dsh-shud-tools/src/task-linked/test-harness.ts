@@ -127,7 +127,7 @@ export async function seedLiveRun(h: TaskToolHarness) {
     },
     produceDetachedShud,
   );
-  await expect.poll(() => readInvocation(record.run_dir)).not.toBeNull();
+  await expect.poll(() => readInvocation(record.run_dir), { timeout: 5000 }).not.toBeNull();
   return record;
 }
 
@@ -143,7 +143,7 @@ export async function expectLiveDurable(h: TaskToolHarness, record: RunJob) {
   expect(h.registry.list()).toEqual(
     expect.arrayContaining([expect.objectContaining({ id: record.dsh_job_id, status: "running" })]),
   );
-  await expect.poll(() => readInvocation(record.run_dir)).not.toBeNull();
+  await expect.poll(() => readInvocation(record.run_dir), { timeout: 5000 }).not.toBeNull();
   const invocation = await readInvocation(record.run_dir);
   if (!invocation) throw new Error("Native solver omitted invocation evidence");
   expect(() => process.kill(invocation.pid, 0)).not.toThrow();

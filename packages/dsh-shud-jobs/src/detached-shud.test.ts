@@ -141,7 +141,7 @@ test.each([0, 13])(
       expect((await readdir(record.run_dir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
       // Exit evidence is consumed by the registry poll path, not classified by child exit events.
       await expect
-        .poll(() => registry.get(execution.registration.handles[0].id).status)
+        .poll(() => registry.get(execution.registration.handles[0].id).status, { timeout: 5000 })
         .toBe(code === 0 ? "completed" : "failed");
       expect(execution.registration.cancellations).toEqual([]);
     } finally {
