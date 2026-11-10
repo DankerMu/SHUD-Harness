@@ -160,7 +160,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 - [x] 7.1b 判据评估器（离线）：输入为工作区与 session log，输出退出码 0/1/2；实现全部判据（含副本 `NUM_OPENMP`/`DT_YE_IC`/END 差异、`.cfg.calib.bak` 的 `%g` 比较、`input_digests`、独立重算逐字节相同）；每类失败一个录制夹具。不启动宿主即可运行。满足 oat-sensitivity「Sensitivity acceptance criteria」的离线部分（依赖 3.6c、4.2、7.1a）。
 - [x] 7.1c（#671）会话驱动与批外重复：`pnpm run shud:sensitivity` 入口；独立 Web profile 与单条提示（固定 plan，`threads: 1`）；只对 `report_submit` 自动 Allow once；宿主停止后批外直接执行重复运行，并清理其进程。满足 oat-sensitivity「Sensitivity local acceptance script」（依赖 7.1b）。
 - [x] 7.1d（#672）本机真实运行 `pnpm run shud:sensitivity <scratch>`，exit 0 的证据（含 O2 实测：单 run 耗时与重复 sha256）贴进 PR；结果为 FAIL 时如实报告并升级给 PI，不放宽判据（依赖 7.1c、5.3、5.4、6.1）。
-- [ ] 7.2 控制面登记：
+- [x] 7.2（#673）控制面登记：
   - `Testing_Strategy.md` 的 Verification Matrix 与 Enforcement Index、`Test_Fixtures_And_Command_Matrix.md`、`constraints.yaml` 镜像。
   - 过时描述随登记刷新：`Testing_Strategy.md` 与 `Test_Fixtures_And_Command_Matrix.md` 中"不确定 numerical_health 的计算里程碑或生产者"的句子；`Test_Fixtures_And_Command_Matrix.md` §1 dummy-batch 行与 §3 Dummy batch 节改写为 M5 实情（`analyses/<id>.json`、`runs/<run_id>/metrics.json`、`reports/<report_id>.sensitivity.json`、入口 `shud:sensitivity`），3×3/parquet/heatmap 只作为"M5 之后"的注记保留。
   - `instructions/agents/shared.md`，经 `instructions:render` 生成 AGENTS.md/CLAUDE.md。
@@ -758,3 +758,13 @@ Commands per PR: RED before implementation; focused `scripts/runtime/shud-sensit
 | packages / profile / docs | Not selected |
 
 Commands: RED before implementation; focused `scripts/runtime/shud-sensitivity*.test.ts` and existing runtime suites; `pnpm run check`; strict OpenSpec validation; one correctness+test-evidence review seat; exact-head CI. Ticks task 7.1c.
+
+## Issue #673 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Docs / control plane | Selected: rows present in Testing_Strategy (matrix + Enforcement Index), shared.md and its rendered root instruction files, `constraints.yaml` mirror + readiness gap, Test_Fixtures fixture and §1/§3; `grep -rn shud:sensitivity .github/workflows` empty; each registration contains the criteria link and no criterion list; `pnpm run instructions:check` and `docs:check` green; rendered budget numbers reported |
+| Legacy | Selected: `git diff` touches only the listed files plus render output; existing rows unchanged |
+| Code / CI / Phased_Plan | Not selected (Phased_Plan comparison reported only) |
+
+Commands: `pnpm run instructions:render`; `pnpm run check`; strict OpenSpec validation; one spec-compliance review seat; exact-head CI. Ticks task 7.2.

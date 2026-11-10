@@ -34,13 +34,14 @@ status: frozen
 
 Fixture 与命令矩阵见 [Test_Fixtures_And_Command_Matrix.md](Test_Fixtures_And_Command_Matrix.md)。原阶段测试计划 Phase_By_Phase_Test_Plan 与 CI 映射 CICD_Release 已删（见 tag archive/zero-v0.8.3）；CI 内容以 Phased_Plan v2 M1 为准。
 
-### Verification Matrix：M4 本机回放
+### Verification Matrix：M4 本机回放与 M5 敏感性
 
-其余命令与级别见根 [Verification Matrix](../../AGENTS.md#verification-matrix)；回放通过判据只维护在下列规范链接中。
+其余命令与级别见根 [Verification Matrix](../../AGENTS.md#verification-matrix)；回放与敏感性通过判据只维护在下列规范链接中。
 
 | 面 | Command | 通过判据 | 级别 |
 |---|---|---|---|
 | keliya known-answer 回放（需 SHUD 工具链、`DMXAPI_KEY`、绝对可执行 `SHUD_BIN`、`SUNDIALS_ROOT` 与显式 `SHUD_REPLAY_KELIYA`） | `pnpm run shud:replay <scratch-workspace>` | [Replay acceptance criteria](../../openspec/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria) | block（本机，CI 不运行） |
+| ccw OAT 敏感性批次（需 SHUD、绝对可执行 `SHUD_BIN`、`DMXAPI_KEY` 与显式工作区） | `pnpm run shud:sensitivity <scratch-workspace>` | [Sensitivity acceptance criteria](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-sensitivity-acceptance-criteria)；exit 2 = INCONCLUSIVE（模型偏离）须重跑、不计回归，exit 1 = FAIL；`report_submit` 自动 Allow once 仅为工程证据，不是 PI 验收 | block（本机，CI 不运行） |
 
 工作区参数必填；缺前置在准备/建会话前失败，不跳过。自动 Allow once 仅为工程证据，不替代 Epic 收口时的 PI Web 操作与明确验收。
 
@@ -327,6 +328,7 @@ gh pr view "$PR" --repo "$REPO" --json headRefOid,state,mergedAt,mergeCommit,mer
 | ccw 重启恢复 / 五条作业不变量 | `scripts/runtime/shud-restart.sh` | 本机 `pnpm run shud:restart`（需 SHUD 与 `DMXAPI_KEY`；SIGTERM / SIGKILL 两用例，通知必须 delivered） | block（本机） |
 | 首任务调用链 / 报告审批与文件联合判据 | `scripts/runtime/shud-first-task.sh` | 本机 `pnpm run shud:first-task <scratch-workspace>`（需 SHUD 与 `DMXAPI_KEY`；独立 Web profile，审计与文件同时通过；CI 不运行，自动 Allow once 不代替 PI 验收） | block（本机） |
 | keliya known-answer 回放 | `scripts/runtime/shud-replay.sh`；[Replay acceptance criteria](../../openspec/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria) | 本机 `pnpm run shud:replay <scratch-workspace>`（需 SHUD 工具链、`DMXAPI_KEY`、`SHUD_BIN`、`SUNDIALS_ROOT`、`SHUD_REPLAY_KELIYA`；CI 不运行；自动审批不是 PI 验收） | block（本机） |
+| ccw OAT 敏感性批次 | `scripts/runtime/shud-sensitivity.sh`；[Sensitivity acceptance criteria](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-sensitivity-acceptance-criteria) | 本机 `pnpm run shud:sensitivity <scratch-workspace>`（需 SHUD、`DMXAPI_KEY`、`SHUD_BIN`、显式工作区；CI 不运行；exit 2 须重跑；自动审批不是 PI 验收） | block（本机） |
 | 物理方程/默认参数/baseline 改动需 PI | policy gate `ask` | 运行时审批卡 + 决策表测试 `pnpm run test` | gate |
 | PI 功能验收（Epic #210 / M3 #423 / M4 #515 / M5 #639 按各自已接受流程，其余在 merge 前） | GitHub PR / Epic；M4 见 [既定验收要求](../../openspec/specs/known-answer-replay/spec.md#requirement-epic-close-pi-acceptance-for-replay)、[ADR-0014](../adr/implemented/0014-m4-epic-acceptance.md)；M5 见 [ADR-0015](../adr/implemented/0015-m5-epic-acceptance.md)，仅流程已接受、功能待 #675 | GitHub rulesets（PR required）+ PI 亲自操作与明确验收记录；工程门、审查、CI 和运行时审批权限不变，流程 accepted、自动工程审批与子 PR 合并不代替功能验收 | gate |
 | 不 import dsh loop 内部（seam 白名单，M1 起） | `eslint.config.mjs` | `pnpm run lint`（`no-restricted-imports` 白名单） | block |
