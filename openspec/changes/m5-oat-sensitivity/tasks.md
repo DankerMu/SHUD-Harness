@@ -150,7 +150,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 
 ## 6. presets：sensitivity 编排 prompt
 
-- [ ] 6.1 coordinator 与 worker 的 prompt 增加 sensitivity 流程：建卡 → `analysis_create` → 委派 worker → sensitivity 卡上一律带 `analysis_plan_id`+`parameter_set_id` 提交 → 显式 `job_output(wait)` + `shud_collect` → 失败如实汇报、不自行重提 → 报告三步。M3 的无 plan 路径只用于 science_assist。更新 `prompts.test.ts`。不新增 preset 或委派工具，`profile:smoke` 断言不变。满足 agent-presets「Preset system prompts」「sensitivity orchestration」（依赖 5.3、5.4）。
+- [x] 6.1（#668 / PR #717）coordinator 与 worker 的 prompt 增加 sensitivity 流程：建卡 → `analysis_create` → 委派 worker → sensitivity 卡上一律带 `analysis_plan_id`+`parameter_set_id` 提交 → 显式 `job_output(wait)` + `shud_collect` → 失败如实汇报、不自行重提 → 报告三步。M3 的无 plan 路径只用于 science_assist。更新 `prompts.test.ts`。不新增 preset 或委派工具，`profile:smoke` 断言不变。满足 agent-presets「Preset system prompts」「sensitivity orchestration」（依赖 5.3、5.4）。
 - Suggested fixture level: compact - prompt 资产与其测试，不新增工具面或 profile 行
 - Minimal mergeable slice: atomic - 两份 prompt 同属一个编排流程，分开合并会出现 coordinator 委派了 worker 却不认识的步骤
 
@@ -658,3 +658,17 @@ Commands: RED before implementation; focused tools suites; `pnpm run check`; `pn
 | Auth / tools / profile / schema | Not selected: unchanged |
 
 Commands: tests first (RED on prompt assertions), `pnpm run check`, `pnpm run build && pnpm run profile:smoke`, `pnpm run shud:first-task <scratch>`, strict OpenSpec validation, compact review (correctness + test-evidence seats), exact-head CI. Closes task 6.1; ticks 5.4 (merged #667).
+
+## Issue #669 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Prerequisites (CLI, spawn) | Selected: spawn the CLI with missing workspace arg, missing record arg, unset `SHUD_BIN`, relative `SHUD_BIN`, non-executable and non-regular `SHUD_BIN`, empty/unset `DMXAPI_KEY`, missing `SHUD/input/ccw` (constructed harness root) → each `status === 1`, stderr names the item; a previously absent workspace still does not exist, an existing workspace's listing is unchanged, no record file; a `DSH_HOME` directory in env has an unchanged listing |
+| Paths | Selected: workspace final component a symlink; workspace an existing regular file; `<ws>/input` a symlink to an outside dir; `<ws>/input` a regular file (ENOTDIR) → failure naming the path, nothing written (outside target dir unchanged); workspace under `os.tmpdir()` (macOS alias path) accepted; record path already existing, under `<ws>/input/`, under `<ws>/analyses` (or another managed root), or with a missing parent → failure naming it, workspace has no `input/ccw` |
+| Occupancy | Selected: each of the seven paths (`tasks`, `runs`, `reports`, `stacks`, `provenance`, `analyses`, `input/ccw`) pre-existing (directory; one as a symlink) → nonzero failure naming that path; workspace tree snapshot (names, bytes, mtimes) unchanged; no record |
+| Successful preparation | Selected: empty workspace and absent workspace path, constructed source with nested files → copy per-file sha256 equals source; record maps keyed by POSIX relative path and sorted; md5/sha256 equal values computed independently in the test with `node:crypto`; submodule revisions from constructed git repos equal HEAD before = after = record (git/PATH/HOME required, failing rather than skipping when absent); `raw` shape with `exists: true` and md5 when `data/raw` exists, `exists: false` when absent; record outside `input/ccw`; source tree bytes/mtimes unchanged; CLI success `status === 0` |
+| Safety / partial copy | Selected: symlink and FIFO in the source tree → failure naming the entry with no `<ws>/input/ccw` created (inventory precedes writes); injected write hook corrupting one copy file → failure naming that file, no record written, already-written copies left in place; byte budget exceeded (test-injected small budget) → failure naming the file before any write |
+| Reuse | Selected: source and copy hashing go through records `readShudInputFile` (spy count: one call per source file, one per copy file); replay tree helpers extracted to a shared module, all existing replay tests pass unchanged; jscpd ≤3% |
+| Sessions / evaluator / registration | Not selected: #670/#671/#673 |
+
+Commands: tests first (RED), `pnpm run check`, strict OpenSpec validation, compact review (correctness + test-evidence), exact-head CI. Closes task 7.1a; ticks 6.1 (merged #668).
