@@ -168,7 +168,7 @@ verification:
     command: "pnpm run test-guardrails"
 
 readiness_gaps:
-  - "CI cannot run SHUD: shud:tiny, shud:restart, shud:first-task, shud:replay and shud:sensitivity remain local-only block gates; restart/first-task/replay/sensitivity require local SHUD and DMXAPI_KEY; first-task/replay/sensitivity require an explicit scratch workspace; replay/sensitivity also require SHUD_BIN; replay also requires SUNDIALS_ROOT, SHUD_REPLAY_KELIYA and the build toolchain"
+  - "CI cannot run SHUD: shud:tiny, shud:restart, shud:first-task, shud:replay and shud:sensitivity remain local-only block gates; restart/first-task/replay/sensitivity require local SHUD and DMXAPI_KEY; first-task/replay/sensitivity require an explicit scratch workspace; first-task/replay/sensitivity also require SHUD_BIN; replay also requires SUNDIALS_ROOT, SHUD_REPLAY_KELIYA and the build toolchain"
   - "CI cannot run real LLM probes: raw-guard:probes requires local DMXAPI_KEY; Web approval remains manual"
   - "eng-init rendered-harness checker lives in gitignored .claude/skills; repo-side equivalents are instructions:check + docs:paths"
   - "semgrep not installed locally; CI job sast runs it"
