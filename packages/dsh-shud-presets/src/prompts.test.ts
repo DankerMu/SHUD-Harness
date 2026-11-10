@@ -600,7 +600,7 @@ const SENSITIVITY_RECOVERY_CLAUSES = [
   /Wait for that worker's subagent-settled message, then call report_generate again/,
   /Re-delegate at most once per parameter set/,
   /If closure fails with job_not_terminal, a linked run is still in progress: use the shud_collect fallback above for that run, by the named job_id or its run_id, until collection confirms terminal evidence, then call report_generate again/,
-  /If the same set is still named after its one re-delegation, or closure fails for any other reason than job_not_terminal, stop and give the PI the error and the collected evidence/,
+  /If the same set is still named after its one re-delegation, or closure fails for a reason other than missing_parameter_set, inadmissible_effective_run or job_not_terminal \(a different parameter set newly named by either of the first two starts its own recovery above\), stop and give the PI the error and the collected evidence/,
 ];
 
 const RECOVERY_PROHIBITION =
