@@ -114,14 +114,17 @@ function prerequisites(input: SensitivityPrepareInput, env: NodeJS.ProcessEnv, r
   return { workspace: resolve(workspace), recordPath: resolve(recordPath), source };
 }
 
-/** Final component ordinary; outer ancestors may be aliases (macOS /var -> /private/var). */
+/**
+ * Final component ordinary; outer ancestors may be aliases (macOS /var -> /private/var). The
+ * native realpath also folds a case-alias spelling, as `analysis_create` resolves `input_dir`.
+ */
 function physicalWorkspace(requested: string): string {
   requireFact(requested !== sep, "Unsafe root workspace");
   const own = inspect(requested);
   if (own) {
     requireFact(!own.isSymbolicLink(), `Workspace must not be a symlink: ${requested}`);
     requireFact(own.isDirectory(), `Workspace must be a directory: ${requested}`);
-    return fs.realpathSync(requested);
+    return fs.realpathSync.native(requested);
   }
   let ancestor = dirname(requested);
   while (!inspect(ancestor)) ancestor = dirname(ancestor);
@@ -129,7 +132,7 @@ function physicalWorkspace(requested: string): string {
     fs.statSync(ancestor).isDirectory(),
     `Workspace ancestor must be a directory: ${ancestor}`,
   );
-  return join(fs.realpathSync(ancestor), requested.slice(ancestor.length));
+  return join(fs.realpathSync.native(ancestor), requested.slice(ancestor.length));
 }
 
 /** `<ws>/input`, when present, must be an ordinary directory at its own physical path. */

@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { snapshotTree } from "../../packages/dsh-shud-records/src/report-code-change-test-harness.ts";
 import * as inputFile from "../../packages/dsh-shud-records/src/shud-input-file.ts";
@@ -28,6 +28,8 @@ vi.mock("../../packages/dsh-shud-records/src/shud-input-file.ts", async (importO
 const readSpy = vi.mocked(inputFile.readShudInputFile);
 const MANAGED = ["tasks", "runs", "reports", "stacks", "provenance", "analyses"];
 const SORTED_NAMES = Object.keys(SOURCE_FILES).sort();
+/** Case-insensitive file systems (default APFS) resolve an upper-case spelling of tmpdir. */
+const CASE_ALIASES = fs.existsSync(tmpdir().toUpperCase());
 
 let h: SensitivityHarness;
 beforeEach(() => {
@@ -121,6 +123,19 @@ test("accepts a workspace under the unresolved os.tmpdir() alias and records its
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });
+
+test.runIf(CASE_ALIASES)(
+  "records the native spelling of a case-alias workspace or workspace ancestor",
+  async () => {
+    const scratch = dirname(h.workspace);
+    const upper = join(dirname(scratch), basename(scratch).toUpperCase());
+    expect((await prepare({ workspace: join(upper, "workspace") })).workspace).toBe(h.workspace);
+    const existing = join(scratch, "existing");
+    fs.mkdirSync(existing);
+    const second = { workspace: join(scratch, "EXISTING"), recordPath: join(h.evidence, "2.json") };
+    expect((await prepare(second)).workspace).toBe(existing);
+  },
+);
 
 test("hashes every source and copy file through exactly one records safe read each", async () => {
   await prepare();

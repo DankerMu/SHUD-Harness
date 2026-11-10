@@ -97,7 +97,7 @@ function planDeviations(plan: AnalysisPlan, workspace: string): string[] {
     .map((set) => `${set.parameter_set_id} ${signature(set)} is not in the fixed plan`);
   for (const expected of fixed)
     if (!own.has(expected)) deviations.push(`fixed ${expected} is missing`);
-  const inputDir = fs.realpathSync(join(workspace, "input/ccw"));
+  const inputDir = fs.realpathSync.native(join(workspace, "input/ccw"));
   const fields = { ...FIXED_PLAN, input_dir: inputDir };
   for (const field of ["end_days", "threads", "input_dir", "project"] as const)
     if (plan[field] !== fields[field])

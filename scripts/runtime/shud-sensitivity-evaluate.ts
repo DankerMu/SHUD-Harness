@@ -75,7 +75,7 @@ async function named<T>(name: string, read: () => T | Promise<T>): Promise<T> {
 }
 
 function physicalWorkspace(path: string): string {
-  const workspace = fs.realpathSync(resolve(path));
+  const workspace = fs.realpathSync.native(resolve(path));
   requireFact(fs.statSync(workspace).isDirectory(), `not a directory: ${path}`);
   fs.readdirSync(workspace);
   return workspace;

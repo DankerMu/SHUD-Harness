@@ -1,9 +1,10 @@
-import { spawnSync } from "node:child_process";
+import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { loadSensitivityBatch } from "./shud-sensitivity-criteria-workspace.ts";
 import {
   classifySensitivityExit,
   type CriterionResult,
@@ -20,9 +21,34 @@ import {
   type EvaluateFixture,
 } from "./sensitivity-evaluate/test-harness.ts";
 
+/** Pass-through spies on every process-starting export; the evaluator may only start `git`. */
+const SPAWNERS = vi.hoisted(() => [
+  "exec",
+  "execFile",
+  "execFileSync",
+  "execSync",
+  "fork",
+  "spawn",
+  "spawnSync",
+]);
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof childProcess>();
+  const spied = Object.fromEntries(
+    SPAWNERS.map((name) => [name, vi.fn(actual[name as keyof typeof actual] as () => unknown)]),
+  );
+  return { ...actual, ...spied, default: { ...actual, ...spied } };
+});
+const started = () =>
+  SPAWNERS.flatMap((name) =>
+    vi.mocked(childProcess[name as "spawn"]).mock.calls.map((call) => `${name} ${String(call[0])}`),
+  );
+/** Case-insensitive file systems (default APFS) resolve an upper-case spelling of tmpdir. */
+const CASE_ALIASES = fs.existsSync(tmpdir().toUpperCase());
+
 let f: EvaluateFixture;
 beforeEach(async () => {
   f = await makeEvaluateFixture();
+  vi.clearAllMocks();
 });
 afterEach(() => {
   fs.chmodSync(f.workspace, 0o755);
@@ -146,7 +172,7 @@ test("the best fixture exits 1 offline naming the 7.1b-2 criteria, both paths, a
   fs.symlinkSync(join(found!, "git"), join(bin, "git"));
   const before = treeState(top);
   const script = fileURLToPath(new URL("./shud-sensitivity-evaluate.ts", import.meta.url));
-  const result = spawnSync(
+  const result = childProcess.spawnSync(
     process.execPath,
     [
       "--input-type=module",
@@ -167,3 +193,32 @@ test("the best fixture exits 1 offline naming the 7.1b-2 criteria, both paths, a
   fs.rmSync(bin, { recursive: true });
   expect(treeState(top)).toStrictEqual(before);
 });
+
+test("in process, evaluation starts no child process other than git", async () => {
+  const result = await evaluate(f);
+  expect(result.code).toBe(1);
+  const commands = started();
+  expect(commands.length).toBeGreaterThanOrEqual(3);
+  for (const command of commands) expect(command).toMatch(/^execFile git$/u);
+});
+
+async function expectAliasAccepted(alias: string): Promise<void> {
+  const result = await evaluate(f, [alias, ...f.argv.slice(1)]);
+  expect(result.stderr).not.toMatch(/preparation record:/u);
+  expect([...result.criteria.keys()]).toEqual([4, 5, 6, 7, 13]);
+}
+
+test("a workspace argument through a symlink alias matches the record and the plan input_dir", async () => {
+  const link = join(dirname(f.h.root), "workspace-link");
+  fs.symlinkSync(f.workspace, link, "dir");
+  await expectAliasAccepted(link);
+});
+
+test.runIf(CASE_ALIASES)(
+  "a case-alias workspace spelling is no input_dir deviation and matches the record",
+  async () => {
+    const alias = join(dirname(f.workspace), basename(f.workspace).toUpperCase());
+    expect(loadSensitivityBatch(alias).outcome).toStrictEqual({ kind: "equivalent" });
+    await expectAliasAccepted(alias);
+  },
+);
