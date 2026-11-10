@@ -10,7 +10,8 @@
         "scripts/runtime/profile-patch.ts",
         "scripts/runtime/shud-restart.ts",
         "scripts/runtime/shud-first-task.ts",
-        "scripts/runtime/shud-replay.ts"
+        "scripts/runtime/shud-replay.ts",
+        "scripts/runtime/shud-sensitivity-evaluate.ts"
       ],
       "project": ["scripts/**/*.ts"]
     },

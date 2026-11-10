@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { z } from "zod";
 import { runGit } from "../../packages/dsh-shud-core/src/stack-lock/repository-revision.ts";
 import { readShudInputFile } from "../../packages/dsh-shud-records/src/shud-input-file.ts";
 import { requireFact } from "./shud-restart-evidence.ts";
@@ -25,15 +26,23 @@ export interface SensitivityPrepareInput {
   writeFile?: (path: string, bytes: Buffer) => void;
 }
 
-export interface SensitivityPreparationRecord {
-  workspace: string;
-  source: string;
-  source_md5: Record<string, string>;
-  source_sha256: Record<string, string>;
-  copy_sha256: Record<string, string>;
-  submodules: Record<(typeof SUBMODULES)[number], string>;
-  raw: ReturnType<typeof rawTreeMd5>;
-}
+const hex = (length: number) => z.string().regex(new RegExp(`^[0-9a-f]{${length}}$`, "u"));
+const fileHashes = (length: number) => z.record(z.string().min(1), hex(length));
+/** Writer (this module) and reader (the offline evaluator) share this one definition. */
+export const SensitivityPreparationRecordSchema = z.strictObject({
+  workspace: z.string().refine(isAbsolute),
+  source: z.string().refine(isAbsolute),
+  source_md5: fileHashes(32),
+  source_sha256: fileHashes(64),
+  copy_sha256: fileHashes(64),
+  submodules: z.strictObject({ SHUD: hex(40), rSHUD: hex(40), AutoSHUD: hex(40) }),
+  raw: z.strictObject({
+    exists: z.boolean(),
+    md5: fileHashes(32),
+    roots: z.strictObject({ harness: z.boolean(), workspace: z.boolean() }),
+  }),
+});
+export type SensitivityPreparationRecord = z.infer<typeof SensitivityPreparationRecordSchema>;
 
 interface InventoryEntry {
   relative: string;
@@ -156,7 +165,7 @@ function physicalRecord(path: string, workspace: string, root: string): string {
   return record;
 }
 
-async function submoduleHead(root: string, name: string): Promise<string> {
+export async function submoduleHead(root: string, name: string): Promise<string> {
   const repository = join(root, name);
   let lines: string[];
   try {
