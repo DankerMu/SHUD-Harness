@@ -78,6 +78,38 @@ function complianceClaims(candidates: readonly string[]) {
   );
 }
 
+// Returns the clauses that do not match in order; each search starts after the
+// previous match.
+function cursorOrderedMisses(text: string, clauses: readonly RegExp[]) {
+  const misses: string[] = [];
+  let cursor = 0;
+  for (const clause of clauses) {
+    const match = clause.exec(text.slice(cursor));
+    if (!match) {
+      misses.push(String(clause));
+      continue;
+    }
+    cursor += match.index + match[0].length;
+  }
+  return misses;
+}
+
+const FIRST_TASK_SETTLED_CLAUSES = [
+  /^3\. Wait for the worker to return run_id and terminal status with collected evidence\./,
+  /immediate subagent result \(started subagent <id>\) is not the worker's return/i,
+  /worker's return arrives as the later subagent-settled message/i,
+  /(?:may|can) end (?:your|the) turn while waiting/i,
+  /(?:do not|never) call report_generate before (?:that|the) settled message arrives/i,
+];
+
+const CODE_CHANGE_SETTLED_CLAUSES = [
+  /\bsubagent_coder\b, \bsubagent\b, \bsubagent_reviewer\b/,
+  /immediate result (?:that )?is only started subagent <id>/i,
+  /not that subagent's return/i,
+  /later subagent-settled message/i,
+  /wait for (?:it|that message) before using its build_id, run_id or verification evidence or moving to the next stage/i,
+];
+
 function withoutCanonicalLists(markdown: string) {
   return markdown
     .split(/(?=^## )/m)
@@ -338,6 +370,48 @@ describe("coordinator prompt orchestration contract", () => {
     expect(fallback).toMatch(/terminal|终态/i);
     expect(fallback).toMatch(/poll|轮询/i);
     expect(fallback).toMatch(/run_id/);
+  });
+
+  // Scoped by section and paragraph: the sensitivity section already carries a
+  // settled sentence, so whole-file matches would pass vacuously.
+  it("anchors the first-task worker return and the collect fallback to the subagent-settled message", () => {
+    const firstTask = promptSection(coordinator, "First-task workflow");
+    const paragraphs = firstTask.split(/\n\s*\n/);
+    const step3 = paragraphs.find((paragraph) => paragraph.startsWith("3. "));
+    expect(step3, "Missing first-task step 3").toBeDefined();
+    expect(cursorOrderedMisses(step3 ?? "", FIRST_TASK_SETTLED_CLAUSES)).toEqual([]);
+    expect(step3).toContain(
+      "A started job or an uncollected terminal process is not completion of this step.",
+    );
+    const step4 = paragraphs.findIndex((paragraph) => paragraph.startsWith("4. "));
+    expect(paragraphs.indexOf(step3 ?? "")).toBe(step4 - 1);
+
+    const fallback = paragraphMatching(firstTask, /shud_collect/);
+    expect(fallback).toMatch(
+      /^If the worker's settled message arrives without collected terminal evidence, use shud_collect to poll that run by its persistent run_id/,
+    );
+    expect(fallback).toMatch(/(?:never|not|do not)[^.]*before (?:that|the) settled message/i);
+    expect(fallback).toMatch(/do not treat a running response as success/i);
+    expect(paragraphs.indexOf(fallback)).toBeGreaterThan(paragraphs.indexOf(step3 ?? ""));
+
+    expect(coordinator.replace(/`/g, "")).not.toMatch(
+      /If the worker returns without collected terminal evidence/i,
+    );
+  });
+
+  it("anchors every code_change delegation and the step 8 report to the settled message", () => {
+    const flow = promptSection(coordinator, "code_change workflow");
+    const paragraphs = flow.split(/\n\s*\n/);
+    const anchor = paragraphMatching(flow, /started subagent <id>/);
+    expect(cursorOrderedMisses(anchor, CODE_CHANGE_SETTLED_CLAUSES)).toEqual([]);
+    const firstDelegation = paragraphs.findIndex((paragraph) => paragraph.startsWith("2. "));
+    expect(firstDelegation).toBeGreaterThan(0);
+    expect(paragraphs.indexOf(anchor)).toBeLessThan(firstDelegation);
+
+    const step8 = paragraphs.find((paragraph) => paragraph.startsWith("8. "));
+    expect(step8).toMatch(
+      /^8\. After the reviewer's subagent-settled message arrives, [^\n]*\breport_generate\b/,
+    );
   });
 
   it("requires corrected inputs and a newly generated report after validation fails", () => {

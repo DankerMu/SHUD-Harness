@@ -156,7 +156,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
 
 ## 7. 验收脚本与控制面登记
 
-- [ ] 7.1a 工作区准备：复制 `SHUD/input/ccw`，前置缺失时明确失败，并记录源输入 md5 与 `input_digests` 基线；附单测。满足 oat-sensitivity「Sensitivity workspace preparation」（依赖 3.0）。
+- [x] 7.1a（#669 / PR #719）工作区准备：复制 `SHUD/input/ccw`，前置缺失时明确失败，并记录源输入 md5 与 `input_digests` 基线；附单测。满足 oat-sensitivity「Sensitivity workspace preparation」（依赖 3.0）。
 - [ ] 7.1b 判据评估器（离线）：输入为工作区与 session log，输出退出码 0/1/2；实现全部判据（含副本 `NUM_OPENMP`/`DT_YE_IC`/END 差异、`.cfg.calib.bak` 的 `%g` 比较、`input_digests`、独立重算逐字节相同）；每类失败一个录制夹具。不启动宿主即可运行。满足 oat-sensitivity「Sensitivity acceptance criteria」的离线部分（依赖 3.6c、4.2、7.1a）。
 - [ ] 7.1c 会话驱动与批外重复：`pnpm run shud:sensitivity` 入口；独立 Web profile 与单条提示（固定 plan，`threads: 1`）；只对 `report_submit` 自动 Allow once；宿主停止后批外直接执行重复运行，并清理其进程。满足 oat-sensitivity「Sensitivity local acceptance script」（依赖 7.1b）。
 - [ ] 7.1d 本机真实运行 `pnpm run shud:sensitivity <scratch>`，exit 0 的证据（含 O2 实测：单 run 耗时与重复 sha256）贴进 PR；结果为 FAIL 时如实报告并升级给 PI，不放宽判据（依赖 7.1c、5.3、5.4、6.1）。
@@ -672,3 +672,14 @@ Commands: tests first (RED on prompt assertions), `pnpm run check`, `pnpm run bu
 | Sessions / evaluator / registration | Not selected: #670/#671/#673 |
 
 Commands: tests first (RED), `pnpm run check`, strict OpenSpec validation, compact review (correctness + test-evidence), exact-head CI. Closes task 7.1a; ticks 6.1 (merged #668).
+
+## Issue #712 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Model-visible contract | Selected: within the first-task section, step 3 paragraph matches `started subagent`, "not the worker's return" (or equivalent), "subagent-settled", and "do not call `report_generate` before"; the fallback paragraph matches a precondition on the settled message arriving without collected terminal evidence (negative: the old unconditioned "If the worker returns without collected terminal evidence" form no longer matches); the code_change section states every delegation (`subagent_coder`, `subagent`, `subagent_reviewer`) returns via its settled message and step 8's `report_generate` requires the reviewer's settled message; assertions scoped by section/paragraph (the sensitivity section already contains a settled sentence, so whole-file matches would be vacuous), cursor-ordered as in the existing tests |
+| Legacy compatibility | Selected: all existing `prompts.test.ts` cases pass, including `:337` (`/(?:not|without|missing|未).*(?:collected|已收集)/i` on the first `shud_collect` paragraph), except where the old fallback wording is intentionally replaced (strengthened, not removed); first-task step order assertions still pass; sensitivity section untouched (`git diff` shows no hunk after `## sensitivity workflow`); `pnpm run build && pnpm run profile:smoke` PASS with no assertion change |
+| Live evidence | Selected: 5 consecutive local `pnpm run shud:first-task <scratch>` runs on the PR head, all counted; record exit status and, from each retained root session log, the seqs of the `subagent` delegated result, every `report_generate` call, the worker `subagent-settled` user/message, and every root `job_list`/`job_output`/`shud_collect` call with its position relative to settled (diagnostic only; the oracle is unchanged and is the pass criterion). Any non-PASS run (ORDER or otherwise) means the live criterion is not met: reported verbatim, no rerun-to-green, escalated. `shud:replay` is not rerun (needs keliya toolchain); its code_change ordering is covered by the prompt assertions only — recorded as a gap |
+| Oracle / tools / profile | Not selected: unchanged by design |
+
+Commands: tests first (RED), `pnpm run check`, `pnpm run build && pnpm run profile:smoke`, 5× `pnpm run shud:first-task`, strict OpenSpec validation, compact review, exact-head CI.
