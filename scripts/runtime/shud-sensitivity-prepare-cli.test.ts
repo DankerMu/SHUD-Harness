@@ -57,6 +57,12 @@ type Case = {
 const CASES: Case[] = [
   { name: "missing workspace argument", item: /workspace argument/u, args: () => [] },
   { name: "missing record argument", item: /record path argument/u, args: (x) => [x.workspace] },
+  { name: "empty workspace argument", item: /workspace argument/u, args: (x) => ["", x.record] },
+  {
+    name: "empty record argument",
+    item: /record path argument/u,
+    args: (x) => [x.workspace, ""],
+  },
   { name: "unset SHUD_BIN", item: /SHUD_BIN/u, env: () => without("SHUD_BIN") },
   {
     name: "relative SHUD_BIN",
@@ -95,6 +101,7 @@ test.each(CASES)(
     if (c.existingWorkspace) fs.mkdirSync(h.workspace);
     const args = c.args ? c.args(h) : [h.workspace, h.record];
     const env = c.env ? c.env(h) : h.env;
+    const rootBefore = fs.readdirSync(h.root, { recursive: true }).sort();
     const result = cli(args, env, c.harnessRoot ? h.root : undefined);
     expect(result.status, result.stderr).toBe(1);
     expect(result.stderr).toMatch(/^shud:sensitivity: /u);
@@ -103,6 +110,7 @@ test.each(CASES)(
     else expect(fs.existsSync(h.workspace)).toBe(false);
     expect(fs.readdirSync(h.evidence)).toEqual([]);
     expect(fileList(h.dshHome)).toEqual(["sentinel"]);
+    expect(fs.readdirSync(h.root, { recursive: true }).sort()).toEqual(rootBefore);
   },
 );
 

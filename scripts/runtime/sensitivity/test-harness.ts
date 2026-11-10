@@ -15,7 +15,7 @@ const LOCATOR_VARS = [
 ];
 
 /** Requires host git, PATH and HOME; absence fails the test rather than skipping it. */
-function git(directory: string, ...args: string[]): string {
+export function git(directory: string, ...args: string[]): string {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
   for (const name of LOCATOR_VARS) delete env[name];
   return execFileSync(
@@ -81,7 +81,8 @@ export interface SensitivityHarness {
   dispose(): void;
 }
 
-function commitRepository(directory: string): void {
+/** Initialise and commit `directory` (README only plus whatever already lies there). */
+export function commitRepository(directory: string): void {
   fs.mkdirSync(directory, { recursive: true });
   git(directory, "init", "-q");
   fs.writeFileSync(join(directory, "README"), `${directory}\n`);
@@ -89,9 +90,16 @@ function commitRepository(directory: string): void {
   git(directory, "commit", "-q", "-m", "fixture");
 }
 
-/** Constructed harness root: three committed repositories and a nested ccw source; never the real SHUD. */
+/**
+ * Constructed harness root: three committed repositories and a nested ccw source; never the real
+ * SHUD. Workspace and evidence live in a sibling scratch directory outside the harness root.
+ */
 export function makeSensitivityHarness(options: { source?: boolean } = {}): SensitivityHarness {
-  const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), "shud-sensitivity-")));
+  const top = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), "shud-sensitivity-")));
+  const root = join(top, "harness");
+  const scratch = join(top, "scratch");
+  fs.mkdirSync(root);
+  fs.mkdirSync(scratch);
   const source = join(root, "SHUD/input/ccw");
   for (const name of ["rSHUD", "AutoSHUD"]) commitRepository(join(root, name));
   fs.mkdirSync(join(root, "SHUD"));
@@ -107,14 +115,14 @@ export function makeSensitivityHarness(options: { source?: boolean } = {}): Sens
   const dshHome = join(root, "dsh-home");
   fs.mkdirSync(dshHome);
   fs.writeFileSync(join(dshHome, "sentinel"), "untouched\n");
-  const evidence = join(root, "evidence");
+  const evidence = join(scratch, "evidence");
   fs.mkdirSync(evidence);
   return {
     root,
     source,
     shudBin,
     dshHome,
-    workspace: join(root, "workspace"),
+    workspace: join(scratch, "workspace"),
     evidence,
     record: join(evidence, "preparation.json"),
     env: {
@@ -132,7 +140,7 @@ export function makeSensitivityHarness(options: { source?: boolean } = {}): Sens
       };
     },
     dispose() {
-      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(top, { recursive: true, force: true });
     },
   };
 }

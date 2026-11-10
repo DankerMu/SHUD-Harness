@@ -1,14 +1,16 @@
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { snapshotTree } from "../../packages/dsh-shud-records/src/report-code-change-test-harness.ts";
 import * as inputFile from "../../packages/dsh-shud-records/src/shud-input-file.ts";
 import {
   SOURCE_FILES,
+  commitRepository,
   fileHashes,
   fileList,
+  git,
   hash,
   makeSensitivityHarness,
   type SensitivityHarness,
@@ -258,6 +260,88 @@ test("an unreadable or non-root submodule fails naming it before any write", asy
   fs.rmSync(join(h.root, "rSHUD/.git"), { recursive: true });
   await expectRejected(`Cannot read submodule rSHUD HEAD: ${join(h.root, "rSHUD")}`);
   expect(fs.existsSync(h.workspace)).toBe(false);
+});
+
+test("a submodule directory resolving to the enclosing repository fails the toplevel check", async () => {
+  fs.rmSync(join(h.root, "rSHUD/.git"), { recursive: true });
+  commitRepository(h.root);
+  expect(git(join(h.root, "rSHUD"), "rev-parse", "--show-toplevel")).toBe(h.root);
+  await expectRejected(`Cannot read submodule rSHUD HEAD: ${join(h.root, "rSHUD")}`);
+  expect(fs.existsSync(h.workspace)).toBe(false);
+});
+
+test("start hashes come from the single inventory read even if the source changes during the copy", async () => {
+  const name = "ccw.cfg.para";
+  const path = join(h.source, name);
+  let rewritten = false;
+  try {
+    const record = await prepare({
+      writeFile(target, bytes) {
+        if (!rewritten) {
+          rewritten = true;
+          fs.writeFileSync(path, Buffer.from("rewritten after inventory\n"));
+        }
+        fs.writeFileSync(target, bytes, { flag: "wx" });
+      },
+    });
+    expect(rewritten).toBe(true);
+    expect(record.source_md5[name]).toBe(hash("md5", SOURCE_FILES[name]));
+    expect(record.source_sha256[name]).toBe(hash("sha256", SOURCE_FILES[name]));
+    expect(record.copy_sha256[name]).toBe(hash("sha256", SOURCE_FILES[name]));
+    expect(fs.readFileSync(join(h.workspace, "input/ccw", name))).toEqual(SOURCE_FILES[name]);
+  } finally {
+    fs.writeFileSync(path, SOURCE_FILES[name]);
+  }
+});
+
+test("a workspace input swapped for a symlink after the path checks fails without writing outside", async () => {
+  const outside = join(h.root, "outside");
+  fs.mkdirSync(outside);
+  fs.writeFileSync(join(outside, "keep"), "outside bytes\n");
+  const outsideBefore = snapshotTree(outside);
+  const workspaceInput = join(h.workspace, "input");
+  fs.mkdirSync(workspaceInput, { recursive: true });
+  const actual = await vi.importActual<typeof inputFile>(
+    "../../packages/dsh-shud-records/src/shud-input-file.ts",
+  );
+  readSpy.mockImplementationOnce((base, relative) => {
+    fs.rmdirSync(workspaceInput);
+    fs.symlinkSync(outside, workspaceInput, "dir");
+    return actual.readShudInputFile(base, relative);
+  });
+  await expectRejected(`Workspace input must be a real directory: ${workspaceInput}`);
+  expect(snapshotTree(outside)).toEqual(outsideBefore);
+});
+
+test("rejects a workspace resolving inside the harness root naming it without writing", async () => {
+  const alias = join(dirname(h.workspace), "root-alias");
+  fs.symlinkSync(h.root, alias, "dir");
+  const rootBefore = snapshotTree(h.root);
+  for (const workspace of [h.root, h.source, join(h.root, "nested/ws"), join(alias, "ws")]) {
+    await expect(prepare({ workspace })).rejects.toThrow(
+      `Workspace must be outside the harness root: ${workspace}`,
+    );
+    expect(fs.existsSync(h.record)).toBe(false);
+    expect(snapshotTree(h.root)).toEqual(rootBefore);
+  }
+});
+
+test("rejects a record path under harness or workspace data/raw naming it without writing", async () => {
+  const raws = [join(h.root, "data/raw"), join(h.workspace, "data/raw")];
+  for (const raw of raws) fs.mkdirSync(join(raw, "nested"), { recursive: true });
+  for (const recordPath of raws.flatMap((raw) => [
+    join(raw, "record.json"),
+    join(raw, "nested/record.json"),
+  ])) {
+    await expectRejected(
+      `Record path must be outside harness and workspace data/raw: ${recordPath}`,
+      {
+        recordPath,
+      },
+    );
+    for (const raw of raws) expect(fileList(raw)).toEqual([]);
+  }
+  expect(fs.readdirSync(h.workspace)).toEqual(["data"]);
 });
 
 test("the record is created exclusively and never overwrites a path that appears during the copy", async () => {

@@ -123,7 +123,20 @@ function physicalWorkspace(requested: string): string {
   return join(fs.realpathSync(ancestor), requested.slice(ancestor.length));
 }
 
-function physicalRecord(path: string, workspace: string): string {
+/** `<ws>/input`, when present, must be an ordinary directory at its own physical path. */
+function requireRealInput(workspace: string): void {
+  const workspaceInput = join(workspace, "input");
+  const stat = inspect(workspaceInput);
+  requireFact(
+    !stat ||
+      (stat.isDirectory() &&
+        !stat.isSymbolicLink() &&
+        fs.realpathSync(workspaceInput) === workspaceInput),
+    `Workspace input must be a real directory: ${workspaceInput}`,
+  );
+}
+
+function physicalRecord(path: string, workspace: string, root: string): string {
   const parent = dirname(path);
   requireFact(
     inspect(parent)?.isDirectory(),
@@ -135,6 +148,10 @@ function physicalRecord(path: string, workspace: string): string {
     record !== workspace &&
       !["input", ...MANAGED_ROOTS].some((name) => within(join(workspace, name), record)),
     `Record path must be outside workspace input and managed roots: ${path}`,
+  );
+  requireFact(
+    ![root, workspace].some((base) => within(join(base, "data/raw"), record)),
+    `Record path must be outside harness and workspace data/raw: ${path}`,
   );
   return record;
 }
@@ -175,15 +192,13 @@ export async function prepareSensitivityWorkspace(
   const root = input.root ?? ROOT;
   const checked = prerequisites(input, input.env ?? process.env, root);
   const workspace = physicalWorkspace(checked.workspace);
-  if (inspect(workspace)) {
-    const workspaceInput = join(workspace, "input");
-    const stat = inspect(workspaceInput);
-    requireFact(
-      !stat || (stat.isDirectory() && !stat.isSymbolicLink()),
-      `Workspace input must be a real directory: ${workspaceInput}`,
-    );
-  }
-  const recordPath = physicalRecord(checked.recordPath, workspace);
+  const physicalRoot = fs.realpathSync(root);
+  requireFact(
+    !within(physicalRoot, workspace),
+    `Workspace must be outside the harness root: ${checked.workspace}`,
+  );
+  if (inspect(workspace)) requireRealInput(workspace);
+  const recordPath = physicalRecord(checked.recordPath, workspace, physicalRoot);
   for (const name of [...MANAGED_ROOTS, "input/ccw"]) {
     const path = join(workspace, name);
     requireFact(!inspect(path), `Occupied workspace path: ${path}; never overwritten`);
@@ -198,6 +213,7 @@ export async function prepareSensitivityWorkspace(
   const copy = join(workspace, "input/ccw");
   fs.mkdirSync(join(workspace, "input"), { recursive: true });
   requireFact(fs.realpathSync(workspace) === workspace, `Workspace changed: ${workspace}`);
+  requireRealInput(workspace);
   fs.mkdirSync(copy);
   const write = input.writeFile ?? exclusiveWrite;
   for (const entry of entries) {
