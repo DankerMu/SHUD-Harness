@@ -37,6 +37,7 @@ test.each([
   "patches",
   "verifications",
   "builds",
+  "analyses",
 ])("%s protects absent and existing records, not reads or sibling names", (root) => {
   const target = `${root}/record.json`;
   expect(decide("write", { file_path: target })).toMatchObject(immutable);
@@ -111,6 +112,18 @@ test("native case aliases follow the actual filesystem without assuming its sens
   expect(decide("edit", { file_path: "CHANGES/new.json" })).toMatchObject(expected);
   expect(decide("bash", { command: "touch CHANGES/new.json" })).toMatchObject(expected);
   expect(decide("bash", { command: "touch new.json", workdir: "CHANGES" })).toMatchObject(expected);
+});
+
+test("analyses case aliases deny when proven and fail closed when unprovable", () => {
+  expect(decide("write", { file_path: "ANALYSES/x.json" })).toMatchObject({
+    kind: "deny",
+    code: "raw-path-unavailable",
+  });
+  mkdirSync(join(cwd, "analyses"));
+  const expected = existsSync(join(cwd, "ANALYSES")) ? immutable : delegated;
+  expect(decide("write", { file_path: "ANALYSES/x.json" })).toMatchObject(expected);
+  expect(decide("bash", { command: "echo {} > ANALYSES/x.json" })).toMatchObject(expected);
+  expect(decide("write", { file_path: "analyses-old/x.json" })).toEqual(delegated);
 });
 
 test.each([
@@ -257,6 +270,7 @@ test("governance denial names the domain tools rather than offering file write a
     "change_submit",
     "shud_build",
     "verification_run",
+    "analysis_create",
     "report_generate",
     "report_validate",
     "report_submit",

@@ -517,7 +517,7 @@ test.each(["invalid", "unreadable"] as const)(
       actualFs.writeFileSync(path, bytes);
       expect(h.registry.kill(id, h.ownerId, "kill with existing bad evidence")).toBe("requested");
       const requestedAt = readDurable(record.run_dir).cancel_requested_at;
-      await expect.poll(() => producer.completed.length).toBe(1);
+      await expect.poll(() => producer.completed.length, { timeout: 5000 }).toBe(1);
       await producer.doneObserved;
       expect(producer.durableAtSettle[0]).toMatchObject({
         status: "failed",

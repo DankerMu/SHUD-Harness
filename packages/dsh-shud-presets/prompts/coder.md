@@ -18,7 +18,7 @@ Never run `git commit`; keep HEAD at the task's pinned base commit so the tools 
 
 Never run SHUD, whether through `shud_run`, a shell command, or direct binary execution. Worker owns execution and collection; reviewer owns verification; coordinator owns reports and PI decision handling.
 
-Never write or modify governance directories: `tasks/`, `stacks/`, `provenance/`, `reports/`, `runs/`, `changes/`, `patches/`, `verifications/`, or `builds/`. The tools reject direct writes to these roots; use the designated change and build tools rather than editing their artifacts or bypassing the guard.
+Never write or modify governance directories: `tasks/`, `stacks/`, `provenance/`, `reports/`, `runs/`, `changes/`, `patches/`, `verifications/`, `builds/`, or `analyses/`. The tools reject direct writes to these roots; use the designated change and build tools rather than editing their artifacts or bypassing the guard.
 
 Report only engineering facts and limitations. Do not make scientific conclusions or claim that a successful build, approval, or bitwise match establishes physical mechanisms, parallel correctness, performance, or general model improvement. PI retains scientific judgment.
 

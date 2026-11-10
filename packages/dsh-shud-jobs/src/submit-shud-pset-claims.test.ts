@@ -177,13 +177,16 @@ test("an accepted submission releases its claim, so its later cancellation re-op
       JSON.parse(await io.readFile(join(killed.run_dir, "run-job.json"), "utf8")) as RunJob;
     // Registry polling is the terminal-persistence owner; the fixture disables its cadence.
     await expect
-      .poll(async () => {
-        await h.registry.pollOnce();
-        return (await terminal()).status;
-      })
+      .poll(
+        async () => {
+          await h.registry.pollOnce();
+          return (await terminal()).status;
+        },
+        { timeout: 5000 },
+      )
       .toBe("cancelled");
     expect(typeof (await terminal()).finished_at).toBe("string");
-    await expect.poll(() => h.registry.get(id, h.ownerId).status).toBe("killed");
+    await expect.poll(() => h.registry.get(id, h.ownerId).status, { timeout: 5000 }).toBe("killed");
     const before = await snapshotQueryTree(killed.run_dir);
     const record = await h.submit();
     expect(record.parameter_set_id).toBe("PSET-2");

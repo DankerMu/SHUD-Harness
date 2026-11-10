@@ -127,7 +127,8 @@ export function noChangeObjects(h: ChangeHarness) {
   }
 }
 
-export async function admission(h: ChangeHarness) {
+/** Only ctx is used; the full harness member keeps contextual typing for inline literals. */
+export async function admission(h: ChangeHarness | Pick<ChangeHarness, "ctx">) {
   const approvals: Array<Parameters<ApprovalService["request"]>[0]> = [];
   let executions = 0;
   let preExecutions = 0;

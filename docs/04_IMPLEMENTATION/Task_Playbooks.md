@@ -17,7 +17,7 @@ M3 设计依据见 [m3-mvp-1 design](../../openspec/changes/archive/2026-11-01-m
 5. Coordinator 调用 `report_generate`，再 `report_validate`；报告对象为 `reports/<report_id>.json`，Markdown 为同名 `.md` 的确定性投影。缺失的 metrics/图表写入 limitations，M3 不生成这些科学指标。
 6. Coordinator 调用 `report_submit`，PI 经 Web 审批决定；未获放行保持 reviewed，后续 comment 与 `report_decide` 流程见 [PI 决策规范](../03_SPEC/PI_Decision_Comments_Spec.md) 及 [M3 policy-gate 契约](../../openspec/specs/policy-gate/spec.md)。工程检查不代替 PI 验收。
 
-下列工程、敏感性分析与运维画像属于后续里程碑；M3 `task_create` 仅接受 science_assist，不能把 engineering/ops 或 AnalysisPlan 示例当成当前工具能力。
+下列工程、敏感性分析与运维画像属于后续里程碑；当前 `task_create` 只接受 science_assist / code_change / sensitivity，不能把 engineering/ops 或下文 AnalysisPlan 规划示例当成当前工具能力。
 
 ## 1. 工程任务：添加输出诊断（M4 规划）
 

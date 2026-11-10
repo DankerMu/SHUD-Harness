@@ -22,7 +22,7 @@ SHUD-Harness/
       src/index.ts
     dsh-shud-raw-guard/             # tools/pre-execute 策略门插件（spike 1.2 TS 化）
     dsh-shud-jobs/                  # durable JobRegistry backend（ctx.jobs 契约）
-    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/change_submit/shud_build/verification_run/report_generate/report_validate/report_submit/report_decide
+    dsh-shud-tools/                 # 已挂载 shud_run/shud_collect/task_create/change_create/change_submit/shud_build/verification_run/report_generate/report_validate/report_submit/report_decide/analysis_create
     dsh-shud-records/               # 已实现四对象文件层、StackLock/provenance 采集、报告渲染/校验/状态机；非 Cordis 插件
       templates/                   # 已用于报告渲染的 Markdown 模板，仅此一个落点
     dsh-shud-policy-gate/           # 已挂载全局 tools/pre-execute，角色 deny + 报告 ask + 变更完整性/级别决策
@@ -77,7 +77,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 {"input_dir":"input/ccw","end_days":30,"label":"ccw END=30"}
 ```
 
-当前接受 `input_dir`、可选 `project`、`end_days`、`label`、品牌 `task_id`、品牌 `build_id` 与正安全整数 `threads`；未知参数（包括 `workdir`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
+当前接受 `input_dir`、可选 `project`、`end_days`、`label`、品牌 `task_id`、品牌 `build_id`、正安全整数 `threads`，以及成对的品牌 `analysis_plan_id` 与 `parameter_set_id`（须同时带 `task_id`；绑定 sensitivity 卡已链接 plan 的一个参数集，覆盖值、输入摘要、窗口与线程只取自 plan）；未知参数（包括 `workdir`、`calib_overrides`）拒绝。有效工作目录只取调用会话 cwd，输入路径原样交给注册表按物理路径处理；project 默认取所给路径末级目录名（忽略末尾分隔符），别名异名或 `.`/`..` 路径应显式给 project。`end_days` 是副本中正整数 END 日的绝对覆写，不是运行时长；label 必须为一行。输入复制与 cfg、内部链接/特殊文件、目录重叠检查仍由注册表负责。raw 输入先走 provenance 读审批，raw 输出目标拒绝；工具本身不新增 PI 审批门。
 
 **M4 扩参契约（#534 运行时与 #539 shud_run 工具参数均已交付）**：新增可选品牌 `build_id` 与正整数 `threads`；零、负数、小数、字符串或非法品牌在文件系统操作前拒绝。未知参数的负例保留 workdir，不再以合法整数 threads 作未知键。注册表解析本工作区 `builds/<build_id>/build-record.json`，校验普通可执行二进制及 SHA256，复制到 `runs/<run_id>/bin/shud` 并执行副本；RunJob/RunRecord 原样记录 build_id、threads、binary_sha256，StackLock 记录构建来源。threads 提供时设置 OMP_NUM_THREADS/SHUD_RHS_THREADS，缺省不新增环境变量；无 build 沿用配置 shudBin。M4 对所有提交新增 tsd.forc 解析与外部 forcing 只读哈希，缺失或解析失败拒绝，不把无 build 路径称为完全无行为变化。详见 [shud_run arguments](../../openspec/specs/shud-run-tools/spec.md#requirement-shud_run-arguments)。
 
@@ -115,7 +115,7 @@ SHUD bundle 在现有 `approval` 行设置全局 `policy: ask`，并在 `permiss
 {"type":"code_change","title":"调整已跟踪源码","question_or_goal":"生成绑定当前源码基线的变更证据"}
 ```
 
-`type` 只接受 `science_assist` / `code_change`，`title` 与 `question_or_goal` 必须非空；未知参数拒绝。工作区只取调用会话 cwd，源检出固定为 `repos/SHUD`，不接受路径参数、不代建或修改源仓库。`code_change` 在创建任务目录前验证真实目录、物理 Git 根与完整 40 位小写十六进制 HEAD，将其钉定为 `source_base_commit`；成功返回 `task_id` 与 `status: planned`，卡片初始链接为空。`science_assist` 保持空 pin，完全不访问 `repos/`。
+`type` 只接受 `science_assist` / `code_change` / `sensitivity`，`title` 与 `question_or_goal` 必须非空；未知参数拒绝。工作区只取调用会话 cwd，源检出固定为 `repos/SHUD`，不接受路径参数、不代建或修改源仓库。`code_change` 在创建任务目录前验证真实目录、物理 Git 根与完整 40 位小写十六进制 HEAD，将其钉定为 `source_base_commit`；成功返回 `task_id` 与 `status: planned`，卡片初始链接为空。`science_assist` 与 `sensitivity` 保持空 pin，完全不访问 `repos/`；`sensitivity` 卡初始 `linked_analyses` 为空，plan 只由 `analysis_create` 创建并链接。
 
 修改该独立检出内的已跟踪文件后调用 `change_create`；下例 `task_id` 须替换为实际建卡返回值：
 
@@ -222,7 +222,7 @@ $DSH_HOME/                          # dsh 家目录（本机 ~/.dsh 或显式指
 <data_root>/raw/                    # 原始数据，必须在 workspace root 之外（Seatbelt 只读）
 ```
 
-M4 新目录由 [m4-mvp-2](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md) 分项实现，工程交付与人工功能验收已记入 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M4 回放源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写；通用 `task_create(code_change)` 钉定的是调用方检出的当前有效 HEAD。九个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
+M4 新目录由 [m4-mvp-2](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md) 分项实现，工程交付与人工功能验收已记入 [M4 验收记录](../Migration_Plan_dsh.md#m4-pi-acceptance)。M4 回放源码 clone 钉定 `9a422e5eb708df7d2f8b4066a3083a031d679a82`，根 submodule 不写；通用 `task_create(code_change)` 钉定的是调用方检出的当前有效 HEAD。十个治理根仅领域工具可写，模型 edit/write/shell 受 raw-guard 限制；启发式边界见 [Workspace 约定](../03_SPEC/Workspace_Conventions.md#9-路径安全)。
 
 ## 3. 与 dsh 的边界
 

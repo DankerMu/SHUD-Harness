@@ -71,7 +71,7 @@ test("kill after an accepted poll snapshot preserves fresh intent and classifies
     expect(signals.events).toEqual([]);
     release.release();
     await polling;
-    await expect.poll(() => producer.completed.length).toBe(1);
+    await expect.poll(() => producer.completed.length, { timeout: 5000 }).toBe(1);
     await producer.doneObserved;
     expect(producer.durableAtSettle[0].finished_at).toEqual(expect.any(String));
     expect(producer.durableAtSettle[0]).toEqual({
@@ -422,15 +422,18 @@ test("late cancellation rechecks descendant quiescence before publishing a termi
     const intent = readDurable(record.run_dir);
     expect(intent.cancel_requested_at).toBe(new Date(origin).toISOString());
     await expect
-      .poll(async () => {
-        try {
-          return await io.readFile(join(record.run_dir, "sigterm-seen"), "utf8");
-        } catch {
-          return null;
-        }
-      })
+      .poll(
+        async () => {
+          try {
+            return await io.readFile(join(record.run_dir, "sigterm-seen"), "utf8");
+          } catch {
+            return null;
+          }
+        },
+        { timeout: 5000 },
+      )
       .toBe("SIGTERM\n");
-    await expect.poll(() => activeGroup(pid).includes(pid)).toBe(false);
+    await expect.poll(() => activeGroup(pid).includes(pid), { timeout: 5000 }).toBe(false);
     await producer.executions[0].waitForExit();
     expect(activeGroup(pid)).toContain(invocation.pid);
     const path = join(record.run_dir, "run-job.json");

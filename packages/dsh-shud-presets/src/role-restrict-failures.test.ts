@@ -16,6 +16,7 @@ afterEach(async () => {
 describe("shud-role-restrict bind failures", () => {
   it.each([
     ["coordinator", "report_generate"],
+    ["coordinator", "analysis_create"],
     ["coordinator", "job_output"],
     ["worker", "shud_run"],
     ["coder", "shud_build"],

@@ -28,7 +28,7 @@ import { TASK, plannedCard, putCard } from "../task-linked/test-harness.ts";
 import { seedQueryRun } from "../../../dsh-shud-jobs/src/list-run-jobs/test-harness.ts";
 import { makeRunRecord } from "../../../dsh-shud-records/src/task-lifecycle-test-harness.ts";
 import { makeRenderingFixture } from "../../../dsh-shud-records/src/report-workspace-test-harness.ts";
-import { digest } from "../../../dsh-shud-records/src/run-metrics-test-harness.ts";
+import { completeMetrics, digest } from "../../../dsh-shud-records/src/run-metrics-test-harness.ts";
 import {
   makeEvidenceReport,
   makeReportDecision,
@@ -70,6 +70,16 @@ export interface ReportHarness {
   shudBin: string;
   registry: ShudJobRegistry;
 }
+/** Publish the rendering fixture's first StackLock and DataProvenance that runs reference. */
+export function seedStackAndData(h: Pick<ReportHarness, "cwd">) {
+  const fixture = makeRenderingFixture();
+  const stack = fixture.stacks[0];
+  const data = fixture.data[0];
+  fs.mkdirSync(join(h.cwd, "stacks"), { recursive: true });
+  fs.writeFileSync(join(h.cwd, "stacks", `${stack.stack_id}.json`), JSON.stringify(stack));
+  writeWorkspaceRecord(h.cwd, "data", data);
+  return { stack, data };
+}
 export async function seedEvidence(
   h: ReportHarness,
   suffix = "a001",
@@ -77,12 +87,7 @@ export async function seedEvidence(
   runChanges: Partial<RunRecord> = {},
   index: "active" | "completed" = "completed",
 ) {
-  const fixture = makeRenderingFixture();
-  const stack = fixture.stacks[0];
-  const data = fixture.data[0];
-  fs.mkdirSync(join(h.cwd, "stacks"), { recursive: true });
-  fs.writeFileSync(join(h.cwd, "stacks", `${stack.stack_id}.json`), JSON.stringify(stack));
-  writeWorkspaceRecord(h.cwd, "data", data);
+  const { stack, data } = seedStackAndData(h);
   const job = await seedQueryRun(
     h,
     suffix,
@@ -112,6 +117,21 @@ export async function seedEvidence(
     }),
   );
   return { job, run, stack, data };
+}
+
+/** completeMetrics with zero CVODE failures and negative states: every verdict passes. */
+export function passingMetrics(): RunMetrics {
+  const metrics = completeMetrics();
+  metrics.numerical_health.cvode_failures = 0;
+  metrics.numerical_health.negative_state_count = 0;
+  return {
+    ...metrics,
+    verdicts: {
+      water_balance_residual: "pass",
+      cvode_failures: "pass",
+      negative_state_count: "pass",
+    },
+  };
 }
 
 export function installMetrics(runDir: string, run: RunRecord, metrics: RunMetrics) {

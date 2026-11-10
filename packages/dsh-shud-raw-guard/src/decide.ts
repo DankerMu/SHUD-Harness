@@ -31,12 +31,13 @@ const GOVERNANCE_ROOTS = [
   "patches",
   "verifications",
   "builds",
+  "analyses",
 ] as const;
 const GOVERNANCE_DENY: RawGuardDecision = {
   kind: "deny",
   code: "governance-immutable",
   reason:
-    "Governance records are immutable through file and shell tools. Write them only through task_create, shud_run, change_create, change_submit, shud_build, verification_run, report_generate, report_validate, report_submit or report_decide.",
+    "Governance records are immutable through file and shell tools. Write them only through task_create, analysis_create, shud_run, change_create, change_submit, shud_build, verification_run, report_generate, report_validate, report_submit or report_decide.",
 };
 const NEXT: RawGuardDecision = { kind: "next", code: "unrelated" };
 export const RAW_READ_PROVENANCE_REASON =
@@ -481,6 +482,63 @@ export function decideRawAccess(call: RawGuardCall, options: RawGuardOptions): R
   }
 }
 
+// Unavailable argument identity (non-object arguments, throwing getters) reads as
+// absent, never as an IO failure.
+function readArgument<T>(
+  call: RawGuardCall,
+  key: string,
+  parse: (value: unknown) => T | undefined,
+): T | undefined {
+  try {
+    const args = call.arguments;
+    const fields =
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {};
+    return parse(fields[key]);
+  } catch {
+    return undefined;
+  }
+}
+
+// A branded task id selects its exact TaskCard; anything else keeps the fixed tasks root.
+function taskWriteTarget(call: RawGuardCall): string {
+  return (
+    readArgument(call, "task_id", (value) => {
+      const taskId = TaskIdSchema.safeParse(value);
+      return taskId.success ? `tasks/${taskId.data}/task.json` : undefined;
+    }) ?? "tasks"
+  );
+}
+
+/**
+ * Metadata-only fixed targets: every write target is checked against every raw root
+ * before the optional input read, so rawDirs order cannot turn a write into an ask.
+ * No record or argument bytes beyond the given paths affect admission.
+ */
+function decideOutputTargets(
+  call: RawGuardCall,
+  options: RawGuardOptions,
+  targets: string[],
+  unavailable: string,
+  inputDir?: string,
+): RawGuardDecision {
+  try {
+    const cwd = call.cwd ?? process.cwd();
+    const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
+    for (const target of targets) {
+      const output = canonical(target, cwd);
+      if (rawRoots.some((raw) => containsRawPath(raw, output))) return DENY;
+    }
+    if (inputDir === undefined) return NEXT;
+    const input = canonical(inputDir, cwd);
+    return rawRoots.some((raw) => containsRawPath(raw, input)) ? ASK : NEXT;
+  } catch (error) {
+    if (error instanceof PathUnavailable) throw error;
+    return { kind: "deny", code: "raw-target-unavailable", reason: unavailable };
+  }
+}
+
 function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): RawGuardDecision {
   if (call.name === "task_create") {
     const cwd = call.cwd ?? process.cwd();
@@ -517,84 +575,37 @@ function decideKnownRawAccess(call: RawGuardCall, options: RawGuardOptions): Raw
     }
   }
   if (call.name === "change_create") {
-    let taskTarget = "tasks";
-    try {
-      const args = call.arguments;
-      const fields =
-        args && typeof args === "object" && !Array.isArray(args)
-          ? (args as Record<string, unknown>)
-          : {};
-      const taskId = TaskIdSchema.safeParse(fields.task_id);
-      if (taskId.success) taskTarget = `tasks/${taskId.data}/task.json`;
-    } catch {
-      // Unavailable argument identity retains the fixed tasks fallback, not an IO failure.
-    }
-    try {
-      const cwd = call.cwd ?? process.cwd();
-      const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
-      // Metadata-only fixed targets: neither card bytes nor description text affect admission.
-      for (const target of ["changes", "patches", taskTarget, "repos/SHUD"]) {
-        const output = canonical(target, cwd);
-        if (rawRoots.some((raw) => containsRawPath(raw, output))) return DENY;
-      }
-      return NEXT;
-    } catch (error) {
-      if (error instanceof PathUnavailable) throw error;
-      return {
-        kind: "deny",
-        code: "raw-target-unavailable",
-        reason: "Change targets cannot be safely resolved; execution denied.",
-      };
-    }
+    return decideOutputTargets(
+      call,
+      options,
+      ["changes", "patches", taskWriteTarget(call), "repos/SHUD"],
+      "Change targets cannot be safely resolved; execution denied.",
+    );
   }
   if (call.name === "shud_build") {
-    try {
-      const cwd = call.cwd ?? process.cwd();
-      const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
-      for (const target of ["builds", "repos/SHUD"]) {
-        const output = canonical(target, cwd);
-        if (rawRoots.some((raw) => containsRawPath(raw, output))) return DENY;
-      }
-      return NEXT;
-    } catch (error) {
-      if (error instanceof PathUnavailable) throw error;
-      return {
-        kind: "deny",
-        code: "raw-target-unavailable",
-        reason: "Build targets cannot be safely resolved; execution denied.",
-      };
-    }
+    return decideOutputTargets(
+      call,
+      options,
+      ["builds", "repos/SHUD"],
+      "Build targets cannot be safely resolved; execution denied.",
+    );
   }
   if (call.name === "verification_run") {
-    let taskTarget = "tasks";
-    try {
-      const args = call.arguments;
-      const fields =
-        args && typeof args === "object" && !Array.isArray(args)
-          ? (args as Record<string, unknown>)
-          : {};
-      const taskId = TaskIdSchema.safeParse(fields.task_id);
-      if (taskId.success) taskTarget = `tasks/${taskId.data}/task.json`;
-    } catch {
-      // Unavailable argument identity retains the fixed tasks fallback, not an IO failure.
-    }
-    try {
-      const cwd = call.cwd ?? process.cwd();
-      const rawRoots = options.rawDirs.map((raw) => canonical(raw, cwd));
-      // Metadata-only publication targets; no card or verification bytes are read.
-      for (const target of ["verifications", taskTarget]) {
-        const output = canonical(target, cwd);
-        if (rawRoots.some((raw) => containsRawPath(raw, output))) return DENY;
-      }
-      return NEXT;
-    } catch (error) {
-      if (error instanceof PathUnavailable) throw error;
-      return {
-        kind: "deny",
-        code: "raw-target-unavailable",
-        reason: "Verification targets cannot be safely resolved; execution denied.",
-      };
-    }
+    return decideOutputTargets(
+      call,
+      options,
+      ["verifications", taskWriteTarget(call)],
+      "Verification targets cannot be safely resolved; execution denied.",
+    );
+  }
+  if (call.name === "analysis_create") {
+    return decideOutputTargets(
+      call,
+      options,
+      ["analyses", taskWriteTarget(call)],
+      "Analysis plan targets cannot be safely resolved; execution denied.",
+      readArgument(call, "input_dir", (value) => (typeof value === "string" ? value : undefined)),
+    );
   }
   if (
     call.name === "report_generate" ||

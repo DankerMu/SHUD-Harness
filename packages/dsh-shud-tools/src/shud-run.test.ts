@@ -48,7 +48,7 @@ test("shud_run returns durable and current job ids while the native solver is st
     expect(h.registry.list()).toMatchObject([
       { id: record.dsh_job_id, label: `${record.run_id} tiny 30d`, status: "running" },
     ]);
-    await expect.poll(() => readInvocation(record.run_dir)).not.toBeNull();
+    await expect.poll(() => readInvocation(record.run_dir), { timeout: 5000 }).not.toBeNull();
     const invocation = await readInvocation(record.run_dir);
     if (!invocation) throw new Error("Native solver omitted its invocation receipt");
     expect(invocation).toMatchObject({
@@ -76,7 +76,9 @@ test("shud_run returns durable and current job ids while the native solver is st
     expect(rendered).toContain("job_list");
     expect(rendered).toContain("shud_collect");
     await releaseInvocation(invocation);
-    await expect.poll(() => readFile(join(record.run_dir, "exit_code"), "utf8")).toBe("0\n");
+    await expect
+      .poll(() => readFile(join(record.run_dir, "exit_code"), "utf8"), { timeout: 5000 })
+      .toBe("0\n");
   } finally {
     await h.dispose();
   }

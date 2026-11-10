@@ -76,7 +76,7 @@ cwd 必须是字符串；非字符串不得隐式回退到进程 cwd，也不得
 | Task worktree | `workspace/tasks/TASK-*/worktrees/*` | 未激活的后续规划，M4 不使用 | M4 模型工具不得写 tasks |
 | Scratch/tmp | `workspace/tmp/` | 非证据临时文件 | 受 sandbox 限制 |
 | Artifacts / runs | `workspace/artifacts/`, `workspace/runs/*/` | 后续分析 / 已有运行产出 | runs 仅领域工具与受控求解器写 |
-| Governance records | `workspace/{tasks,stacks,provenance,reports,changes,patches,verifications,builds}` | 领域事实与投影 | 仅对应领域工具写；模型可只读 |
+| Governance records | `workspace/{tasks,stacks,provenance,reports,changes,patches,verifications,builds,analyses}` | 领域事实与投影 | 仅对应领域工具写；模型可只读 |
 | Secrets | `workspace/secrets/` | local-token 等敏感文件（0600） | backend 私有 |
 
 ### 1.4 与其他规范的关系
@@ -207,7 +207,7 @@ resolve path
 → record normalized path
 ```
 
-**M4 治理根写保护：** 相对会话 cwd 固定九根 `tasks stacks provenance reports runs changes patches verifications builds`，不可配置。模型 write/edit/str_replace_editor（非 view）目标命中即 deny `governance-immutable`；bash/pwsh 触及且被既有写 denylist 判为写也 deny，只读触及 next。与角色或 sandbox_permissions 无关，raw 同时命中时优先执行 raw 规则；`repos/` 不在集合中。
+**M4 治理根写保护：** 相对会话 cwd 固定十根 `tasks stacks provenance reports runs changes patches verifications builds analyses`，不可配置。模型 write/edit/str_replace_editor（非 view）目标命中即 deny `governance-immutable`；bash/pwsh 触及且被既有写 denylist 判为写也 deny，只读触及 next。与角色或 sandbox_permissions 无关，raw 同时命中时优先执行 raw 规则；`repos/` 不在集合中。
 
 这是启发式保护，不是工作区内的沙箱强隔离。绕过 shell denylist 的写法仍可能改写治理记录，`repos/SHUD/.git` 篡改亦不在 M4 威胁模型内。补偿为 ask 前、change_submit 执行时、shud_build 与 closure 的 patch 摘要复核、运行二进制摘要复核，以及回放对 approval_ref 与 session log 的交叉核对；不宣称密码学审批证明。边界见 [design D15(9)/D16](../../openspec/changes/archive/2026-11-05-m4-mvp-2/design.md#d16-治理根写保护critical-path-23)。
 

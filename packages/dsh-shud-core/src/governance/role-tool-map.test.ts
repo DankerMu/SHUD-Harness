@@ -14,6 +14,7 @@ const EXPECTED_TOOL_COLLECTIONS = {
   coordinator: {
     inherited: [
       "task_create",
+      "analysis_create",
       "report_generate",
       "report_validate",
       "report_submit",
@@ -44,6 +45,7 @@ const EXPECTED_TOOL_COLLECTIONS = {
 } as const satisfies core.RoleToolMap;
 
 const EXPECTED_ROLE_TOOL_IDS = [
+  "analysis_create",
   "bash",
   "change_create",
   "change_submit",
@@ -185,6 +187,16 @@ describe("canonical role to tool collections", () => {
         expect(core.isRoleToolIdAllowed(role, toolId)).toBe(false);
       }
     }
+  });
+
+  test("keeps analysis_create exclusive to coordinator", () => {
+    expect(core.isRoleToolIdAllowed("coordinator", "analysis_create")).toBe(true);
+    for (const role of ["worker", "coder", "reviewer", "repo_explorer"] as const) {
+      expect(core.isRoleToolIdAllowed(role, "analysis_create"), role).toBe(false);
+    }
+    expect(rolesContainingAny(["analysis_create"])).toEqual(["coordinator"]);
+    expect(core.getRoleToolIds("coordinator").inherited).toContain("analysis_create");
+    expect(core.getRoleToolIds("coordinator").local).not.toContain("analysis_create");
   });
 
   test("keeps subagent exclusive to coordinator", () => {

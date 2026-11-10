@@ -49,6 +49,74 @@ function paragraphMatching(markdown: string, expression: RegExp) {
   return paragraph ?? "";
 }
 
+function promptSection(markdown: string, heading: string) {
+  const section = markdown
+    .replace(/`/g, "")
+    .replace(/\r/g, "")
+    .split(/(?=^## )/m)
+    .find((text) => text.startsWith(`## ${heading}\n`));
+  expect(section, `Missing prompt section ## ${heading}`).toBeDefined();
+  if (!section) throw new Error(`Missing prompt section ## ${heading}`);
+  return section;
+}
+
+function sentences(text: string) {
+  return text
+    .split(/(?<=[.!?。])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0);
+}
+
+// Sentences that tie a guard/validation pass to compliance or sufficiency; each
+// such sentence in a sensitivity section must be explicitly negated.
+function complianceClaims(candidates: readonly string[]) {
+  return candidates.filter(
+    (sentence) =>
+      /report_validate|guard|lint|validat/i.test(sentence) &&
+      /pass|validates/i.test(sentence) &&
+      /complian|sufficient/i.test(sentence),
+  );
+}
+
+// Returns the clauses that do not match in order; each search starts after the
+// previous match.
+function cursorOrderedMisses(text: string, clauses: readonly RegExp[]) {
+  const misses: string[] = [];
+  let cursor = 0;
+  for (const clause of clauses) {
+    const match = clause.exec(text.slice(cursor));
+    if (!match) {
+      misses.push(String(clause));
+      continue;
+    }
+    cursor += match.index + match[0].length;
+  }
+  return misses;
+}
+
+const FIRST_TASK_SETTLED_CLAUSES = [
+  /^3\. Wait for the worker to return run_id and terminal status with collected evidence\./,
+  /immediate subagent result \(started subagent <id>\) is not the worker's return/i,
+  /worker's return arrives as the later subagent-settled message/i,
+  /(?:may|can) end (?:your|the) turn while waiting/i,
+  /(?:do not|never) call report_generate before (?:that|the) settled message arrives/i,
+];
+
+const CODE_CHANGE_SETTLED_CLAUSES = [
+  /\bsubagent_coder\b, \bsubagent\b, \bsubagent_reviewer\b/,
+  /immediate result (?:that )?is only started subagent <id>/i,
+  /not that subagent's return/i,
+  /later subagent-settled message/i,
+  /wait for (?:it|that message) before using its build_id, run_id or verification evidence or moving to the next stage/i,
+];
+
+function withoutCanonicalLists(markdown: string) {
+  return markdown
+    .split(/(?=^## )/m)
+    .filter((section) => !/^## (?:FORBIDDEN_REPORT_PHRASES|GOVERNANCE_INVARIANTS)\n/.test(section))
+    .join("");
+}
+
 describe("preset canonical governance wording", () => {
   const lists = [
     { heading: "FORBIDDEN_REPORT_PHRASES", expected: FORBIDDEN_REPORT_PHRASES, count: 10 },
@@ -214,6 +282,84 @@ describe("coordinator prompt orchestration contract", () => {
     );
   });
 
+  it("orders the sensitivity card, single plan, plan-bound worker delegation and report submission", () => {
+    const flow = promptSection(coordinator, "sensitivity workflow");
+    const sequence = [
+      { step: /\btask_create\b/, clauses: [/\btype:\s*sensitivity\b/, /retain.*\btask_id\b/i] },
+      {
+        step: /\banalysis_create\b/,
+        clauses: [
+          /exactly (?:once|one)/i,
+          /\bparameter_sets\b.*only whitelisted-key multipliers/i,
+          /never absolute calib values/i,
+          /retain.*\banalysis_plan_id\b.*\bparameter_set_id\b/i,
+        ],
+      },
+      {
+        step: /\bsubagent\b/,
+        clauses: [
+          /delegate to preset worker/i,
+          /task text must include/i,
+          /\btask_id\b/,
+          /\banalysis_plan_id\b/,
+          /\bparameter_set_id\b/,
+          /\binput_dir\b/,
+        ],
+      },
+      {
+        step: /\bthen call report_generate for the card\b/i,
+        clauses: [
+          /wait for the worker's report.*subagent-settled message/i,
+          /immediate subagent result \(started subagent <id>\) is not (?:that|the) report/i,
+          /(?:do not|never) call report_generate before the settled message arrives/i,
+          /then call report_generate for the card and retain the resulting report_id/i,
+        ],
+      },
+      { step: /\breport_validate\b/, clauses: [/before submission/i] },
+      { step: /\breport_submit\b/, clauses: [/PI/, /approval gate/i] },
+    ];
+    const paragraphs = flow.split(/\n\s*\n/);
+    let paragraphIndex = 0;
+    let cursor = 0;
+    for (const { step, clauses } of sequence) {
+      let match = step.exec((paragraphs[paragraphIndex] ?? "").slice(cursor));
+      while (!match && paragraphIndex < paragraphs.length - 1) {
+        paragraphIndex += 1;
+        cursor = 0;
+        match = step.exec(paragraphs[paragraphIndex] ?? "");
+      }
+      expect(match, `Missing ordered sensitivity step ${String(step)}`).not.toBeNull();
+      if (!match) throw new Error(`Missing ordered sensitivity step ${String(step)}`);
+      for (const clause of clauses) {
+        expect(paragraphs[paragraphIndex], `sensitivity step ${String(step)}`).toMatch(clause);
+      }
+      cursor += match.index + match[0].length;
+    }
+
+    expect(flow).toMatch(
+      /do not call analysis_create again for a card that already has a linked plan/i,
+    );
+    const fallback = paragraphMatching(flow, /shud_collect/);
+    expect(fallback).toMatch(
+      /^If the worker's settled report lacks collected terminal evidence for a parameter set, use shud_collect/,
+    );
+    expect(fallback).toMatch(/poll.*persistent run_id/i);
+    const summary = paragraphMatching(flow, /summary table/i);
+    expect(summary).toMatch(/states only changes relative to baseline/i);
+    expect(summary).toMatch(/no sensitivity indices, rankings or mechanism explanations/i);
+    expect(summary).toMatch(/parameter ranges are agent suggestions that PI has not confirmed/i);
+    const inherited = paragraphMatching(flow, /rules above apply to this flow/i);
+    expect(inherited).toMatch(/never call shud_run/i);
+    expect(inherited).toMatch(/report_validate/);
+    expect(inherited).toMatch(/PI decision conversation/);
+
+    const plain = coordinator.replace(/`/g, "");
+    expect(plain.indexOf("## code_change workflow")).toBeGreaterThanOrEqual(0);
+    expect(plain.indexOf("## sensitivity workflow")).toBeGreaterThan(
+      plain.indexOf("## code_change workflow"),
+    );
+  });
+
   it("forbids direct SHUD execution and polls only when the worker lacks collected terminal evidence", () => {
     const direct = paragraphMatching(coordinator, /shud_run/);
     expect(direct).toMatch(/(?:never|do not|must not).*\bshud_run\b|不直接调用\s*shud_run/i);
@@ -224,6 +370,48 @@ describe("coordinator prompt orchestration contract", () => {
     expect(fallback).toMatch(/terminal|终态/i);
     expect(fallback).toMatch(/poll|轮询/i);
     expect(fallback).toMatch(/run_id/);
+  });
+
+  // Scoped by section and paragraph: the sensitivity section already carries a
+  // settled sentence, so whole-file matches would pass vacuously.
+  it("anchors the first-task worker return and the collect fallback to the subagent-settled message", () => {
+    const firstTask = promptSection(coordinator, "First-task workflow");
+    const paragraphs = firstTask.split(/\n\s*\n/);
+    const step3 = paragraphs.find((paragraph) => paragraph.startsWith("3. "));
+    expect(step3, "Missing first-task step 3").toBeDefined();
+    expect(cursorOrderedMisses(step3 ?? "", FIRST_TASK_SETTLED_CLAUSES)).toEqual([]);
+    expect(step3).toContain(
+      "A started job or an uncollected terminal process is not completion of this step.",
+    );
+    const step4 = paragraphs.findIndex((paragraph) => paragraph.startsWith("4. "));
+    expect(paragraphs.indexOf(step3 ?? "")).toBe(step4 - 1);
+
+    const fallback = paragraphMatching(firstTask, /shud_collect/);
+    expect(fallback).toMatch(
+      /^If the worker's settled message arrives without collected terminal evidence, use shud_collect to poll that run by its persistent run_id/,
+    );
+    expect(fallback).toMatch(/(?:never|not|do not)[^.]*before (?:that|the) settled message/i);
+    expect(fallback).toMatch(/do not treat a running response as success/i);
+    expect(paragraphs.indexOf(fallback)).toBeGreaterThan(paragraphs.indexOf(step3 ?? ""));
+
+    expect(coordinator.replace(/`/g, "")).not.toMatch(
+      /If the worker returns without collected terminal evidence/i,
+    );
+  });
+
+  it("anchors every code_change delegation and the step 8 report to the settled message", () => {
+    const flow = promptSection(coordinator, "code_change workflow");
+    const paragraphs = flow.split(/\n\s*\n/);
+    const anchor = paragraphMatching(flow, /started subagent <id>/);
+    expect(cursorOrderedMisses(anchor, CODE_CHANGE_SETTLED_CLAUSES)).toEqual([]);
+    const firstDelegation = paragraphs.findIndex((paragraph) => paragraph.startsWith("2. "));
+    expect(firstDelegation).toBeGreaterThan(0);
+    expect(paragraphs.indexOf(anchor)).toBeLessThan(firstDelegation);
+
+    const step8 = paragraphs.find((paragraph) => paragraph.startsWith("8. "));
+    expect(step8).toMatch(
+      /^8\. After the reviewer's subagent-settled message arrives, [^\n]*\breport_generate\b/,
+    );
   });
 
   it("requires corrected inputs and a newly generated report after validation fails", () => {
@@ -272,7 +460,7 @@ describe("worker prompt collection contract", () => {
     expect(collect).toMatch(/(?:not|never|不是|不可).*dsh_job_id/i);
   });
 
-  it("runs supplied builds with one thread and preserves the no-build collection path", () => {
+  it("runs supplied builds with one thread and keeps the no-build, no-plan path for science_assist", () => {
     const run = paragraphMatching(
       worker,
       /task (?:text|message).*(?:includes|supplies|contains|provides)\s+(?:a\s+)?build_id/i,
@@ -289,12 +477,55 @@ describe("worker prompt collection contract", () => {
     expect(completion).toMatch(/return.*\brun_id\b/);
     expect(completion).toMatch(/return.*\bbuild_id\b/);
 
-    const legacy = paragraphMatching(
-      worker,
-      /(?:no|without|lacks)\s+build_id|build_id.*(?:absent|not supplied)/i,
+    const legacy = paragraphMatching(worker, /neither\s+build_id\s+nor\s+analysis_plan_id/i);
+    expect(legacy).toMatch(/neither build_id nor analysis_plan_id \(a science_assist card\)/i);
+    expect(legacy).toMatch(
+      /(?:omit|do not pass|不传)\s+build_id\s*(?:,|and|\/|、)\s*threads\s*,?\s*(?:and|\/|、)\s*plan parameters/i,
     );
-    expect(legacy).toMatch(/(?:omit|do not pass|不传)\s+build_id\s*(?:and|\/|、)\s*threads/i);
     expect(legacy).toMatch(/M3|unchanged|same.*(?:run|collect)|原样/i);
+    const plain = worker.replace(/`/g, "");
+    expect(plain.indexOf(legacy)).toBeLessThan(plain.indexOf("## Plan-bound sensitivity runs"));
+  });
+
+  it("submits one plan-bound run per parameter set, never retries around a rejection and reports failures", () => {
+    const flow = promptSection(worker, "Plan-bound sensitivity runs");
+    const callForm = "shud_run(task_id, input_dir, analysis_plan_id, parameter_set_id)";
+    const call = sentences(flow).find((sentence) => sentence.includes(callForm));
+    expect(call, "Missing plan-bound shud_run call form").toBeDefined();
+    expect(call).toMatch(/task text includes analysis_plan_id and a list of parameter sets/i);
+    expect(call).toMatch(/\bsensitivity card\b/);
+    expect(call).toMatch(/once for each parameter set/i);
+    expect(call).toMatch(/both analysis_plan_id and parameter_set_id every time/i);
+    expect(call).toMatch(/never passing calib values, end_days, build_id or threads/i);
+
+    const rejection = paragraphMatching(flow, /rejected/);
+    expect(rejection).toMatch(
+      /shud_run without plan parameters on a sensitivity card is rejected/i,
+    );
+    expect(rejection).toMatch(/do not retry by omitting the plan parameters or task_id/i);
+    expect(rejection).toMatch(/report the error/i);
+    expect(rejection).toMatch(
+      /no-plan path, with neither build_id nor analysis_plan_id, is only for science_assist cards/i,
+    );
+
+    const batch = paragraphMatching(flow, /submit all parameter sets first/i);
+    const submitAt = batch.search(/submit all parameter sets first/i);
+    const waitAt = batch.indexOf("job_output(wait: true)");
+    const collectAt = batch.search(/shud_collect.*persistent run_id/);
+    expect(waitAt).toBeGreaterThan(submitAt);
+    expect(collectAt).toBeGreaterThan(waitAt);
+    expect(batch).toMatch(/for each run/i);
+    expect(batch).toMatch(
+      /do not rely on SHUD wake for these runs; a still-running response is not collected evidence/i,
+    );
+
+    const failure = paragraphMatching(flow, /resubmit/i);
+    expect(failure).toMatch(/do not resubmit a failed parameter set/i);
+    expect(failure).toMatch(/parameter_set_id, run_id and terminal status/);
+    expect(failure).toMatch(/to the coordinator/i);
+    expect(failure).toMatch(
+      /preserving failed or cancelled runs as they are rather than describing them as successful/i,
+    );
   });
 
   it("requires a collected terminal RunRecord before returning run_id and terminal status", () => {
@@ -324,7 +555,55 @@ describe("worker prompt collection contract", () => {
   });
 });
 
+describe("sensitivity prompt wording guard", () => {
+  it("keeps indices, rankings, mechanisms, compliance claims and forbidden phrases out of the sensitivity sections", () => {
+    const sections = [
+      promptSection(coordinator, "sensitivity workflow"),
+      promptSection(worker, "Plan-bound sensitivity runs"),
+    ];
+    const negation = /\b(?:no|not|never)\b|不/i;
+    const steering = sections
+      .flatMap(sentences)
+      .filter((sentence) => /sensitivity ind|rank|mechanism/i.test(sentence));
+    expect(steering.length).toBeGreaterThan(0);
+    for (const sentence of steering) expect(sentence).toMatch(negation);
+    const violation = "A passing report_validate is sufficient for compliance.";
+    expect(complianceClaims([violation])).toEqual([violation]);
+    expect(violation).not.toMatch(negation);
+    expect(complianceClaims(["The guard/validation pass is sufficient."])).toHaveLength(1);
+    expect(complianceClaims(["The report validates, which proves compliance."])).toHaveLength(1);
+    for (const sentence of complianceClaims(sections.flatMap(sentences))) {
+      expect(sentence).toMatch(negation);
+    }
+
+    const coordinatorProse = withoutCanonicalLists(coordinator);
+    expect(coordinatorProse).toContain("## sensitivity workflow");
+    for (const phrase of FORBIDDEN_REPORT_PHRASES) {
+      expect(worker).not.toContain(phrase);
+      expect(coordinatorProse).not.toContain(phrase);
+    }
+  });
+});
+
 describe("coder prompt change contract", () => {
+  it("names all ten guarded governance roots, including analyses/", () => {
+    const governance = paragraphMatching(coder, /governance (?:directories|roots)/i);
+    const roots = [
+      "tasks/",
+      "stacks/",
+      "provenance/",
+      "reports/",
+      "runs/",
+      "changes/",
+      "patches/",
+      "verifications/",
+      "builds/",
+      "analyses/",
+    ];
+    for (const root of roots) expect(governance).toContain(root);
+    expect(governance.match(/\b[a-z]+\/(?=[,\s.])/g)).toEqual(roots);
+  });
+
   it("bounds coder edits and builds by task identity, approval and engineering-only authority", () => {
     const text = coder.replace(/`/g, "").replace(/\r/g, "");
 

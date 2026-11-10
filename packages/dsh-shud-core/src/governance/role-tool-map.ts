@@ -14,6 +14,7 @@ export const ROLE_TOOL_MAP = Object.freeze({
   coordinator: defineRoleToolProfile(
     [
       "task_create",
+      "analysis_create",
       "report_generate",
       "report_validate",
       "report_submit",
