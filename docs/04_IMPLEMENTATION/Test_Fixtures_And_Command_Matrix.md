@@ -17,10 +17,11 @@ status: frozen
 |---|---|---|
 | schema-only | core/support schema 校验 | 否 |
 | dummy-runner | job submit/log/collect/report | 否 |
-| dummy-batch | AnalysisPlan/AnalysisProgressPayload（Heatmap 出 MVP；最小 OAT 见 Phased_Plan M5） | 否 |
+| [dummy-batch](#3-dummy-batch) | M5 `analyses/<id>.json` → `runs/<run_id>/metrics.json` → `reports/<report_id>.sensitivity.json` 离线判据评估；真实入口 `shud:sensitivity` | 否 |
 | old-output fixture | rSHUD backward compatibility | 部分依赖 rSHUD |
 | ccw tiny | 真实 SHUD/rSHUD 闭环 | 是 |
 | [keliya replay](#7-keliya-known-answer-回放) | M4 N=1 known-answer 工程回放 | 是；本机 block，CI 不运行 |
+| [ccw sensitivity](#8-ccw-敏感性批次) | M5 ccw OAT 四 pset 批次 | 是；本机 block，CI 不运行 |
 | report fixture | M3 EvidenceReport 渲染/校验/语言护栏；不含 M4 导出 | 否 |
 
 ---
@@ -64,31 +65,32 @@ M2 的 RunJob/RunRecord 不经 `ctx.storage` 域保存；记录落点与索引/�
 
 ## 3. Dummy batch
 
-> **M5 口径（Phased_Plan M5）**：M5 参数集用最小 OAT（3–5 组），产出用普通 artifact
-> （analysis_progress.json + batch 汇总表），**不产 parquet / heatmap.json**；下述 3×3 参数设计与 parquet/heatmap
-> 定义保留供 M5 之后（首个真实敏感性研究任务）复用。
+M5 离线批次夹具：临时工作区与录制记录，不启动宿主、模型或求解器；真实批次入口为 [`shud:sensitivity`](#8-ccw-敏感性批次)。
 
 ### 命令
 
-尚未落地，无可执行脚本；需在 M5 及后续真实敏感性任务规划中确定实现入口。
-保留的 3×3 设计为 `ksat=0.5,1,2` × `roughness=0.7,1,1.3`，并注入 `PSET-005` 失败，
-不是当前可直接运行的命令，也不改变 M5 最小 OAT 的 3–5 组范围。
+从仓库根目录执行；先完成 `pnpm install --frozen-lockfile` 与 `pnpm run build`。各文件均在默认 `pnpm run test:coverage` 内：
+
+```bash
+pnpm exec vitest run packages/dsh-shud-tools/src/analysis-create.test.ts packages/dsh-shud-jobs/src/collect-shud-metrics.test.ts packages/dsh-shud-tools/src/report-sensitivity.test.ts scripts/runtime/shud-sensitivity-criteria.test.ts scripts/runtime/shud-sensitivity-evaluate.test.ts
+```
 
 ### 预期输出
 
 ```text
-<workspace>/runs/<plan_id>/analysis_plan.yaml
-<workspace>/runs/<plan_id>/analysis_progress.json
-<workspace>/runs/<plan_id>/sensitivity_results.parquet
-<workspace>/runs/<plan_id>/heatmap.json
+<workspace>/analyses/<analysis_plan_id>.json       # 不可变 AnalysisPlan
+<workspace>/runs/<run_id>/metrics.json             # collect 内逐 run 指标与 numerical_health
+<workspace>/reports/<report_id>.sensitivity.json   # 报告的确定性 Δ 汇总
 ```
 
 ### 用例
 
-- AnalysisProgressPayload 计数；
-- failed parameter set 保留；
-- heatmap aggregation；
-- partial report limitations。
+- plan 发布与 TaskCard 链接；
+- `metrics.json` 以 sha256 绑定 RunRecord，已提交记录不重算；
+- Δ 汇总、失败 pset 保留与报告限制项；
+- 判据评估器每类失败一个录制夹具。
+
+> **M5 之后**：3×3 设计（`ksat=0.5,1,2` × `roughness=0.7,1,1.3`，注入 `PSET-005` 失败）与 `analysis_progress.json`、`sensitivity_results.parquet`、`heatmap.json` 保留供首个真实敏感性研究任务复用；M5 不产出这些文件，也无对应入口。
 
 ---
 
@@ -143,11 +145,11 @@ rSHUD 水量平衡函数见 `rSHUD/R/WaterBalance.R` 的 `wb.all`，依赖已配
 非 M2 的后续设计示意，不是上述两个入口当前承诺的产物：
 
 ```text
-<workspace>/runs/RUN-001/metrics.yaml        # 后续里程碑示意，非 M2；路径未定
+<workspace>/runs/RUN-001/metrics.json        # M5 collect 起（#662），非 M2
 <workspace>/reports/<report_id>.md          # M3 起
 ```
 
-metrics/figure 的具体里程碑、生产者、格式和落点未在本节确定，见 [Collect 阶段](../03_SPEC/Park_Resume_Design.md#5-collect-阶段)；
+`metrics.json` 由 M5 collect 生产（见下方 `numerical_health`）；figure 的里程碑、生产者、格式和落点未在本节确定，见 [Collect 阶段](../03_SPEC/Park_Resume_Design.md#5-collect-阶段)；
 图与时序的分类示意见 [Artifact 分类](../03_SPEC/Artifact_Registry_Spec.md#2-artifact-分类)，不将其示例当成已有生产者。
 
 ### 验收（按入口）
@@ -225,3 +227,17 @@ pnpm run shud:replay /absolute/path/to/empty-scratch-workspace
 ```
 
 这是 **block（本机，CI 不运行）**。通过判据唯一正文为 [Replay acceptance criteria](../../openspec/specs/known-answer-replay/spec.md#requirement-replay-acceptance-criteria)，本页不复制清单。退出 1 时保留工作区与 canonical session log，不改称 INCONCLUSIVE；自动 Allow once 不代替 PI 验收，N=1 比较不构成并行正确性、性能或模型改进结论。
+
+---
+
+## 8. ccw 敏感性批次
+
+`pnpm run shud:sensitivity` 把只读的 `SHUD/input/ccw` 复制到显式工作区（须在仓库外）的 `input/ccw`，submodule 不改，以独立 Web profile 下发单条提示：90 天窗口、固定四 pset plan——baseline、`GEOL_KSATH`×0.5、`GEOL_KSATH`×2、`LC_ROUGH`×2，`threads: 1`。产物为 [§3](#3-dummy-batch) 所列三类文件。宿主停止后，脚本在自建 `DSH_HOME` 的 `sensitivity/repeat/` 中以批内 baseline 输入副本批外重复运行一次，记录写入 `sensitivity/repeat.json`。
+
+从仓库根执行，先经环境变量提供 `DMXAPI_KEY`（不写入文件）与绝对可执行普通文件 `SHUD_BIN`：
+
+```sh
+pnpm run shud:sensitivity /absolute/path/to/empty-scratch-workspace
+```
+
+这是 **block（本机，CI 不运行）**。通过判据唯一正文为 [Sensitivity acceptance criteria](../../openspec/changes/m5-oat-sensitivity/specs/oat-sensitivity/spec.md#requirement-sensitivity-acceptance-criteria)，本页不复制清单。exit 2 = INCONCLUSIVE（模型偏离）须重跑；exit 1/2 保留并打印工作区与 session log 路径；`report_submit` 的自动 Allow once 不代替 PI 验收，结果只是单流域、单窗口、相对 baseline 的变化。
