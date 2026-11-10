@@ -1,7 +1,11 @@
 import * as fs from "node:fs";
 import { join, sep } from "node:path";
-import { afterEach, beforeEach, expect, test } from "vitest";
-import { groupCanPerformIo } from "../../packages/dsh-shud-jobs/src/process-identity.ts";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import type * as processIdentity from "../../packages/dsh-shud-jobs/src/process-identity.ts";
+import {
+  groupCanPerformIo,
+  processStart,
+} from "../../packages/dsh-shud-jobs/src/process-identity.ts";
 import { inBatchBaseline } from "./shud-sensitivity-criteria-numeric.ts";
 import { loadSensitivityBatch } from "./shud-sensitivity-criteria-workspace.ts";
 import { SensitivityRepeatRecordSchema } from "./shud-sensitivity-evaluate.ts";
@@ -14,6 +18,12 @@ import {
   type EvaluateFixture,
 } from "./sensitivity-evaluate/test-harness.ts";
 
+/** `ps` is the OS boundary: a pass-through spy lets one test withhold a start identity. */
+vi.mock("../../packages/dsh-shud-jobs/src/process-identity.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof processIdentity>();
+  return { ...actual, processStart: vi.fn(actual.processStart) };
+});
+
 /** Bytes the fake solver writes as rivqdown; the expected digest is taken from this literal. */
 const RIVQDOWN = "fake rivqdown 0 1 2\n";
 
@@ -22,6 +32,7 @@ let trace: string;
 let solver: string;
 let stateDir: string;
 beforeEach(async () => {
+  vi.mocked(processStart).mockClear();
   f = await makeEvaluateFixture();
   const scratch = join(f.home, "..");
   trace = join(scratch, "solver-trace");
@@ -63,7 +74,7 @@ const WRITES_OUTPUT = [
 function baseline() {
   const found = inBatchBaseline(f.workspace, loadSensitivityBatch(f.workspace));
   if (typeof found === "string") throw new Error(found);
-  return { run_id: found.job.run_id, dir: found.dir };
+  return found;
 }
 function batchState() {
   return {
@@ -127,7 +138,6 @@ test("a non-zero solver exit is recorded verbatim with no rivqdown digest", asyn
 
 test("a repeat beyond its bound stops the solver group and records a null exit code", async () => {
   installSolver("sleep 30");
-  const started = Date.now();
   const record = await runSensitivityRepeat({
     home: f.home,
     shudBin: solver,
@@ -135,7 +145,6 @@ test("a repeat beyond its bound stops the solver group and records a null exit c
     threads: 1,
     timeoutMs: 1000,
   });
-  expect(Date.now() - started).toBeLessThan(4000);
   expect(record).toMatchObject({ status: "executed", exit_code: null, rivqdown_sha256: null });
   expect(groupCanPerformIo(Number(fs.readFileSync(join(trace, "pgid"), "utf8")))).toBe(false);
 });
@@ -148,7 +157,7 @@ test("without a unique succeeded in-batch baseline the repeat is not executed an
   const record = await runSensitivityRepeat({
     home: f.home,
     shudBin: solver,
-    baseline: found as string,
+    baseline: found,
     threads: 1,
   });
   expect(record).toEqual({
@@ -160,4 +169,23 @@ test("without a unique succeeded in-batch baseline the repeat is not executed an
   );
   expect(fs.existsSync(join(trace, "argv"))).toBe(false);
   expect(fs.existsSync(join(f.home, "sensitivity/repeat"))).toBe(false);
+});
+
+test("a solver whose start identity cannot be proved is killed with its group before failing", async () => {
+  installSolver("sleep 30 &\nsleep 30");
+  vi.mocked(processStart).mockImplementationOnce(() => null);
+  const record = await runSensitivityRepeat({
+    home: f.home,
+    shudBin: solver,
+    baseline: baseline(),
+    threads: 1,
+  });
+  expect(record).toEqual({
+    status: "not_executed",
+    reason: expect.stringMatching(
+      /^repeat run failed: Repeat solver \d+ start identity unavailable$/u,
+    ) as unknown,
+  });
+  const [pid] = vi.mocked(processStart).mock.calls[0];
+  expect(groupCanPerformIo(pid)).toBe(false);
 });

@@ -1,12 +1,13 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { zstdCompressSync } from "node:zlib";
 import ts from "typescript";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { snapshotTree } from "../../packages/dsh-shud-records/src/report-code-change-test-harness.ts";
+import { runSensitivityEvaluateCli } from "./shud-sensitivity-evaluate.ts";
 import { FIXED_PLAN } from "./shud-sensitivity-plan.ts";
 import {
   runSensitivity,
@@ -16,9 +17,24 @@ import {
   type SensitivityStages,
 } from "./shud-sensitivity.ts";
 import { sensitivitySummary } from "./shud-sensitivity-summary.ts";
-import { makeEvaluateFixture, run } from "./sensitivity-evaluate/test-harness.ts";
+import { WORKER_ID, makeEvaluateFixture, run } from "./sensitivity-evaluate/test-harness.ts";
+import type * as webDriver from "./shud-web-driver.ts";
+import type * as evaluator from "./shud-sensitivity-evaluate.ts";
+import { command } from "./shud-web-driver.ts";
+
+// Build/installer processes and the evaluator are the seams the default stages call; the
+// remaining driver and repeat code runs unmocked.
+vi.mock("./shud-web-driver.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof webDriver>()),
+  command: vi.fn(() => Promise.resolve("")),
+}));
+vi.mock("./shud-sensitivity-evaluate.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof evaluator>()),
+  runSensitivityEvaluateCli: vi.fn(() => Promise.resolve(1)),
+}));
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = fs.realpathSync(resolve(HERE, "../.."));
 const SCRIPT = join(HERE, "shud-sensitivity.sh");
 const ROOT_ID = "session-sensitivity-671";
 
@@ -479,4 +495,133 @@ test("package.json registers the entry between shud:restart and shud:tiny", () =
   expect(manifest.scripts["shud:sensitivity"]).toBe("sh scripts/runtime/shud-sensitivity.sh");
   expect(names.indexOf("shud:sensitivity")).toBe(names.indexOf("shud:restart") + 1);
   expect(names.indexOf("shud:tiny")).toBe(names.indexOf("shud:sensitivity") + 1);
+});
+
+test("the install stage builds and installs the bundle with the isolated Web profile env", async () => {
+  const saved = process.env.ALL_PROXY;
+  process.env.ALL_PROXY = "x";
+  vi.mocked(command).mockClear();
+  const order: string[] = [];
+  const s = stages(order, {
+    drive() {
+      order.push("drive");
+      return Promise.reject(new Error("no session"));
+    },
+  });
+  delete s.stages.install;
+  try {
+    const { code } = await captured(() => runSensitivity(config(), s.stages));
+    expect(code).toBe(1);
+    const calls = vi.mocked(command).mock.calls;
+    expect(calls.map(([binary, args, cwd]) => [binary, args, cwd])).toEqual([
+      ["pnpm", ["run", "build"], REPO],
+      ["sh", [join(REPO, "scripts/runtime/profile-install.sh")], s.workspace],
+    ]);
+    for (const [, , , env] of calls) {
+      expect(env).toMatchObject({
+        DSH_HOME: s.homes[0],
+        PROFILE_NAME: "shud",
+        PROFILE_TEMPLATE: "web",
+        SHUD_BIN: solver,
+      });
+      expect(env).not.toHaveProperty("ALL_PROXY");
+    }
+    expect(process.env.ALL_PROXY).toBe("x");
+  } finally {
+    if (saved === undefined) delete process.env.ALL_PROXY;
+    else process.env.ALL_PROXY = saved;
+    fs.rmSync(s.homes[0], { recursive: true, force: true });
+  }
+});
+
+test("the default evaluate stage passes the prepared workspace, canonical log and both records", async () => {
+  vi.mocked(runSensitivityEvaluateCli).mockClear().mockResolvedValueOnce(2);
+  const order: string[] = [];
+  const s = stages(order);
+  delete s.stages.evaluate;
+  try {
+    const { code } = await captured(() => runSensitivity(config(), s.stages));
+    expect(code).toBe(2);
+    const [home] = s.homes;
+    expect(vi.mocked(runSensitivityEvaluateCli).mock.calls).toEqual([
+      [
+        [
+          s.workspace,
+          join(home, "sessions/project", ROOT_ID, "session.v4.jsonl.zstd"),
+          join(home, "sensitivity/preparation.json"),
+          join(home, "sensitivity/repeat.json"),
+        ],
+      ],
+    ]);
+  } finally {
+    fs.rmSync(s.homes[0], { recursive: true, force: true });
+  }
+});
+
+test("the default repeat stage runs the in-batch baseline outside the workspace with the plan's threads", async () => {
+  const f = await makeEvaluateFixture();
+  const trace = join(scratch, "trace");
+  fs.mkdirSync(trace);
+  fs.writeFileSync(
+    solver,
+    [
+      "#!/bin/sh",
+      `printf '%s\\n' "$0" "$@" > '${trace}/argv'`,
+      `pwd -P > '${trace}/cwd'`,
+      `printf '%s\\n' "$OMP_NUM_THREADS" "$SHUD_RHS_THREADS" > '${trace}/threads'`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const argv = [solver, "-o", "output/ccw.out", "ccw"];
+  // The registry records the configured solver argv; drive captured each run's (now quiet) group.
+  for (const job of f.jobs)
+    f.writeJson(`runs/${job.run_id}/run-job.json`, { ...job, command: argv });
+  const order: string[] = [];
+  const s = stages(order, {
+    prepare(r: SensitivityRun) {
+      order.push("prepare");
+      s.homes.push(r.home);
+      r.workspace = f.workspace;
+      return Promise.resolve();
+    },
+  });
+  const drive = s.stages.drive!;
+  s.stages.drive = async (r: SensitivityRun) => {
+    await drive(r);
+    r.owners.add(WORKER_ID);
+    for (const job of f.jobs)
+      r.groups.set(job.pid!, { isGroupActive: () => false, signalGroup: () => undefined });
+  };
+  try {
+    const { code } = await captured(() => runSensitivity(config(), s.stages));
+    expect(code).toBe(1);
+    expect(order).toEqual([
+      "prepare",
+      "install",
+      "drive",
+      "approvals.close",
+      "host.stop",
+      "evaluate",
+    ]);
+    const [home] = s.homes;
+    const threads = String(f.plan.threads);
+    expect(repeatRecord(home)).toMatchObject({
+      status: "executed",
+      exit_code: 0,
+      baseline_run_id: run(1),
+      run_id: `repeat-${run(1)}`,
+      omp_num_threads: threads,
+      shud_rhs_threads: threads,
+    });
+    const lines = (name: string) =>
+      fs.readFileSync(join(trace, name), "utf8").trimEnd().split("\n");
+    expect(lines("argv")).toEqual(argv);
+    expect(lines("cwd")).toEqual([join(home, "sensitivity/repeat")]);
+    expect(lines("cwd")[0].startsWith(f.workspace + sep)).toBe(false);
+    expect(lines("threads")).toEqual([threads, threads]);
+  } finally {
+    f.h.dispose();
+    for (const home of s.homes) fs.rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -10,7 +10,12 @@ import { load, type WebHost } from "./shud-web-driver.ts";
 import { openOwnedApprovals } from "./shud-approval-transport.ts";
 
 /** Preserve the M3 report-only predicate on the shared original-peer transport. */
-export async function openReportApprovals(host: WebHost, sessionId: string, workspace: string) {
+export async function openReportApprovals(
+  host: WebHost,
+  sessionId: string,
+  workspace: string,
+  options: { label?: string; streamId?: string } = {},
+) {
   return openOwnedApprovals(
     host,
     async (value, signal) => {
@@ -42,6 +47,6 @@ export async function openReportApprovals(host: WebHost, sessionId: string, work
       }
       return allowed;
     },
-    { streamId: "first-task-approvals" },
+    { streamId: options.streamId ?? "first-task-approvals", label: options.label },
   );
 }

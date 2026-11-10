@@ -9,7 +9,7 @@ import { makeReplayFixture } from "./replay/test-harness.ts";
 import type { ReplayEvidence } from "./shud-replay-evidence.ts";
 import type { CanonicalEvent } from "./shud-restart-evidence.ts";
 import { openReportApprovals } from "./shud-first-task-approval.ts";
-import { batchProgress } from "./shud-sensitivity.ts";
+import { batchProgress, openSensitivityApprovals } from "./shud-sensitivity.ts";
 import type { SessionLog } from "./shud-session-log.ts";
 
 const ROOT = "session-sensitivity-root";
@@ -243,3 +243,40 @@ test("job terminality accepts the statuses the caller names on the shared transp
     }
   }
 });
+
+test.each([
+  ["first-task", "first-task-approvals", "First-task"],
+  ["sensitivity", "sensitivity-approvals", "Sensitivity"],
+] as const)(
+  "%s approvals open their own stream and name themselves on failure",
+  async (kind, streamId, label) => {
+    const h = reportFixture();
+    const remote = await peer();
+    let disposed = false;
+    try {
+      const transport =
+        kind === "first-task"
+          ? await openReportApprovals(remote.host, "replay-root", h.root)
+          : await openSensitivityApprovals(remote.host, "replay-root", h.root);
+      expect(
+        remote.frames.filter((frame) => frame.type === "open").map((frame) => frame.streamId),
+      ).toEqual([streamId]);
+      disposed = true;
+      await remote.dispose();
+      await expect
+        .poll(() => {
+          try {
+            transport.healthy();
+            return "healthy";
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        })
+        .toBe(`${label} approval connection closed unexpectedly`);
+      await expect(transport.close()).rejects.toThrow(`${label} approval`);
+    } finally {
+      if (!disposed) await remote.dispose();
+      fs.rmSync(h.root, { recursive: true, force: true });
+    }
+  },
+);

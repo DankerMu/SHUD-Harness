@@ -24,8 +24,9 @@ const PROJECT = FIXED_PLAN.project;
 const COPY = `input/${PROJECT}`;
 const RIVQDOWN = `output/${PROJECT}.out/${PROJECT}.rivqdown.dat`;
 
+/** The in-batch baseline as `inBatchBaseline` returns it (criterion 7 uses the same rule). */
 export interface RepeatBaseline {
-  run_id: RunId;
+  job: { run_id: RunId };
   /** `<workspace>/runs/<run_id>` of the in-batch baseline run. */
   dir: string;
 }
@@ -65,13 +66,14 @@ function fileSha256(path: string): string | null {
 
 /**
  * Spawn the solver as its own group leader. The group identity is taken before any await, while
- * the child is unreaped; a leader that already exited may not leave a live group behind.
+ * the child is unreaped; a leader that already exited may not leave a live group behind. When
+ * the identity cannot be proved, the still-unreaped group is killed before the failure returns.
  */
-function launch(
+async function launch(
   input: RepeatInput,
   cwd: string,
   env: NodeJS.ProcessEnv,
-): { child: ChildProcess; exited: Promise<void>; group?: ShudProcessGroup } {
+): Promise<{ child: ChildProcess; exited: Promise<void>; group?: ShudProcessGroup }> {
   const stdout = fs.openSync(join(cwd, "stdout.log"), "wx", 0o600);
   let stderr: number | undefined;
   let child: ChildProcess;
@@ -95,20 +97,31 @@ function launch(
   });
   const pid = child.pid;
   if (pid === undefined) return { child, exited };
-  const stamp = processStart(pid);
-  requireFact(stamp, `Repeat solver ${pid} start identity unavailable`);
   try {
-    const group = recoverProcessGroup({
-      pid,
-      pid_started_at: new Date(`${stamp} UTC`).toISOString(),
-    });
-    return { child, exited, group };
-  } catch (error) {
-    requireFact(
-      !groupCanPerformIo(pid),
-      `Repeat solver ${pid} exited with live group members; ownership unproved: ${message(error)}`,
-    );
-    return { child, exited };
+    const stamp = processStart(pid);
+    requireFact(stamp, `Repeat solver ${pid} start identity unavailable`);
+    try {
+      const group = recoverProcessGroup({
+        pid,
+        pid_started_at: new Date(`${stamp} UTC`).toISOString(),
+      });
+      return { child, exited, group };
+    } catch (error) {
+      requireFact(
+        !groupCanPerformIo(pid),
+        `Repeat solver ${pid} exited with live group members; ownership unproved: ${message(error)}`,
+      );
+      return { child, exited };
+    }
+  } catch (failure) {
+    // The leader is still unreaped, so its group id cannot have been reused yet.
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+    }
+    await exited;
+    throw failure;
   }
 }
 
@@ -129,7 +142,7 @@ async function execute(
   fs.mkdirSync(join(directory, "output"));
   const threads = String(input.threads);
   const env = { ...process.env, OMP_NUM_THREADS: threads, SHUD_RHS_THREADS: threads };
-  const { child, exited, group } = launch(input, directory, env);
+  const { child, exited, group } = await launch(input, directory, env);
   const bound = AbortSignal.any([
     AbortSignal.timeout(input.timeoutMs ?? REPEAT_MS),
     ...(input.abort ? [input.abort] : []),
@@ -152,8 +165,8 @@ async function execute(
     omp_num_threads: threads,
     shud_rhs_threads: threads,
     rivqdown_sha256: fileSha256(join(directory, RIVQDOWN)),
-    run_id: `repeat-${baseline.run_id}`,
-    baseline_run_id: baseline.run_id,
+    run_id: `repeat-${baseline.job.run_id}`,
+    baseline_run_id: baseline.job.run_id,
   };
 }
 

@@ -159,6 +159,17 @@ export async function batchProgress(
   return terminal ? { state: "done" } : { state: "running" };
 }
 
+/** The report-only predicate (only `report_submit` is answered) on its own named stream. */
+export async function openSensitivityApprovals(host: WebHost, rootId: string, workspace: string) {
+  // Bootstrap boundary: the report predicate loads built records, which exist only after the
+  // install stage's build (as shud-first-task.ts does).
+  const { openReportApprovals } = await import("./shud-first-task-approval.ts");
+  return openReportApprovals(host, rootId, workspace, {
+    label: "Sensitivity",
+    streamId: "sensitivity-approvals",
+  });
+}
+
 async function drive(run: SensitivityRun): Promise<void> {
   const workspace = physical(run);
   const host = new WebHost(run.config.dshBin, workspace, run.env, run.abort, {
@@ -171,10 +182,7 @@ async function drive(run: SensitivityRun): Promise<void> {
       .sessionId,
   );
   run.rootId = rootId;
-  // Bootstrap boundary: the report predicate loads built records, which exist only after the
-  // install stage's build (as shud-first-task.ts does).
-  const { openReportApprovals } = await import("./shud-first-task-approval.ts");
-  const approvals = await openReportApprovals(host, rootId, workspace);
+  const approvals = await openSensitivityApprovals(host, rootId, workspace);
   run.approvals = approvals;
   const accepted = object(
     await host.rpc("session/prompt", {
@@ -258,8 +266,7 @@ async function repeat(run: SensitivityRun, reason: string | undefined): Promise<
       const { inBatchBaseline } = await import("./shud-sensitivity-criteria-numeric.ts");
       const batch = loadSensitivityBatch(workspace);
       threads = bound(batch).plan.threads;
-      const found = inBatchBaseline(workspace, batch);
-      baseline = typeof found === "string" ? found : { run_id: found.job.run_id, dir: found.dir };
+      baseline = inBatchBaseline(workspace, batch);
     } catch (error) {
       baseline = message(error);
     }

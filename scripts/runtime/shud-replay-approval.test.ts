@@ -432,3 +432,28 @@ test.each(["unavailable", "cancelled", "rejected"])(
     }
   },
 );
+
+test("replay accepts only completed for its own RunJob host jobs", async () => {
+  const h = approvalFixture();
+  const remote = await peer(undefined, () => [
+    { id: "shud-current", kind: "shud", status: "failed" },
+  ]);
+  let close: (() => Promise<void>) | undefined;
+  try {
+    const transport = await openReplayApprovals(
+      remote.host,
+      h.snapshot.home,
+      "replay-root",
+      h.root,
+    );
+    close = transport.close;
+    expect((await transport.jobsTerminal(["replay-root"], ["shud-current"])).terminal).toBe(false);
+  } finally {
+    try {
+      await close?.();
+    } finally {
+      await remote.dispose();
+      h.dispose();
+    }
+  }
+});
