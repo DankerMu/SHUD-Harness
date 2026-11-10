@@ -119,7 +119,7 @@ Required behavior evidence: residual 0.01/0.0100001/0.05/0.0500001 → pass/warn
   - 只对 `exit_class: ok` 的 run 计算；写 `metrics.json` 并填 `metrics_summary` 与 numerical_health。
   - 失败隔离：unavailable 由 run-metrics 判定，不写 `collect-error.json`、不计次；`metrics.json` 写失败时字段为 null；非 ok run 不写；已有 RunRecord 时幂等，不改写。
   - 同一切片中：
-    - 更新 `shud:first-task` oracle（ccw run 的 numerical_health 三项非 null）与 `shud:replay` oracle（keliya residual 为 null，原因 `missing_variable`）；
+    - 更新 `shud:first-task` oracle（ccw run 的 numerical_health 三项非 null）与 `shud:replay` oracle（keliya `metrics.json` 为 `unavailable`、原因 `parse:input/keliya/keliya.sp.mesh`、`numerical_health` 四项 null；PI 2026-11-09 裁定 #662 (A)）；
     - 重跑 `shud:first-task`、`shud:replay`、`shud:restart`（SIGTERM/SIGKILL 两用例全长 ccw，`delivered` 判据不放宽），附三份本机证据；
     - 全长 run 的 collect 耗时写进 PR。
   - 满足 shud-run-jobs「Automatic collect」、run-metrics「Metrics computed at collect」，以及 agent-presets「Local first-task acceptance script」与 known-answer-replay「Replay acceptance criteria」的 metrics 部分（依赖 2.2、3.2d、4.1a）。
@@ -696,7 +696,7 @@ Commands: tests first (RED), `pnpm run check`, `pnpm run build && pnpm run profi
 | Idempotence | Selected: committed run-record + metrics, `.dat` rewritten, recollect (automatic and `collectShud`) → both files byte+mtime unchanged; first attempt writes metrics then run-record write fails, retry succeeds → attempts 1 in ledger before retry, ledger bytes unchanged by the successful retry, metrics bytes identical to first |
 | Readonly / legacy | Selected: `collectShud(id, {readonly: true})` computes nothing, writes nothing; pre-M5 committed RunRecord not backfilled |
 | Read-only metrics | Selected: `.dat`, `stdout.log`, `stderr.log`, input copy byte+mtime unchanged across a metrics computation |
-| Runtime oracles | Selected: first-task oracle positive + negative (residual null fixture → non-zero naming criterion); replay oracle positive + negatives (summary null, digest mismatch, reason not `missing_variable:`); rivqdown unchanged |
+| Runtime oracles | Selected: first-task oracle positive + negative (residual null fixture → non-zero naming criterion); replay oracle positive (`unavailable`, reason exactly `parse:input/keliya/keliya.sp.mesh`, four health fields null, digest bound) + negatives (summary null, digest mismatch, `status: ok`, a different reason, any non-null health field); rivqdown unchanged (PI 2026-11-09, #662 option A) |
 | Hydrology runtime / resource | Selected: real `shud:first-task`, `shud:replay` exit 0; `shud:restart` SIGTERM/SIGKILL PASS with `delivered`, retained RunRecords have non-null `metrics_summary`; full-length ccw collect duration (incl. metrics) measured and reported |
 | Scientific governance / lineage | Selected: no invented values; nulls carry reasons; metrics producer for #422 |
 | Documentation | Selected: `Runtime_Lifecycle.md:57` (metrics exemption from collect-error and write position), `:61` (wake token), `Testing_Strategy.md:114`, `Test_Fixtures_And_Command_Matrix.md:163` (producer now known); `Migration_Plan_dsh.md` untouched; `pnpm run docs:check` green |
