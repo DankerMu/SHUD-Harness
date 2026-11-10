@@ -166,8 +166,8 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
       const record = await jobs.submitShud(
         {
           cwd,
-          // Plan-bound: the realpath resolvePlan compared; unbound: the caller's spelling.
-          input_dir: plan?.input_dir ?? args.input_dir,
+          // Plan-bound calls: the plan fields spread last replace this with the plan's realpath.
+          input_dir: args.input_dir,
           project,
           ...(args.end_days === undefined ? {} : { end_days: args.end_days }),
           ...(args.label === undefined ? {} : { label: args.label }),
