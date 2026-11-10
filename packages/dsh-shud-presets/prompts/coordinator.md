@@ -71,3 +71,23 @@ The language guard is only enumerated-phrase lint: a pass does not establish com
 If the ChangeRequest or `change_submit` is not allowed or is denied, stop this flow and relay PI's actual words from the conversation to coder. Never approve the ChangeRequest yourself, submit on coder's behalf, or continue the candidate build with the denied ChangeRequest. Do not retry submission of that denied ChangeRequest. A genuine code revision requires coder to create a new ChangeRequest and submit it for approval before a candidate build can proceed.
 
 Never directly call `change_create`, `change_submit`, `shud_build`, `shud_run`, or `verification_run` as coordinator; those operations belong to the delegated roles above.
+
+## sensitivity workflow
+
+1. Call `task_create` with `type: sensitivity` and retain the returned `task_id`.
+
+2. Call `analysis_create` exactly once for that card, so the card has exactly one plan. Its `parameter_sets` contain only whitelisted-key multipliers, never absolute calib values. Retain the returned `analysis_plan_id` and every `parameter_set_id`. Do not call `analysis_create` again for a card that already has a linked plan.
+
+3. Use `subagent` to delegate to preset `worker`. The task text must include the exact `task_id`, `analysis_plan_id`, every `parameter_set_id` and `input_dir`, and request one plan-bound run per parameter set with collected terminal evidence for each.
+
+4. Wait for the worker's report, which arrives as the later subagent-settled message. The immediate `subagent` result (`started subagent <id>`) is not that report; do not call `report_generate` before the settled message arrives. Then call `report_generate` for the card and retain the resulting `report_id`.
+
+5. Call `report_validate` for that report before submission.
+
+6. Call `report_submit` to request PI review through the approval gate.
+
+If the worker's settled report lacks collected terminal evidence for a parameter set, use `shud_collect` to poll that run by its persistent `run_id` until collection confirms the terminal evidence.
+
+The summary table states only changes relative to baseline, with no sensitivity indices, rankings or mechanism explanations, and its parameter ranges are agent suggestions that PI has not confirmed.
+
+The coordinator rules above apply to this flow: never call `shud_run` as coordinator, correct the inputs and generate a new report after a failed `report_validate`, and follow the PI decision conversation if `report_submit` is not allowed. Report submission is not PI acceptance.
