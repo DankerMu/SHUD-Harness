@@ -101,7 +101,7 @@
 - IC SHALL 取自副本 `<project>.cfg.ic`（文本；元素表列 `Index Canopy Snow Surface Unsat GW`，接河道表 `Index Stage`）；元素表或河道表行数与副本网格或河网不等时残差 SHALL 为 `null`，原因 `ic_shape_mismatch`（`.cfg.ic` 不存在或不可安全读取则按「Metrics file shape and determinism」为 `unavailable`）。
 - `water_balance_residual = |P − Qd − AET − ΔS| / P`。
 
-该公式是 PI 的科学定义：实现 SHALL NOT 增删、替换或重新加权任何项，任何偏离只能经 PI 决定后改本 spec。`P ≤ 0` 时残差 SHALL 为 `null`，原因 `zero_precipitation`。任一必需变量文件缺失（ENOENT；例如 keliya 不输出储量，或运行副本未开启 `eleyic` 输出）时残差 SHALL 为 `null`，原因 `missing_variable:<var>`（`<var>` 为第一个缺失的变量名，按变量名码点序）；`GEOL_THETAS` 键不在副本 `.cfg.calib` 中时残差 SHALL 为 `null`，原因 `missing_calib:GEOL_THETAS`，SHALL NOT 默认为 1；必需输入含非有限值时残差 SHALL 为 `null`，原因 `nonfinite:<var>`。以上 `null` 只影响残差，不使整份指标变为 `unavailable`。`metrics.json` SHALL 同时写出 `P`、`Qd`、`AET`、六个 ΔS 分量与 `ΔS`（不可算时为 `null`），以及公式来源说明，供 rSHUD 对照与 PI 审阅。`water_balance_residual` 只是数值守恒诊断，SHALL NOT 被表述为水文真实性或模型改进证据。
+该公式是 PI 的科学定义：实现 SHALL NOT 增删、替换或重新加权任何项，任何偏离只能经 PI 决定后改本 spec。`P ≤ 0` 时残差 SHALL 为 `null`，原因 `zero_precipitation`。任一必需变量文件缺失（ENOENT；例如 不输出储量的运行，或运行副本未开启 `eleyic` 输出）时残差 SHALL 为 `null`，原因 `missing_variable:<var>`（`<var>` 为第一个缺失的变量名，按变量名码点序）；`GEOL_THETAS` 键不在副本 `.cfg.calib` 中时残差 SHALL 为 `null`，原因 `missing_calib:GEOL_THETAS`，SHALL NOT 默认为 1；必需输入含非有限值时残差 SHALL 为 `null`，原因 `nonfinite:<var>`。以上 `null` 只影响残差，不使整份指标变为 `unavailable`。`metrics.json` SHALL 同时写出 `P`、`Qd`、`AET`、六个 ΔS 分量与 `ΔS`（不可算时为 `null`），以及公式来源说明，供 rSHUD 对照与 PI 审阅。`water_balance_residual` 只是数值守恒诊断，SHALL NOT 被表述为水文真实性或模型改进证据。
 
 #### Scenario: residual from closed budget
 - **WHEN** 合成夹具中 `P = 0.100`、`Qd = 0.030`、`AET = 0.060`、`ΔS = 0.009`
