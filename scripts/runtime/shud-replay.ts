@@ -11,13 +11,11 @@ import type { RunJob } from "../../packages/dsh-shud-core/src/schemas/run-job.ts
 import { extendPrefix, object, requireFact, text } from "./shud-restart-evidence.ts";
 import {
   WebHost,
-  BUFFER_LIMIT,
   cleanupOwnedRuns,
   command,
   cwdOf,
-  directoryNames,
   ownRunGroup,
-  readPrivateJob,
+  readPrivateJobs,
   readFileBounded,
   save,
   screen,
@@ -161,26 +159,7 @@ function replayPreflight(argv: string[]): Config {
   return { workspace, source, design, shudBin, sundials: fs.realpathSync(sundials), dshBin };
 }
 
-function privateJobs(workspace: string): RunJob[] {
-  const root = join(workspace, "runs");
-  if (!fs.existsSync(root)) return [];
-  requireFact(
-    fs.lstatSync(root).isDirectory() && fs.realpathSync(root) === root,
-    "Unsafe replay runs root",
-  );
-  const jobs: RunJob[] = [],
-    budget = { remaining: BUFFER_LIMIT };
-  for (const name of directoryNames(root, budget)) {
-    requireFact(jobs.length < 2, "Unexpected additional replay runs");
-    const path = join(root, name);
-    if (fs.existsSync(join(path, "run-job.json"))) {
-      const job = readPrivateJob(workspace, path, budget);
-      requireFact(job.run_dir === path, "Private RunJob path identity mismatch");
-      jobs.push(job);
-    }
-  }
-  return jobs;
-}
+const privateJobs = (workspace: string) => readPrivateJobs(workspace, 2);
 
 async function run(config: Config, abort: AbortSignal): Promise<void> {
   abort = AbortSignal.any([abort, AbortSignal.timeout(COMPLETE_MS)]);

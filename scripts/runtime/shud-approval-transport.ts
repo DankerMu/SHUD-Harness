@@ -170,6 +170,51 @@ export async function openOwnedApprovals(
         socket.send(JSON.stringify({ type: "cancel", streamId: id }));
     }
   }
+  /**
+   * Owned host jobs of every session are terminal: each current RunJob host id is observed
+   * ownerless as a `shud` job in one of `accepted`; any other owned job has ended.
+   */
+  async function jobsTerminal(
+    sessionIds: string[],
+    currentJobIds: string[],
+    accepted: readonly string[],
+  ): Promise<{ terminal: boolean; rosters: unknown[] }> {
+    const expected = new Set(currentJobIds);
+    const observed = new Set<string>();
+    const rosters: unknown[] = [];
+    let terminal = true;
+    for (const sessionId of sessionIds) {
+      const frame = object(await jobRoster(sessionId));
+      requireFact(
+        frame.type === "rows" && Array.isArray(frame.jobs),
+        "Malformed public job roster",
+      );
+      const owned = frame.jobs
+        .map(object)
+        .filter(
+          (job) =>
+            job.owner === sessionId || (job.owner === undefined && expected.has(text(job.id))),
+        );
+      for (const job of owned) {
+        const id = text(job.id),
+          status = text(job.status);
+        requireFact(
+          ["running", "stopping", "completed", "killed", "failed"].includes(status),
+          `Unknown job status ${id}`,
+        );
+        if (expected.has(id)) {
+          requireFact(
+            job.owner === undefined && job.kind === "shud",
+            `RunJob registry identity ${id}`,
+          );
+          observed.add(id);
+          terminal &&= accepted.includes(status);
+        } else terminal &&= ["completed", "killed", "failed"].includes(status);
+      }
+      rosters.push({ sessionId, jobs: owned });
+    }
+    return { terminal: terminal && [...expected].every((id) => observed.has(id)), rosters };
+  }
   async function close(): Promise<void> {
     closing = true;
     // Roster reads can stop immediately; already-posted approval results must still drain.
@@ -212,7 +257,7 @@ export async function openOwnedApprovals(
       await delay(50, undefined, { signal: host.abort });
     }
     requireFact(clientId, `${label} approval stream readiness deadline`);
-    return { healthy, close, jobRoster };
+    return { healthy, close, jobRoster, jobsTerminal };
   } catch (error) {
     try {
       await close();
