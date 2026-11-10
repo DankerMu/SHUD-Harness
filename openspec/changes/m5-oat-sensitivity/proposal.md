@@ -370,3 +370,10 @@ Stage 1 压测结论（`.workplans/m5-oat-sensitivity/grill-gate.json`：30 个�
 - Blast radius: a registration that copies the criteria list (second source of truth), claims CI runs the gate, overruns the rendered root-instruction budget, hand-edits rendered files, or leaves the Test_Fixtures dummy-batch section describing a non-existent 3×3/parquet entry as current.
 - Selected packs: Docs / control plane (Testing_Strategy matrix + Enforcement Index, Test_Fixtures ccw sensitivity fixture and §1/§3 rewrite, `constraints.yaml` verification mirror + local-only readiness gap, `instructions/agents/shared.md` + `instructions:render`), Legacy compatibility (existing rows unchanged; render within budget). Not selected: code, `.github/workflows/`, Phased_Plan (report-only check), Migration_Plan, ADR.
 - Evidence floor: `pnpm run instructions:render` then `instructions:check` within `agents_md_max_lines`/`agents_md_max_bytes`; `pnpm run docs:check`; `pnpm run check`; grep evidence that no workflow runs `shud:sensitivity` and the registration text links (not copies) the criteria; Phased_Plan M5 wording compared and reported in the PR.
+
+## Issue #713 execution fixture (option A)
+
+- Issue type: test + spec (PI 2026-11-09: A first — pin current behavior; B is a later ADR). Fixture level: compact, but touches Critical Path #1/#2/#3 test surfaces (policy gate, raw guard, approval seam) without product code → white-box review seat on the test.
+- Blast radius: a test that passes without exercising the real composition (fake ordering, restrict not mounted, tool not registered through `@deepseek-ai/dsh-tools`), or a spec wording that hides the exception; any product-code change (out of scope for A).
+- Selected packs: Ordering / composition (real Cordis + raw-guard + policy-gate + role-restrict in the profile's order), Approval seam (request count, outcomes), Raw protection (md5 unchanged), Legacy (on-role raw ask unchanged). Not selected: product code, profile, docs, ADR (B).
+- Evidence floor: new full-chain test(s) green, existing `approval-runtime.test.ts` and raw-guard suites unchanged; `pnpm run check`; one white-box review seat; exact-head CI.
