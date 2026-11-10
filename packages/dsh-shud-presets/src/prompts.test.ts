@@ -585,6 +585,116 @@ describe("sensitivity prompt wording guard", () => {
   });
 });
 
+// Issue #718: bounded recovery after a sensitivity closure failure. Ordered per
+// design (a) collect once, (b) re-delegate once, job_not_terminal fallback, (c) stop.
+const SENSITIVITY_RECOVERY_CLAUSES = [
+  /^If report_generate fails because closure names a parameter_set_id/,
+  /\bmissing_parameter_set\b/,
+  /\binadmissible_effective_run\b/,
+  /For inadmissible_effective_run, first call shud_collect once on the named job_id, then call report_generate again/,
+  /at most once per named job_id and is not a re-delegation/i,
+  /If that set is still named by missing_parameter_set or inadmissible_effective_run/,
+  /use subagent to delegate preset worker once for that set only/,
+  /task_id, analysis_plan_id, input_dir and that single parameter_set_id/,
+  /one plan-bound run with collected terminal evidence/,
+  /Wait for that worker's subagent-settled message, then call report_generate again/,
+  /Re-delegate at most once per parameter set/,
+  /If closure fails with job_not_terminal, a linked run is still in progress: use the shud_collect fallback above for that run, by the named job_id or its run_id, until collection confirms terminal evidence, then call report_generate again/,
+  /If the same set is still named after its one re-delegation, or closure fails for any other reason than job_not_terminal, stop and give the PI the error and the collected evidence/,
+];
+
+const RECOVERY_PROHIBITION =
+  /do not create a new card or plan, do not call analysis_create again and do not call shud_run/;
+const UNBOUNDED_RETRY = /until it succeeds|\brepeat|keep retrying|retry until|as many times/i;
+
+describe("sensitivity recovery prompt contract", () => {
+  it("places one bounded coordinator recovery paragraph after the collect fallback", () => {
+    const flow = promptSection(coordinator, "sensitivity workflow");
+    const paragraphs = flow.split(/\n\s*\n/);
+    const fallback = paragraphMatching(flow, /shud_collect/);
+    expect(fallback).toMatch(
+      /^If the worker's settled report lacks collected terminal evidence for a parameter set, use shud_collect/,
+    );
+    const recovery = paragraphMatching(flow, /missing_parameter_set/);
+    expect(paragraphs.indexOf(recovery)).toBe(paragraphs.indexOf(fallback) + 1);
+    expect(paragraphs.indexOf(paragraphMatching(flow, /summary table/i))).toBe(
+      paragraphs.indexOf(recovery) + 1,
+    );
+    expect(paragraphs.indexOf(recovery)).toBeLessThan(
+      paragraphs.indexOf(paragraphMatching(flow, /rules above apply to this flow/i)),
+    );
+    expect(cursorOrderedMisses(recovery, SENSITIVITY_RECOVERY_CLAUSES)).toEqual([]);
+  });
+
+  it("keeps the coordinator recovery from creating plans, running SHUD or retrying without bound", () => {
+    const flow = promptSection(coordinator, "sensitivity workflow");
+    const recovery = paragraphMatching(flow, /missing_parameter_set/);
+    expect(recovery).toMatch(RECOVERY_PROHIBITION);
+    const remainder = recovery.replace(RECOVERY_PROHIBITION, "");
+    expect(remainder).not.toMatch(/analysis_create|task_create|\bshud_run\b|new (?:card|plan)/i);
+    expect(recovery).not.toMatch(UNBOUNDED_RETRY);
+    expect(recovery.match(/at most once/gi)).toHaveLength(2);
+    expect(flow).toMatch(
+      /Do not call analysis_create again for a card that already has a linked plan/,
+    );
+    expect(paragraphMatching(flow, /rules above apply to this flow/i)).toMatch(
+      /never call shud_run as coordinator/,
+    );
+  });
+
+  it("points generic step 1 to the build-bound and plan-bound sections without moving existing lookups", () => {
+    const section = promptSection(worker, "Run and collect");
+    const step1 = paragraphMatching(section, /^1\. /);
+    expect(step1).toBe(paragraphMatching(worker, /shud_run/));
+    expect(step1).toMatch(
+      /^1\. Call shud_run with the task_id and input_dir from the task text \(for task text that names a build_id or an analysis_plan_id, take the arguments from the matching section below\)\. Retain the returned/,
+    );
+    expect(step1).not.toMatch(/return.*\bbuild_id\b/i);
+    expect(step1).not.toMatch(/(?:includes|supplies|contains|provides)\s+(?:a\s+)?build_id/i);
+    expect(paragraphMatching(worker, /return.*\bbuild_id\b/i)).toMatch(/^Use the same job_output/);
+  });
+
+  it("retries a plan-parameter rejection once in the correct form and reports every other rejection", () => {
+    const flow = promptSection(worker, "Plan-bound sensitivity runs");
+    const rejection = paragraphMatching(flow, /rejected/);
+    const retry = sentences(rejection).find((sentence) => /once more/i.test(sentence));
+    expect(retry, "Missing plan-bound retry sentence").toBeDefined();
+    expect(
+      cursorOrderedMisses(rejection, [
+        /do not retry by omitting the plan parameters or task_id/,
+        /a rejection saying only that a plan parameter or task_id is missing/,
+      ]),
+    ).toEqual([]);
+    expect(
+      cursorOrderedMisses(retry ?? "", [
+        /only that a plan parameter or task_id is missing/,
+        /requires parameter_set_id/,
+        /requires analysis_plan_id/,
+        /require task_id/,
+        /requires its plan binding/,
+        /submit that parameter set once more with task_id, input_dir, analysis_plan_id and parameter_set_id/,
+        /every other rejection/,
+        /malformed id/,
+        /plan read failure/,
+        /plan of another task/,
+        /parameter set not in the plan/,
+        /input_dir, project, end_days or threads mismatch/,
+        /plan not linked to the card/,
+        /\bbuild_id\b/,
+        /duplicate parameter set/,
+        /input digest mismatch/,
+        /is reported as returned without submitting that set again/,
+      ]),
+    ).toEqual([]);
+    expect(retry).not.toMatch(/resubmi/i);
+    expect(retry).not.toMatch(/analysis_create|task_create|\bshud_run\b|new (?:card|plan)/i);
+    expect(retry).not.toMatch(UNBOUNDED_RETRY);
+    expect(paragraphMatching(flow, /resubmit/i)).toMatch(
+      /^Do not resubmit a failed parameter set yourself/,
+    );
+  });
+});
+
 describe("coder prompt change contract", () => {
   it("names all ten guarded governance roots, including analyses/", () => {
     const governance = paragraphMatching(coder, /governance (?:directories|roots)/i);

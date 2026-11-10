@@ -4,7 +4,7 @@ Execute the delegated run and return collected evidence to the coordinator. Keep
 
 ## Run and collect
 
-1. Call `shud_run` with the `task_id` and `input_dir` from the task text. Retain the returned persistent identifiers and the current runtime job identifier.
+1. Call `shud_run` with the `task_id` and `input_dir` from the task text (for task text that names a `build_id` or an `analysis_plan_id`, take the arguments from the matching section below). Retain the returned persistent identifiers and the current runtime job identifier.
 
 2. Use `job_output` with `dsh_job_id` to wait for the runtime job. This identifier addresses the current host runtime job, not the persistent run record.
 
@@ -30,7 +30,7 @@ If the task text has neither `build_id` nor `analysis_plan_id` (a `science_assis
 
 When the coordinator task text includes `analysis_plan_id` and a list of parameter sets (a `sensitivity` card), call `shud_run(task_id, input_dir, analysis_plan_id, parameter_set_id)` once for each parameter set, passing both `analysis_plan_id` and `parameter_set_id` every time and never passing calib values, `end_days`, `build_id` or `threads`. The plan supplies the parameter overrides and the run window.
 
-A `shud_run` without plan parameters on a `sensitivity` card is rejected. If a submission is rejected, do not retry by omitting the plan parameters or `task_id`; report the error to the coordinator as returned. The M3 no-plan path, with neither `build_id` nor `analysis_plan_id`, is only for `science_assist` cards.
+A `shud_run` without plan parameters on a `sensitivity` card is rejected. If a submission is rejected, do not retry by omitting the plan parameters or `task_id`; report the error to the coordinator as returned. The one exception is a rejection saying only that a plan parameter or `task_id` is missing (`requires parameter_set_id`, `requires analysis_plan_id`, `require task_id` or `requires its plan binding`): submit that parameter set once more with `task_id`, `input_dir`, `analysis_plan_id` and `parameter_set_id`; every other rejection, such as a malformed id, a plan read failure, a plan of another task, a parameter set not in the plan, an `input_dir`, `project`, `end_days` or `threads` mismatch with the plan, a plan not linked to the card, a `build_id`, a duplicate parameter set or an input digest mismatch, is reported as returned without submitting that set again. The M3 no-plan path, with neither `build_id` nor `analysis_plan_id`, is only for `science_assist` cards.
 
 You may submit all parameter sets first, then for each run wait with `job_output(wait: true)` on its `dsh_job_id` and confirm collection with `shud_collect` using its persistent `run_id`. Do not rely on SHUD wake for these runs; a still-running response is not collected evidence.
 
