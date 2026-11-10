@@ -704,3 +704,16 @@ Commands: tests first (RED), `pnpm run check`, `pnpm run build && pnpm run profi
 | Auth / dependency / profile | Not selected |
 
 Commands: RED before implementation; focused jobs + runtime suites; `pnpm run build`; `pnpm run check`; `pnpm run shud:first-task <scratch>`; `pnpm run shud:replay <scratch>`; `pnpm run shud:restart`; strict OpenSpec validation; expanded three-seat review; exact-head CI. Only task4.2 closes.
+
+## Issue #715 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Model-visible contract | Selected: plan-bound call with a valid `build_id` → tool error whose text names `build_id`; the `build_id` parameter description states it is not accepted with `analysis_plan_id`; malformed `build_id` (with or without plan arguments) keeps the existing brand error |
+| Persisted state | Selected: the same rejection with no `agent.session` in `exec` still names `build_id` (proves the check precedes session access); half plan arguments + `build_id` → existing pairing error; paired plan arguments without `task_id` + `build_id` → existing `task_id` error; the rejected call makes zero `listRunJobsByTask`/`submitShud` calls (recording registry), creates no `runs/` entry, leaves `tasks/<id>/task.json` bytes and mtime and `analyses/` unchanged; also when the plan file is absent (the pure check precedes the plan read) |
+| Path identity | Selected: plan-bound call without `build_id` forwards `input_dir === plan.input_dir` to `submitShud` when the call spells the input as a relative path, through a workspace symlink, and as the absolute realpath; `project` default unchanged |
+| Legacy compatibility | Selected: unbound call forwards `args.input_dir` verbatim (relative spelling preserved) with and without `build_id`/`task_id`; existing shud_run, plan-binding and build-bound suites pass unchanged |
+| Documentation | Selected: `Repository_Layout.md:80` states plan-bound runs forward the plan's `input_dir` and reject `build_id`; unbound wording unchanged; `pnpm run docs:check` green |
+| Schema / registry / closure / prompts | Not selected: no AnalysisPlan field, no jobs change, `mixed_stack` unchanged, prompts unchanged |
+
+Commands: RED before implementation; focused `packages/dsh-shud-tools` shud_run suites; `pnpm run check`; strict OpenSpec validation; one correctness+test-evidence review seat; exact-head CI.
