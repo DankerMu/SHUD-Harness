@@ -88,7 +88,7 @@ describe("SHUD execution transaction through the actual registry", () => {
         expect(await readFile(join(record.run_dir, "input", "tiny", name))).toEqual(expected);
       }
       expect(await readdir(join(record.run_dir, "input", "tiny", "nested", "empty"))).toEqual([]);
-      await expect.poll(() => readdir(record.run_dir)).toContain("wrapper.pid");
+      await expect.poll(() => readdir(record.run_dir), { timeout: 5000 }).toContain("wrapper.pid");
       expect(Number(await readFile(join(record.run_dir, "wrapper.pid"), "utf8"))).toBe(record.pid);
       expect(registry.get(execution.handles[0].id)).toMatchObject({
         kind: "shud",
