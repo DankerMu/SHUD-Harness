@@ -9,6 +9,7 @@ import {
   expectReportError,
   generated,
   installMetrics,
+  passingMetrics,
   reportHarness,
   seedCodeChangeEvidence,
   seedEvidence,
@@ -16,20 +17,6 @@ import {
 
 const FIXED =
   "max_solver_dt 在钉版 SHUD 中不可观测（PrintFinalStats 未被调用），各运行该项恒为 null，不作判定";
-
-function passingMetrics(): RunMetrics {
-  const metrics = completeMetrics();
-  metrics.numerical_health.cvode_failures = 0;
-  metrics.numerical_health.negative_state_count = 0;
-  return {
-    ...metrics,
-    verdicts: {
-      water_balance_residual: "pass",
-      cvode_failures: "pass",
-      negative_state_count: "pass",
-    },
-  };
-}
 
 test.each(["pass", "warn", "negative10", "negative11", "null"] as const)(
   "%s metrics do not block closure and append only their non-pass evidence",

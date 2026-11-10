@@ -5,7 +5,11 @@ import { createTaskCard } from "@shud-harness/dsh-shud-records";
 import { readSourceCheckout } from "./source-checkout.ts";
 
 const parameters = {
-  type: { type: "string", enum: ["science_assist", "code_change"], required: true },
+  type: {
+    type: "string",
+    enum: ["science_assist", "code_change", "sensitivity"],
+    required: true,
+  },
   title: { type: "string", required: true, description: "Nonempty task title." },
   question_or_goal: {
     type: "string",
@@ -18,7 +22,7 @@ export function createTaskCreateTool(): ToolDefinition {
   const tool = defineTool({
     name: "task_create",
     description:
-      "Create a planned science-assistance or code-change TaskCard in the calling session workspace. Code changes pin repos/SHUD HEAD. Does not start runs or link reports.",
+      "Create a planned science-assistance, code-change or sensitivity TaskCard in the calling session workspace. Code changes pin repos/SHUD HEAD; sensitivity cards start without a plan (analysis_create links one). Does not start runs or link reports.",
     parameters,
     output: {
       schema: {

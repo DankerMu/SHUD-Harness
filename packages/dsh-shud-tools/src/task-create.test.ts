@@ -168,6 +168,46 @@ test("task_create publishes the exact planned card through the closed ToolRuntim
   expect(h.registry.indexes.read()).toEqual({ active: [], completed: [] });
 });
 
+test("task_create publishes a sensitivity card with the science_assist initial fields", async () => {
+  const schema = h.runtime.schemas(h.agent).find((tool) => tool.name === "task_create");
+  expect(schema?.parameters?.properties?.type).toMatchObject({
+    enum: ["science_assist", "code_change", "sensitivity"],
+  });
+  expect(schema?.description).toMatch(/sensitivity/u);
+  const sensitivity = {
+    type: "sensitivity",
+    title: "ccw OAT 敏感性",
+    question_or_goal: "相对 baseline 比较三个单参数扰动",
+  };
+  const result = await call(sensitivity);
+  expect(result).toMatchObject({ isError: false, value: { task_id: firstId, status: "planned" } });
+  const file: unknown = JSON.parse(
+    await io.readFile(join(h.cwd, "tasks", firstId, "task.json"), "utf8"),
+  );
+  expect(file).toEqual({
+    ...sensitivity,
+    task_id: firstId,
+    status: "planned",
+    runtime_phase: null,
+    created_by: "coordinator",
+    current_owner: "coordinator",
+    reviewer: "pi",
+    inference_budget: { mode: "normal" },
+    stack_id: null,
+    data_id: null,
+    linked_jobs: [],
+    linked_reports: [],
+    linked_changes: [],
+    linked_verifications: [],
+    linked_analyses: [],
+    source_base_commit: null,
+    created_at: "2026-10-27T08:00:05.987Z",
+    updated_at: "2026-10-27T08:00:05.987Z",
+  });
+  expect(await io.readdir(h.cwd)).not.toEqual(expect.arrayContaining(["repos"]));
+  expect(await io.readdir(h.cwd)).not.toEqual(expect.arrayContaining(["analyses"]));
+});
+
 test("task_create pins code_change to checkout HEAD without changing source or index", async () => {
   const source = join(h.cwd, "repos", "SHUD");
   await io.mkdir(source, { recursive: true });
@@ -246,7 +286,7 @@ const invalid = [
       return { input, message: new RegExp(field, "iu") };
     }),
   ),
-  ...["engineering", "ops", "sensitivity"].map((type) => ({
+  ...["engineering", "ops"].map((type) => ({
     input: { ...args, type },
     message: /type/iu,
   })),

@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { defineTool, ToolArgsError, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import {
   DataIdSchema,
@@ -9,16 +10,21 @@ import {
 } from "@shud-harness/dsh-shud-core";
 import type { ShudJobRegistry } from "@shud-harness/dsh-shud-jobs";
 import {
+  buildSensitivitySummary,
   createEvidenceReport,
+  createSensitivityClosureLoaders,
+  deriveSensitivityLimitations,
   evaluateClosure,
   readChangePatch,
   readReportMetricFacts,
+  readShudInputFile,
   readWorkspaceRecord,
   reconcileTaskCard,
   transitionTask,
   writeWorkspaceRecord,
   type ClosureRunJob,
   type ReportMetricFacts,
+  type SensitivityClosureResult,
 } from "@shud-harness/dsh-shud-records";
 import { checkReportCitations, type AuthoredReport } from "./report-citations.ts";
 import {
@@ -52,7 +58,7 @@ const parameters = {
   pi_questions: { type: "array", items: { type: "string" }, required: true },
 } as const;
 
-/** Append only deterministic non-sensitivity limitations, never satisfying authored counts. */
+/** Deterministic max_solver_dt and per-run metric limitations (kinds 3/4), never authored counts. */
 function metricLimitations(
   runs: readonly RunRecord[],
   facts: readonly ReportMetricFacts[],
@@ -91,6 +97,25 @@ function metricLimitations(
   return limitations;
 }
 
+/**
+ * Derive the companion summary from the successful closure and the exact plan file bytes
+ * (descriptor-bound, no-follow, non-creating), then its deterministic limitation kinds 1/2/5.
+ */
+function sensitivityEvidence(
+  cwd: string,
+  closure: Extract<SensitivityClosureResult, { ok: true }>,
+) {
+  try {
+    // readShudInputFile requires an absolute base; normalize as readReportMetricFacts does.
+    const base = isAbsolute(cwd) ? cwd : `${process.cwd()}/${cwd || "."}`;
+    const { bytes } = readShudInputFile(base, `analyses/${closure.analysis_plan_id}.json`);
+    const summary = buildSensitivitySummary(closure, bytes);
+    return { summary, ...deriveSensitivityLimitations(summary, closure.plan) };
+  } catch {
+    throw new Error(`report_generate sensitivity_summary failed for ${closure.analysis_plan_id}`);
+  }
+}
+
 async function generateReport(
   cwd: string,
   taskId: TaskId,
@@ -127,40 +152,67 @@ async function generateReport(
   // Evidence awaits may have allowed another writer to change the card. Never discard an
   // unseen job, retry collection, or publish a report using a stale linked_jobs snapshot.
   const card = readGeneratableTask(cwd, taskId);
-  const closure = evaluateClosure(card, evidence, records, authored, {
-    readChange: (id) => readWorkspaceRecord(cwd, "change", id, { readonly: true }),
-    readPatch: (id) => readChangePatch(cwd, id, { readonly: true }),
-    readVerification: (id) => readWorkspaceRecord(cwd, "verification", id, { readonly: true }),
-  });
+  // The records guard rejects mixed loader families: sensitivity gets only its own readers.
+  const closure = evaluateClosure(
+    card,
+    evidence,
+    records,
+    authored,
+    card.type === "sensitivity"
+      ? createSensitivityClosureLoaders(cwd)
+      : {
+          readChange: (id) => readWorkspaceRecord(cwd, "change", id, { readonly: true }),
+          readPatch: (id) => readChangePatch(cwd, id, { readonly: true }),
+          readVerification: (id) =>
+            readWorkspaceRecord(cwd, "verification", id, { readonly: true }),
+        },
+  );
   if (!closure.ok) {
     throw new Error(`report_generate closure failed: ${JSON.stringify(closure.failures)}`);
   }
+  const sensitivity = "plan" in closure ? closure : undefined;
   const byJob = new Map(records.map((record) => [record.job_id, record]));
-  const ordered = card.linked_jobs.map((jobId) => {
-    const record = byJob.get(jobId);
-    if (!record) throw new Error(`report_generate missing record for ${jobId}`);
-    return record;
-  });
+  // A sensitivity closure admits uncollected terminal jobs without a RunRecord; they stay
+  // visible through the summary. Every other closure already required one record per job.
+  const ordered =
+    sensitivity === undefined
+      ? card.linked_jobs.map((jobId) => {
+          const record = byJob.get(jobId);
+          if (!record) throw new Error(`report_generate missing record for ${jobId}`);
+          return record;
+        })
+      : card.linked_jobs.flatMap((jobId) => byJob.get(jobId) ?? []);
+  const derived = sensitivity === undefined ? undefined : sensitivityEvidence(cwd, sensitivity);
   const metricFacts = readReportMetricFacts(cwd, ordered);
-  const limitations = [...authored.limitations, ...metricLimitations(ordered, metricFacts)];
+  const limitations = [
+    ...authored.limitations,
+    ...(derived?.leading ?? []),
+    ...metricLimitations(ordered, metricFacts),
+    ...(derived?.trailing ?? []),
+  ];
   const now = new Date().toISOString();
-  const report = createEvidenceReport(cwd, {
-    task_id: taskId,
-    status: "draft",
-    ...authored,
-    limitations,
-    linked_runs: ordered.map((record) => record.run_id),
-    stack_ids: [...new Set(ordered.map((record) => StackIdSchema.parse(record.stack_id)))],
-    data_ids: [...new Set(ordered.map((record) => DataIdSchema.parse(record.data_id)))],
-    llm_response_models: [...new Set(ordered.map((record) => record.llm.response_model))],
-    change_ids: card.type === "code_change" ? [...new Set(card.linked_changes)] : [],
-    verification_ids: card.type === "code_change" ? [...new Set(card.linked_verifications)] : [],
-    analysis_ids: [],
-    sensitivity_summary: null,
-    decision_history: [],
-    created_at: now,
-    updated_at: now,
-  });
+  const report = createEvidenceReport(
+    cwd,
+    {
+      task_id: taskId,
+      status: "draft",
+      ...authored,
+      limitations,
+      linked_runs: ordered.map((record) => record.run_id),
+      stack_ids: [...new Set(ordered.map((record) => StackIdSchema.parse(record.stack_id)))],
+      data_ids: [...new Set(ordered.map((record) => DataIdSchema.parse(record.data_id)))],
+      llm_response_models: [...new Set(ordered.map((record) => record.llm.response_model))],
+      change_ids: card.type === "code_change" ? [...new Set(card.linked_changes)] : [],
+      verification_ids: card.type === "code_change" ? [...new Set(card.linked_verifications)] : [],
+      analysis_ids: derived === undefined ? [] : [...card.linked_analyses],
+      // Records owns the sensitivity reference: it publishes the summary and binds its digest.
+      ...(derived === undefined ? { sensitivity_summary: null } : {}),
+      decision_history: [],
+      created_at: now,
+      updated_at: now,
+    },
+    derived?.summary,
+  );
   // Register the new id's publication before yielding; all report tools share this lane.
   return withReportOperation(cwd, report.report_id, async () => {
     try {
