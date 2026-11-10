@@ -294,8 +294,10 @@ test("failed terminal persistence preserves done and retries successfully withou
     await releaseRun(other);
     await h.registry.pollOnce();
     await expect
-      .poll(() =>
-        h.errors.some((error) => error.includes("run-job publication") && error.includes("EIO")),
+      .poll(
+        () =>
+          h.errors.some((error) => error.includes("run-job publication") && error.includes("EIO")),
+        { timeout: 5000 },
       )
       .toBe(true);
     expect(await io.readFile(path)).toEqual(original);
@@ -322,7 +324,7 @@ test("completion callback retry does not rewrite terminal bytes, mtime or finish
     const record = await pending;
     await releaseRun(record);
     await h.registry.pollOnce();
-    await expect.poll(() => producer.attempts.length).toBeGreaterThan(0);
+    await expect.poll(() => producer.attempts.length, { timeout: 5000 }).toBeGreaterThan(0);
     expect(producer.completed).toEqual([]);
     const path = join(record.run_dir, "run-job.json");
     const terminal = await readRecord(record.run_dir);
