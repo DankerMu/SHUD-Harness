@@ -6,3 +6,8 @@ export const REPLAY_FILES = [
   "src/Model/f.cpp",
   "src/Model/shud.cpp",
 ] as const;
+/**
+ * PI 2026-11-09 (#662 option A): real keliya `.sp.mesh` carries `NA` cells, so collect metrics
+ * are pinned as unavailable with exactly this top-level reason.
+ */
+export const KELIYA_METRICS_UNAVAILABLE_REASON = "parse:input/keliya/keliya.sp.mesh";

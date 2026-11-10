@@ -33,7 +33,17 @@ import {
 } from "../../../packages/dsh-shud-records/src/task-lifecycle-test-harness.ts";
 import { renderReportDocument } from "../../../packages/dsh-shud-records/src/report-render.ts";
 import { completeMetrics } from "../../../packages/dsh-shud-records/src/run-metrics-test-harness.ts";
-import type { RunMetrics } from "../../../packages/dsh-shud-records/src/run-metrics-wire.ts";
+import {
+  FLOW_FIELDS,
+  HEALTH_FIELDS,
+  MAX_SOLVER_DT_REASON,
+  VERDICT_FIELDS,
+  WATER_FIELDS,
+  nullMetricBlock,
+  serializeRunMetrics,
+  type RunMetrics,
+} from "../../../packages/dsh-shud-records/src/run-metrics-wire.ts";
+import { KELIYA_METRICS_UNAVAILABLE_REASON } from "../shud-replay-contract.ts";
 import { REPORT_LIMITATION_TEMPLATES } from "../../../packages/dsh-shud-core/src/governance/wording.ts";
 import { snapshotReportMetricFacts } from "../shud-report-metrics.ts";
 import {
@@ -67,27 +77,26 @@ const prompt =
 const sha256 = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 
 /**
- * Constructed keliya-shaped collect metrics: keliya writes no storage outputs, so the residual is
- * null with a missing-variable reason while the other health items remain observed.
+ * Constructed keliya-shaped collect metrics: the whole computation is unavailable for one
+ * top-level reason, every value null, exactly as records finalizes an unavailable run.
  */
-export function replayRunMetrics(reason = "missing_variable:eleygw"): RunMetrics {
+export function replayRunMetrics(reason: string = KELIYA_METRICS_UNAVAILABLE_REASON): RunMetrics {
   const metrics: RunMetrics = completeMetrics();
-  for (const field of [
-    "delta_s_surf",
-    "delta_s_us",
-    "delta_s_gw",
-    "delta_s",
-    "residual",
-  ] as const) {
-    metrics.water_balance[field] = null;
-    metrics.water_balance.reasons[field] = reason;
-  }
-  // Missing state outputs also leave the negative-state count unobserved.
-  for (const field of ["water_balance_residual", "negative_state_count"] as const) {
-    metrics.numerical_health[field] = null;
-    metrics.numerical_health.reasons[field] = reason;
-    metrics.verdicts[field] = "not_available";
-  }
+  metrics.status = "unavailable";
+  metrics.reason = reason;
+  metrics.flow = nullMetricBlock(FLOW_FIELDS, reason);
+  metrics.water_balance = {
+    formula_source: metrics.water_balance.formula_source,
+    ...nullMetricBlock(WATER_FIELDS, reason),
+    approximation: metrics.water_balance.approximation,
+  };
+  metrics.numerical_health = {
+    ...nullMetricBlock(HEALTH_FIELDS, reason),
+    negative_state_count_note: metrics.numerical_health.negative_state_count_note,
+  };
+  // Structural unobservability keeps its own reason even in an unavailable document.
+  metrics.numerical_health.reasons.max_solver_dt = MAX_SOLVER_DT_REASON;
+  for (const field of VERDICT_FIELDS) metrics.verdicts[field] = "not_available";
   return metrics;
 }
 
@@ -97,7 +106,8 @@ export function bindReplayMetrics(
   record: RunRecord,
   metrics: RunMetrics = replayRunMetrics(),
 ): void {
-  const bytes = JSON.stringify(metrics);
+  // The real serializer validates the constructed shape before any oracle sees it.
+  const bytes = serializeRunMetrics(metrics);
   record.artifacts.metrics_summary = { path: "metrics.json", sha256: sha256(bytes) };
   record.numerical_health = {
     water_balance_residual: metrics.numerical_health.water_balance_residual,

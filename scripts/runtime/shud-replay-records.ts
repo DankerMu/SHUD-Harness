@@ -30,7 +30,11 @@ import { renderReportDocument } from "../../packages/dsh-shud-records/lib/report
 import { object, requireFact } from "./shud-restart-evidence.ts";
 import { snapshotReportMetricFacts } from "./shud-report-metrics.ts";
 
-import { REPLAY_COMMIT, REPLAY_FILES } from "./shud-replay-contract.ts";
+import {
+  KELIYA_METRICS_UNAVAILABLE_REASON,
+  REPLAY_COMMIT,
+  REPLAY_FILES,
+} from "./shud-replay-contract.ts";
 export interface ReplayRecords {
   task: TaskCard;
   change: ChangeRequest;
@@ -84,7 +88,7 @@ function parseReplayRecord<T>(
   }
 }
 
-/** keliya writes no storage outputs: residual null for a missing variable, digest-bound file. */
+/** keliya metrics are pinned unavailable (#662 option A): digest-bound file, exact reason, all-null health. */
 function assertReplayRunMetrics(files: Record<string, unknown>, run: RunRecord): void {
   const path = `runs/${run.run_id}/metrics.json`;
   const summary = run.artifacts.metrics_summary;
@@ -93,20 +97,14 @@ function assertReplayRunMetrics(files: Record<string, unknown>, run: RunRecord):
     Object.hasOwn(files, path) && artifactDigest(files[path]).sha256 === summary.sha256,
     `Metrics digest ${path}`,
   );
-  requireFact(
-    run.numerical_health.water_balance_residual === null,
-    `RunRecord ${run.run_id}: water_balance_residual must be null`,
-  );
-  requireFact(
-    run.numerical_health.max_solver_dt === null,
-    `RunRecord ${run.run_id}: max_solver_dt must be null`,
-  );
   const [{ metrics }] = snapshotReportMetricFacts(files, [run]);
-  const reason = metrics?.numerical_health.reasons.water_balance_residual;
+  requireFact(metrics?.status === "unavailable", `Metrics status ${path}: must be unavailable`);
   requireFact(
-    typeof reason === "string" && reason.startsWith("missing_variable:"),
-    `Metrics residual reason ${path}: must start with missing_variable:`,
+    metrics.reason === KELIYA_METRICS_UNAVAILABLE_REASON,
+    `Metrics reason ${path}: must equal ${KELIYA_METRICS_UNAVAILABLE_REASON}`,
   );
+  for (const [field, value] of Object.entries(run.numerical_health))
+    requireFact(value === null, `RunRecord ${run.run_id}: numerical_health.${field} must be null`);
 }
 
 export function replayRecords(files: Record<string, unknown>, workspace: string): ReplayRecords {

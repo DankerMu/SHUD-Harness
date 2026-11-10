@@ -187,7 +187,7 @@ core SHALL 导出阈值常量 `NUMERICAL_HEALTH_THRESHOLDS`（取自 `SHUD_Outpu
 ### Requirement: Metrics file shape and determinism
 每个计算了指标的运行 SHALL 有 `runs/<run_id>/metrics.json`，为固定键序的 JSON 对象，至少含：`method_version`（core 导出的 metrics 方法版本常量）、`status`（`ok|unavailable`）、`reason`（`status: unavailable` 时为非空字符串，否则为 `null`）、`inputs`（每个读取文件的 `{path, sha256, size_bytes}`，`path` 相对运行目录，按 `path` 码点升序）、`nonfinite_count`、`outlets`（升序河段 index）、`flow`（`peak_flow_m3d`、`peak_day`、`total_runoff_m3` 及各自 `null` 原因）、`water_balance`（`formula_source`、`P`、`Qd`、`AET`、六个 ΔS 分量、`delta_s`、`residual` 及其原因）、`numerical_health`（四项值、各自原因与 `negative_state_count` 的下界说明）、`verdicts`（三项判定，不含 `max_solver_dt`）。
 
-`status` 语义 SHALL 为：`ok` 表示计算完成，单项可以各自为 `null` 并在其原因字段写明原因——变量文件不存在（ENOENT）只使依赖它的项为 `null`，原因 `missing_variable:<name>`，不使整份指标变为 `unavailable`（例如 keliya 不输出储量：`water_balance_residual` 与 `negative_state_count` 为 `null`，峰值类指标照常计算，`status` 仍为 `ok`）。`unavailable` SHALL 只用于计算无法进行的情形：`rivqdown.dat`、副本 `.sp.riv`、`.sp.mesh`、`.cfg.ic` 或 `.cfg.para` 不存在或不可安全读取，出口集合为空，或任一**已存在**的 `.dat` 布局校验失败、为不安全文件或读取发生 IO 错误。副本 `.sp.att`、`.para.geol`、`.cfg.calib` 不存在或不可读时只使残差为 `null`，原因 `unreadable_input:<file>`。`status: unavailable` 时各值 SHALL 为 `null`、`reason` 点名失败原因。数值 SHALL 以 JS 最短往返表示序列化；文件 SHALL NOT 含时间戳、绝对路径、主机信息或密钥材料。同一组输入文件字节 SHALL 产生逐字节相同的 `metrics.json`，使验收脚本可从保留的 `.dat` 独立复算并逐字节比较。
+`status` 语义 SHALL 为：`ok` 表示计算完成，单项可以各自为 `null` 并在其原因字段写明原因——变量文件不存在（ENOENT）只使依赖它的项为 `null`，原因 `missing_variable:<name>`，不使整份指标变为 `unavailable`（例如不输出储量的运行：`water_balance_residual` 与 `negative_state_count` 为 `null`，峰值类指标照常计算，`status` 仍为 `ok`）。`unavailable` SHALL 只用于计算无法进行的情形：`rivqdown.dat`、副本 `.sp.riv`、`.sp.mesh`、`.cfg.ic` 或 `.cfg.para` 不存在或不可安全读取，出口集合为空，或任一**已存在**的 `.dat` 布局校验失败、为不安全文件或读取发生 IO 错误。副本 `.sp.att`、`.para.geol`、`.cfg.calib` 不存在或不可读时只使残差为 `null`，原因 `unreadable_input:<file>`。`status: unavailable` 时各值 SHALL 为 `null`、`reason` 点名失败原因。数值 SHALL 以 JS 最短往返表示序列化；文件 SHALL NOT 含时间戳、绝对路径、主机信息或密钥材料。同一组输入文件字节 SHALL 产生逐字节相同的 `metrics.json`，使验收脚本可从保留的 `.dat` 独立复算并逐字节比较。
 
 #### Scenario: identical inputs give identical bytes
 - **WHEN** 对同一运行目录先后两次计算指标
@@ -198,7 +198,7 @@ core SHALL 导出阈值常量 `NUMERICAL_HEALTH_THRESHOLDS`（取自 `SHUD_Outpu
 - **THEN** `metrics.json` 为 `status: unavailable`，`reason` 点名该文件与布局错误，各指标值为 `null`
 
 #### Scenario: run without storage outputs stays ok
-- **WHEN** keliya 运行（`DT_YE_SNOW/SURF/UNSAT/GW` 均为 0，输出目录没有 `eleysurf`、`eleyunsat`、`eleygw` 等储量 `.dat`）被计算指标
+- **WHEN** 一个 `DT_YE_SNOW/SURF/UNSAT/GW` 均为 0 的运行（输出目录没有 `eleysurf`、`eleyunsat`、`eleygw` 等储量 `.dat`，核心输入均可读）被计算指标
 - **THEN** `metrics.json` 为 `status: ok`，`peak_flow_m3d`、`peak_day`、`total_runoff_m3` 非 `null`，`water_balance_residual` 与 `negative_state_count` 均为 `null` 且原因为 `missing_variable:<name>`
 
 #### Scenario: unreadable core input makes metrics unavailable
