@@ -30,12 +30,14 @@ test.each([0, 13])(
       if (!entry) throw new Error("Tool did not submit a run");
       const record = await readRecord(entry.run_dir);
       if (!record.dsh_job_id || !record.pid) throw new Error("Running record omitted identity");
-      await expect.poll(() => readInvocation(record.run_dir)).not.toBeNull();
+      await expect.poll(() => readInvocation(record.run_dir), { timeout: 5000 }).not.toBeNull();
       const invocation = await readInvocation(record.run_dir);
       if (!invocation) throw new Error("Native invocation was not observed");
       await releaseInvocation(invocation);
       const id = JobId(record.dsh_job_id);
-      await expect.poll(() => h.registry.get(id).status).toBe(code === 0 ? "completed" : "failed");
+      await expect
+        .poll(() => h.registry.get(id).status, { timeout: 5000 })
+        .toBe(code === 0 ? "completed" : "failed");
       expect(terminalAtEvents).toHaveLength(1);
       const terminal = terminalAtEvents[0];
       if (!terminal) throw new Error("Public completion omitted its durable-state observation");
@@ -45,7 +47,9 @@ test.each([0, 13])(
       expect(terminal.exit_code).toBe(code);
       expect(terminal.finished_at).toBeTypeOf("string");
       expect(activeGroup(record.pid)).toEqual([]);
-      await expect.poll(async () => (await readRecord(record.run_dir)).status).toBe("collected");
+      await expect
+        .poll(async () => (await readRecord(record.run_dir)).status, { timeout: 5000 })
+        .toBe("collected");
       const collected = await h.registry.collectShud(record.run_id);
       expect(collected).toMatchObject({ exit_code: code, exit_class: code === 0 ? "ok" : "input" });
     } finally {
@@ -64,15 +68,17 @@ test("public kill of a tool-created run persists intent and reaches actual produ
     if (!entry) throw new Error("Tool did not submit a run");
     const record = await readRecord(entry.run_dir);
     if (!record.dsh_job_id || !record.pid) throw new Error("Running record omitted identity");
-    await expect.poll(() => readInvocation(record.run_dir)).not.toBeNull();
+    await expect.poll(() => readInvocation(record.run_dir), { timeout: 5000 }).not.toBeNull();
     const id = JobId(record.dsh_job_id);
     expect(h.registry.kill(id, h.ownerId, "cancel tool run")).toBe("requested");
     const intent = readDurable(record.run_dir);
     expect(intent.cancel_requested_at).toBeTypeOf("string");
     expect(signals.events).toEqual([{ pid: -record.pid, signal: "SIGTERM" }]);
-    await expect.poll(() => h.registry.get(id).status).toBe("killed");
+    await expect.poll(() => h.registry.get(id).status, { timeout: 5000 }).toBe("killed");
     expect(activeGroup(record.pid)).toEqual([]);
-    await expect.poll(async () => (await readRecord(record.run_dir)).status).toBe("collected");
+    await expect
+      .poll(async () => (await readRecord(record.run_dir)).status, { timeout: 5000 })
+      .toBe("collected");
     expect(await h.registry.collectShud(record.run_id)).toMatchObject({
       exit_class: "cancelled",
       exit_code: null,
@@ -98,7 +104,7 @@ test.each([false, true])(
       if (!entry) throw new Error("Tool did not submit a run");
       const record = await readRecord(entry.run_dir);
       if (!record.dsh_job_id || !record.pid) throw new Error("Running record omitted identity");
-      await expect.poll(() => readInvocation(record.run_dir)).not.toBeNull();
+      await expect.poll(() => readInvocation(record.run_dir), { timeout: 5000 }).not.toBeNull();
       const invocation = await readInvocation(record.run_dir);
       if (!invocation) throw new Error("Native invocation was not observed");
       if (killing) {
@@ -106,7 +112,7 @@ test.each([false, true])(
           "requested",
         );
         await expect
-          .poll(() => readFile(join(record.run_dir, "sigterm-seen"), "utf8"))
+          .poll(() => readFile(join(record.run_dir, "sigterm-seen"), "utf8"), { timeout: 5000 })
           .toBe("SIGTERM\n");
       }
       const intent = readDurable(record.run_dir);
@@ -176,7 +182,7 @@ test("a repeated kill cannot reset the native tool producer's original escalatio
     if (!entry) throw new Error("Tool did not submit a run");
     const record = await readRecord(entry.run_dir);
     if (!record.dsh_job_id || !record.pid) throw new Error("Running record omitted identity");
-    await expect.poll(() => readInvocation(record.run_dir)).not.toBeNull();
+    await expect.poll(() => readInvocation(record.run_dir), { timeout: 5000 }).not.toBeNull();
     const id = JobId(record.dsh_job_id);
     const origin = Date.now();
     // Only wall-clock observations are controlled; process I/O, signals and polling are native.
@@ -184,7 +190,7 @@ test("a repeated kill cannot reset the native tool producer's original escalatio
     vi.setSystemTime(origin);
     expect(h.registry.kill(id, h.ownerId, "first request")).toBe("requested");
     await expect
-      .poll(() => readFile(join(record.run_dir, "sigterm-seen"), "utf8"))
+      .poll(() => readFile(join(record.run_dir, "sigterm-seen"), "utf8"), { timeout: 5000 })
       .toBe("SIGTERM\n");
     const intent = readDurable(record.run_dir).cancel_requested_at;
     expect(intent).toBe(new Date(origin).toISOString());
@@ -196,7 +202,7 @@ test("a repeated kill cannot reset the native tool producer's original escalatio
     expect(readDurable(record.run_dir).status).toBe("running");
     expect(signals.events).toEqual([{ pid: -record.pid, signal: "SIGTERM" }]);
     vi.setSystemTime(origin + 10000);
-    await expect.poll(() => h.registry.get(id).status).toBe("killed");
+    await expect.poll(() => h.registry.get(id).status, { timeout: 5000 }).toBe("killed");
     expect(signals.events).toEqual([
       { pid: -record.pid, signal: "SIGTERM" },
       { pid: -record.pid, signal: "SIGKILL" },

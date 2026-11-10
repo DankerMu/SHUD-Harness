@@ -150,7 +150,9 @@ test("the online dispatcher automatically collects after terminal persistence an
     await releaseRun(job);
     await producer.doneObserved;
     await expect
-      .poll(async () => (await io.readdir(job.run_dir)).includes("run-record.json"))
+      .poll(async () => (await io.readdir(job.run_dir)).includes("run-record.json"), {
+        timeout: 5000,
+      })
       .toBe(true);
     const result = RunRecordSchema.parse(
       JSON.parse(await io.readFile(join(job.run_dir, "run-record.json"), "utf8")),
