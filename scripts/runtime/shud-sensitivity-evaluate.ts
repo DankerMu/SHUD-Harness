@@ -44,7 +44,7 @@ export const SensitivityRepeatRecordSchema = z.discriminatedUnion("status", [
   }),
   z.strictObject({ status: z.literal("not_executed"), reason: z.string().min(1) }),
 ]);
-type SensitivityRepeatRecord = z.infer<typeof SensitivityRepeatRecordSchema>;
+export type SensitivityRepeatRecord = z.infer<typeof SensitivityRepeatRecordSchema>;
 
 /** The four evaluator inputs after validation; nothing here is model text. */
 export interface SensitivityEvaluationInput {

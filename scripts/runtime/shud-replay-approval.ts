@@ -234,43 +234,8 @@ export async function openReplayApprovals(
       state.healthy();
       transport.healthy();
     },
-    async jobsTerminal(sessionIds: string[], currentJobIds: string[]) {
-      const expected = new Set(currentJobIds);
-      const observed = new Set<string>();
-      const rosters: unknown[] = [];
-      let terminal = true;
-      for (const sessionId of sessionIds) {
-        const frame = object(await transport.jobRoster(sessionId));
-        requireFact(
-          frame.type === "rows" && Array.isArray(frame.jobs),
-          "Malformed public job roster",
-        );
-        const owned = frame.jobs
-          .map(object)
-          .filter(
-            (job) =>
-              job.owner === sessionId || (job.owner === undefined && expected.has(text(job.id))),
-          );
-        for (const job of owned) {
-          const id = text(job.id),
-            status = text(job.status);
-          requireFact(
-            ["running", "stopping", "completed", "killed", "failed"].includes(status),
-            `Unknown job status ${id}`,
-          );
-          if (expected.has(id)) {
-            requireFact(
-              job.owner === undefined && job.kind === "shud",
-              `RunJob registry identity ${id}`,
-            );
-            observed.add(id);
-            terminal &&= status === "completed";
-          } else terminal &&= ["completed", "killed", "failed"].includes(status);
-        }
-        rosters.push({ sessionId, jobs: owned });
-      }
-      return { terminal: terminal && [...expected].every((id) => observed.has(id)), rosters };
-    },
+    jobsTerminal: (sessionIds: string[], currentJobIds: string[]) =>
+      transport.jobsTerminal(sessionIds, currentJobIds, ["completed"]),
     close: transport.close,
   };
 }

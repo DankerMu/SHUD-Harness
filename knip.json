@@ -11,7 +11,8 @@
         "scripts/runtime/shud-restart.ts",
         "scripts/runtime/shud-first-task.ts",
         "scripts/runtime/shud-replay.ts",
-        "scripts/runtime/shud-sensitivity-evaluate.ts"
+        "scripts/runtime/shud-sensitivity-evaluate.ts",
+        "scripts/runtime/shud-sensitivity.ts"
       ],
       "project": ["scripts/**/*.ts"]
     },

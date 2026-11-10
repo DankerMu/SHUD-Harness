@@ -23,6 +23,7 @@ import {
 } from "../../packages/dsh-shud-records/lib/index.js";
 import { requireFact } from "./shud-restart-evidence.ts";
 import type { SensitivityEvaluationInput } from "./shud-sensitivity-evaluate.ts";
+import { FIXED_PLAN } from "./shud-sensitivity-plan.ts";
 import { ccwSha256 } from "./shud-sensitivity-prepare.ts";
 import { regular } from "./shud-session-log.ts";
 import { BUFFER_LIMIT, directoryNames, load } from "./shud-web-driver.ts";
@@ -49,14 +50,6 @@ export interface SensitivityBatch {
   report(): EvidenceReport;
 }
 export type CriterionCheck = [criterion: number, check: () => string[] | Promise<string[]>];
-
-/** The fixed acceptance plan (oat-sensitivity criterion 1): one constant. */
-export const FIXED_PLAN = {
-  project: "ccw",
-  end_days: 90,
-  threads: 1,
-  parameter_sets: ["baseline", "GEOL_KSATH×0.5", "GEOL_KSATH×2", "LC_ROUGH×2"],
-} as const;
 
 export function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

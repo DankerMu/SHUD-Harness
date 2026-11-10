@@ -4,7 +4,7 @@ import {
   submittedParameterBytes,
 } from "../../packages/dsh-shud-jobs/src/shud-cfg-rewrite.ts";
 import { readCollectErrorAttempts } from "../../packages/dsh-shud-jobs/src/shud-collect.ts";
-import type { AnalysisPlan, TaskCard } from "../../packages/dsh-shud-core/src/schemas/index.ts";
+import type { TaskCard } from "../../packages/dsh-shud-core/src/schemas/index.ts";
 import {
   buildSensitivitySummary,
   computeRunMetrics,
@@ -18,9 +18,9 @@ import {
 } from "../../packages/dsh-shud-records/lib/index.js";
 import { requireFact } from "./shud-restart-evidence.ts";
 import type { SensitivityEvaluationInput } from "./shud-sensitivity-evaluate.ts";
+import { FIXED_PLAN } from "./shud-sensitivity-plan.ts";
 import { ccwSha256 } from "./shud-sensitivity-prepare.ts";
 import {
-  FIXED_PLAN,
   bound,
   hashDrift,
   message,
@@ -36,23 +36,19 @@ const PARAMETERS = `${COPY}/${PROJECT}.cfg.para`;
 const BAK = `output/${PROJECT}.out/${PROJECT}.cfg.calib.bak`;
 const RIVQDOWN = `output/${PROJECT}.out/${PROJECT}.rivqdown.dat`;
 
-interface LinkedRun extends BatchRun {
+export interface LinkedRun extends BatchRun {
   /** `<workspace>/runs/<run_id>`, the directory the run's files were read from. */
   dir: string;
 }
 
 /** Every card-linked job with a run directory, in `linked_jobs` order; the rest named. */
-function linkedRuns(
-  input: SensitivityEvaluationInput,
-  batch: SensitivityBatch,
-  evidence: string[],
-): LinkedRun[] {
+function linkedRuns(workspace: string, batch: SensitivityBatch, evidence: string[]): LinkedRun[] {
   requireFact(batch.card, "no sensitivity TaskCard");
   const runs = batch.runs();
   const found: LinkedRun[] = [];
   for (const id of batch.card.linked_jobs) {
     const run = runs.get(id);
-    if (run) found.push({ ...run, dir: join(input.workspace, "runs", run.job.run_id) });
+    if (run) found.push({ ...run, dir: join(workspace, "runs", run.job.run_id) });
     else evidence.push(`${id} has no run directory`);
   }
   if (found.length === 0) evidence.push("no linked run directory");
@@ -74,7 +70,7 @@ function effectiveCalib(input: SensitivityEvaluationInput, batch: SensitivityBat
   );
   const sets = new Map(plan.parameter_sets.map((set) => [set.parameter_set_id, set]));
   const evidence: string[] = [];
-  for (const { job, dir } of linkedRuns(input, batch, evidence)) {
+  for (const { job, dir } of linkedRuns(input.workspace, batch, evidence)) {
     const set = sets.get(job.parameter_set_id ?? "");
     if (!set) {
       evidence.push(`${job.run_id} parameter_set_id ${job.parameter_set_id} is not in the plan`);
@@ -111,7 +107,7 @@ const HEALTH = ["water_balance_residual", "cvode_failures", "negative_state_coun
 /** Criterion 5: three health values observed, max_solver_dt null, metrics.json ok at its digest. */
 function numericalHealth(input: SensitivityEvaluationInput, batch: SensitivityBatch): string[] {
   const evidence: string[] = [];
-  for (const { job, record, dir } of linkedRuns(input, batch, evidence)) {
+  for (const { job, record, dir } of linkedRuns(input.workspace, batch, evidence)) {
     if (!record) {
       evidence.push(`${job.job_id} has no RunRecord`);
       continue;
@@ -181,7 +177,7 @@ async function recomputable(
 ): Promise<string[]> {
   const { card } = bound(batch);
   const evidence: string[] = [];
-  const runs = linkedRuns(input, batch, evidence);
+  const runs = linkedRuns(input.workspace, batch, evidence);
   for (const { job, record, dir } of runs) {
     if (record?.exit_class !== "ok") continue;
     const file = `runs/${job.run_id}/metrics.json`;
@@ -202,7 +198,13 @@ async function recomputable(
   return evidence;
 }
 
-function baselineRun(plan: AnalysisPlan, runs: LinkedRun[]): LinkedRun | string {
+/**
+ * The one card-linked, collected, succeeded run of the plan's baseline set, or why there is none.
+ * Criterion 7 and the batch-external repeat share this rule; an unbound batch throws.
+ */
+export function inBatchBaseline(workspace: string, batch: SensitivityBatch): LinkedRun | string {
+  const { plan } = bound(batch);
+  const runs = linkedRuns(workspace, batch, []);
   const sets = new Set(
     plan.parameter_sets.filter((set) => set.baseline).map((set) => set.parameter_set_id),
   );
@@ -223,9 +225,9 @@ function baselineRun(plan: AnalysisPlan, runs: LinkedRun[]): LinkedRun | string 
  * rivqdown is compared only once the repeat's input, environment and baseline identity hold.
  */
 function repeatRun(input: SensitivityEvaluationInput, batch: SensitivityBatch): string[] {
-  const { plan } = bound(batch);
+  bound(batch);
   const evidence: string[] = [];
-  const runs = linkedRuns(input, batch, evidence);
+  const runs = linkedRuns(input.workspace, batch, evidence);
   for (const { job } of runs)
     if (job.threads !== FIXED_PLAN.threads)
       evidence.push(`${job.run_id} RunJob threads ${job.threads} (expected ${FIXED_PLAN.threads})`);
@@ -242,7 +244,7 @@ function repeatRun(input: SensitivityEvaluationInput, batch: SensitivityBatch): 
   };
   for (const [name, value] of Object.entries(environment))
     if (value !== threads) blocking.push(`${label} ${name} "${value}" (expected "${threads}")`);
-  const baseline = baselineRun(plan, runs);
+  const baseline = inBatchBaseline(input.workspace, batch);
   if (typeof baseline === "string") blocking.push(baseline);
   else {
     if (repeat.baseline_run_id !== baseline.job.run_id)
@@ -300,7 +302,7 @@ function lineDrift(file: string, actual: Buffer, expected: Buffer): string[] {
 function runParameters(input: SensitivityEvaluationInput, batch: SensitivityBatch): string[] {
   const expected = expectedRunParameters(readShudInputFile(input.workspace, PARAMETERS).bytes);
   const evidence: string[] = [];
-  for (const { job, dir } of linkedRuns(input, batch, evidence)) {
+  for (const { job, dir } of linkedRuns(input.workspace, batch, evidence)) {
     const file = `runs/${job.run_id}/${PARAMETERS}`;
     try {
       const actual = readShudInputFile(dir, PARAMETERS).bytes;

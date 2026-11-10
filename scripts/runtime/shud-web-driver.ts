@@ -518,7 +518,8 @@ export function canonicalLog(home: string, sessionId: string): string {
   requireFact(selected && !ambiguous, "Missing or ambiguous canonical log generation");
   return join(directory, selected.name);
 }
-async function stopGroup(group: ShudProcessGroup): Promise<void> {
+/** SIGTERM then SIGKILL an owned group, each bounded by STOP_MS; fails unless it is proved gone. */
+export async function stopGroup(group: ShudProcessGroup): Promise<void> {
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
     if (!group.isGroupActive()) return;
     group.signalGroup(signal);
@@ -607,6 +608,28 @@ export function readPrivateJob(
   const parsed = RunJobSchema.safeParse(load(join(runDir, "run-job.json"), budget));
   requireFact(parsed.success, "Malformed canonical RunJob");
   return parsed.data;
+}
+
+/** Every admitted RunJob under `<workspace>/runs`, at most `maxRuns` directories. */
+export function readPrivateJobs(workspace: string, maxRuns: number): RunJob[] {
+  const root = join(workspace, "runs");
+  if (!fs.existsSync(root)) return [];
+  requireFact(
+    fs.lstatSync(root).isDirectory() && fs.realpathSync(root) === root,
+    "Unsafe private runs root",
+  );
+  const jobs: RunJob[] = [],
+    budget = { remaining: BUFFER_LIMIT };
+  for (const name of directoryNames(root, budget)) {
+    requireFact(jobs.length < maxRuns, "Unexpected additional private runs");
+    const path = join(root, name);
+    if (fs.existsSync(join(path, "run-job.json"))) {
+      const job = readPrivateJob(workspace, path, budget);
+      requireFact(job.run_dir === path, "Private RunJob path identity mismatch");
+      jobs.push(job);
+    }
+  }
+  return jobs;
 }
 
 export interface NativeRunPolicy {
