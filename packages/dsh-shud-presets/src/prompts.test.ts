@@ -67,6 +67,17 @@ function sentences(text: string) {
     .filter((sentence) => sentence.length > 0);
 }
 
+// Sentences that tie a guard/validation pass to compliance or sufficiency; each
+// such sentence in a sensitivity section must be explicitly negated.
+function complianceClaims(candidates: readonly string[]) {
+  return candidates.filter(
+    (sentence) =>
+      /report_validate|guard|lint|validat/i.test(sentence) &&
+      /pass|validates/i.test(sentence) &&
+      /complian|sufficient/i.test(sentence),
+  );
+}
+
 function withoutCanonicalLists(markdown: string) {
   return markdown
     .split(/(?=^## )/m)
@@ -264,11 +275,12 @@ describe("coordinator prompt orchestration contract", () => {
         ],
       },
       {
-        step: /\breport_generate\b/,
+        step: /\bthen call report_generate for the card\b/i,
         clauses: [
           /wait for the worker's report.*subagent-settled message/i,
           /immediate subagent result \(started subagent <id>\) is not (?:that|the) report/i,
           /(?:do not|never) call report_generate before the settled message arrives/i,
+          /then call report_generate for the card and retain the resulting report_id/i,
         ],
       },
       { step: /\breport_validate\b/, clauses: [/before submission/i] },
@@ -303,11 +315,17 @@ describe("coordinator prompt orchestration contract", () => {
     const summary = paragraphMatching(flow, /summary table/i);
     expect(summary).toMatch(/states only changes relative to baseline/i);
     expect(summary).toMatch(/no sensitivity indices, rankings or mechanism explanations/i);
-    expect(summary).toMatch(/parameter ranges are agent suggestions/i);
+    expect(summary).toMatch(/parameter ranges are agent suggestions that PI has not confirmed/i);
     const inherited = paragraphMatching(flow, /rules above apply to this flow/i);
     expect(inherited).toMatch(/never call shud_run/i);
     expect(inherited).toMatch(/report_validate/);
     expect(inherited).toMatch(/PI decision conversation/);
+
+    const plain = coordinator.replace(/`/g, "");
+    expect(plain.indexOf("## code_change workflow")).toBeGreaterThanOrEqual(0);
+    expect(plain.indexOf("## sensitivity workflow")).toBeGreaterThan(
+      plain.indexOf("## code_change workflow"),
+    );
   });
 
   it("forbids direct SHUD execution and polls only when the worker lacks collected terminal evidence", () => {
@@ -423,11 +441,17 @@ describe("worker prompt collection contract", () => {
     expect(waitAt).toBeGreaterThan(submitAt);
     expect(collectAt).toBeGreaterThan(waitAt);
     expect(batch).toMatch(/for each run/i);
+    expect(batch).toMatch(
+      /do not rely on SHUD wake for these runs; a still-running response is not collected evidence/i,
+    );
 
     const failure = paragraphMatching(flow, /resubmit/i);
     expect(failure).toMatch(/do not resubmit a failed parameter set/i);
     expect(failure).toMatch(/parameter_set_id, run_id and terminal status/);
     expect(failure).toMatch(/to the coordinator/i);
+    expect(failure).toMatch(
+      /preserving failed or cancelled runs as they are rather than describing them as successful/i,
+    );
   });
 
   it("requires a collected terminal RunRecord before returning run_id and terminal status", () => {
@@ -469,15 +493,14 @@ describe("sensitivity prompt wording guard", () => {
       .filter((sentence) => /sensitivity ind|rank|mechanism/i.test(sentence));
     expect(steering.length).toBeGreaterThan(0);
     for (const sentence of steering) expect(sentence).toMatch(negation);
-    const compliance = sections
-      .flatMap(sentences)
-      .filter(
-        (sentence) =>
-          /report_validate|guard|lint/i.test(sentence) &&
-          /pass/i.test(sentence) &&
-          /complian|sufficient/i.test(sentence),
-      );
-    for (const sentence of compliance) expect(sentence).toMatch(negation);
+    const violation = "A passing report_validate is sufficient for compliance.";
+    expect(complianceClaims([violation])).toEqual([violation]);
+    expect(violation).not.toMatch(negation);
+    expect(complianceClaims(["The guard/validation pass is sufficient."])).toHaveLength(1);
+    expect(complianceClaims(["The report validates, which proves compliance."])).toHaveLength(1);
+    for (const sentence of complianceClaims(sections.flatMap(sentences))) {
+      expect(sentence).toMatch(negation);
+    }
 
     const coordinatorProse = withoutCanonicalLists(coordinator);
     expect(coordinatorProse).toContain("## sensitivity workflow");
