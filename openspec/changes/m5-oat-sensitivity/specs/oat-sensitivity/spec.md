@@ -64,7 +64,7 @@
 12. plan 的 `input_digests` 的文件集合等于 analysis-plans「AnalysisPlan record」对该字段规定的集合（`ccw.cfg.calib` 与白名单类别文件），每项 sha256 等于准备阶段记录的工作区 `input/ccw` 同名文件的 sha256；脚本结束时工作区 `input/ccw` 的逐文件 sha256 仍等于准备阶段记录（源副本未被改动）。
 13. 每个批内 run 的 `<run_dir>/input/ccw/ccw.cfg.para` 中有效 `NUM_OPENMP` 行的值为 1、有效 `END` 行的值为 90、有效 `DT_YE_IC` 行的值为 1440；该文件相对工作区 `input/ccw/ccw.cfg.para` 只在 `END`、`NUM_OPENMP` 与 `DT_YE_IC` 行（ccw 源文件无 `DT_YE_IC` 时为末尾追加的一行）上不同，其余行逐字节相同。
 
-退出码 SHALL 为：全部判据成立为 0；判据 1 中恰好存在一张 sensitivity 卡与一个链接 plan、但该 plan 与固定 plan 不等价（模型偏离），且判据 9 与 11 成立时为 2（INCONCLUSIVE，需重跑，不计回归）；其余任一判据不成立——含批外重复的 rivqdown sha256 不等、任一 pset 运行失败、没有 sensitivity 卡或没有 plan——以及前置缺失均为 1。exit 1 与 exit 2 SHALL 保留并打印工作区与 session log 路径。INCONCLUSIVE SHALL NOT 用于运行失败、重复性不等或可复算不等。
+退出码 SHALL 为：全部判据成立为 0；判据 1 中恰好存在一张 sensitivity 卡与一个链接 plan、但该 plan 与固定 plan 不等价（模型偏离），判据 1 仅因该不等价而不成立，且除判据 1 与 13（运行副本 `END`/`NUM_OPENMP` 取值绑定固定 plan）以外的判据全部成立——含判据 9 与 11——时为 2（INCONCLUSIVE，需重跑，不计回归；判据 13 的失败照常打印但不改变退出码 2）；其余任一判据不成立——含批外重复的 rivqdown sha256 不等、任一 pset 运行失败、没有 sensitivity 卡或没有 plan——以及前置缺失均为 1。exit 1 与 exit 2 SHALL 保留并打印工作区与 session log 路径。INCONCLUSIVE SHALL NOT 用于运行失败、重复性不等或可复算不等。
 
 判据评估器 SHALL 可离线运行：输入为工作区目录、canonical session log 路径、准备阶段的哈希记录与批外重复运行的结果记录（退出码、输入哈希、线程环境、rivqdown sha256），输出为上述退出码与点名失败判据的 stderr；评估器 SHALL NOT 启动宿主、模型会话或求解器，SHALL NOT 写入工作区。
 
@@ -135,8 +135,9 @@
 
 #### Scenario: plan input digests must match the prepared workspace input
 
-- **WHEN** plan 的 `input_digests` 中 `ccw.cfg.calib` 或某白名单类别文件的 sha256 与准备阶段记录的工作区 `input/ccw` 同名文件不同，或集合缺少/多出文件，或脚本结束时工作区 `input/ccw` 某文件 sha256 已改变
+- **WHEN** plan 的 `input_digests` 中 `ccw.cfg.calib` 或某白名单类别文件的 sha256 与准备阶段记录的工作区 `input/ccw` 同名文件不同，或脚本结束时工作区 `input/ccw` 某文件 sha256 已改变
 - **THEN** 脚本 exit 1 并点名该文件与两个 sha256
+- **AND** `input_digests` 集合缺少或多出文件时，该 plan 不能通过 `AnalysisPlanSchema`，脚本 exit 1 并点名该 plan 文件
 
 #### Scenario: run copy cfg.para differs only in END, DT_YE_IC and NUM_OPENMP
 
