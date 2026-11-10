@@ -17,6 +17,7 @@ import {
 import {
   evaluate,
   makeEvaluateFixture,
+  run,
   treeState,
   type EvaluateFixture,
 } from "./sensitivity-evaluate/test-harness.ts";
@@ -163,40 +164,105 @@ test("the classifier rejects an array that is not the fixed 13 entries", () => {
   expect(() => classifySensitivityExit(holding().slice(1), EQUIVALENT)).toThrow(/13/u);
 });
 
-test("the best fixture exits 1 offline naming the 7.1b-2 criteria, both paths, and writes nothing", () => {
-  const top = dirname(f.h.root);
+/** The CLI in a fresh node with only `git` on PATH: no dsh host, DMXAPI_KEY or SHUD_BIN. */
+function offline() {
   const bin = fs.mkdtempSync(join(tmpdir(), "git-only-"));
   const found = (process.env.PATH ?? "")
     .split(delimiter)
     .find((d) => fs.existsSync(join(d, "git")));
   fs.symlinkSync(join(found!, "git"), join(bin, "git"));
-  const before = treeState(top);
   const script = fileURLToPath(new URL("./shud-sensitivity-evaluate.ts", import.meta.url));
-  const result = childProcess.spawnSync(
-    process.execPath,
-    [
-      "--input-type=module",
-      "-e",
-      `import { runSensitivityEvaluateCli } from ${JSON.stringify(`file://${script}`)};` +
-        `process.exitCode = await runSensitivityEvaluateCli(process.argv.slice(1), { root: ${JSON.stringify(f.h.root)} });`,
-      ...f.argv,
-    ],
-    { env: { PATH: bin, HOME: process.env.HOME }, encoding: "utf8", timeout: 60_000 },
-  );
-  expect(result.status, result.stderr).toBe(1);
-  const lines = result.stderr.trimEnd().split("\n");
-  expect(lines).toEqual([
-    ...[4, 5, 6, 7, 13].map((n) => `shud:sensitivity: criterion ${n}: implemented in 7.1b-2`),
-    `shud:sensitivity: workspace ${f.workspace}`,
-    `shud:sensitivity: session log ${f.logPath}`,
-  ]);
-  fs.rmSync(bin, { recursive: true });
+  try {
+    return childProcess.spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { runSensitivityEvaluateCli } from ${JSON.stringify(`file://${script}`)};` +
+          `process.exitCode = await runSensitivityEvaluateCli(process.argv.slice(1), { root: ${JSON.stringify(f.h.root)} });`,
+        ...f.argv,
+      ],
+      { env: { PATH: bin, HOME: process.env.HOME }, encoding: "utf8", timeout: 60_000 },
+    );
+  } finally {
+    fs.rmSync(bin, { recursive: true });
+  }
+}
+
+const criterionLines = (stderr: string) =>
+  [...stderr.matchAll(/^shud:sensitivity: criterion (\d+): /gmu)].map((m) => Number(m[1]));
+const paths = () => [
+  `shud:sensitivity: workspace ${f.workspace}`,
+  `shud:sensitivity: session log ${f.logPath}`,
+];
+
+/** The three recorded groups of the spec plus the end_days deviation that also fails 13. */
+type Group = [name: string, setup: () => Promise<void>, code: number, failing: number[]];
+const GROUPS: Group[] = [
+  ["all criteria hold", () => Promise.resolve(), 0, []],
+  [
+    "only the plan deviates (LC_ROUGH×0.5)",
+    async () => {
+      f.h.dispose();
+      f = await makeEvaluateFixture({
+        changes: [{}, { GEOL_KSATH: 0.5 }, { GEOL_KSATH: 2 }, { LC_ROUGH: 0.5 }],
+      });
+    },
+    2,
+    [1],
+  ],
+  [
+    "only the plan deviates (end_days 60), criterion 13 printed",
+    async () => {
+      f.h.dispose();
+      f = await makeEvaluateFixture({ end_days: 60 });
+    },
+    2,
+    [1, 13],
+  ],
+  [
+    "only the repeat rivqdown sha256 differs",
+    () => {
+      f.repeat.rivqdown_sha256 = "e".repeat(64);
+      f.publishRepeat();
+      return Promise.resolve();
+    },
+    1,
+    [7],
+  ],
+];
+
+test.each(GROUPS)("offline recorded fixture: %s", async (_name, setup, code, failing) => {
+  await setup();
+  const top = dirname(f.h.root);
+  const before = treeState(top);
+  const result = offline();
   expect(treeState(top)).toStrictEqual(before);
+  expect(result.status, result.stderr).toBe(code);
+  expect(criterionLines(result.stderr)).toEqual(failing);
+  const lines = result.stderr.trimEnd().split("\n");
+  if (code === 0) {
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("shud:sensitivity: all 13 criteria hold\n");
+  } else expect(lines.slice(-2)).toEqual(paths());
+  if (code === 2)
+    expect(lines.at(-3)).toMatch(
+      /^shud:sensitivity: INCONCLUSIVE: rerun; the model plan deviates: (PSET-4 LC_ROUGH×0\.5 is not in the fixed plan; fixed LC_ROUGH×2 is missing|end_days 60 \(fixed 90\))$/u,
+    );
+  else expect(result.stderr).not.toMatch(/INCONCLUSIVE/u);
+  if (failing.includes(7))
+    expect(lines[0]).toMatch(
+      new RegExp(
+        `^shud:sensitivity: criterion 7: repeat repeat-baseline rivqdown sha256 ${"e".repeat(64)} ` +
+          `differs from in-batch baseline ${run(1)} [0-9a-f]{64}$`,
+        "u",
+      ),
+    );
 });
 
 test("in process, evaluation starts no child process other than git", async () => {
   const result = await evaluate(f);
-  expect(result.code).toBe(1);
+  expect(result.code).toBe(0);
   const commands = started();
   expect(commands.length).toBeGreaterThanOrEqual(3);
   for (const command of commands) expect(command).toMatch(/^execFile git$/u);
@@ -205,7 +271,7 @@ test("in process, evaluation starts no child process other than git", async () =
 async function expectAliasAccepted(alias: string): Promise<void> {
   const result = await evaluate(f, [alias, ...f.argv.slice(1)]);
   expect(result.stderr).not.toMatch(/preparation record:/u);
-  expect([...result.criteria.keys()]).toEqual([4, 5, 6, 7, 13]);
+  expect(result.code, result.stderr).toBe(0);
 }
 
 test("a workspace argument through a symlink alias matches the record and the plan input_dir", async () => {

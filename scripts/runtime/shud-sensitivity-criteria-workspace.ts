@@ -33,7 +33,7 @@ export type PlanOutcome =
   | { kind: "non_equivalent"; deviations: string[] }
   | { kind: "unavailable"; reason: string };
 
-interface BatchRun {
+export interface BatchRun {
   job: RunJob;
   record: RunRecord | null;
 }
@@ -51,7 +51,7 @@ export interface SensitivityBatch {
 export type CriterionCheck = [criterion: number, check: () => string[] | Promise<string[]>];
 
 /** The fixed acceptance plan (oat-sensitivity criterion 1): one constant. */
-const FIXED_PLAN = {
+export const FIXED_PLAN = {
   project: "ccw",
   end_days: 90,
   threads: 1,
@@ -197,7 +197,7 @@ export function loadSensitivityBatch(workspace: string): SensitivityBatch {
   };
 }
 
-function bound(batch: SensitivityBatch): { card: TaskCard; plan: AnalysisPlan } {
+export function bound(batch: SensitivityBatch): { card: TaskCard; plan: AnalysisPlan } {
   const { card, plan, outcome } = batch;
   requireFact(
     card && plan,

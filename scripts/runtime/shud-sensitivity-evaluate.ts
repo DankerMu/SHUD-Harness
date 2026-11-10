@@ -11,6 +11,7 @@ import {
   type SensitivityPreparationRecord,
 } from "./shud-sensitivity-prepare.ts";
 import { governanceCriteria } from "./shud-sensitivity-criteria-governance.ts";
+import { numericCriteria } from "./shud-sensitivity-criteria-numeric.ts";
 import {
   loadSensitivityBatch,
   message,
@@ -137,18 +138,15 @@ async function loadInputs(argv: string[], root: string): Promise<SensitivityEval
   };
 }
 
-/** Criteria 4-7 and 13 belong to the second #670 slice. */
-const LATER = new Set([4, 5, 6, 7, 13]);
-
 async function evaluateSensitivityCriteria(input: SensitivityEvaluationInput) {
   const batch = loadSensitivityBatch(input.workspace);
-  const checks = new Map([...workspaceCriteria(input, batch), ...governanceCriteria(input, batch)]);
+  const checks = new Map([
+    ...workspaceCriteria(input, batch),
+    ...numericCriteria(input, batch),
+    ...governanceCriteria(input, batch),
+  ]);
   const results: CriterionResult[] = [];
   for (let criterion = 1; criterion <= 13; criterion++) {
-    if (LATER.has(criterion)) {
-      results.push({ criterion, ok: false, evidence: ["implemented in 7.1b-2"] });
-      continue;
-    }
     try {
       const check = checks.get(criterion);
       requireFact(check, `criterion ${criterion} has no check`);

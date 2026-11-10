@@ -11,24 +11,19 @@ import {
   type RunRecord,
   type TaskCard,
 } from "../../../packages/dsh-shud-core/src/schemas/index.ts";
+import { instantiateSensitivityCoverage } from "../../../packages/dsh-shud-core/src/governance/wording.ts";
 import {
   buildSensitivitySummary,
   createSensitivityClosureLoaders,
   deriveSensitivityClosure,
   renderReport,
-  serializeRunMetrics,
   serializeSensitivitySummary,
 } from "../../../packages/dsh-shud-records/src/index.ts";
-import {
-  COVERAGE,
-  PARAMETER_RANGE,
-} from "../../../packages/dsh-shud-records/src/report-sensitivity-test-harness.ts";
+import { PARAMETER_RANGE } from "../../../packages/dsh-shud-records/src/report-sensitivity-test-harness.ts";
 import {
   makeEvidenceReport,
   makeReportDecision,
 } from "../../../packages/dsh-shud-records/src/report-render-test-harness.ts";
-import { completeMetrics } from "../../../packages/dsh-shud-records/src/run-metrics-test-harness.ts";
-import { sections } from "../../../packages/dsh-shud-records/src/shud-text-test-harness.ts";
 import {
   makeRunJob,
   makeRunRecord,
@@ -38,18 +33,20 @@ import { stackCase } from "../../../packages/dsh-shud-records/src/test-harness.t
 import { runSensitivityEvaluateCli } from "../shud-sensitivity-evaluate.ts";
 import { prepareSensitivityWorkspace } from "../shud-sensitivity-prepare.ts";
 import {
+  fileHashes,
   hash,
   makeSensitivityHarness,
   type SensitivityHarness,
 } from "../sensitivity/test-harness.ts";
+import { closedBudgetOutputs, writeCcwSource, writeRunDirectory } from "./run-evidence.ts";
 
 const TASK = "TASK-20261110T090000-a001";
 export const PLAN = "PLAN-20261110T090000-b001";
 export const REPORT = "REPORT-20261110T090000-c001";
-const STACK = "STACK-20261110T090000-d001";
 const DATA = "DATA-20261110T090000-e001";
 export const job = (n: number) => `JOB-20261110T090000-000${n}`;
 export const run = (n: number) => `RUN-20261110T090000-000${n}`;
+const STACK = "STACK-20261110T090000-d001";
 export const ROOT_ID = "session-coordinator-670";
 export const WORKER_ID = "session-worker-670";
 const SUBMIT_CALL = "call-report-submit-670";
@@ -118,21 +115,35 @@ export interface EvaluateFixture {
   records: RunRecord[];
   report: EvidenceReport;
   sessions: FixtureSession[];
+  /** The batch-external repeat result, written by `publishRepeat`. */
+  repeat: Record<string, unknown>;
   writeJson(relative: string, value: unknown): void;
   publishReport(): void;
   publishLogs(): void;
+  publishRepeat(): void;
+}
+
+export interface EvaluateFixtureOptions {
+  /** Parameter-set changes in plan order (the first is the baseline); default the fixed plan. */
+  changes?: Record<string, number>[];
+  end_days?: number;
+  /** Edits the real ccw calib text before preparation. */
+  calib?: (text: string) => string;
 }
 
 /**
- * Best constructed PR A fixture: a prepared ccw workspace (through the real preparation writer),
- * one sensitivity card bound to the fixed plan, four collected succeeded runs on one StackLock,
- * an accepted report whose Markdown is the records rendering, and coordinator + worker canonical
- * logs with exactly one report_submit approval. Criteria 4-7 and 13 evidence is not constructed.
+ * Best constructed fixture: a prepared ccw workspace (through the real preparation writer), one
+ * sensitivity card bound to the plan, one collected succeeded run per pset on one StackLock, each
+ * run directory as the registry, SHUD and the collector leave it (rewritten input copy, closed
+ * water-budget outputs, SHUD-layout calib `.bak`, `metrics.json` and matching health), an accepted
+ * report whose summary and Markdown are the records functions' bytes, coordinator + worker
+ * canonical logs with exactly one report_submit approval, and a matching baseline repeat record.
  */
-export async function makeEvaluateFixture(): Promise<EvaluateFixture> {
+export async function makeEvaluateFixture(
+  options: EvaluateFixtureOptions = {},
+): Promise<EvaluateFixture> {
   const h = makeSensitivityHarness();
-  fs.writeFileSync(join(h.source, "ccw.para.geol"), sections.geol);
-  fs.writeFileSync(join(h.source, "ccw.para.lc"), sections.lc);
+  writeCcwSource(h.source, options.calib ?? ((text) => text));
   const scratch = dirname(h.workspace);
   const repeatPath = join(h.evidence, "repeat.json");
   const home = join(scratch, "home");
@@ -156,9 +167,9 @@ export async function makeEvaluateFixture(): Promise<EvaluateFixture> {
     strategy: "one_at_a_time",
     input_dir: input,
     project: "ccw",
-    end_days: 90,
+    end_days: options.end_days ?? 90,
     threads: 1,
-    parameter_sets: FIXED_CHANGES.map((changes, index) => ({
+    parameter_sets: (options.changes ?? FIXED_CHANGES).map((changes, index) => ({
       parameter_set_id: `PSET-${index + 1}`,
       label: index === 0 ? "baseline" : null,
       baseline: index === 0,
@@ -186,36 +197,37 @@ export async function makeEvaluateFixture(): Promise<EvaluateFixture> {
       uncertainty_notes: null,
     }),
   );
-  const metrics = serializeRunMetrics(completeMetrics());
   const bound = { task_id: TASK, stack_id: STACK, data_id: DATA, analysis_plan_id: PLAN };
-  const jobs = plan.parameter_sets.map((set, index) =>
-    makeRunJob(job(index + 1), {
+  const outputs = closedBudgetOutputs(join(scratch, "budget"));
+  const jobs: RunJob[] = [];
+  const records: RunRecord[] = [];
+  for (const [index, set] of plan.parameter_sets.entries()) {
+    const runDir = join(ws, "runs", run(index + 1));
+    const evidence = await writeRunDirectory(runDir, input, plan, set, outputs);
+    const value = makeRunJob(job(index + 1), {
       ...bound,
       parameter_set_id: set.parameter_set_id,
-      end_days: 90,
-      threads: 1,
-      input_dir: join(ws, "runs", run(index + 1), "input/ccw"),
-      run_dir: join(ws, "runs", run(index + 1)),
+      end_days: plan.end_days,
+      threads: plan.threads,
+      input_dir: join(runDir, "input/ccw"),
+      run_dir: runDir,
       owner_session: WORKER_ID,
-    }),
-  );
-  const records = jobs.map((value) => {
+    });
     const artifacts = makeRunRecord(value).artifacts;
-    return makeRunRecord(value, {
+    const sha256 = hash("sha256", Buffer.from(evidence.metrics));
+    const record = makeRunRecord(value, {
       ...bound,
       parameter_set_id: value.parameter_set_id,
-      threads: 1,
-      artifacts: {
-        ...artifacts,
-        metrics_summary: { path: "metrics.json", sha256: hash("sha256", Buffer.from(metrics)) },
-      },
+      threads: plan.threads,
+      numerical_health: evidence.health,
+      artifacts: { ...artifacts, metrics_summary: { path: "metrics.json", sha256 } },
     });
-  });
-  jobs.forEach((value, index) => {
     writeJson(`runs/${value.run_id}/run-job.json`, value);
-    writeJson(`runs/${value.run_id}/run-record.json`, records[index]);
-    fs.writeFileSync(join(ws, `runs/${value.run_id}/metrics.json`), metrics);
-  });
+    writeJson(`runs/${value.run_id}/run-record.json`, record);
+    fs.writeFileSync(join(runDir, "metrics.json"), evidence.metrics);
+    jobs.push(value);
+    records.push(record);
+  }
   const card = makeTaskCard({
     task_id: TASK,
     type: "sensitivity",
@@ -231,7 +243,7 @@ export async function makeEvaluateFixture(): Promise<EvaluateFixture> {
   writeJson(`tasks/${TASK}/task.json`, card);
   const draft = {
     observations: ["Section 5 lists stored per-run metrics."],
-    limitations: [COVERAGE, PARAMETER_RANGE],
+    limitations: [instantiateSensitivityCoverage(plan), PARAMETER_RANGE],
     pi_questions: ["Review the stored sensitivity facts?"],
   };
   const runJobs = jobs.map((value) => ({ job: value, collect_error_attempts: 0 }));
@@ -285,6 +297,19 @@ export async function makeEvaluateFixture(): Promise<EvaluateFixture> {
     records,
     report,
     sessions: [root, worker],
+    repeat: {
+      status: "executed",
+      exit_code: 0,
+      input_sha256: fileHashes(join(ws, "runs", run(1), "input/ccw"), "sha256"),
+      omp_num_threads: "1",
+      shud_rhs_threads: "1",
+      rivqdown_sha256: hash(
+        "sha256",
+        fs.readFileSync(join(ws, "runs", run(1), "output/ccw.out/ccw.rivqdown.dat")),
+      ),
+      run_id: "repeat-baseline",
+      baseline_run_id: run(1),
+    },
     writeJson,
     publishReport() {
       writeJson(`reports/${REPORT}.json`, fixture.report);
@@ -300,23 +325,13 @@ export async function makeEvaluateFixture(): Promise<EvaluateFixture> {
         fs.writeFileSync(path, Buffer.concat(lines));
       }
     },
+    publishRepeat() {
+      fs.writeFileSync(repeatPath, `${JSON.stringify(fixture.repeat)}\n`);
+    },
   };
   fixture.publishReport();
   fixture.publishLogs();
-  const baseline = fs.readdirSync(input).filter((name) => fs.statSync(join(input, name)).isFile());
-  fs.writeFileSync(
-    repeatPath,
-    `${JSON.stringify({
-      status: "executed",
-      exit_code: 0,
-      input_sha256: Object.fromEntries(baseline.map((name) => [name, digestOf(name)])),
-      omp_num_threads: "1",
-      shud_rhs_threads: "1",
-      rivqdown_sha256: hash("sha256", Buffer.from("rivqdown")),
-      run_id: "repeat-baseline",
-      baseline_run_id: run(1),
-    })}\n`,
-  );
+  fixture.publishRepeat();
   return fixture;
 }
 
