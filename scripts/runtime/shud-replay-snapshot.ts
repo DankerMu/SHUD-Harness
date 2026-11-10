@@ -31,6 +31,7 @@ import {
   resultObject,
 } from "./shud-evidence-events.ts";
 import { REPLAY_COMMIT } from "./shud-replay-contract.ts";
+import { HASH_LIMIT, digest, rawTreeMd5, treeHashes, walk } from "./shud-tree-digest.ts";
 
 export interface ReplayBuildBinding {
   taskId: string;
@@ -146,110 +147,6 @@ export function rememberReplayBuilds(
   }
 }
 
-const HASH_LIMIT = 512 * 1024 * 1024;
-interface Budget {
-  remaining: number;
-}
-
-function digest(path: string, algorithm: "sha256" | "md5", budget: Budget) {
-  regular(path, "digest source");
-  const fd = fs.openSync(
-    path,
-    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
-  );
-  try {
-    const before = fs.fstatSync(fd);
-    requireFact(
-      before.isFile() && before.size <= budget.remaining,
-      `Hash byte budget exceeded: ${path}`,
-    );
-    budget.remaining -= before.size;
-    const hash = createHash(algorithm);
-    const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, before.size));
-    let offset = 0;
-    while (offset < before.size) {
-      const count = fs.readSync(
-        fd,
-        buffer,
-        0,
-        Math.min(buffer.length, before.size - offset),
-        offset,
-      );
-      requireFact(count > 0, "Digest source truncated");
-      hash.update(buffer.subarray(0, count));
-      offset += count;
-    }
-    const after = fs.fstatSync(fd),
-      current = fs.lstatSync(path);
-    requireFact(
-      before.ino === after.ino &&
-        before.size === after.size &&
-        before.mtimeMs === after.mtimeMs &&
-        current.ino === before.ino &&
-        current.dev === before.dev &&
-        !current.isSymbolicLink(),
-      "Digest source changed",
-    );
-    return { sha256: hash.digest("hex"), size_bytes: before.size };
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-function walk(
-  directory: string,
-  consume: (path: string) => void,
-  budget: Budget,
-  inventoryOnly = false,
-): void {
-  requireFact(
-    fs.lstatSync(directory).isDirectory() && fs.realpathSync(directory) === directory,
-    `Unsafe evidence directory: ${directory}`,
-  );
-  for (const name of directoryNames(directory, budget)) {
-    const path = join(directory, name),
-      stat = fs.lstatSync(path);
-    requireFact(inventoryOnly || !stat.isSymbolicLink(), `Symbolic evidence path: ${path}`);
-    if (stat.isDirectory()) walk(path, consume, budget, inventoryOnly);
-    else {
-      requireFact(inventoryOnly || stat.isFile(), `Special evidence path: ${path}`);
-      consume(path);
-    }
-  }
-}
-function treeHashes(
-  directory: string,
-  algorithm: "sha256" | "md5",
-  hashBudget: Budget,
-  absolute = false,
-) {
-  const values: Record<string, string> = {};
-  walk(
-    directory,
-    (path) => {
-      values[absolute ? path : relative(directory, path)] = digest(
-        path,
-        algorithm,
-        hashBudget,
-      ).sha256;
-    },
-    { remaining: BUFFER_LIMIT },
-  );
-  return Object.fromEntries(
-    Object.entries(values).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
-  );
-}
-
-function entryExists(path: string): boolean {
-  try {
-    fs.lstatSync(path);
-    return true;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
-    throw error;
-  }
-}
-
 export function preparedInputReceipt(workspace: string): Record<string, string> | null {
   const directory = join(workspace, "input/keliya");
   if (!fs.existsSync(directory)) return null;
@@ -319,18 +216,7 @@ export async function capturePreservation(
   inventory.sort();
   const dotGit = join(root, "SHUD/.git");
   const gitlink = fs.lstatSync(dotGit).isFile();
-  const raw = join(root, "data/raw"),
-    workspaceRaw = join(workspace, "data/raw");
-  const rawRoots = { harness: entryExists(raw), workspace: entryExists(workspaceRaw) };
-  const rawHashes: Record<string, string> = {};
-  for (const [label, path] of [
-    ["harness", raw],
-    ["workspace", workspaceRaw],
-  ])
-    if (entryExists(path)) {
-      for (const [name, hash] of Object.entries(treeHashes(path, "md5", hashBudget)))
-        rawHashes[`${label}/${name}`] = hash;
-    }
+  const raw = rawTreeMd5(root, workspace, hashBudget);
   return {
     clone: await cloneReceipt(workspace),
     repositories,
@@ -342,7 +228,7 @@ export async function capturePreservation(
       inventory,
     },
     ccwMd5: treeHashes(join(root, "SHUD/input/ccw"), "md5", hashBudget),
-    raw: { exists: rawRoots.harness || rawRoots.workspace, md5: rawHashes, roots: rawRoots },
+    raw,
     keliyaSourceSha256: treeHashes(source, "sha256", hashBudget),
     forcingSha256: treeHashes(
       join(dirname(dirname(source)), "forcing.trimmed"),
