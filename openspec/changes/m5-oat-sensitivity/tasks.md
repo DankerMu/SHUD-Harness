@@ -758,3 +758,13 @@ Commands per PR: RED before implementation; focused `scripts/runtime/shud-sensit
 | packages / profile / docs | Not selected |
 
 Commands: RED before implementation; focused `scripts/runtime/shud-sensitivity*.test.ts` and existing runtime suites; `pnpm run check`; strict OpenSpec validation; one correctness+test-evidence review seat; exact-head CI. Ticks task 7.1c.
+
+## Issue #673 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Docs / control plane | Selected: rows present in Testing_Strategy (matrix + Enforcement Index), shared.md and its rendered root instruction files, `constraints.yaml` mirror + readiness gap, Test_Fixtures fixture and §1/§3; `grep -rn shud:sensitivity .github/workflows` empty; each registration contains the criteria link and no criterion list; `pnpm run instructions:check` and `docs:check` green; rendered budget numbers reported |
+| Legacy | Selected: `git diff` touches only the listed files plus render output; existing rows unchanged |
+| Code / CI / Phased_Plan | Not selected (Phased_Plan comparison reported only) |
+
+Commands: `pnpm run instructions:render`; `pnpm run check`; strict OpenSpec validation; one spec-compliance review seat; exact-head CI. Ticks task 7.2.
