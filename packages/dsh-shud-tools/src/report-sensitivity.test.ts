@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   COVERAGE,
@@ -95,6 +95,26 @@ test("sensitivity draft publishes summary, JSON and Markdown with plan links and
   });
   const validation = resultValue(await h.invoke("report_validate", { report_id: id }));
   expect(validation).toMatchObject({ report_id: id, status: "reviewed", ok: true });
+});
+
+test("a relative session cwd still publishes the sensitivity summary from the plan bytes", async () => {
+  await seedAcceptanceBatch(h);
+  const previous = process.cwd();
+  const header = h.agent.session.header;
+  try {
+    process.chdir(dirname(h.cwd));
+    Object.assign(header, { cwd: basename(h.cwd) });
+    const report = generated(h, await h.generate());
+    const id = report.report_id;
+    expect(reportFiles()).toEqual([`${id}.json`, `${id}.md`, `${id}.sensitivity.json`]);
+    expect(report.sensitivity_summary).toEqual({
+      path: `reports/${id}.sensitivity.json`,
+      sha256: sha256(readSummary(id).bytes),
+    });
+  } finally {
+    process.chdir(previous);
+    Object.assign(header, { cwd: h.cwd });
+  }
 });
 
 test("failed cells and superseded collected runs stay in linked_runs with limitations kinds 1 to 5", async () => {
