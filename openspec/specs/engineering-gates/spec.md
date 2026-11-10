@@ -78,7 +78,7 @@ Default test and CI failure output SHALL retain captured cleanup failures' neste
 
 ### Requirement: Native settlement tests observe completion prerequisites
 
-Native tests that consume settlement results or collect a completed run SHALL wait for the required observable completion state with a bounded deadline while driving accepted registry work. A single joined tick SHALL NOT be treated as proof of settlement. Isolation tests SHALL continue to assert protected entries remain unchanged on every waiting iteration. Production dispatch semantics and all existing outcome, identity and evidence assertions SHALL remain unchanged. Post-readiness tests of pending notifications without session services SHALL await the documented waiting presentation before comparing the collected snapshot, rather than pinning submission-time detail. A held-persistence lifecycle oracle SHALL establish the intended post-exit work admission before comparing completion against barrier entry, and SHALL independently verify the publication metadata boundary while preserving single-flight, independent-run progress and exact terminal-write assertions. Diagnostic attribution SHALL distinguish an observed controlled schedule from an untraced historical failure.
+Native tests that consume settlement results or collect a completed run SHALL wait for the required observable completion state with a bounded deadline while driving accepted registry work. A single joined tick SHALL NOT be treated as proof of settlement. Isolation tests SHALL continue to assert protected entries remain unchanged on every waiting iteration. Production dispatch semantics and all existing outcome, identity and evidence assertions SHALL remain unchanged. Post-readiness tests of pending notifications without session services SHALL await the documented waiting presentation before comparing the collected snapshot, rather than pinning submission-time detail. A held-persistence lifecycle oracle SHALL establish the intended post-exit work admission before comparing completion against barrier entry, and SHALL independently verify the publication metadata boundary while preserving single-flight, independent-run progress and exact terminal-write assertions. Diagnostic attribution SHALL distinguish an observed controlled schedule from an untraced historical failure. Tests that, after a public settlement, wait for the durable `collected` projection or the committed `run-record.json` SHALL pass an explicit bounded poll timeout matching the repository's existing 5000ms pattern rather than relying on the framework's 1s default, because collection is performed by a later registry tick plus file IO and is not part of the public settlement. Tests that, after submission, wait for native process evidence (first invocation, signal observation) or the public settlement itself SHALL use the same explicit bound, because those depend on native process start/exit and pump ticks.
 
 #### Scenario: Joined work returns before settlement
 
@@ -101,6 +101,13 @@ Native tests that consume settlement results or collect a completed run SHALL wa
 - **AND** releasing the initial metadata latch reaches a separately held publication metadata gate with the same no-terminal-progress assertions
 - **AND** releasing the publication gate completes the run exactly once with one terminal-write attempt and one successful write
 - **AND** a genuine gate bypass or caught polling failure yields a bounded failure with gate phase and pre-cleanup durable evidence, not a retry, skip or relaxed timeout
+
+#### Scenario: Collected projection lags the public settlement
+
+- **WHEN** a tool-created or registry-created run reaches a public settlement (`completed`, `failed` or `killed`) and its durable record is terminal (`succeeded`, `failed` or `cancelled`) but not yet `collected`, and `run-record.json` is not yet written, until a later tick collects it
+- **THEN** the test polls the durable record for `collected` (or the run directory for `run-record.json`) with an explicit bounded timeout of at least 5000ms and an unchanged per-test limit
+- **AND** every existing outcome assertion (kill intent persisted, signal, process group cleared, `exit_class`, `exit_code`) remains exact
+- **AND** permanent non-collection still fails at the bounded deadline rather than being retried, skipped or hidden by a global timeout change
 
 ### Requirement: Local agent evidence is separate from formatted deliverables
 
