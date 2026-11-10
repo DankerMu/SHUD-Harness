@@ -31,6 +31,8 @@ vi.mock("node:fs", async (original) => {
 });
 
 const MISSING_PLAN = AnalysisPlanIdSchema.parse("PLAN-20261108T093000-dead");
+const BUILD = "BUILD-20261108T093000-b1d0";
+const PLAN_BUILD = /build_id is not accepted with analysis_plan_id/u;
 let h: PlanHarness;
 beforeEach(async () => {
   h = await planHarness();
@@ -62,12 +64,13 @@ async function rejectsWithoutEffects(
   args: Record<string, unknown>,
   message: RegExp,
   unknownKey = false,
+  withAgent = true,
 ) {
   const query = vi.spyOn(h.registry, "listRunJobsByTask");
   const submit = vi.spyOn(h.registry, "submitShud");
   const before = await h.effects();
   vi.clearAllMocks();
-  const error = expectToolError(await h.call(args), message);
+  const error = expectToolError(await h.call(args, withAgent ? undefined : null), message);
   // The plan pair is part of the closed schema; only internal fields are unknown keys.
   if (!unknownKey) expect(error).not.toMatch(/unknown parameter/iu);
   expect(query).not.toHaveBeenCalled();
@@ -97,6 +100,31 @@ const shapes: Array<[string, Record<string, unknown>, RegExp]> = [
     /analysis_plan_id/u,
   ],
   ["a numeric pset", { analysis_plan_id: MISSING_PLAN, parameter_set_id: 3 }, /parameter_set_id/u],
+  [
+    "only analysis_plan_id with a valid build_id",
+    { analysis_plan_id: MISSING_PLAN, build_id: BUILD },
+    /analysis_plan_id requires parameter_set_id/u,
+  ],
+  [
+    "only parameter_set_id with a valid build_id",
+    { parameter_set_id: "PSET-3", build_id: BUILD },
+    /parameter_set_id requires analysis_plan_id/u,
+  ],
+  [
+    "the pair without task_id with a valid build_id",
+    {
+      analysis_plan_id: MISSING_PLAN,
+      parameter_set_id: "PSET-3",
+      task_id: undefined,
+      build_id: BUILD,
+    },
+    /analysis_plan_id and parameter_set_id require task_id/u,
+  ],
+  [
+    "the pair with a malformed build_id",
+    { analysis_plan_id: MISSING_PLAN, parameter_set_id: "PSET-3", build_id: "BUILD-0001" },
+    /requires a valid build_id/u,
+  ],
 ];
 
 test.each(shapes)("%s is rejected with zero filesystem access", async (_name, fields, message) => {
@@ -107,6 +135,25 @@ test.each(shapes)("%s is rejected with zero filesystem access", async (_name, fi
   await rejectsWithoutEffects(args, message);
   expect(governedCalls()).toEqual([]);
 });
+
+test.each([true, false].flatMap((planFile) => [true, false].map((agent) => ({ planFile, agent }))))(
+  "a plan-bound valid build_id is rejected before any access; plan=$planFile, agent=$agent",
+  async ({ planFile, agent }) => {
+    const plan = planFile ? await h.createPlan() : MISSING_PLAN;
+    if (!planFile) seedCard(h, { linked_analyses: [MISSING_PLAN] });
+    const card = await cardSnapshot(h);
+    const args = {
+      task_id: TASK,
+      input_dir: "input/ccw",
+      analysis_plan_id: plan,
+      parameter_set_id: "PSET-3",
+      build_id: BUILD,
+    };
+    await rejectsWithoutEffects(args, PLAN_BUILD, false, agent);
+    expect(governedCalls(/\/(?:analyses|builds|tasks|runs)(?:\/|$)/u)).toEqual([]);
+    expect(await cardSnapshot(h)).toEqual(card);
+  },
+);
 
 test.each(["calib_overrides", "changes", "input_digests"])(
   "model-supplied %s is an unknown parameter",

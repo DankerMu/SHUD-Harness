@@ -2,8 +2,8 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { produceDetachedShud } from "@shud-harness/dsh-shud-jobs";
-import { expectNativeReceipt } from "./shud-run-build/test-harness.ts";
-import { returnedRun, TASK } from "./task-linked/test-harness.ts";
+import { expectNativeReceipt, seedBuild } from "./shud-run-build/test-harness.ts";
+import { plannedCard, putCard, returnedRun, TASK } from "./task-linked/test-harness.ts";
 import {
   aliasedInput,
   DIGEST_FILES,
@@ -41,7 +41,7 @@ test("a linked plan's PSET-3 runs with the plan window, threads, override and di
   expect(submit).toHaveBeenCalledExactlyOnceWith(
     {
       cwd: h.cwd,
-      input_dir: "input/ccw",
+      input_dir: readPlan(h, plan).input_dir,
       project: "ccw",
       task_id: TASK,
       owner_session: h.ownerId,
@@ -122,3 +122,62 @@ test("input_dir resolves physically through link/.., never by textual collapse",
   );
   expect(job.analysis_plan_id).toBe(plan);
 }, 20_000);
+
+const spellings: Array<[string, (input: string, cwd: string) => string, string | undefined]> = [
+  ["a relative path", () => "input/ccw", undefined],
+  [
+    "a workspace symlink",
+    (input, cwd) => {
+      fs.symlinkSync(input, join(cwd, "via-link"));
+      return "via-link";
+    },
+    "ccw",
+  ],
+  ["the absolute realpath", (input) => fs.realpathSync.native(input), undefined],
+];
+
+test.each(spellings)(
+  "a plan-bound call spelling input_dir as %s forwards the plan's input_dir",
+  async (_name, spell, project) => {
+    const plan = await h.createPlan();
+    const inputDir = spell(h.input, h.cwd);
+    const submit = vi.spyOn(h.registry, "submitShud");
+    const job = await returnedRun(
+      h,
+      await h.run(plan, { input_dir: inputDir, ...(project === undefined ? {} : { project }) }),
+    );
+    expect(submit.mock.calls[0][0]).toMatchObject({
+      input_dir: readPlan(h, plan).input_dir,
+      project: "ccw",
+    });
+    expect(job.analysis_plan_id).toBe(plan);
+  },
+  20_000,
+);
+
+test.each([
+  { build: false, linked: false },
+  { build: true, linked: false },
+  { build: false, linked: true },
+  { build: true, linked: true },
+])(
+  "an unbound run forwards the caller's input_dir verbatim; build=$build, task=$linked",
+  async ({ build, linked }) => {
+    const seeded = build ? await seedBuild(h.cwd) : undefined;
+    const task = seeded?.build.task_id ?? TASK;
+    if (linked) putCard(h, plannedCard({ task_id: task }));
+    const submit = vi.spyOn(h.registry, "submitShud");
+    const job = await returnedRun(
+      h,
+      await h.call({
+        input_dir: "input/ccw",
+        ...(linked ? { task_id: task } : {}),
+        ...(seeded === undefined ? {} : { build_id: seeded.build.build_id }),
+      }),
+    );
+    expect(submit.mock.calls[0][0]).toMatchObject({ input_dir: "input/ccw", project: "ccw" });
+    expect(job.build_id).toBe(seeded?.build.build_id ?? null);
+    expect(job.task_id).toBe(linked ? task : null);
+  },
+  20_000,
+);

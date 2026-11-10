@@ -4,6 +4,7 @@ import {
   ParameterSetIdSchema,
   type AnalysisPlan,
   type AnalysisPlanId,
+  type BuildId,
   type TaskCard,
   type TaskId,
 } from "@shud-harness/dsh-shud-core";
@@ -28,6 +29,7 @@ export interface PlanCall {
 type PlanFields = Required<
   Pick<
     SubmitShudRequest,
+    | "input_dir"
     | "analysis_plan_id"
     | "parameter_set_id"
     | "end_days"
@@ -38,10 +40,14 @@ type PlanFields = Required<
 >;
 type CalibKey = keyof typeof CALIB_WHITELIST;
 
-/** Pure shape check: both plan ids or neither, each brand-valid, the pair only with task_id. */
+/**
+ * Pure shape check: both plan ids or neither, each brand-valid, the pair only with task_id and
+ * never with a (brand-valid) build_id.
+ */
 export function planArguments(
   args: { analysis_plan_id?: string; parameter_set_id?: string },
   taskId: TaskId | undefined,
+  buildId: BuildId | undefined,
 ): PlanArguments | undefined {
   const { analysis_plan_id: plan, parameter_set_id: set } = args;
   if (plan === undefined && set === undefined) return undefined;
@@ -53,6 +59,11 @@ export function planArguments(
   if (!setId.success) throw new Error("shud_run parameter_set_id must be PSET-1..PSET-5");
   if (taskId === undefined) {
     throw new Error("shud_run analysis_plan_id and parameter_set_id require task_id");
+  }
+  if (buildId !== undefined) {
+    throw new Error(
+      "shud_run build_id is not accepted with analysis_plan_id; plan-bound runs use the configured SHUD binary",
+    );
   }
   return { analysisPlanId: planId.data, parameterSetId: setId.data, taskId };
 }
@@ -79,7 +90,7 @@ function resolvesTo(cwd: string, inputDir: string, expected: string): boolean {
 /**
  * Read the bound plan and require the call to run exactly its parameter set: same card, input
  * directory (physical), project, window and threads. Runs before the task query, card
- * reconciliation and every write; the plan supplies the overrides and digests verbatim.
+ * reconciliation and every write; the plan supplies its input_dir, overrides and digests verbatim.
  */
 export function resolvePlan(cwd: string, binding: PlanArguments, call: PlanCall): PlanFields {
   const id = binding.analysisPlanId;
@@ -113,6 +124,7 @@ export function resolvePlan(cwd: string, binding: PlanArguments, call: PlanCall)
     return multiplier === undefined ? [] : [{ key, multiplier }];
   });
   return {
+    input_dir: plan.input_dir,
     analysis_plan_id: id,
     parameter_set_id: set.parameter_set_id,
     end_days: plan.end_days,

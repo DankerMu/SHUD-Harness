@@ -25,6 +25,10 @@ test("shud_run advertises a closed model contract with optional task, build and 
     ]);
     expect(schema?.parameters?.properties?.task_id).toMatchObject({ type: "string" });
     expect(schema?.parameters?.properties?.build_id).toMatchObject({ type: "string" });
+    expect(schema?.parameters?.properties?.build_id).toHaveProperty(
+      "description",
+      expect.stringMatching(/not accepted with analysis_plan_id/u),
+    );
     expect(schema?.parameters?.properties?.threads).toMatchObject({ type: "integer" });
   } finally {
     await h.dispose();

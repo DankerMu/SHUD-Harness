@@ -41,7 +41,9 @@ const parameters = {
   },
   build_id: {
     type: "string",
-    description: "Optional BUILD-YYYYMMDDTHHMMSS-xxxx id of a workspace build to execute.",
+    description:
+      "Optional BUILD-YYYYMMDDTHHMMSS-xxxx id of a workspace build to execute; not accepted with " +
+      "analysis_plan_id (plan-bound runs use the configured SHUD binary).",
   },
   threads: {
     type: "integer",
@@ -126,7 +128,7 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
         }
         threads = parsed.data;
       }
-      const binding = planArguments(args, taskId);
+      const binding = planArguments(args, taskId, buildId);
       const session = exec.agent?.session;
       const cwd = session?.header.cwd;
       const owner = session?.id;
@@ -164,7 +166,8 @@ export function createShudRunTool(jobs: ShudJobRegistry): ToolDefinition {
       const record = await jobs.submitShud(
         {
           cwd,
-          input_dir: args.input_dir,
+          // Plan-bound: the realpath resolvePlan compared; unbound: the caller's spelling.
+          input_dir: plan?.input_dir ?? args.input_dir,
           project,
           ...(args.end_days === undefined ? {} : { end_days: args.end_days }),
           ...(args.label === undefined ? {} : { label: args.label }),
