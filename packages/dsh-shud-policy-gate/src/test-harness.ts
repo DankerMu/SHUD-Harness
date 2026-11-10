@@ -17,6 +17,7 @@ import {
   TaskCardSchema,
 } from "@shud-harness/dsh-shud-core";
 import type { ChangeRequest, EvidenceReport } from "@shud-harness/dsh-shud-core";
+import * as roleRestrict from "@shud-harness/dsh-shud-presets";
 import * as rawGuard from "@shud-harness/dsh-shud-raw-guard";
 import { expect, vi } from "vitest";
 import * as policyGate from "./index.ts";
@@ -175,6 +176,8 @@ interface HarnessOptions {
   projections?: boolean;
   approval?: ApprovalOutcome | "absent" | "throw";
   rawDirs?: string[];
+  /** Mount shud-role-restrict after policy-gate, in the profile insert order. */
+  restrict?: boolean;
 }
 
 export async function createPolicyHarness(options: HarnessOptions = {}) {
@@ -215,14 +218,19 @@ export async function createPolicyHarness(options: HarnessOptions = {}) {
       if (options.projections !== false) services.provide("sessionProjections", { stateOf });
       if (options.approval !== "absent") services.provide("approval", { request });
     });
+    await ctx.plugin(ToolRuntime, { mode: "native" });
+    // Only public Agent/Session data are doubled; Cordis scope and ToolRuntime are real.
+    // The agent is its own scope key, as on the host, so restrictions reach its tool view.
+    const agent = { id: session.id, session } as unknown as Agent;
     let agentContext: Context | undefined;
     await ctx.plugin({
-      inject: options.projections === false ? [] : ["sessionProjections"],
+      inject: ["tools", ...(options.projections === false ? [] : ["sessionProjections"])],
       apply(consumer: Context) {
-        agentContext = createScope(consumer, {}).ctx;
+        agentContext = createScope(consumer, agent).ctx;
       },
     });
     if (!agentContext) throw new Error("Calling context did not activate");
+    Object.assign(agent, { ctx: agentContext });
     if (options.projections !== false) {
       const projections: unknown = Reflect.get(agentContext, "sessionProjections");
       if (!projections || typeof projections !== "object") {
@@ -231,9 +239,6 @@ export async function createPolicyHarness(options: HarnessOptions = {}) {
       const stateOf: unknown = Reflect.get(projections, "stateOf");
       expect(stateOf).toBeTypeOf("function");
     }
-    // Only public Agent/Session data are doubled; Cordis scope and ToolRuntime are real.
-    const agent = { id: session.id, session, ctx: agentContext } as unknown as Agent;
-    await ctx.plugin(ToolRuntime, { mode: "native" });
     let runtime: ToolRuntime | undefined;
     const executions: Array<{ name: string; arguments: unknown }> = [];
     await ctx.plugin({
@@ -244,6 +249,7 @@ export async function createPolicyHarness(options: HarnessOptions = {}) {
           "report_submit",
           "report_decide",
           "task_create",
+          "analysis_create",
           "shud_run",
           "shud_collect",
           "subagent",
@@ -252,6 +258,15 @@ export async function createPolicyHarness(options: HarnessOptions = {}) {
           "read",
           "job_output",
           "report_generate",
+          // The rest of every role's inherited surface, so role-restrict can bind any preset.
+          "report_validate",
+          "job_list",
+          "job_kill",
+          "edit",
+          "change_create",
+          "change_submit",
+          "shud_build",
+          "verification_run",
         ]) {
           consumer.tools.register(
             defineTool({
@@ -275,6 +290,10 @@ export async function createPolicyHarness(options: HarnessOptions = {}) {
     const tools = runtime;
     if (options.rawDirs) await ctx.plugin(rawGuard, { rawDirs: options.rawDirs });
     const policyFiber = await ctx.plugin(policyGate);
+    if (options.restrict) {
+      await ctx.plugin(roleRestrict);
+      await ctx.serial("agent/created", { agent, source: "startup" });
+    }
     const next = vi.fn(() => Promise.resolve<PreToolDecision>({ kind: "cancel" }));
     let callNumber = 0;
     const input = (name: string, args: unknown, caller: Agent | null, signal: AbortSignal) => ({
