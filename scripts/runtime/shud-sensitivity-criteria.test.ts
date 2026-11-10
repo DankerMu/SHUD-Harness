@@ -26,7 +26,6 @@ beforeEach(async () => {
 });
 afterEach(() => f.h.dispose());
 
-const PR_B = "implemented in 7.1b-2";
 const writePlan = () => f.writeJson(`analyses/${PLAN}.json`, f.plan);
 const writeCard = () => f.writeJson(`tasks/${f.card.task_id}/task.json`, f.card);
 const writeRecord = (n: number) => f.writeJson(`runs/${run(n)}/run-record.json`, f.records[n - 1]);
@@ -38,11 +37,10 @@ const rootEvents = (edit: (events: FixtureSession["events"]) => FixtureSession["
 const OTHER_TASK = "TASK-20261110T090000-a002";
 const OTHER_PLAN = "PLAN-20261110T090000-b002";
 
-test("the best PR A fixture satisfies criteria 1, 2, 3, 8, 9, 10, 11 and 12", async () => {
+test("the best fixture satisfies all 13 criteria", async () => {
   const result = await evaluate(f);
-  expect(result.code).toBe(1);
-  expect([...result.criteria.keys()]).toEqual([4, 5, 6, 7, 13]);
-  for (const detail of result.criteria.values()) expect(detail).toBe(PR_B);
+  expect(result.code, result.stderr).toBe(0);
+  expect(result.criteria.size).toBe(0);
 });
 
 type Case = [name: string, criterion: number, mutate: () => void, detail: RegExp[]];
