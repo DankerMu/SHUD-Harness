@@ -27,7 +27,7 @@
   },
   "dependencies": {
     "@shud-harness/dsh-shud-core": "workspace:*",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "peerDependencies": {
     "@deepseek-ai/dsh": "0.2.1-rc.2"
