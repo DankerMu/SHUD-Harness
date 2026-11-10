@@ -135,8 +135,9 @@
 
 #### Scenario: plan input digests must match the prepared workspace input
 
-- **WHEN** plan 的 `input_digests` 中 `ccw.cfg.calib` 或某白名单类别文件的 sha256 与准备阶段记录的工作区 `input/ccw` 同名文件不同，或集合缺少/多出文件，或脚本结束时工作区 `input/ccw` 某文件 sha256 已改变
+- **WHEN** plan 的 `input_digests` 中 `ccw.cfg.calib` 或某白名单类别文件的 sha256 与准备阶段记录的工作区 `input/ccw` 同名文件不同，或脚本结束时工作区 `input/ccw` 某文件 sha256 已改变
 - **THEN** 脚本 exit 1 并点名该文件与两个 sha256
+- **AND** `input_digests` 集合缺少或多出文件时，该 plan 不能通过 `AnalysisPlanSchema`，脚本 exit 1 并点名该 plan 文件
 
 #### Scenario: run copy cfg.para differs only in END, DT_YE_IC and NUM_OPENMP
 
