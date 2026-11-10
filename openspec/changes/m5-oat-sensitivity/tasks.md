@@ -768,3 +768,15 @@ Commands: RED before implementation; focused `scripts/runtime/shud-sensitivity*.
 | Code / CI / Phased_Plan | Not selected (Phased_Plan comparison reported only) |
 
 Commands: `pnpm run instructions:render`; `pnpm run check`; strict OpenSpec validation; one spec-compliance review seat; exact-head CI. Ticks task 7.2.
+
+## Issue #713 risk packs and executable evidence (option A)
+
+| Pack | Selection and required evidence |
+|---|---|
+| Composition | Selected: the off-role raw cases above through the real chain; a mutation (e.g. restrict not mounted, or policy-gate before raw-guard) makes at least one assertion red — record the probe |
+| Approval seam | Selected: exact request count and outcome per case |
+| Raw protection | Selected: md5 of the raw sample before/after every case |
+| Legacy | Selected: on-role raw ask controls and the non-raw off-role deny control; existing suites unchanged |
+| Product code / profile / ADR | Not selected (option B, later) |
+
+Commands: focused vitest for the new test and the policy-gate/raw-guard packages; `pnpm run check`; strict OpenSpec validation; white-box review seat; exact-head CI.

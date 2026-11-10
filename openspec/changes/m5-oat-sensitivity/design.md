@@ -864,3 +864,12 @@ Highest risks are validator/runtime projection missing the new metrics input, lo
 - `instructions/agents/shared.md`: Verification Matrix row after replay (criteria link only), then `pnpm run instructions:render`; the rendered root instruction files are never hand-edited and stay within the budget.
 - Phased_Plan M5 gate wording is compared with "Sensitivity acceptance criteria" and any mismatch is reported in the PR, not edited.
 - Must preserve: every existing row/entry text; no `.github/workflows/` change.
+
+## Issue #713 option A test contract
+
+- One composition test file (in the package whose test harness already builds the real host chain — extend `packages/dsh-shud-policy-gate/src/test-harness.ts` rather than a second harness) mounting, in `profile/shud/cordis.patch.yml` order, `shud-raw-guard` (with a temp `rawDirs` holding a sample file), `shud-policy-gate`, and `shud-role-restrict` for the calling preset, with `analysis_create` and `shud_run` registered through the real `@deepseek-ai/dsh-tools` registry as recording fakes (body records an execution).
+- Cases (each with approval outcome `allowed-once` and one non-allow outcome, e.g. `rejected`): worker / coder / reviewer → `analysis_create` with raw `input_dir`; coordinator → `shud_run` with raw `input_dir`. Assert: exactly one approval request whose reason is the raw provenance constant; no `role-tool-surface` policy audit line; `allowed-once` → error code `UNKNOWN_TOOL`, other outcome → the rejection error; recorded executions empty; raw sample md5 unchanged.
+- On-role controls: worker → `shud_run` and coordinator → `analysis_create` with raw `input_dir` still produce the provenance ask (one request), proving no regression.
+- Off-role non-raw control (existing behavior): coordinator → `shud_run` with ordinary `input_dir` → `deny role-tool-surface`, zero approval requests.
+- If the real chain cannot be assembled through documented seams only, stop and report (no dsh internals, no `../deepseek-harness` edits).
+- Spec: policy-gate scenario "off-role call with raw input_dir asks before the role deny (known exception)" (this change's delta).
