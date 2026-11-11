@@ -255,7 +255,8 @@ function policyGateErrors(rows, schema) {
   if (nested) errors.push(`${id}: nested row`);
   const rawIndex = rows.findIndex((row) => row?.id === "shud-raw-guard");
   const policyIndex = rows.findIndex((row) => row?.id === id);
-  if (rawIndex < 0 || policyIndex <= rawIndex) errors.push(`${id}: must follow raw-guard`);
+  // ADR-0016: raw-guard defers known-role off-surface raw asks via next(), so policy-gate must be the very next row.
+  if (rawIndex < 0 || policyIndex !== rawIndex + 1) errors.push(`${id}: must immediately follow raw-guard`);
   if (schema !== undefined) {
     const entries = (schema["x-cordis"]?.entries ?? []).filter((entry) => entry.id === id);
     if (entries.length !== 1) errors.push(`${id}: expected one schema entry`);
@@ -278,6 +279,8 @@ function checkPolicyGateControls(rows, schema, label) {
   const nested = [...structuredClone(without), {
     id: "policy-control-preset", config: { plugins: [structuredClone(original)] },
   }];
+  const between = structuredClone(rows);
+  between.splice(between.findIndex((row) => row?.id === "shud-raw-guard") + 1, 0, { id: "policy-control-between" });
   const importError = structuredClone(schema);
   const entry = importError["x-cordis"]?.entries?.find((row) => row.id === "shud-policy-gate");
   if (entry) entry.status = "error";
@@ -287,7 +290,8 @@ function checkPolicyGateControls(rows, schema, label) {
     ["nested", nested, schema, "nested row"],
     ["import-error", rows, importError, "import status error"],
     ["duplicate", [...rows, structuredClone(original)], schema, "expected one global row"],
-    ["before-raw", [structuredClone(original), ...without], schema, "must follow raw-guard"],
+    ["before-raw", [structuredClone(original), ...without], schema, "must immediately follow raw-guard"],
+    ["between", between, schema, "must immediately follow raw-guard"],
   ]) {
     check(`${label}: actual policy-gate assertion rejects ${kind}`,
       policyGateErrors(config, projection).some((error) => error.includes(expected)));
