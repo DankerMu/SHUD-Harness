@@ -780,3 +780,16 @@ Commands: `pnpm run instructions:render`; `pnpm run check`; strict OpenSpec vali
 | Product code / profile / ADR | Not selected (option B, later) |
 
 Commands: focused vitest for the new test and the policy-gate/raw-guard packages; `pnpm run check`; strict OpenSpec validation; white-box review seat; exact-head CI.
+
+## Issue #713 risk packs and executable evidence (option B)
+
+| Pack | Selection and required evidence |
+|---|---|
+| Decision table | Selected: deny first and role-free (off-role raw write case); ask deferral only for known role + off-surface tool |
+| Approval seam | Selected: off-role zero requests; on-role and unknown one request |
+| Audit | Selected: `next <tool> role-deferred` line, no arguments/paths; dispose ask count unchanged by deferral |
+| Legacy | Selected: existing raw-guard / policy-gate / presets suites green; #732 test flipped |
+| Runtime | Selected: `pnpm run profile:smoke`; `pnpm run raw-guard:probes` exit 0 (exit 2 = rerun) |
+| Mutation | Selected: deferral removed → off-role cases red |
+
+Commands: RED first; focused vitest for raw-guard, policy-gate, presets; `pnpm run check`; `profile:smoke`; `raw-guard:probes`; strict OpenSpec validation; white-box review seat; exact-head CI. Closes #713.
