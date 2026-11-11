@@ -39,11 +39,11 @@ core SHALL 提供 authority 规则 `role-tool-surface`，其 id 列入 `RESERVED
 
 #### Scenario: off-role analysis_create is denied
 - **WHEN** preset `worker`、`coder` 或 `reviewer` 调用 `analysis_create`
-- **THEN** 三次决策 `kind` 均为 `deny`（`role-tool-surface`），`reason` 分别含对应角色与 `analysis_create`，`next()` 未被调用，宿主不发起审批卡；`input_dir` 位于 raw 内时适用下一场景的已知例外
+- **THEN** 三次决策 `kind` 均为 `deny`（`role-tool-surface`），`reason` 分别含对应角色与 `analysis_create`，`next()` 未被调用，宿主不发起审批卡；`input_dir` 位于 raw 内时同样成立（见 raw-data-guard「Off-role raw asks defer to the role surface」）
 
-#### Scenario: off-role call with raw input_dir asks before the role deny (known exception)
+#### Scenario: off-role call with raw input_dir is denied by role without a card
 - **WHEN** 在实际瀑布顺序（raw-guard 先于 policy-gate，role-restrict 挂载）下，preset `worker`、`coder` 或 `reviewer` 以 raw 内 `input_dir` 调用 `analysis_create`，或 preset `coordinator` 以 raw 内 `input_dir` 调用 `shud_run`
-- **THEN** raw-guard 先返回 provenance `ask`，策略门不运行（无 `role-tool-surface` 审计行），宿主恰好发起一次审批卡；审批为 `allowed-once` 时结果为错误码 `UNKNOWN_TOOL`（role-restrict 隐藏该工具），否则为对应拒绝错误；两种情况下工具主体都不执行，raw 字节不变。这是 #713 登记的已知例外（PI 2026-11-09 裁定先固定现状）；角色拒绝先于 raw ask 的变更须经 `docs/adr/proposed/` 中 PI 接受的决策记录后另行实施
+- **THEN** raw-guard 记 `next <tool id> role-deferred` 并委托下一个监听器，策略门返回 `deny`（`role-tool-surface`，审计行 `deny <tool id> role-tool-surface`），宿主不发起审批卡，工具主体不执行，raw 字节不变（[ADR-0016](../../../../../docs/adr/implemented/0016-role-deny-before-raw-ask.md)，取代 #713 选项 A 登记的已知例外）
 
 #### Scenario: coordinator analysis_create passes the surface
 - **WHEN** preset `coordinator` 调用 `analysis_create`

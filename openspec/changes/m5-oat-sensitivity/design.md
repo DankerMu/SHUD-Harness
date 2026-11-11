@@ -873,3 +873,11 @@ Highest risks are validator/runtime projection missing the new metrics input, lo
 - Off-role non-raw control (existing behavior): coordinator → `shud_run` with ordinary `input_dir` → `deny role-tool-surface`, zero approval requests.
 - If the real chain cannot be assembled through documented seams only, stop and report (no dsh internals, no `../deepseek-harness` edits).
 - Spec: policy-gate scenario "off-role call with raw input_dir asks before the role deny (known exception)" (this change's delta).
+
+## Issue #713 option B contract (ADR-0016)
+
+- `packages/dsh-shud-raw-guard/src/index.ts` listener: after `decideRawAccess` returns `ask`, resolve `role = presetIdToRole(readCallerPresetId(execution.agent))` (the same core helpers policy-gate imports) and, when `role !== "unknown"` and `!isRoleToolIdAllowed(role, call.name)`, log `next <tool> role-deferred` and `return next()`; no ask counter increment. `deny` and `next` decisions are untouched and never read the role. `decide.ts` stays role-free (pure decision table); the deferral lives in the listener.
+- Specs: policy-gate known-exception scenario replaced by "off-role call with raw input_dir is denied by role without a card"; raw-data-guard ADDED "Off-role raw asks defer to the role surface" (three scenarios).
+- Tests: raw-guard listener tests for the three scenarios (worker `analysis_create` raw → deferred + log + count; coordinator `bash` raw write → deny first, no next; unknown-role bash raw read and worker `shud_run` raw → ask); `offrole-raw-ask.test.ts` off-role cases now assert zero approval requests, error = role denial message, `h.logs` contains `next <tool> role-deferred` then policy `deny <tool> role-tool-surface`, no execution, md5 unchanged; on-role controls unchanged; add off-role raw write case (`bash` write by coordinator) → `deny raw-immutable`, zero requests, no policy line. Test names no longer say "known exception".
+- Docs: `docs/04_IMPLEMENTATION/Runtime_Lifecycle.md` order sentence unchanged; add one clause there or in the raw-guard README if one documents decisions (only if an existing doc lists raw-guard decisions — grep first; do not add a new doc).
+- Must preserve: listener order and profile patch; every existing deny code and ask reason; probes T1–T5 (headless template disables presets → role `unknown`; confirm by the real probe run).

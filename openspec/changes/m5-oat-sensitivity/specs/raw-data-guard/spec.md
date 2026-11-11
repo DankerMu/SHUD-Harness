@@ -69,6 +69,21 @@ shell 工具：对 `bash`（含 persistent 变体）与 `pwsh`，"触及治理�
 
 ## ADDED Requirements
 
+### Requirement: Off-role raw asks defer to the role surface
+raw-guard 在按其它要求得到 `ask` 决策后、返回之前 SHALL 以与策略门相同的方式解析调用者角色（`presetIdToRole(readCallerPresetId(execution.agent))`）并以 core `isRoleToolIdAllowed` 判定该工具是否在角色工具面（`ROLE_TOOL_MAP` 的 `inherited ∪ local`）内。角色为 coordinator、worker、coder 或 reviewer 且工具不在其工具面内时 SHALL 改为委托下一个监听器恰好一次，SHALL NOT 返回 `ask`，并经 `ctx.logger('shud-raw-guard')` 输出一行 `next <tool id> role-deferred`（不含参数、路径或 raw 内容）；该次不计入 dispose 的 ask 计数。角色为 `unknown`，或工具在角色工具面内时，`ask` 决策、`reason`、`displayReason` 与计数不变。`deny` 决策（raw 写、raw 祖先写、治理根写及其它既有 deny）SHALL NOT 读取角色，照常最先返回。依据 [ADR-0016](../../../../../docs/adr/implemented/0016-role-deny-before-raw-ask.md)。
+
+#### Scenario: off-role raw read defers to the role deny
+- **WHEN** preset `worker` 以 raw 内 `input_dir` 调用 `analysis_create`
+- **THEN** raw-guard 委托下一个监听器恰好一次且未返回 `ask`，logger 收到 `next analysis_create role-deferred`，dispose 的 `ask` 计数不增加
+
+#### Scenario: off-role raw write is still denied first
+- **WHEN** preset `coordinator`（工具面不含 `bash`）以 `bash` 向 raw 内写入
+- **THEN** raw-guard 返回 `deny`（`raw-immutable`），不委托下一个监听器，审计行为 `deny bash raw-immutable`
+
+#### Scenario: unknown role and on-role calls keep the provenance ask
+- **WHEN** `role: "unknown"` 的 Agent 以 `bash` 读取 raw；preset `worker` 以 raw 内 `input_dir` 调用 `shud_run`
+- **THEN** 两次决策 `kind` 均为 `ask`，`reason` 为 provenance 常量，均不输出 `role-deferred`
+
 ### Requirement: Analysis plan creation protects its fixed output root
 `analysis_create` SHALL 在工具执行前经 raw-guard 判定，判定方式沿「Task creation protects its fixed output root」与「Change, build and verification tools protect their fixed output roots」：以调用 session cwd 解析，复用既有 realpath/最近存在祖先、物理别名（符号链接与本机大小写别名）与路径包含规则（目标已存在时使用其 realpath，不存在时以最近存在祖先的 realpath 拼接余段）。写入判定目标为：待分配 id 的写入根 `analyses`，以及经 core TaskId 校验的 `task_id` 的确切写入目标 `tasks/<task_id>/task.json`（`linked_analyses` 回写）；`task_id` 缺失、类型不符或未通过品牌校验时 SHALL NOT 用其拼接路径，改为只判定固定根 `tasks`，SHALL NOT 抛错，参数错误仍交由工具参数校验拒绝。任一写入判定目标等于或位于任一 raw 根之内（含 raw 根为其受保护祖先）时，SHALL 在工具执行前返回 `deny`，`code` 为 `raw-immutable`，`reason` 含 `immutable`，SHALL NOT 提供写审批路径，SHALL NOT 创建目录或写入、删除任何文件；目标不存在时也 SHALL 保护。raw 根仅覆盖 `analyses` 下的另一个 plan 或另一任务目录而不包含本次判定目标时 SHALL NOT 据此拒绝。
 

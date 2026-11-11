@@ -149,3 +149,74 @@ test("real Cordis unload emits counts once and removes the guard", async () => {
   expect(next).toHaveBeenCalledTimes(1);
   await stop();
 });
+
+// ADR-0016 oracles: the provenance reason as written in the raw-data-guard spec, and the
+// role surfaces of the Runtime Lifecycle role-tool table (worker lacks analysis_create,
+// coordinator lacks bash, worker has shud_run).
+const PROVENANCE_REASON = "Reading raw data requires PI approval (provenance rule).";
+
+function agentAs(preset: string | undefined) {
+  const stateOf = vi.fn(() => preset);
+  const session = { header: { cwd: "/workspace" } };
+  const agent =
+    preset === undefined ? { session } : { session, ctx: { sessionProjections: { stateOf } } };
+  return { agent, stateOf };
+}
+
+test("off-role raw read defers to the role deny without asking or counting", async () => {
+  const { ctx, listeners, info } = harness();
+  apply(ctx, { rawDirs: ["protected"] });
+  const listener = listeners.get("tools/pre-execute") as Listener;
+  const downstream: PreToolDecision = { kind: "deny", reason: "role surface" };
+  const next = vi.fn(() => Promise.resolve(downstream));
+  const { agent } = agentAs("worker");
+  const result = await listener(
+    { name: "analysis_create", agent, arguments: { input_dir: "protected/ccw" } },
+    next,
+  );
+  expect(result).toBe(downstream);
+  expect(next).toHaveBeenCalledTimes(1);
+  (listeners.get("cleanup") as () => void)();
+  expect(info.mock.calls).toEqual([["next analysis_create role-deferred"], ["deny=0 ask=0"]]);
+});
+
+test("off-role raw write is still denied first without reading the role", async () => {
+  const { ctx, listeners, info } = harness();
+  apply(ctx, { rawDirs: ["protected"] });
+  const listener = listeners.get("tools/pre-execute") as Listener;
+  const next = vi.fn<() => Promise<PreToolDecision>>();
+  const { agent, stateOf } = agentAs("coordinator");
+  const result = await listener(
+    { name: "bash", agent, arguments: { command: "echo x > protected/new.csv" } },
+    next,
+  );
+  expect(result.kind).toBe("deny");
+  expect(result).toHaveProperty("reason", expect.stringContaining("immutable"));
+  expect(next).not.toHaveBeenCalled();
+  expect(stateOf).not.toHaveBeenCalled();
+  (listeners.get("cleanup") as () => void)();
+  expect(info.mock.calls).toEqual([["deny bash raw-immutable"], ["deny=1 ask=0"]]);
+});
+
+test("unknown role and on-role raw reads keep the provenance ask", async () => {
+  const { ctx, listeners, info } = harness();
+  apply(ctx, { rawDirs: ["protected"] });
+  const listener = listeners.get("tools/pre-execute") as Listener;
+  const next = vi.fn<() => Promise<PreToolDecision>>();
+  for (const [preset, name, args] of [
+    [undefined, "bash", { command: "cat protected/secret.csv" }],
+    ["unknown-custom", "bash", { command: "cat protected/secret.csv" }],
+    ["worker", "shud_run", { input_dir: "protected/ccw" }],
+  ] as const) {
+    const decision = await listener({ name, agent: agentAs(preset).agent, arguments: args }, next);
+    expect(decision).toMatchObject({ kind: "ask", reason: PROVENANCE_REASON });
+  }
+  expect(next).not.toHaveBeenCalled();
+  (listeners.get("cleanup") as () => void)();
+  expect(info.mock.calls).toEqual([
+    ["ask bash raw-read-provenance"],
+    ["ask bash raw-read-provenance"],
+    ["ask shud_run raw-read-provenance"],
+    ["deny=0 ask=3"],
+  ]);
+});

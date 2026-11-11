@@ -147,14 +147,18 @@ test("raw guard first short-circuits policy while ordinary calls reach policy", 
     expect(h.request).not.toHaveBeenCalled();
     expect(h.logs).toEqual([{ name: "shud-raw-guard", args: ["deny write raw-immutable"] }]);
 
-    const rawRead = await h.call("bash", { command: "cat protected/private.csv" });
+    // ADR-0016: an on-role raw read keeps the card; raw-guard reads the role only to decide that.
+    const rawRead = await h.call("analysis_create", { input_dir: "protected/ccw" });
     expect(rawRead.isError).toBe(true);
     if (!rawRead.isError) throw new Error("Rejected raw read unexpectedly executed");
     expect(rawRead.error.message).toContain("rejected");
     expect(h.request).toHaveBeenCalledTimes(1);
     expect(h.policyLogs()).toEqual([]);
-    expect(h.stateOf).not.toHaveBeenCalled();
-    expect(h.logs[1]).toEqual({ name: "shud-raw-guard", args: ["ask bash raw-read-provenance"] });
+    expect(h.stateOf).toHaveBeenCalledTimes(1);
+    expect(h.logs[1]).toEqual({
+      name: "shud-raw-guard",
+      args: ["ask analysis_create raw-read-provenance"],
+    });
 
     await writeReport(h.cwd);
     const report = await h.call("report_submit", { report_id: REPORT_ID });
@@ -163,7 +167,7 @@ test("raw guard first short-circuits policy while ordinary calls reach policy", 
     expect(report.error.message).toContain("rejected");
     expect(h.policyLogs()).toEqual([["ask report_submit report-approval"]]);
     expect(h.request).toHaveBeenCalledTimes(2);
-    expect(h.stateOf).toHaveBeenCalledTimes(1);
+    expect(h.stateOf).toHaveBeenCalledTimes(2);
 
     const nonrawOffRole = await h.call("shud_run", { input_dir: "ordinary-input" });
     expect(nonrawOffRole).toMatchObject({
