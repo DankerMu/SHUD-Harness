@@ -1,5 +1,10 @@
 import type { Context } from "@deepseek-ai/cordis";
 import type { PreToolDecision } from "@deepseek-ai/dsh-tools";
+import {
+  isRoleToolIdAllowed,
+  presetIdToRole,
+  readCallerPresetId,
+} from "@shud-harness/dsh-shud-core";
 import { decideRawAccess, normalizeRawDirs } from "./decide.ts";
 
 export const name = "shud-raw-guard";
@@ -35,11 +40,18 @@ export function apply(ctx: Context, config?: unknown): void {
     if (!call) return next();
     const decision = decideRawAccess(call, options);
     if (decision.kind === "next") return next();
-    logger.info(`${decision.kind} ${call.name} ${decision.code}`);
     if (decision.kind === "deny") {
+      logger.info(`deny ${call.name} ${decision.code}`);
       deny++;
       return Promise.resolve({ kind: "deny", reason: decision.reason! });
     }
+    // ADR-0016: a known role's off-surface call goes to the policy-gate role deny, not a PI card.
+    const role = presetIdToRole(readCallerPresetId(execution.agent));
+    if (role !== "unknown" && !isRoleToolIdAllowed(role, call.name)) {
+      logger.info(`next ${call.name} role-deferred`);
+      return next();
+    }
+    logger.info(`ask ${call.name} ${decision.code}`);
     ask++;
     return Promise.resolve({
       kind: "ask",

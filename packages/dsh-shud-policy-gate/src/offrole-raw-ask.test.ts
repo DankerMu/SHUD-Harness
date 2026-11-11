@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { createPolicyHarness } from "./test-harness.ts";
 
-// #713 option A pins current behavior: raw-guard, policy-gate and role-restrict are mounted
-// in the profile insert order, and the restricted tools are real ToolRuntime registrations.
+// #713 option B (ADR-0016): raw-guard, policy-gate and role-restrict are mounted in the
+// profile insert order, and the restricted tools are real ToolRuntime registrations.
 // Independent oracles: the raw-data-guard provenance reason as written in the spec, and the
 // RFC 1321 known answer md5("abc").
 const RAW_PROVENANCE_REASON = "Reading raw data requires PI approval (provenance rule).";
@@ -35,31 +35,24 @@ const OFF_ROLE = [
   { preset: "coordinator", tool: "shud_run" },
 ] as const;
 
-test.each(OFF_ROLE.flatMap((call) => OUTCOMES.map((approval) => ({ ...call, approval }))))(
-  "known exception: off-role $preset $tool with raw input_dir asks once, then $approval never executes",
-  async ({ preset, tool, approval }) => {
-    const { h, sample, surface } = await rawChain(preset, approval);
+test.each(OFF_ROLE)(
+  "off-role $preset $tool with raw input_dir is denied by role without a card",
+  async ({ preset, tool }) => {
+    const { h, sample, surface } = await rawChain(preset, "allowed-once");
     try {
       // Registered globally and hidden only by the role mask, not merely absent.
       expect(h.tools.schemas().map((schema) => schema.name)).toContain(tool);
       expect(surface()).not.toContain(tool);
       const result = await h.call(tool, { input_dir: `${RAW_DIR}/` });
-      expect(result.isError).toBe(true);
-      if (!result.isError) throw new Error(`Off-role ${tool} unexpectedly executed`);
-      if (approval === "allowed-once") {
-        expect(result.error.info?.code).toBe("UNKNOWN_TOOL");
-      } else {
-        expect(result.error.message).toMatch(/rejected/iu);
-        expect(result.error.info?.code).not.toBe("UNKNOWN_TOOL");
-      }
-      expect(h.request).toHaveBeenCalledTimes(1);
-      const [request] = h.request.mock.calls[0];
-      expect(request.toolName).toBe(tool);
-      expect(request.reason).toBe(RAW_PROVENANCE_REASON);
+      expect(result).toMatchObject({
+        isError: true,
+        error: { message: `Role ${preset} cannot call tool ${tool}.` },
+      });
+      expect(h.request).not.toHaveBeenCalled();
       expect(h.logs).toEqual([
-        { name: "shud-raw-guard", args: [`ask ${tool} raw-read-provenance`] },
+        { name: "shud-raw-guard", args: [`next ${tool} role-deferred`] },
+        { name: "shud-policy-gate", args: [`deny ${tool} role-tool-surface`] },
       ]);
-      expect(h.policyLogs()).toEqual([]);
       expect(h.executions).toEqual([]);
       expect(await md5(sample)).toBe(RAW_SAMPLE_MD5);
     } finally {
@@ -67,6 +60,25 @@ test.each(OFF_ROLE.flatMap((call) => OUTCOMES.map((approval) => ({ ...call, appr
     }
   },
 );
+
+test("off-role coordinator bash raw write is denied as raw-immutable before any role check", async () => {
+  const { h, sample, surface } = await rawChain("coordinator", "allowed-once");
+  try {
+    expect(surface()).not.toContain("bash");
+    h.stateOf.mockClear();
+    const result = await h.call("bash", { command: `echo x > ${RAW_DIR}/sample.csv` });
+    expect(result.isError).toBe(true);
+    if (!result.isError) throw new Error("Raw write unexpectedly executed");
+    expect(result.error.message).toContain("immutable");
+    expect(h.stateOf).not.toHaveBeenCalled();
+    expect(h.request).not.toHaveBeenCalled();
+    expect(h.logs).toEqual([{ name: "shud-raw-guard", args: ["deny bash raw-immutable"] }]);
+    expect(h.executions).toEqual([]);
+    expect(await md5(sample)).toBe(RAW_SAMPLE_MD5);
+  } finally {
+    await h.dispose();
+  }
+});
 
 test.each(
   [
