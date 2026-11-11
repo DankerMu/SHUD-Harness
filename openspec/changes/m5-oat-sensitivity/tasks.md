@@ -793,3 +793,13 @@ Commands: focused vitest for the new test and the policy-gate/raw-guard packages
 | Mutation | Selected: deferral removed → off-role cases red |
 
 Commands: RED first; focused vitest for raw-guard, policy-gate, presets; `pnpm run check`; `profile:smoke`; `raw-guard:probes`; strict OpenSpec validation; white-box review seat; exact-head CI. Closes #713.
+
+## Issue #726 risk packs and executable evidence
+
+| Pack | Selection and required evidence |
+|---|---|
+| Test isolation | Selected: `GIT_TRACE` positive test (no auto-maintenance/gc spawned by fixture commits; red against the old helper) |
+| Legacy | Selected: whole-root snapshot assertion in `shud-sensitivity-prepare-cli.test.ts` unchanged; negative test that a write into `h.root` is detected |
+| Production / gates | Not selected |
+
+Commands: focused vitest for `scripts/runtime/shud-sensitivity-prepare*.test.ts`; `pnpm run check`; exact-head CI. Closes #726.
