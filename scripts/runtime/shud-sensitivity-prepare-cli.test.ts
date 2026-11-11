@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
+  commitRepository,
   fileList,
   makeSensitivityHarness,
   type SensitivityHarness,
@@ -15,7 +16,10 @@ let h: SensitivityHarness;
 beforeEach(() => {
   h = makeSensitivityHarness();
 });
-afterEach(() => h.dispose());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  h.dispose();
+});
 
 /** Direct `node` entry; `root` routes through the exported CLI with a constructed harness root. */
 function cli(args: string[], env: NodeJS.ProcessEnv, root?: string) {
@@ -113,6 +117,26 @@ test.each(CASES)(
     expect(fs.readdirSync(h.root, { recursive: true }).sort()).toEqual(rootBefore);
   },
 );
+
+test("fixture commits spawn no detached git maintenance or gc that could touch the harness root", () => {
+  const trace = join(dirname(h.root), "git-trace.log");
+  vi.stubEnv("GIT_TRACE", trace);
+  commitRepository(join(dirname(h.root), "trace-probe"));
+  const lines = fs.readFileSync(trace, "utf8");
+  expect(lines).toMatch(/trace: built-in: git commit\b/u);
+  expect(lines).not.toMatch(/\bmaintenance run\b/u);
+  expect(lines).not.toMatch(/\bgc --auto\b/u);
+});
+
+test("the whole-root snapshot still detects a file written inside a fixture .git", () => {
+  const rootBefore = fs.readdirSync(h.root, { recursive: true }).sort();
+  fs.writeFileSync(join(h.root, "SHUD/.git/objects/maintenance.lock"), "");
+  const rootAfter = fs.readdirSync(h.root, { recursive: true }).sort();
+  expect(() => expect(rootAfter).toEqual(rootBefore)).toThrow(/to deeply equal/u);
+  expect(rootAfter.filter((name) => !rootBefore.includes(name))).toEqual([
+    "SHUD/.git/objects/maintenance.lock",
+  ]);
+});
 
 test("CLI prepares the constructed harness and exits 0 with the record written", () => {
   const result = cli([h.workspace, h.record], h.env, h.root);

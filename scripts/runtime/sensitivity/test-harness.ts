@@ -14,7 +14,10 @@ const LOCATOR_VARS = [
   "GIT_NAMESPACE",
 ];
 
-/** Requires host git, PATH and HOME; absence fails the test rather than skipping it. */
+/**
+ * Requires host git, PATH and HOME; absence fails the test rather than skipping it. Automatic
+ * maintenance and gc are off so no commit leaves a detached process writing into the fixture.
+ */
 export function git(directory: string, ...args: string[]): string {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
   for (const name of LOCATOR_VARS) delete env[name];
@@ -29,6 +32,10 @@ export function git(directory: string, ...args: string[]): string {
       "core.fsmonitor=false",
       "-c",
       "commit.gpgsign=false",
+      "-c",
+      "maintenance.auto=false",
+      "-c",
+      "gc.auto=0",
       "-c",
       "user.name=fixture",
       "-c",
