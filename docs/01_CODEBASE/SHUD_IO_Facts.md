@@ -78,7 +78,7 @@ canonical_for: [shud-io-facts]
 - Header: 1024 字节 char header（默认全零，当前调用链未设置变量名或 magic），然后是以 double 写出的起始日期字段、NumVar、column indices。起始日期字段来自 `ForcStartTime`（YYYYMMDD，如 20000101），不是模拟起止时间的分钟值 — Source: `SHUD/src/classes/Model_Control.hpp`:17；`SHUD/src/classes/Model_Control.cpp`:239-259、328-329；`SHUD/src/ModelData/MD_initialize.cpp`:242-258；`SHUD/src/ModelData/MD_readin.cpp`:375-376；`SHUD/input/ccw/ccw.tsd.forc`:1
 - 数据: `[Time double][NumVar 个 values double]` 顺序写入 — Source: `SHUD/src/classes/Model_Control.cpp`:408-414
 - Native endian，无记录分隔符 — Source: `SHUD/src/classes/Model_Control.cpp`:408-414
-- Flux 变量累积后除以 NumUpdate, tau=1440; Storage 变量瞬时, tau=1.0 — Source: `SHUD/src/classes/Model_Control.cpp`:298-302、321-325、360-364、396-400、436-457
+- Flux 与 Storage 变量都在 `PrintData` 中逐步累积，并在每个输出区间末以 `tau / NumUpdate` 缩放（源码注释 "Get the mean in the time-interval"），两类输出走同一区间累积与缩放流程，没有瞬时值分支；`iFlux` 只选择 `tau`（Flux 为 1440，Storage 为 1），不是瞬时/平均模式开关 — Source: `SHUD/src/classes/Model_Control.cpp`:298-302、321-325、360-364、396-400、436-457
 - 不检查 NaN，可能写入 NaN 值 — Source: `SHUD/src/classes/Model_Control.cpp`:408-414
 
 ## CVODE 集成
