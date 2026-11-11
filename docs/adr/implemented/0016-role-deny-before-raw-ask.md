@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 kind: architecture
 ---
 
@@ -19,7 +19,7 @@ No raw data is exposed, but the PI receives a card that cannot authorize anythin
 
 The PI also decided that option B follows A, as this record. B touches Critical Paths #1 (policy gate), #2 (raw protection) and #3 (approval seam). It must be accepted by the PI before any implementation.
 
-## Decision (proposed)
+## Decision
 
 raw-guard consults the role surface before it returns `ask`. Its `deny` decisions are unchanged and stay first.
 
@@ -44,7 +44,6 @@ raw-guard consults the role surface before it returns `ask`. Its `deny` decision
 - **Raw-guard probes.** `pnpm run raw-guard:probes` (T1–T5) run in the headless `shud-probe` profile. If their caller role resolves to `unknown`, they are unaffected; if it resolves to a known role whose surface lacks `bash`, T2/T3 would change from ask to deny. Implementation must establish which, through a probe run, before merge.
 - **Review.** Implementation requires a white-box reviewer record and `pnpm run check`, `profile:smoke` and `raw-guard:probes` evidence (Critical Paths #1/#2/#3).
 
-## Open questions for the PI
+## Authorization
 
-1. Accept the deferral design above, or keep option A as the final state?
-2. Is `next <tool> role-deferred` the right audit wording, or should raw-guard log nothing on deferral?
+The PI accepted this record and chose the `next <tool> role-deferred` audit wording on 2026-11-10 ([#713 comment 6786415881](https://github.com/DankerMu/SHUD-Harness/issues/713#issuecomment-6786415881)). Implementation still requires the white-box review and the `pnpm run check`, `profile:smoke` and `raw-guard:probes` evidence listed above; acceptance of this record is not functional acceptance of the implementation.
